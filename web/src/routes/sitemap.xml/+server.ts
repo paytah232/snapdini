@@ -1,10 +1,15 @@
 import type { RequestHandler } from './$types';
+import { useCaseSlugs } from '$lib/usecases';
 
 // sitemap.xml — public, indexable marketing pages only. Origin-aware.
 export const GET: RequestHandler = ({ url }) => {
-  const pages = ['/'];
+  // Homepage (priority 1.0) + the use-case landing pages (0.8).
+  const pages: { path: string; priority: string }[] = [
+    { path: '/', priority: '1.0' },
+    ...useCaseSlugs.map((slug) => ({ path: `/${slug}`, priority: '0.8' })),
+  ];
   const urls = pages
-    .map((p) => `  <url>\n    <loc>${url.origin}${p}</loc>\n    <changefreq>weekly</changefreq>\n    <priority>1.0</priority>\n  </url>`)
+    .map(({ path, priority }) => `  <url>\n    <loc>${url.origin}${path}</loc>\n    <changefreq>weekly</changefreq>\n    <priority>${priority}</priority>\n  </url>`)
     .join('\n');
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
