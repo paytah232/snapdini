@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dashboard — Snapdini</title>
+<style>
+  :root { --bg:#0f0f0f; --surface:#1a1a1a; --surface2:#222; --border:#2a2a2a; --text:#f5f5f5; --muted:#888; --accent:#f5c518; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:16px;
+    padding:16px 24px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  .brand { display:inline-block; background:var(--accent); color:#111; padding:5px 11px;
+    border-radius:7px; font-weight:800; }
+  .who { color:var(--muted); font-size:0.85rem; }
+  .wrap { max-width:880px; margin:0 auto; padding:28px 24px 60px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:20px; flex-wrap:wrap; }
+  h1 { font-size:1.5rem; margin:0; }
+  .btn { padding:10px 18px; border:none; border-radius:9px; font-weight:700; font-size:0.9rem;
+    cursor:pointer; background:var(--accent); color:#111; text-decoration:none; display:inline-block; }
+  .btn-ghost { background:transparent; color:var(--text); border:1px solid var(--border); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:16px; }
+  .ev { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:18px; }
+  .ev h3 { margin:0 0 6px; font-size:1.05rem; }
+  .ev .meta { color:var(--muted); font-size:0.8rem; margin-bottom:12px; }
+  .badge { font-size:0.7rem; font-weight:700; padding:2px 8px; border-radius:20px; }
+  .b-live { background:#1a2e1a; color:#9bffb0; } .b-lock { background:#3a2e15; color:#f5c518; }
+  .b-soon { background:#15263a; color:#7db8ff; } .b-end { background:#2a2a2a; color:#999; }
+  .stats { display:flex; gap:18px; margin:12px 0 14px; }
+  .stats div { font-size:0.78rem; color:var(--muted); }
+  .stats b { display:block; font-size:1.2rem; color:var(--text); }
+  .links { display:flex; gap:8px; flex-wrap:wrap; }
+  .links a { font-size:0.8rem; padding:7px 12px; border-radius:8px; border:1px solid var(--border);
+    color:var(--text); text-decoration:none; }
+  .links a:hover { border-color:var(--accent); }
+  .empty { text-align:center; color:var(--muted); padding:60px 20px; border:1px dashed var(--border); border-radius:14px; }
+  .version { text-align:center; font-size:0.72rem; color:#555; margin-top:36px; }
+</style>
+</head>
+<body>
+  <header>
+    <a class="brand" href="/" style="text-decoration:none">📷 Snapdini</a>
+    <div style="display:flex;align-items:center;gap:14px">
+      <span class="who" id="who"></span>
+      <button class="btn btn-ghost" id="logout">Sign out</button>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="row">
+      <h1>Your events</h1>
+      <a class="btn" href="/app">+ New event</a>
+    </div>
+    <div id="events"></div>
+    <div class="version" id="version"></div>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+fetch('/api/config').then(r=>r.json()).then(c => { $('version').textContent = 'Snapdini v' + c.version; }).catch(()=>{});
+
+function badge(ev) {
+  if (ev.isLocked)   return '<span class="badge b-lock">🔒 Locked</span>';
+  if (ev.isExpired)  return '<span class="badge b-end">Ended</span>';
+  if (ev.isUpcoming) return '<span class="badge b-soon">⏰ Upcoming</span>';
+  return '<span class="badge b-live">● Live</span>';
+}
+
+function render(events) {
+  const el = $('events');
+  if (!events.length) {
+    el.innerHTML = '<div class="empty">No events yet.<br><br><a class="btn" href="/app">Create your first event</a></div>';
+    return;
+  }
+  el.className = 'grid';
+  el.innerHTML = events.map(ev => {
+    const join = ev.slug ? '/e/' + ev.slug : '/join/' + ev.joinCode;
+    const gallery = '/gallery/' + (ev.slug || ev.joinCode);
+    const admin = '/admin/' + ev.joinCode + '#' + encodeURIComponent(ev.organizerCode);
+    return `<div class="ev">
+      <div style="display:flex;justify-content:space-between;align-items:start;gap:8px">
+        <h3>${esc(ev.name)}</h3>${badge(ev)}
+      </div>
+      <div class="meta">Ends ${new Date(ev.expiresAt).toLocaleString()}</div>
+      <div class="stats">
+        <div><b>${ev.participantCount}</b>guests</div>
+        <div><b>${ev.photoCount}</b>photos</div>
+      </div>
+      <div class="links">
+        <a href="${admin}">⚙ Manage</a>
+        <a href="${gallery}">🖼 Gallery</a>
+        <a href="${join}">📷 Join page</a>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function load() {
+  const me = await fetch('/api/auth/me').then(r=>r.json()).catch(()=>({}));
+  if (!me.user) { location.href = '/login'; return; }
+  $('who').textContent = me.user.displayName || me.user.email;
+  const data = await fetch('/api/events/mine').then(r=>r.json()).catch(()=>({events:[]}));
+  render(data.events || []);
+}
+
+$('logout').addEventListener('click', async () => {
+  await fetch('/api/auth/logout', { method:'POST' });
+  location.href = '/login';
+});
+
+load();
+</script>
+</body>
+</html>

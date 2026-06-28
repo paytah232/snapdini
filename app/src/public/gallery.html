@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Gallery — Snapdini</title>
+  <meta name="theme-color" content="#0f0f0f" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+<div class="grain"></div>
+
+<div id="gallery-page" style="display:block;min-height:100dvh;background:var(--bg)">
+  <div class="gallery-header">
+    <div class="gallery-header-left">
+      <a href="/" class="btn btn-secondary btn-sm">← Home</a>
+      <div>
+        <h2 id="gallery-event-name">Gallery</h2>
+        <div class="meta" id="gallery-meta"></div>
+      </div>
+    </div>
+    <div class="gallery-header-right">
+      <button class="btn btn-secondary btn-sm hidden" id="btn-highlights">⭐ Highlights</button>
+      <button class="btn btn-secondary btn-sm hidden" id="btn-download-all">⬇ All</button>
+    </div>
+  </div>
+
+  <div id="gallery-content"></div>
+</div>
+
+<div id="lightbox">
+  <button class="lightbox-close" id="lightbox-close">✕</button>
+  <img id="lightbox-img" src="" alt="" style="display:none" />
+  <video id="lightbox-video" controls style="display:none"></video>
+  <div class="lightbox-caption" id="lightbox-caption"></div>
+  <div class="lightbox-actions">
+    <button class="btn btn-secondary btn-sm hidden" id="lightbox-download">⬇ Download</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/js/util.js"></script>
+<script>
+const joinCode = window.location.pathname.split('/')[2];
+let showHighlightsOnly = false;
+let allPhotos = [];
+let allowDownloads = true;
+let lbPhotos = [], lbIndex = 0;
+
+async function load() {
+  const content = document.getElementById('gallery-content');
+  content.innerHTML = '<div style="text-align:center;padding:48px;color:var(--text-muted)">Loading…</div>';
+
+  // Fetch event info and photos in parallel
+  const [evRes, photoRes] = await Promise.all([
+    fetch(`/api/events/${joinCode}`),
+    fetch(`/api/photos/${joinCode}?gallery=true${showHighlightsOnly ? '&highlightsOnly=true' : ''}`),
+  ]);
+
+  const ev   = await evRes.json();
+  const data = await photoRes.json();
+
+  if (!evRes.ok)   { content.innerHTML = errHtml(ev.error || 'Event not found'); return; }
+  if (!photoRes.ok){ content.innerHTML = errHtml(data.error); return; }
+
+  document.getElementById('gallery-event-name').textContent = ev.name || 'Gallery';
+  document.title = `${ev.name} — Snapdini`;
+  allowDownloads = data.allowDownloads !== false;
+
+  applyTheme(ev.theme);
+
+  // Highlights toggle
+  const hlBtn = document.getElementById('btn-highlights');
+  if (data.hasHighlights) {
+    hlBtn.classList.remove('hidden');
+    hlBtn.textContent = showHighlightsOnly ? '📷 All Photos' : '⭐ Highlights';
+    hlBtn.onclick = () => { showHighlightsOnly = !showHighlightsOnly; load(); };
+  } else {
+    hlBtn.classList.add('hidden');
+  }
+
+  // Download all
+  const dlBtn = document.getElementById('btn-download-all');
+  if (allowDownloads) {
+    dlBtn.classList.remove('hidden');
+    dlBtn.onclick = () => downloadAll(allPhotos);
+  } else {
+    dlBtn.classList.add('hidden');
+  }
+
+  if (!data.revealed) {
+    const modeText = {
+      at_end: 'Photos reveal when the event ends',
+      manual: 'The organiser will reveal photos soon',
+      instant: 'Refresh to see photos',
+    }[data.revealMode] || '';
+    content.innerHTML = `<div class="reveal-wall">
+      <span class="lock-icon">🔒</span>
+      <h2>${data.photoCount} photo${data.photoCount !== 1 ? 's' : ''} waiting</h2>
+      <p>${modeText}</p>
+      <button class="btn btn-secondary" onclick="load()" style="width:auto;margin:0 auto">↻ Refresh</button>
+    </div>`;
+    return;
+  }
+
+  allPhotos = data.photos;
+  const count = allPhotos.length;
+  document.getElementById('gallery-meta').textContent =
+    `${count} photo${count !== 1 ? 's' : ''}${showHighlightsOnly ? ' · highlights' : ''}`;
+
+  if (!count) {
+    content.innerHTML = '<div style="text-align:center;padding:60px;color:var(--text-muted)">No photos yet</div>';
+    return;
+  }
+
+  const grid = document.createElement('div');
+  grid.className = 'gallery-grid';
+  allPhotos.forEach((photo, i) => {
+    const item = document.createElement('div');
+    item.className = 'photo-item';
+    const time = new Date(photo.takenAt).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+
+    if (photo.mediaType === 'video') {
+      item.innerHTML = `
+        <video src="${photo.url}" preload="metadata" muted playsinline></video>
+        <div class="play-overlay">▶</div>
+        <div class="photo-author">${esc(photo.participantName)} · ${time}</div>
+        ${photo.isHighlighted ? '<div class="highlight-badge">⭐</div>' : ''}
+        ${allowDownloads ? `<button class="photo-download-btn" data-url="${photo.url}" data-name="${esc(photo.participantName)}_${i+1}.mp4">⬇</button>` : ''}
+      `;
+    } else {
+      item.innerHTML = `
+        <img src="${photo.url}" alt="" loading="lazy" />
+        <div class="photo-author">${esc(photo.participantName)} · ${time}</div>
+        ${photo.isHighlighted ? '<div class="highlight-badge">⭐</div>' : ''}
+        ${allowDownloads ? `<button class="photo-download-btn" data-url="${photo.url}" data-name="${esc(photo.participantName)}_${i+1}.jpg">⬇</button>` : ''}
+      `;
+    }
+
+    item.querySelector('.photo-download-btn')?.addEventListener('click', async e => {
+      e.stopPropagation();
+      const btn = e.currentTarget;
+      await downloadOne(btn.dataset.url, btn.dataset.name);
+    });
+
+    item.addEventListener('click', () => { lbPhotos = allPhotos; lbIndex = i; openLb(); });
+    grid.appendChild(item);
+  });
+  content.innerHTML = '';
+  content.appendChild(grid);
+}
+
+// ── Lightbox ──────────────────────────────────────────────────────────────────
+
+function openLb() {
+  const lb = document.getElementById('lightbox');
+  renderLb();
+  lb.classList.add('open');
+}
+
+function renderLb() {
+  const p = lbPhotos[lbIndex];
+  const img = document.getElementById('lightbox-img');
+  const vid = document.getElementById('lightbox-video');
+  const dl  = document.getElementById('lightbox-download');
+
+  if (p.mediaType === 'video') {
+    img.style.display = 'none';
+    vid.style.display = 'block';
+    vid.src = p.url;
+  } else {
+    vid.style.display = 'none'; vid.src = '';
+    img.style.display = 'block'; img.src = p.url;
+  }
+
+  document.getElementById('lightbox-caption').textContent =
+    `${p.participantName} · ${new Date(p.takenAt).toLocaleString()} · ${lbIndex+1}/${lbPhotos.length}`;
+
+  if (allowDownloads) {
+    dl.classList.remove('hidden');
+    dl.onclick = () => downloadOne(p.url, `${p.participantName}_${lbIndex+1}.${p.mediaType === 'video' ? 'mp4' : 'jpg'}`);
+  } else {
+    dl.classList.add('hidden');
+  }
+}
+
+document.getElementById('lightbox').addEventListener('click', e => {
+  const lb = document.getElementById('lightbox');
+  if (e.target.id === 'lightbox-close' || e.target.id === 'lightbox') { lb.classList.remove('open'); return; }
+  if (e.target.tagName === 'VIDEO' || e.target.tagName === 'BUTTON') return;
+  const half = window.innerWidth / 2;
+  if (e.clientX > half && lbIndex < lbPhotos.length - 1) lbIndex++;
+  else if (e.clientX <= half && lbIndex > 0) lbIndex--;
+  renderLb();
+});
+
+document.addEventListener('keydown', e => {
+  const lb = document.getElementById('lightbox');
+  if (!lb.classList.contains('open')) return;
+  if (e.key === 'ArrowRight' && lbIndex < lbPhotos.length - 1) { lbIndex++; renderLb(); }
+  if (e.key === 'ArrowLeft'  && lbIndex > 0)                   { lbIndex--; renderLb(); }
+  if (e.key === 'Escape') lb.classList.remove('open');
+});
+
+// ── Download helpers ──────────────────────────────────────────────────────────
+// downloadOne, esc, showToast come from /js/util.js (loaded before this script).
+
+async function downloadAll(photos) {
+  if (!allowDownloads) { showToast('Downloads are disabled for this event', true); return; }
+  showToast(`Downloading ${photos.length} files…`);
+  for (const [i, p] of photos.entries()) {
+    const ext = p.mediaType === 'video' ? 'mp4' : 'jpg';
+    await downloadOne(p.url, `${esc(p.participantName).replace(/\s+/g,'_')}_${i+1}.${ext}`);
+    await new Promise(r => setTimeout(r, 400));
+  }
+}
+
+// ── Theme ─────────────────────────────────────────────────────────────────────
+
+function applyTheme(theme) {
+  if (!theme) return;
+  const r = document.documentElement;
+  if (theme.bg)          r.style.setProperty('--bg', theme.bg);
+  if (theme.surface)     r.style.setProperty('--surface', theme.surface);
+  if (theme.surface2)    r.style.setProperty('--surface-2', theme.surface2);
+  if (theme.border)      r.style.setProperty('--border', theme.border);
+  if (theme.text)        r.style.setProperty('--text', theme.text);
+  if (theme.textMuted)   r.style.setProperty('--text-muted', theme.textMuted);
+  if (theme.accent)      r.style.setProperty('--accent', theme.accent);
+  if (theme.accentDark)  r.style.setProperty('--accent-dark', theme.accentDark);
+  if (theme.mode) r.classList.toggle('light',
+    theme.mode === 'light' ? true : theme.mode === 'dark' ? false : matchMedia('(prefers-color-scheme:light)').matches);
+  if (theme.font) r.style.setProperty('--font', theme.font);
+  if (theme.headerImage) {
+    const el = document.createElement('div');
+    el.className = 'event-header-image';
+    el.style.backgroundImage = `url('${theme.headerImage}')`;
+    document.getElementById('gallery-page').prepend(el);
+  }
+  if (theme.customCss) {
+    const s = document.createElement('style');
+    s.textContent = theme.customCss;
+    document.head.appendChild(s);
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function errHtml(msg) {
+  return `<div style="text-align:center;padding:48px;color:var(--danger)">${esc(msg)}</div>`;
+}
+
+load();
+</script>
+</body>
+</html>

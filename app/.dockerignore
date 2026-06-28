@@ -1,0 +1,10 @@
+# Build context excludes — keep src + package files, drop everything heavy/private.
+data
+data-prod
+node_modules
+.git
+.gitignore
+.env
+.env.*
+npm-debug.log*
+docs

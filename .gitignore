@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Secrets / local env — NEVER commit (.env.example is the only tracked one)
+.env
+.env.*
+!.env.example
+
+# Local data — Postgres + uploaded media (dev AND prod). Contains real data + secrets.
+data/
+data-prod/
+app/data/
+app/data-prod/
+
+# Build artifacts
+web/build/
+web/.svelte-kit/
+**/*.timestamp-*.mjs
+
+# Test output
+test-results/
+playwright-report/
+
+# OS
+.DS_Store
+
+# Agent / maintainer-internal notes (not part of the product)
+CLAUDE.md
+**/CLAUDE.md

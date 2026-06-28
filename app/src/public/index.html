@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Snapdini — Shared Event Camera</title>
+  <meta name="description" content="Create a shared camera roll for your event. No app required." />
+  <meta name="theme-color" content="#0f0f0f" />
+  <link rel="stylesheet" href="/css/style.css" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <script src="/js/sw-register.js"></script>
+</head>
+<body>
+<div class="grain"></div>
+
+<div class="page">
+  <a class="logo" href="/" style="text-decoration:none;color:inherit">
+    <div class="logo-icon">📷</div>
+    <div class="logo-text">Snap<span>upload</span></div>
+  </a>
+
+  <div class="hero">
+    <span class="hero-camera">🎞️</span>
+    <h1>Your event's<br><em>shared camera</em></h1>
+    <p>Create a camera roll for your event. Everyone shoots, everyone sees. No app needed — just a browser.</p>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <div class="tab active" data-tab="create">Create Event</div>
+    <div class="tab" data-tab="join">Join Event</div>
+  </div>
+
+  <!-- ── Create form ── -->
+  <div id="create-panel">
+    <div class="card">
+      <div class="card-title">Event Details</div>
+      <div class="field">
+        <label>Event Name</label>
+        <input type="text" id="event-name" placeholder="e.g. Lisa's Birthday 🎂" maxlength="80" />
+      </div>
+
+      <div class="field">
+        <label>Custom URL <span style="color:var(--text-muted);font-size:0.75em">(optional)</span></label>
+        <div style="display:flex;align-items:center;gap:0">
+          <span style="background:var(--surface-2);border:1px solid var(--border);border-right:none;border-radius:var(--radius-sm) 0 0 var(--radius-sm);padding:12px 10px;font-size:0.78rem;color:var(--text-muted);white-space:nowrap">/e/</span>
+          <input type="text" id="event-slug" placeholder="lisas-birthday" maxlength="50"
+                 style="border-radius:0 var(--radius-sm) var(--radius-sm) 0;font-family:var(--font-mono);font-size:0.9rem" />
+        </div>
+        <div id="slug-feedback" style="font-size:0.75rem;margin-top:5px;min-height:1em"></div>
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label>Start Date</label>
+          <input type="date" id="event-start-date" />
+        </div>
+        <div class="field">
+          <label>Start Time</label>
+          <input type="time" id="event-start-time" />
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label>Duration</label>
+          <select id="event-duration"></select>
+        </div>
+        <div class="field">
+          <label>Shots per person</label>
+          <select id="event-max-photos"></select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Timezone <span style="color:var(--text-muted);font-size:0.75em">(type to search)</span></label>
+        <input id="event-timezone" list="tz-datalist" autocomplete="off" placeholder="e.g. Australia/Brisbane" />
+        <datalist id="tz-datalist"></datalist>
+      </div>
+
+      <div class="field">
+        <label>Photo shapes <span style="color:var(--text-muted);font-size:0.75em">(guests pick from what you allow)</span></label>
+        <div id="aspect-options" class="aspect-options"></div>
+      </div>
+
+      <div class="field">
+        <label>Allow downloads</label>
+        <label class="toggle">
+          <input type="checkbox" id="allow-downloads" checked />
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Reveal Mode</div>
+      <div class="reveal-options" id="reveal-options"></div>
+      <input type="hidden" id="reveal-mode" value="instant" />
+
+      <div class="field hidden" id="reveal-delay-field" style="margin-top:14px">
+        <label>Reveal delay after the event ends</label>
+        <select id="reveal-delay"></select>
+      </div>
+
+      <div class="field hidden" id="moderation-field" style="margin-top:14px">
+        <label>Moderate photos <span style="color:var(--text-muted);font-size:0.75em">(you approve each before it shows)</span></label>
+        <label class="toggle">
+          <input type="checkbox" id="moderation-enabled" />
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" id="create-btn">Create Event</button>
+    <p class="text-muted text-center mt-8" style="font-size:0.8rem">You'll get a QR code + join code to share with guests</p>
+  </div>
+
+  <!-- ── Join form ── -->
+  <div id="join-panel" class="hidden">
+    <div class="card">
+      <div class="card-title">Join an Event</div>
+      <div class="field">
+        <label>Your Name</label>
+        <input type="text" id="join-name" placeholder="e.g. Alex" maxlength="40" />
+      </div>
+      <div class="field">
+        <label>Event Code</label>
+        <input type="text" id="join-code-input" placeholder="XXXXXX" maxlength="6"
+               style="text-transform:uppercase;letter-spacing:0.2em;font-size:1.3rem;text-align:center;font-family:var(--font-mono)" />
+      </div>
+      <button class="btn btn-primary" id="join-btn">Join Event</button>
+    </div>
+    <p class="text-muted text-center mt-8" style="font-size:0.8rem">Ask the host for the 6-character code or scan their QR code</p>
+  </div>
+</div>
+
+<!-- Result modal -->
+<div id="result-modal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:100;display:flex;align-items:center;justify-content:center;padding:16px;">
+  <div class="card" style="width:100%;max-width:420px;max-height:90dvh;overflow-y:auto;">
+    <div class="card-title">🎉 Event Created!</div>
+
+    <div class="qr-block">
+      <img id="result-qr" src="" alt="QR Code" />
+      <div class="join-code-display" id="result-code"></div>
+      <div class="join-url" id="result-url"></div>
+    </div>
+
+    <div id="result-upcoming-notice" class="hidden" style="background:rgba(245,197,24,0.1);border:1px solid var(--accent);border-radius:var(--radius-sm);padding:10px 14px;margin-bottom:16px;font-size:0.82rem;color:var(--accent)"></div>
+
+    <div style="background:var(--surface-2);border-radius:var(--radius-sm);padding:12px;margin-bottom:16px;">
+      <div style="font-size:0.75rem;color:var(--text-muted);font-family:var(--font-mono);margin-bottom:4px">ORGANIZER CODE (keep private)</div>
+      <div id="result-org-code" style="font-family:var(--font-mono);font-size:0.8rem;word-break:break-all;color:var(--accent)"></div>
+    </div>
+
+    <div class="flex" style="gap:8px;margin-bottom:12px;">
+      <button class="btn btn-secondary btn-sm" style="flex:1" id="copy-link-btn">Copy Link</button>
+      <button class="btn btn-secondary btn-sm" style="flex:1" id="open-admin-btn">Admin Panel</button>
+    </div>
+    <button class="btn btn-primary" id="go-camera-btn">Open Camera →</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script src="/js/util.js"></script>
+<script src="/js/home.js"></script>
+</body>
+</html>

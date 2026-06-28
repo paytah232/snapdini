@@ -1,0 +1,114 @@
+# Production stack (snapdini-prod). Lives in the same folder as the dev + coming-soon composes,
+# so it has its OWN project name, network, container names, data dir (./data-prod — NEVER ./data,
+# which is the dev Postgres) and host port (3002). Load the live secrets explicitly:
+#
+#   cd app
+#   docker compose -f docker-compose.yml --env-file .env.release up -d --build
+#
+# (compose otherwise auto-loads the dev `.env` = TEST keys). See CUTOVER.md for the full runbook.
+name: snapdini-prod
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: snapdini-prod-app:latest
+    container_name: snapdini-app
+    restart: unless-stopped
+    volumes:
+      - ./data-prod:/data        # prod-only local data (NOT ./data — that's the dev DB)
+      # Heavy media on the ZFS pool (keep Postgres/local on ./data-prod). See dev compose for
+      # permission notes (app runs as root → dir must be writable / NFS no_root_squash).
+      - ${UPLOADS_HOST:-/bigdata/snapdini/release}:${UPLOADS_DIR:-/data/uploads}
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - BASE_URL=${BASE_URL:-http://localhost:3002}   # public URL for links/QR/emails — set per-deploy in .env.release
+      - DATA_DIR=/data
+      - UPLOADS_DIR=${UPLOADS_DIR:-/data/uploads}
+      - DATABASE_URL=${DATABASE_URL:-postgres://snapdini:snapdini@db:5432/snapdini}
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-64}
+      - MAX_VIDEO_SIZE_MB=${MAX_VIDEO_SIZE_MB:-8192}
+      - IMAGE_QUALITY=${IMAGE_QUALITY:-100}
+      - VIDEO_MAX_SECONDS=${VIDEO_MAX_SECONDS:-0}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_SECURE=${SMTP_SECURE:-false}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - MAILGUN_API_KEY=${MAILGUN_API_KEY:-}
+      - MAILGUN_DOMAIN=${MAILGUN_DOMAIN:-}
+      - MAILGUN_BASE=${MAILGUN_BASE:-}
+      - SUPPORT_EMAIL=${SUPPORT_EMAIL:-}
+      # Site admin bootstrap (both unset = no admin, no shipped default credential).
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      # Google sign-in (optional; both unset = Google button hidden).
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - RETENTION_DAYS=${RETENTION_DAYS:-7}
+      # Billing (live keys). Set via --env-file .env.release; blank = billing off.
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      - BILLING_CURRENCY=${BILLING_CURRENCY:-aud}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # node is always in the image (wget isn't); 200 from /api/config = healthy.
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/config',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  web:
+    build:
+      context: ../web
+      dockerfile: Dockerfile
+    image: snapdini-prod-web:latest
+    container_name: snapdini-web
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      # adapter-node uses ORIGIN to build absolute URLs (og:image, og:url) behind the proxy.
+      - ORIGIN=${BASE_URL:-http://localhost:3002}
+      # Server-side link-preview fetches hit Express directly inside the Docker network.
+      - INTERNAL_API_BASE=http://app:3000
+    depends_on:
+      - app
+
+  db:
+    image: postgres:16-alpine
+    container_name: snapdini-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=snapdini
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-snapdini}
+      - POSTGRES_DB=snapdini
+    volumes:
+      - ./data-prod/pg:/var/lib/postgresql/data   # prod DB — isolated from the dev ./data/pg
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U snapdini"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    image: nginx:alpine
+    container_name: snapdini-nginx
+    restart: unless-stopped
+    ports:
+      - "3002:80"              # reverse proxy (Traefik) routes the public domain (see BASE_URL) → this host:3002
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app
+      - web
+
+networks:
+  default:
+    name: snapdini-net

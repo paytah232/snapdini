@@ -1,0 +1,23 @@
+# Temporary "coming soon" holding page for the prod domain, on the same host port (3002)
+# the real prod stack uses, so Traefik keeps routing snapdini.com → here with no change.
+#
+# Deploy:   docker compose -f docker-compose.yml down            # free :3002 (stops old prod)
+#           docker compose -f docker-compose.comingsoon.yml up -d
+# Revert:   docker compose -f docker-compose.comingsoon.yml down
+#           docker compose -f docker-compose.yml up -d           # (or the real cutover)
+name: snapdini-comingsoon
+
+services:
+  comingsoon:
+    image: nginx:alpine
+    container_name: snapdini-comingsoon
+    restart: unless-stopped
+    ports:
+      - "3002:80"
+    volumes:
+      - ./nginx/coming-soon.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/coming-soon.html:/usr/share/nginx/html/index.html:ro
+
+networks:
+  default:
+    name: snapdini-comingsoon-net

@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Admin — Snapdini</title>
+  <meta name="theme-color" content="#0f0f0f" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+<div class="grain"></div>
+
+<!-- Auth wall -->
+<div id="auth-wall" class="page">
+  <div class="logo">
+    <div class="logo-icon">📷</div>
+    <div class="logo-text">Snap<span>upload</span></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Organizer Login</div>
+    <div class="field">
+      <label>Organizer Code</label>
+      <input type="text" id="org-code-input" placeholder="Paste your organizer code"
+             style="font-family:var(--font-mono);font-size:0.8rem" />
+    </div>
+    <button class="btn btn-primary" id="auth-btn">Access Admin Panel</button>
+  </div>
+</div>
+
+<!-- Admin dashboard -->
+<div id="admin-dashboard" class="hidden page" style="padding-bottom:80px">
+  <div class="logo">
+    <div class="logo-icon">📷</div>
+    <div class="logo-text">Snap<span>upload</span> <small style="font-size:0.6em;color:var(--text-muted)">ADMIN</small></div>
+  </div>
+
+  <!-- Event header -->
+  <div class="flex items-center justify-between mb-16">
+    <div>
+      <h1 id="adm-event-name" style="font-size:1.4rem;font-weight:800"></h1>
+      <div style="font-size:0.8rem;color:var(--text-muted);margin-top:4px">
+        <span id="adm-status-badge"></span>
+        <span id="adm-expires" style="margin-left:8px"></span>
+      </div>
+      <div id="adm-starts" style="font-size:0.78rem;color:var(--accent);margin-top:4px;display:none"></div>
+    </div>
+    <a id="adm-join-link" class="btn btn-secondary btn-sm" style="width:auto">📷 Camera</a>
+  </div>
+
+  <!-- Stats -->
+  <div class="stat-grid">
+    <div class="stat-box"><div class="stat-num" id="adm-participant-count">0</div><div class="stat-label">Participants</div></div>
+    <div class="stat-box"><div class="stat-num" id="adm-photo-count">0</div><div class="stat-label">Photos Taken</div></div>
+    <div class="stat-box"><div class="stat-num" id="adm-shots-left">0</div><div class="stat-label">Shots Remaining</div></div>
+    <div class="stat-box"><div class="stat-num" id="adm-max-photos">0</div><div class="stat-label">Max per Person</div></div>
+  </div>
+
+  <!-- Invite -->
+  <div class="card mb-16">
+    <div class="card-title">Share &amp; Invite</div>
+    <div class="qr-block">
+      <img id="adm-qr" src="" alt="QR Code" />
+      <div class="join-code-display" id="adm-join-code"></div>
+      <div class="join-url" id="adm-join-url"></div>
+    </div>
+    <div class="flex" style="gap:8px;margin-top:12px">
+      <button class="btn btn-secondary btn-sm" style="flex:1" id="adm-copy-link">Copy Join Link</button>
+      <button class="btn btn-secondary btn-sm" style="flex:1" id="adm-download-qr">Save QR</button>
+    </div>
+    <div style="margin-top:8px">
+      <button class="btn btn-secondary btn-sm" style="width:100%" id="adm-copy-gallery">🖼 Copy Gallery-Only Link</button>
+    </div>
+    <!-- Email gallery -->
+    <div id="adm-email-gallery-section" class="hidden" style="margin-top:12px">
+      <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:6px;font-family:var(--font-mono)">EMAIL GALLERY LINK</div>
+      <div class="email-row">
+        <input type="email" id="adm-email-input" placeholder="guest@example.com, another@example.com" />
+        <button class="btn btn-secondary btn-sm" id="adm-email-send">Send</button>
+      </div>
+      <p style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">Comma-separated addresses</p>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="card mb-16">
+    <div class="card-title">Controls</div>
+    <div style="display:flex;flex-direction:column;gap:0">
+
+      <div class="toggle-row">
+        <div>
+          <div class="toggle-label">Reveal Photos</div>
+          <div class="toggle-sublabel" id="reveal-status-text">Photos are hidden</div>
+        </div>
+        <button class="btn btn-primary btn-sm" id="adm-reveal-btn" style="width:auto">Reveal Now</button>
+      </div>
+
+      <div style="height:1px;background:var(--border)"></div>
+
+      <div class="toggle-row">
+        <div>
+          <div class="toggle-label">Allow Downloads</div>
+          <div class="toggle-sublabel">Participants can download photos</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="adm-allow-downloads" checked />
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+
+      <div style="height:1px;background:var(--border)"></div>
+
+      <div class="toggle-row">
+        <div>
+          <div class="toggle-label">Lock Event</div>
+          <div class="toggle-sublabel">Prevent new photos and joins</div>
+        </div>
+        <button class="btn btn-secondary btn-sm" id="adm-lock-btn" style="width:auto">Lock</button>
+      </div>
+
+      <div style="height:1px;background:var(--border)"></div>
+
+      <div class="toggle-row">
+        <div>
+          <div class="toggle-label">Delete Event</div>
+          <div class="toggle-sublabel">Permanently remove all data</div>
+        </div>
+        <button class="btn btn-danger btn-sm" id="adm-delete-btn" style="width:auto">Delete</button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Event settings (schedule / reveal / moderation) -->
+  <div class="card mb-16">
+    <div class="card-title">Event Settings</div>
+    <div class="field">
+      <label>Event name</label>
+      <input type="text" id="adm-set-name" maxlength="80" />
+    </div>
+    <div class="field-row">
+      <div class="field"><label>Start date</label><input type="date" id="adm-set-date" /></div>
+      <div class="field"><label>Start time</label><input type="time" id="adm-set-time" /></div>
+    </div>
+    <div class="field">
+      <label>Timezone <span style="color:var(--text-muted);font-size:0.75em">(type to search)</span></label>
+      <input id="adm-set-timezone" list="adm-tz-datalist" autocomplete="off" placeholder="e.g. Australia/Brisbane" />
+      <datalist id="adm-tz-datalist"></datalist>
+    </div>
+    <div class="field">
+      <label>Photo shapes</label>
+      <div id="adm-aspect-options" class="aspect-options"></div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Duration</label>
+        <select id="adm-set-duration"></select>
+      </div>
+      <div class="field">
+        <label>Reveal mode</label>
+        <select id="adm-set-reveal"></select>
+      </div>
+    </div>
+    <div class="field hidden" id="adm-set-delay-field">
+      <label>Reveal delay after the event ends</label>
+      <select id="adm-set-delay"></select>
+    </div>
+    <div class="toggle-row hidden" id="adm-set-moderation-row">
+      <div>
+        <div class="toggle-label">Moderate photos</div>
+        <div class="toggle-sublabel">Approve each photo before it appears in the gallery</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="adm-set-moderation" />
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <button class="btn btn-primary" id="adm-set-save" style="margin-top:12px">Save Settings</button>
+  </div>
+
+  <!-- Theme editor -->
+  <div class="card mb-16">
+    <div class="card-title">Theme</div>
+
+    <div class="field" style="margin-bottom:12px">
+      <label>Appearance</label>
+      <select id="adm-theme-mode"></select>
+    </div>
+
+    <div class="field" style="margin-bottom:12px">
+      <label>Font</label>
+      <select id="adm-theme-font"></select>
+    </div>
+
+    <div style="margin-bottom:12px">
+      <div style="font-size:0.75rem;color:var(--text-muted);font-family:var(--font-mono);margin-bottom:8px">PALETTE</div>
+      <div class="theme-presets" id="adm-theme-presets"></div>
+    </div>
+
+    <div class="field" style="margin-bottom:12px">
+      <label>Header Image</label>
+      <div class="flex" style="gap:8px;align-items:center">
+        <input type="file" id="adm-header-img-input" accept="image/*" style="flex:1;padding:8px" />
+        <button class="btn btn-secondary btn-sm" id="adm-header-img-clear">Clear</button>
+      </div>
+      <div id="adm-header-img-preview" style="margin-top:8px;display:none">
+        <img id="adm-header-img-thumb" style="width:100%;height:80px;object-fit:cover;border-radius:var(--radius-sm)" />
+      </div>
+    </div>
+
+    <details style="margin-bottom:16px">
+      <summary style="cursor:pointer;font-size:0.82rem;color:var(--text-muted)">Advanced — custom colours &amp; CSS</summary>
+      <div class="color-grid" style="margin-top:12px">
+        <div class="color-field"><label>Background</label><input type="color" id="adm-color-bg" /></div>
+        <div class="color-field"><label>Surface</label><input type="color" id="adm-color-surface" /></div>
+        <div class="color-field"><label>Accent</label><input type="color" id="adm-color-accent" /></div>
+        <div class="color-field"><label>Text</label><input type="color" id="adm-color-text" /></div>
+        <div class="color-field"><label>Surface 2</label><input type="color" id="adm-color-surface2" /></div>
+        <div class="color-field"><label>Border</label><input type="color" id="adm-color-border" /></div>
+      </div>
+      <div class="field" style="margin-top:12px">
+        <label>Custom CSS <span style="color:var(--text-muted);font-size:0.75em">(gallery &amp; event pages)</span></label>
+        <textarea id="adm-custom-css" placeholder="/* e.g. body { letter-spacing: 0.02em; } */" rows="3"></textarea>
+      </div>
+    </details>
+
+    <div class="flex" style="gap:8px">
+      <button class="btn btn-secondary" id="adm-theme-preview">Preview</button>
+      <button class="btn btn-primary" id="adm-theme-save">Save Theme</button>
+    </div>
+  </div>
+
+  <!-- Participants -->
+  <div class="card mb-16">
+    <div class="card-title">Participants</div>
+    <div id="adm-participants" class="participant-list">
+      <div class="text-muted" style="font-size:0.85rem">No participants yet</div>
+    </div>
+  </div>
+
+  <!-- Pending moderation -->
+  <div class="card mb-16 hidden" id="adm-moderation-card">
+    <div class="card-title">Pending Review (<span id="adm-pending-num">0</span>)</div>
+    <p class="text-muted" style="font-size:0.8rem;margin:-4px 0 12px">Approve to publish to the gallery, or reject to delete.</p>
+    <div id="adm-pending-grid" class="admin-photo-grid"></div>
+  </div>
+
+  <!-- Photos -->
+  <div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div class="card-title" style="margin-bottom:0">All Photos</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+        <button class="btn btn-secondary btn-sm hidden" id="adm-selection-actions">
+          <span id="adm-sel-count">0</span> selected
+        </button>
+        <button class="btn btn-secondary btn-sm hidden" id="adm-download-sel">⬇ Download</button>
+        <button class="btn btn-primary btn-sm hidden" id="adm-highlight-sel">⭐ Highlight</button>
+        <button class="btn btn-secondary btn-sm hidden" id="adm-unhighlight-sel">✕ Unhighlight</button>
+        <button class="btn btn-secondary btn-sm" id="adm-select-toggle">Select</button>
+      </div>
+    </div>
+    <div id="adm-photos" class="admin-photo-grid">
+      <div class="text-muted" style="font-size:0.85rem;grid-column:1/-1">No photos yet</div>
+    </div>
+  </div>
+</div>
+
+<!-- Photo lightbox (admin) -->
+<div id="lightbox">
+  <button class="lightbox-close" id="lightbox-close">✕</button>
+  <img id="lightbox-img" src="" alt="" style="display:none" />
+  <video id="lightbox-video" controls style="display:none"></video>
+  <div class="lightbox-caption" id="lightbox-caption"></div>
+</div>
+
+<div id="toast"></div>
+<script src="/js/util.js"></script>
+<script src="/js/admin.js"></script>
+</body>
+</html>

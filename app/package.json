@@ -1,0 +1,43 @@
+{
+  "name": "snapdini",
+  "version": "1.0.0",
+  "license": "AGPL-3.0-or-later",
+  "description": "Self-hosted disposable camera web app for shared event photography",
+  "main": "src/server/index.ts",
+  "scripts": {
+    "start": "tsx src/server/index.ts",
+    "dev": "tsx watch src/server/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "archiver": "^8.0.0",
+    "argon2": "^0.41.1",
+    "cookie-parser": "^1.4.6",
+    "drizzle-orm": "^0.45.2",
+    "express": "^4.18.2",
+    "express-async-errors": "^3.1.1",
+    "express-rate-limit": "^7.2.0",
+    "helmet": "^7.1.0",
+    "multer": "^1.4.5-lts.2",
+    "nodemailer": "^6.9.0",
+    "pg": "^8.11.5",
+    "qrcode": "^1.5.3",
+    "sharp": "^0.33.4",
+    "stripe": "^22.2.2",
+    "tsx": "^4.22.4",
+    "uuid": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/archiver": "^8.0.0",
+    "@types/cookie-parser": "^1.4.10",
+    "@types/express": "^5.0.6",
+    "@types/multer": "^2.1.0",
+    "@types/node": "^26.0.0",
+    "@types/nodemailer": "^8.0.1",
+    "@types/pg": "^8.20.0",
+    "@types/qrcode": "^1.5.6",
+    "drizzle-kit": "^0.31.10",
+    "nodemon": "^3.0.3",
+    "typescript": "^6.0.3"
+  }
+}

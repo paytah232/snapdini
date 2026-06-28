@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Snapdini</title>
+  <meta name="theme-color" content="#000000" />
+  <link rel="stylesheet" href="/css/style.css" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <script src="/js/sw-register.js"></script>
+</head>
+<body>
+<div class="grain"></div>
+
+<!-- Join / onboarding screen -->
+<div id="join-screen">
+  <span class="join-icon">📷</span>
+  <h1 id="join-event-name">Join Event</h1>
+  <p>Enter your name to join and start shooting</p>
+  <div style="width:100%;max-width:340px">
+    <div class="field">
+      <label>Your Name</label>
+      <input type="text" id="participant-name" placeholder="e.g. Alex" maxlength="40"
+             style="font-size:1.1rem;text-align:center" />
+    </div>
+    <div class="field">
+      <label>Email <span style="color:var(--text-muted);font-size:0.75em">(optional — receive your photos later)</span></label>
+      <input type="email" id="participant-email" placeholder="you@example.com" />
+    </div>
+    <button class="btn btn-primary" id="join-btn">Join &amp; Open Camera</button>
+    <p class="text-muted text-center mt-8" style="font-size:0.78rem">
+      Your name appears on your photos in the shared gallery
+    </p>
+  </div>
+</div>
+
+<!-- Camera page -->
+<div id="camera-page" class="hidden">
+  <div id="viewfinder">
+    <video id="video" autoplay playsinline muted></video>
+    <div id="flash"></div>
+    <div id="focus-ring"></div>
+    <div class="uploading-badge" id="uploading-badge">Saving…</div>
+
+    <!-- Corner brackets -->
+    <div class="camera-overlay">
+      <div class="corner corner-tl"></div>
+      <div class="corner corner-tr"></div>
+      <div class="corner corner-bl"></div>
+      <div class="corner corner-br"></div>
+    </div>
+
+    <!-- Top bar -->
+    <div class="camera-top-bar">
+      <div class="event-label">
+        📷 <strong id="cam-event-name">Loading…</strong>
+      </div>
+      <div class="shot-counter" id="shot-counter">
+        <span id="shots-num">—</span>
+        <small>shots left</small>
+      </div>
+    </div>
+
+    <!-- Recording timer (hidden until recording) -->
+    <div class="rec-timer hidden" id="rec-timer">
+      <div class="rec-dot"></div>
+      <span id="rec-time">0:00</span>
+      <span id="rec-limit" style="color:rgba(255,255,255,0.5)"></span>
+    </div>
+
+    <!-- No camera fallback -->
+    <div class="no-camera hidden" id="no-camera">
+      <div style="font-size:48px">📁</div>
+      <p>Camera not available.<br>Upload a file instead.</p>
+      <label class="btn btn-secondary" style="width:auto;cursor:pointer">
+        Choose File
+        <input type="file" id="file-upload-input" accept="image/*,video/*" style="display:none" />
+      </label>
+    </div>
+
+    <!-- Camera permission blocked -->
+    <div class="no-camera hidden" id="cam-perm">
+      <div style="font-size:48px">🎥</div>
+      <p>Camera access is blocked.<br>Allow it to take photos &amp; video.</p>
+      <button class="btn btn-primary" id="cam-perm-retry" style="width:auto">Allow camera</button>
+      <p class="text-muted" style="font-size:0.72rem;margin-top:10px;max-width:260px">
+        If you're not asked again, enable Camera for this site in your browser settings, then tap Allow.
+      </p>
+    </div>
+  </div>
+
+  <!-- Mode toggle (photo / video) — shown only when video enabled -->
+  <div class="mode-toggle hidden" id="mode-toggle">
+    <button class="mode-btn active" id="btn-mode-photo">Photo</button>
+    <button class="mode-btn" id="btn-mode-video">Video</button>
+  </div>
+
+  <!-- Quick actions: cog opens camera settings; fullscreen toggle -->
+  <div class="camera-controls-row" id="camera-actions-row">
+    <button class="cam-ctrl-btn hidden" id="btn-aspect" title="Photo shape">1:1</button>
+    <button class="cam-ctrl-btn" id="btn-settings" title="Camera settings">⚙</button>
+    <button class="cam-ctrl-btn" id="btn-fullscreen" title="Fullscreen" aria-label="Fullscreen">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+    </button>
+  </div>
+
+  <!-- Camera settings (hidden until the cog is tapped) -->
+  <div class="camera-controls-row cam-settings-panel hidden" id="cam-settings-panel">
+    <button class="cam-ctrl-btn" id="btn-torch" title="Torch">🔦</button>
+    <button class="cam-ctrl-btn" id="btn-screenflash" title="Screen flash — lights the screen white when you shoot">💡</button>
+    <button class="cam-ctrl-btn" id="btn-grid" title="Toggle grid">⊞</button>
+    <button class="cam-ctrl-btn" id="btn-exposure" title="Exposure">☀️</button>
+    <input type="range" id="exposure-slider" min="0" max="100" value="50" class="hidden" />
+    <button class="cam-ctrl-btn hidden" id="btn-exposure-reset" title="Reset brightness">↺</button>
+  </div>
+
+  <!-- Grid overlay -->
+  <div class="camera-grid hidden" id="camera-grid">
+    <div class="grid-line grid-v" style="left:33.3%"></div>
+    <div class="grid-line grid-v" style="left:66.6%"></div>
+    <div class="grid-line grid-h" style="top:33.3%"></div>
+    <div class="grid-line grid-h" style="top:66.6%"></div>
+  </div>
+
+  <!-- Bottom controls -->
+  <div class="camera-bottom-bar">
+    <button class="btn-gallery" id="btn-gallery" title="View Gallery">
+      🖼
+      <div class="queue-badge hidden" id="queue-badge">0</div>
+    </button>
+    <button class="btn-shutter" id="btn-shutter" title="Take Photo / Record"></button>
+    <button class="btn-flip" id="btn-flip" title="Flip Camera">🔄</button>
+  </div>
+</div>
+
+<!-- Gallery page -->
+<div id="gallery-page">
+  <div class="gallery-header">
+    <div class="gallery-header-left">
+      <button class="btn btn-secondary btn-sm" id="btn-back-camera">← Camera</button>
+      <div>
+        <h2 id="gallery-event-name">Gallery</h2>
+        <div class="meta" id="gallery-meta"></div>
+      </div>
+    </div>
+    <div class="gallery-header-right">
+      <button class="btn btn-secondary btn-sm hidden" id="btn-email-photos" title="Email my photos">✉️ My Photos</button>
+      <button class="btn btn-secondary btn-sm hidden" id="btn-highlights-toggle"></button>
+      <button class="btn btn-secondary btn-sm hidden" id="btn-download-mine">⬇ Mine</button>
+      <button class="btn btn-secondary btn-sm hidden" id="btn-download-all">⬇ All</button>
+    </div>
+  </div>
+  <div id="gallery-content"></div>
+</div>
+
+<!-- Lightbox -->
+<div id="lightbox">
+  <button class="lightbox-close" id="lightbox-close">✕</button>
+  <img id="lightbox-img" src="" alt="" style="display:none" />
+  <video id="lightbox-video" controls style="display:none"></video>
+  <div class="lightbox-caption" id="lightbox-caption"></div>
+  <div class="lightbox-actions">
+    <button class="btn btn-secondary btn-sm hidden" id="lightbox-download">⬇ Download</button>
+  </div>
+</div>
+
+<!-- Upload queue drawer -->
+<div class="queue-drawer" id="queue-drawer">
+  <div class="queue-drawer-handle" id="queue-drawer-handle"></div>
+  <div class="queue-drawer-header">
+    <span class="queue-drawer-title">Upload Queue</span>
+    <button class="btn btn-secondary btn-sm" id="queue-drawer-close">Done</button>
+  </div>
+  <div class="queue-drawer-body" id="queue-drawer-body"></div>
+</div>
+
+<!-- Email my photos modal -->
+<div id="email-modal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:300;display:flex;align-items:center;justify-content:center;padding:16px">
+  <div class="card" style="width:100%;max-width:380px">
+    <div class="card-title">Email My Photos</div>
+    <p style="font-size:0.88rem;color:var(--text-muted);margin-bottom:16px">We'll send a link to the gallery where your photos are shown under your name.</p>
+    <div class="field">
+      <label>Your Email</label>
+      <input type="email" id="email-input" placeholder="you@example.com" />
+    </div>
+    <div class="flex" style="gap:8px">
+      <button class="btn btn-secondary" id="email-cancel">Cancel</button>
+      <button class="btn btn-primary" id="email-send">Send Link</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script src="/js/util.js"></script>
+<script src="/js/event.js"></script>
+</body>
+</html>

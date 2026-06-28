@@ -1,0 +1,120 @@
+# Explicit project name — dev, prod and coming-soon compose files share this folder, so
+# without distinct names they'd collide on the default project ("app") and a `down` on one
+# could tear down another. (Learned the hard way.)
+name: snapdini-dev
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: snapdini-dev-app
+    restart: unless-stopped
+    # Dev: tsx watch auto-restarts the server on any src edit (src is bind-mounted below),
+    # so backend changes need no rebuild and no manual `restart`.
+    command: ["npm", "run", "dev"]
+    volumes:
+      - ./src:/app/src         # live-mounted for dev — restart container to pick up code changes
+      - ./assets:/app/assets:ro # bundled assets (slideshow music) — read-only
+      - ./data:/data           # local data (Postgres lives in the db service; keep this on fast disk)
+      # Heavy media (event photos/videos + theme images) lives here. Point UPLOADS_HOST at a
+      # ZFS pool mounted over NFS to offload storage; leave it for the local default.
+      # PERMISSIONS: the app runs as root in-container, so the host/NFS dir must be writable by
+      # it — `chown -R 0:0 <dir>` (or match the container uid) and export the NFS share with
+      # no_root_squash (or rw for that uid). Create the dir first: `mkdir -p <dir>`.
+      - ${UPLOADS_HOST:-/bigdata/snapdini/dev}:${UPLOADS_DIR:-/data/uploads}
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - BASE_URL=${BASE_URL:-http://localhost:3001}   # public URL for links/QR/emails — set per-deploy in .env
+      - DATA_DIR=/data
+      - UPLOADS_DIR=${UPLOADS_DIR:-/data/uploads}   # container path for media (host = UPLOADS_HOST)
+      - DATABASE_URL=${DATABASE_URL:-postgres://snapdini:snapdini@db:5432/snapdini}
+      - RETENTION_DAYS=${RETENTION_DAYS:-7}
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-64}
+      - MAX_VIDEO_SIZE_MB=${MAX_VIDEO_SIZE_MB:-8192}
+      - IMAGE_QUALITY=${IMAGE_QUALITY:-100}
+      - VIDEO_MAX_SECONDS=${VIDEO_MAX_SECONDS:-60}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_SECURE=${SMTP_SECURE:-false}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      # Email via Mailgun HTTP API (alternative to SMTP; preferred when set).
+      - MAILGUN_API_KEY=${MAILGUN_API_KEY:-}
+      - MAILGUN_DOMAIN=${MAILGUN_DOMAIN:-}
+      - MAILGUN_BASE=${MAILGUN_BASE:-}
+      # System address the contact form emails (e.g. support@snapdini.com).
+      - SUPPORT_EMAIL=${SUPPORT_EMAIL:-}
+      # Site admin bootstrap (both unset = no admin, no shipped default credential).
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      # Google sign-in (optional; both unset = Google button hidden).
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      - BILLING_CURRENCY=${BILLING_CURRENCY:-usd}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # Node is always present in the image (wget isn't); 200 from /api/config = healthy.
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/config',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  web:
+    build:
+      context: ../web
+      dockerfile: Dockerfile
+    container_name: snapdini-dev-web
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      # adapter-node uses ORIGIN to build absolute URLs (og:image, og:url) behind the proxy.
+      - ORIGIN=${BASE_URL:-http://localhost:3001}
+      # Server-side link-preview fetches hit Express directly inside the Docker network.
+      - INTERNAL_API_BASE=http://app:3000
+    depends_on:
+      - app
+
+  db:
+    image: postgres:16-alpine
+    container_name: snapdini-dev-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=snapdini
+      - POSTGRES_PASSWORD=snapdini
+      - POSTGRES_DB=snapdini
+    volumes:
+      # Bind-mounted host folder so the DB is a plain directory you can copy/back up.
+      # For other self-deploys that prefer a managed Docker volume, swap this for a
+      # named volume (e.g. `pgdata:/var/lib/postgresql/data`) and declare it below.
+      - ./data/pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U snapdini"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    image: nginx:alpine
+    container_name: snapdini-dev-nginx
+    restart: unless-stopped
+    ports:
+      - "3001:80"              # reverse proxy (Traefik) routes the dev domain (see BASE_URL) → this host:3001
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app
+      - web
+
+
+networks:
+  default:
+    name: snapdini-dev-net

@@ -1,0 +1,15 @@
+{
+  "name": "snapdini-tests",
+  "private": true,
+  "description": "Top-level test/dev runner for Snapdini (app = Express/TS backend, web = SvelteKit frontend).",
+  "scripts": {
+    "typecheck": "(cd app && npm run typecheck) && (cd web && npm run check)",
+    "test:unit": "cd web && npm run test",
+    "test:integration": "node testsuite/run.mjs",
+    "test:e2e": "cd web && npm run test:e2e",
+    "test:load": "node loadtest/run.mjs",
+    "test:load:multi": "node loadtest/multi.mjs",
+    "test": "npm run typecheck && npm run test:unit && npm run test:integration && npm run test:e2e",
+    "_comment": "test:integration + test:e2e need the dev stack running (docker compose -f app/docker-compose.dev.yml up -d). test:load is run manually."
+  }
+}
