@@ -11,6 +11,31 @@ optional Stripe billing switches on only when keys are set.
 📖 **New here?** [`docs/GUIDE.md`](docs/GUIDE.md) walks through every page and what each control does
 (visitor → organizer → guest → site admin). 🧪 [`TESTING.md`](TESTING.md) is the manual QA checklist.
 
+## See it in action
+
+<p align="center">
+  <img src="docs/screenshots/hero-reveal.gif" alt="Scan a QR code, shoot a limited roll, and the whole gallery reappears when the event ends" width="760">
+</p>
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/camera.png" alt="In-browser camera with a limited roll — no app to install" width="100%"></td>
+    <td width="50%"><img src="docs/screenshots/gallery.png" alt="Every guest's photos in one shared gallery" width="100%"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Guests scan &amp; shoot</b><br><sub>A limited roll, right in the browser</sub></td>
+    <td align="center"><b>One shared gallery</b><br><sub>Reveal at the end, download the lot</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/create-event.png" alt="Create an event in about a minute" width="100%"></td>
+    <td width="50%"><img src="docs/screenshots/poster.png" alt="Printable QR table poster with the logo in the code" width="100%"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Set up in a minute</b><br><sub>Name it, pick the roll size &amp; reveal</sub></td>
+    <td align="center"><b>Print the QR poster</b><br><sub>Drop it on the tables — guests join in a tap</sub></td>
+  </tr>
+</table>
+
 ## Quick start — run the published image
 
 The fastest way to self-host. No build needed; pulls prebuilt images (app + SvelteKit web) and runs
