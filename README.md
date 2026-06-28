@@ -17,9 +17,9 @@ The fastest way to self-host. No build needed; pulls prebuilt images (app + Svel
 them with Postgres + nginx.
 
 ```bash
-# 1. Grab the release compose + nginx config + env template
+# 1. Grab the compose file + nginx config + env template
 mkdir snapdini && cd snapdini
-curl -O https://raw.githubusercontent.com/paytah232/snapdini/main/app/docker-compose.release.yml
+curl -O https://raw.githubusercontent.com/paytah232/snapdini/main/app/docker-compose.yml
 mkdir nginx && curl -o nginx/default.conf https://raw.githubusercontent.com/paytah232/snapdini/main/app/nginx/default.conf
 curl -o .env https://raw.githubusercontent.com/paytah232/snapdini/main/app/.env.example   # then edit it
 
@@ -27,8 +27,8 @@ curl -o .env https://raw.githubusercontent.com/paytah232/snapdini/main/app/.env.
 #    Optional: STRIPE_* (billing), MAILGUN_* (email), ADMIN_EMAIL/PASSWORD (admin panel).
 
 # 3. Pull + run (serves on HTTP_PORT, default 8080 — put your own TLS / reverse-proxy in front)
-docker compose -f docker-compose.release.yml pull
-docker compose -f docker-compose.release.yml up -d
+docker compose pull
+docker compose up -d
 ```
 
 - Images: `ghcr.io/paytah232/snapdini-app` and `ghcr.io/paytah232/snapdini-web`. Pin a version with
@@ -44,39 +44,30 @@ docker compose -f docker-compose.release.yml up -d
 ```bash
 git clone https://github.com/paytah232/snapdini.git && cd snapdini/app
 cp .env.example .env            # edit: BASE_URL, POSTGRES_PASSWORD, optional Stripe/Mailgun/admin
-docker compose -f docker-compose.dev.yml up -d --build     # dev stack on :3001 (hot-reload)
+docker compose -f docker-compose.dev.yml up -d --build     # dev stack (hot-reload)
 ```
-The dev stack bind-mounts source for hot-reload; the prod stack (`docker-compose.yml`) builds
-optimised images. See **Stacks** below and `app/CUTOVER.md` for a production runbook.
+The dev stack bind-mounts the source for hot-reload. For production you don't build at all — run the
+**published images** with `docker-compose.yml` (see **Quick start** above). To publish your own images
+from a fork, see **Releasing** below.
 
-## Stacks, ports & Compose projects
+## Two ways to run
 
-All three compose files live in `app/`, so each declares an explicit **`name:`** (project).
-**This matters:** without distinct project names they default to the folder name (`app`) and a
-`down` on one stack can tear down the others. Always keep the project names.
+| Mode | File | What it does |
+|---|---|---|
+| **Published images** (default) | `app/docker-compose.yml` | Pulls `ghcr.io/paytah232/snapdini-{app,web}` + Postgres + nginx. For self-hosting / production. |
+| **Build from source** | `app/docker-compose.dev.yml` | Builds app + web from local source with hot-reload, for development. |
 
-| Stack | File | Project | Host port | Domain (via Traefik) |
-|---|---|---|---|---|
-| Dev | `app/docker-compose.dev.yml` | `snapdini-dev` | 3001 | `dev.snapdini.com` |
-| Prod | `app/docker-compose.yml` | `snapdini-prod` | 3002 | `snapdini.com` |
-| Coming-soon | `app/docker-compose.comingsoon.yml` | `snapdini-comingsoon` | 3002 | (holds the prod port) |
+Each compose file declares an explicit **`name:`** (project) so stacks stay isolated on one host —
+keep it; otherwise a `down` on one can tear down another. Run prod from its own folder with its own
+`.env` (don't share the dev tree's env).
 
-### Run (dev)
+### Dev stack tips
 ```bash
 cd app
-docker compose -f docker-compose.dev.yml up -d            # start/rebuild
-docker compose -f docker-compose.dev.yml up -d --build web # after web changes
-docker compose -f docker-compose.dev.yml restart app       # after backend changes (src is bind-mounted)
-docker compose -f docker-compose.dev.yml restart nginx     # ALWAYS after recreating app (stale upstream → 502)
-```
-
-### "Coming soon" holding page (prod)
-A standalone nginx serving `app/nginx/coming-soon.html` on :3002, so the prod domain shows a
-holding page until cutover. Deploy / revert:
-```bash
-cd app
-docker compose -f docker-compose.comingsoon.yml up -d      # bring it up (own project, won't touch dev)
-docker compose -f docker-compose.comingsoon.yml down       # take it down before the real prod cutover
+docker compose -f docker-compose.dev.yml up -d             # start (builds on first run)
+docker compose -f docker-compose.dev.yml up -d --build web  # after web changes
+docker compose -f docker-compose.dev.yml restart app        # after backend changes (src is bind-mounted)
+docker compose -f docker-compose.dev.yml restart nginx      # after recreating app (stale upstream → 502)
 ```
 
 ## Landing hero images (the film-strip)
@@ -137,9 +128,8 @@ and `…-web:…`. Make the GHCR packages public so self-hosters can pull withou
 cd app && ./publish.sh 1.0.0 ghcr.io/youruser/snapdini
 ```
 
-Self-hosters consume these via the **Quick start** above (`docker-compose.release.yml`). The
-maintainer's own prod box can either build from source (`app/CUTOVER.md`) or switch to the published
-image by running `docker-compose.release.yml` with `IMAGE_PREFIX`/`IMAGE_TAG` set.
+Self-hosters consume these via the **Quick start** above — `docker-compose.yml` pulls them. Pin a
+release with `IMAGE_TAG` in `.env` (e.g. `1.0.0`); point at your own registry with `IMAGE_PREFIX`.
 
 ## Support
 

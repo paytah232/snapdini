@@ -3,7 +3,7 @@
 # it uses the built-in GITHUB_TOKEN with packages:write. Images land at:
 #   ghcr.io/<owner>/snapdini-app:<version>   (+ :latest)
 #   ghcr.io/<owner>/snapdini-web:<version>   (+ :latest)
-# Self-hosters then run docker-compose.release.yml with IMAGE_PREFIX=ghcr.io/<owner>/snapdini.
+# Self-hosters then run docker-compose.yml with IMAGE_PREFIX=ghcr.io/<owner>/snapdini.
 #
 # MULTI-ARCH: each architecture is built on its OWN native runner (amd64 on ubuntu-latest, arm64 on
 # ubuntu-24.04-arm — free for public repos), pushed BY DIGEST, then a `merge` job stitches the two

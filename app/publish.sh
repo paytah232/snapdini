@@ -23,4 +23,4 @@ docker buildx build --platform "$PLATFORMS" \
   -t "${PREFIX}-web:${VERSION}" -t "${PREFIX}-web:latest" \
   -f ../web/Dockerfile ../web --push
 
-echo "✓ published. Self-hosters: docker-compose.release.yml with IMAGE_PREFIX=${PREFIX} IMAGE_TAG=${VERSION}"
+echo "✓ published. Self-hosters: docker-compose.yml with IMAGE_PREFIX=${PREFIX} IMAGE_TAG=${VERSION}"

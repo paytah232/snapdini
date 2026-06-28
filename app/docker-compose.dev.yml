@@ -1,6 +1,6 @@
-# Explicit project name — dev, prod and coming-soon compose files share this folder, so
-# without distinct names they'd collide on the default project ("app") and a `down` on one
-# could tear down another. (Learned the hard way.)
+# Explicit project name — the dev and prod compose files share this folder, so without distinct
+# names they'd collide on the default project ("app") and a `down` on one could tear down another.
+# (Learned the hard way.)
 name: snapdini-dev
 
 services:
