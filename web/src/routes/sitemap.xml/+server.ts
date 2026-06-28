@@ -6,6 +6,7 @@ export const GET: RequestHandler = ({ url }) => {
   // Homepage (priority 1.0) + the use-case landing pages (0.8).
   const pages: { path: string; priority: string }[] = [
     { path: '/', priority: '1.0' },
+    { path: '/pricing', priority: '0.9' },
     ...useCaseSlugs.map((slug) => ({ path: `/${slug}`, priority: '0.8' })),
   ];
   const urls = pages

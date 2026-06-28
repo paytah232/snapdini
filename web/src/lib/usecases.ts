@@ -135,6 +135,102 @@ export const usecases: Record<string, UseCase> = {
     ctaTitle: 'Set up your baby-shower camera.',
     ctaText: 'Create your event free, share one QR code, and gather every guest’s photos into one keepsake gallery.',
   },
+
+  'bachelorette-hens-party-camera': {
+    slug: 'bachelorette-hens-party-camera',
+    title: 'Bachelorette & Hen Party Camera App',
+    desc: 'A shared QR camera for bachelorette and hen parties. Everyone scans to snap a limited roll — no app — and the (sometimes incriminating) photos land in one gallery revealed at the end. Free for up to 10 guests.',
+    eyebrow: 'For hen & bachelorette parties',
+    h1: 'The shared camera for the <em>hen do</em>.',
+    lede: 'Whatever happens on the night, it lands in one gallery. Everyone scans the same QR, shoots their roll, and the whole story reappears together when it’s over — nothing lost in a dozen camera rolls.',
+    features: [
+      { ic: '🥂', t: 'Every angle of the night', d: 'The bits the bride misses while she’s busy being celebrated — captured by the whole group.' },
+      NOAPP,
+      REVEAL,
+      SHARED,
+    ],
+    faqs: [
+      { q: 'How does a hen / bachelorette party camera work?', a: 'Create an event, share the QR code or link, and everyone opens a camera with a limited roll. All the photos collect in one shared gallery you reveal at the end and download together.' },
+      { q: 'Do guests need an app?', a: 'No — scan the QR or tap the link and the camera opens in the browser. Works on any phone, no install.' },
+      { q: 'Is it free?', a: 'Free for up to 10 guests with all features. Bigger groups are a one-off pass from A$5, with optional add-ons for extra shots and short videos.' },
+      { q: 'Can we keep the photos private until the end?', a: 'Yes — choose the end-of-night reveal so nothing shows until the party’s over, then it all reappears at once.' },
+      { q: 'Can we get all the photos afterwards?', a: 'Yes — one shared gallery with a full zip download for the bride to keep.' },
+    ],
+    ctaTitle: 'Get the whole night in one gallery.',
+    ctaText: 'Create your event free and share one QR — every photo from every phone, in one place.',
+  },
+
+  'engagement-party-camera': {
+    slug: 'engagement-party-camera',
+    title: 'Engagement Party Camera — Shared QR Photos',
+    desc: 'A digital disposable camera for engagement parties. Guests scan a QR to snap a limited roll — no app — into one shared gallery revealed at the end. Free for up to 10 guests; a head start before the wedding.',
+    eyebrow: 'For engagement parties',
+    h1: 'A shared camera for the <em>engagement</em>.',
+    lede: 'Celebrate the “yes” with photos from everyone who came. One QR code, one gallery — the candid moments to keep, and a perfect warm-up for the wedding camera later.',
+    features: [
+      { ic: '💞', t: 'The first of many', d: 'Capture the engagement the same way you’ll capture the wedding — by everyone there, in one gallery.' },
+      NOAPP,
+      REVEAL,
+      SHARED,
+    ],
+    faqs: [
+      { q: 'How does the engagement party camera work?', a: 'Create an event, share the QR or link, and guests open a camera with a limited roll. Every photo lands in one shared gallery you reveal at the end and download together.' },
+      { q: 'Do guests need to install an app?', a: 'No — they scan a QR or tap a link and shoot in the browser. Nothing to download.' },
+      { q: 'Is it free?', a: 'Free for up to 10 guests with all features; larger parties are a one-off pass from A$5.' },
+      { q: 'Can we use it again for the wedding?', a: 'Yes — set up a fresh event for the wedding when the time comes. Same simple QR, new gallery.' },
+      { q: 'Can everyone download the photos?', a: 'Yes — one shared gallery with a full zip download.' },
+    ],
+    ctaTitle: 'Capture the celebration.',
+    ctaText: 'Create your event free, share one QR, and collect every guest’s photos from the night.',
+  },
+
+  'graduation-party-photo-app': {
+    slug: 'graduation-party-photo-app',
+    title: 'Graduation Party Photo App — Shared QR Camera',
+    desc: 'A shared QR camera for graduation parties. Friends and family scan to snap a limited roll — no app — into one gallery to reveal and keep. Free for up to 10 guests.',
+    eyebrow: 'For graduations',
+    h1: 'A shared camera for the <em>graduation</em>.',
+    lede: 'Cap toss, family photos and the after-party — captured by everyone there and gathered into one gallery to celebrate the milestone and keep forever.',
+    features: [
+      { ic: '🎓', t: 'The whole milestone', d: 'From the ceremony to the party, captured by friends and family — not just whoever held the camera.' },
+      NOAPP,
+      REVEAL,
+      SHARED,
+    ],
+    faqs: [
+      { q: 'How does the graduation photo app work?', a: 'Create an event, share the QR or link, and guests open a camera with a limited roll. All photos collect in one shared gallery you reveal at the end and download together.' },
+      { q: 'Do guests need an app?', a: 'No — scan the QR or tap the link to shoot in the browser. No install, any phone.' },
+      { q: 'Is it free?', a: 'Free for up to 10 guests with all features; larger gatherings are a one-off pass from A$5.' },
+      { q: 'Can family who couldn’t attend see the photos?', a: 'Yes — create a share link to the gallery so distant family can view and download.' },
+      { q: 'Can we download everything afterwards?', a: 'Yes — one shared gallery with a full zip to keep.' },
+    ],
+    ctaTitle: 'Capture the big day.',
+    ctaText: 'Create your event free, share one QR, and gather every photo from the graduation into one gallery.',
+  },
+
+  'holiday-christmas-party-camera': {
+    slug: 'holiday-christmas-party-camera',
+    title: 'Holiday & Christmas Party Camera App',
+    desc: 'A shared QR camera for holiday and Christmas parties — office or family. Everyone scans to snap a limited roll, no app, into one gallery to reveal and download. Free for up to 10 guests.',
+    eyebrow: 'For holiday & Christmas parties',
+    h1: 'A shared camera for the <em>Christmas party</em>.',
+    lede: 'Office do or family gathering — let everyone capture it. One QR on the table or the invite, one gallery of the whole night, revealed and ready to download when it’s over.',
+    features: [
+      { ic: '🎄', t: 'The whole party, one gallery', d: 'Secret Santa, the dance floor and the group photo — captured by everyone, collected in one place.' },
+      { ic: '🔗', t: 'No app, no logins', d: 'Guests scan a QR and shoot in-browser — perfect for a mixed crowd or a work event with no IT fuss.' },
+      REVEAL,
+      SHARED,
+    ],
+    faqs: [
+      { q: 'How does the holiday party camera work?', a: 'Create an event, share the QR or link, and everyone opens a camera with a limited roll. All photos collect in one shared gallery you reveal at the end and download together.' },
+      { q: 'Do guests need an app?', a: 'No — they scan a QR or tap a link and shoot in the browser. No install, any phone.' },
+      { q: 'Is it good for an office Christmas party?', a: 'Yes — no logins or accounts for attendees, optional moderation, and you can remove Snapdini branding and theme it for the company.' },
+      { q: 'Is there a free option?', a: 'Free for up to 10 guests with all features; larger parties are a one-off pass from A$5.' },
+      { q: 'Can we download all the photos?', a: 'Yes — one shared gallery with a full zip download.' },
+    ],
+    ctaTitle: 'Capture the holiday party.',
+    ctaText: 'Create your event free, share one QR, and collect everyone’s photos from the night in one gallery.',
+  },
 };
 
 export const useCaseSlugs = Object.keys(usecases);

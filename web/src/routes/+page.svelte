@@ -214,6 +214,7 @@
   <div class="fl">
     {#if loggedIn}<a href="/dashboard">My events</a>{:else}<a href="/login">Sign in</a>{/if}
     <a href="/signup">Start free</a>
+    <a href="/pricing">Pricing</a>
     <a href="/contact">Contact</a>
     <a href="/terms">Terms</a>
     <a href="/privacy">Privacy</a>
