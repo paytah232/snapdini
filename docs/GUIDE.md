@@ -8,6 +8,24 @@ whole app is free and the "Pro"/pricing UI is hidden.
 Roles: **visitor** (not signed in) · **organizer** (created an event) · **co-host** (invited to help
 run one) · **guest** (takes photos at an event) · **site admin** (operates the platform).
 
+## In a nutshell
+
+1. **Create an event** — pick how many shots each guest gets and when the photos appear.
+2. **Share the QR** — print the poster or send the link. Guests scan and a camera opens in their browser, no app.
+3. **Guests shoot** their limited roll; every photo lands in one shared gallery.
+4. **Reveal & download** — show the gallery (at the end, or live) and grab the lot as a zip.
+
+The rest of this guide is the full reference for each page.
+
+## Contents
+
+- [1 · Public / marketing](#1-public--marketing)
+- [2 · Account & sign-in](#2-account--sign-in)
+- [3 · Organizer portal](#3-organizer-portal) — create, manage, poster, review & slideshow
+- [4 · Guest capture](#4-guest-capture)
+- [5 · Public sharing & gallery](#5-public-sharing--gallery)
+- [6 · Site administration](#6-site-administration)
+
 ---
 
 ## 1. Public / marketing
@@ -129,9 +147,10 @@ Where you approve, curate and share photos.
 
 ---
 
-## 4. Guest capture — `/join/<code>` or `/e/<slug>`
+## 4. Guest capture
 
-What a guest sees after scanning the QR (both URLs open the same camera; the slug is just prettier).
+What a guest sees after scanning the QR. Both **`/join/<code>`** and the prettier **`/e/<slug>`** open
+the same camera.
 - **Join screen:** event branding + blurb, a **"limited roll — N snaps"** callout, an **Event info**
   panel (photo shapes, video, when photos appear), your **name** (and an optional **email** so you can
   resume on another device), then **Join & open camera**. Returning with the same email resumes your
@@ -162,9 +181,10 @@ The public gallery for an event.
 
 ---
 
-## 6. Site administration — `/siteadmin`
+## 6. Site administration
 
-Platform operators only. A red "Site admin mode" banner; every list has search, filters and paging.
+Platform operators only, at **`/siteadmin`**. A red "Site admin mode" banner; every list has search,
+filters and paging.
 - **Events** — all events with status + purge timing; **Manage →** opens any event's panel (support
   override).
 - **Users** — accounts, plan, event counts, verified/admin flags (view-only).
