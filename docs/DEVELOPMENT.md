@@ -1,0 +1,117 @@
+# Snapdini — development & maintainer guide
+
+Everything beyond the self-host quick start in the [README](../README.md): architecture, building
+from source, the dev stack, gotchas, and releasing. If you just want to **run** Snapdini, the
+README's quick start is all you need.
+
+## Architecture
+
+- **Backend** — `app/` — Express + TypeScript (run via `tsx`) + Postgres + Drizzle ORM.
+- **Frontend** — `web/` — SvelteKit 2 + TypeScript (adapter-node), served behind nginx.
+- **nginx** routes `/api` + `/uploads` → the app, everything else → the web (SvelteKit) server.
+- Per-stack Docker Compose; a reverse proxy you manage (Traefik, Caddy, nginx…) terminates TLS and
+  routes your public domain → the stack's host port.
+
+## Two ways to run
+
+| Mode | File | What it does |
+|---|---|---|
+| **Published images** (default) | `app/docker-compose.yml` | Pulls `ghcr.io/paytah232/snapdini-{app,web}` + Postgres + nginx. For self-hosting / production. |
+| **Build from source** | `app/docker-compose.dev.yml` | Builds app + web from local source with hot-reload, for development. |
+
+Each compose file declares an explicit **`name:`** (project) so stacks stay isolated on one host —
+keep it; otherwise a `down` on one can tear down another. **Run production from its own folder with
+its own `.env`** — don't share the dev tree's env file.
+
+## Build from source
+
+```bash
+git clone https://github.com/paytah232/snapdini.git && cd snapdini/app
+cp .env.example .env            # edit: BASE_URL, POSTGRES_PASSWORD, optional Stripe/Mailgun/admin
+docker compose -f docker-compose.dev.yml up -d --build     # dev stack (hot-reload)
+```
+
+The dev stack bind-mounts the source for hot-reload. For production you don't build at all — run the
+**published images** with `docker-compose.yml` (see the README quick start). To publish your own
+images from a fork, see **Releasing** below.
+
+### Dev stack tips
+
+```bash
+cd app
+docker compose -f docker-compose.dev.yml up -d             # start (builds on first run)
+docker compose -f docker-compose.dev.yml up -d --build web  # after web changes
+docker compose -f docker-compose.dev.yml restart app        # after backend changes (src is bind-mounted)
+docker compose -f docker-compose.dev.yml restart nginx      # after recreating app (stale upstream → 502)
+```
+
+## Landing hero images (the film-strip)
+
+The rotated film-strip on the landing page (`web/src/routes/+page.svelte`) shows four frames.
+By default they're warm gradients; drop real photos in to replace them:
+
+- Put `1.jpg … 4.jpg` in **`web/static/sample/`**, then rebuild web. Missing files fall back to the
+  gradient automatically.
+- **Any aspect ratio is fine** — each frame adopts its image's real shape on load, so a mix of
+  1:1 / 4:5 / etc. displays true-to-shape (equal width, centre-aligned).
+- The resize uses a Svelte action that checks `img.complete` **and** listens for `load`. This is
+  deliberate: relying on the `load` event alone misses **already-cached** images (the image finishes
+  before the handler attaches), which made the resize hit-or-miss. Keep both paths.
+
+## Notes & gotchas
+
+- **Typecheck runs on the HOST, not in the container** — `tsconfig.json` isn't bind-mounted, so `tsc`
+  inside the app container can't find it. Use `npm run typecheck` from `app/` (or the root).
+- **`BASE_URL` is REQUIRED in production** — it's baked into QR codes, email/verify links, Stripe
+  redirects + webhook, and OG tags. For security the app does **not** trust the request `Host` header
+  for these in prod (anti host-header-poisoning); if `BASE_URL` is unset it logs a warning and falls
+  back to the host. Always set it (dev default: `http://localhost:3001`).
+- **Billing is env-gated** — `STRIPE_SECRET_KEY` unset ⇒ billing off, no "Pro" UI, fully free (the
+  self-host default). Keys live in the stack's `.env` (gitignored).
+- **Site admin** is bootstrapped from `ADMIN_EMAIL`/`ADMIN_PASSWORD` (no shipped default).
+- **Contact form** (`/contact`) is a **durable DB mailbox**: every submission is stored in the
+  `contact_messages` table and surfaced under **Site admin → Contact messages** (with a *mark done*
+  toggle). If **`SUPPORT_EMAIL`** + an email transport (Mailgun/SMTP) are configured it *also*
+  forwards by email (best-effort) — but submitting always succeeds and is never lost if email is off
+  or fails. On a Mailgun **sandbox** domain, `SUPPORT_EMAIL` must be an *authorized recipient* or the
+  forwarded copy won't deliver (the DB record is kept regardless).
+- **Google sign-in (optional)** — set `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` to show the Google
+  button. Create them at <https://console.cloud.google.com/apis/credentials> (OAuth client ID → "Web
+  application"); the **Authorised redirect URI must be `<BASE_URL>/api/auth/google/callback`** and
+  match `BASE_URL` exactly. CSRF `state` is handled automatically. Both unset ⇒ button hidden.
+- **Social share image** — `web/static/og.png` is generated by `app/src/scripts/make-og.mjs` (needs
+  the fonts baked into `Dockerfile.dev`). See that script's header to regenerate.
+- **Capacity / load testing** — uploads are the CPU-bound ceiling; see `loadtest/CAPACITY.md` and
+  `npm run test:load` / `npm run test:load:multi`.
+
+## Releasing (maintainers)
+
+Two images are published per release — `snapdini-app` (Express API) and `snapdini-web` (SvelteKit).
+
+**Automated (recommended):** bump `app/package.json` + `web/package.json` to the new version, commit,
+then push a version tag. GitHub Actions builds + pushes both, multi-arch (amd64 + arm64), to GHCR —
+no registry secrets needed (uses the built-in `GITHUB_TOKEN`):
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+Workflow: `.github/workflows/release.yml`. Output: `ghcr.io/<owner>/snapdini-app:1.0.0` (+ `:latest`)
+and `…-web:…`. Make the GHCR packages public so self-hosters can pull without auth. (Each arch builds
+on its own native runner — `ubuntu-latest` + `ubuntu-24.04-arm` — then a merge job stitches the
+multi-arch manifest; QEMU emulation is avoided because it crashes on the native-dep `npm install`.)
+
+**Manual (no CI):** `app/publish.sh <version> <prefix>` does the same with `docker buildx` after a
+`docker login`:
+
+```bash
+cd app && ./publish.sh 1.0.0 ghcr.io/youruser/snapdini
+```
+
+Self-hosters consume these via the README quick start — `docker-compose.yml` pulls them. Pin a release
+with `IMAGE_TAG` in `.env`; point at your own registry with `IMAGE_PREFIX`.
+
+## Other docs
+
+- **[GUIDE.md](GUIDE.md)** — page-by-page walkthrough of the app (visitor → organizer → guest → admin).
+- **[../TESTING.md](../TESTING.md)** — manual QA checklist.
