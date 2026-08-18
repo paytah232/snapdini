@@ -27,7 +27,7 @@
     <li><strong>Account details</strong> — your email address, optional display name, and a securely hashed password (we never store your password in plain text).</li>
     <li><strong>Event content</strong> — the photos and videos you and your guests upload to an event.</li>
     <li><strong>Guest details</strong> — a guest's chosen name and, optionally, an email address they provide to receive their photos.</li>
-    <li><strong>Basic technical data</strong> — a single sign-in session cookie, and minimal server logs needed for security and reliability. We don't use third-party advertising or tracking cookies.</li>
+    <li><strong>Basic technical data</strong> — a single sign-in session cookie, and minimal server logs needed for security and reliability. We only set analytics or advertising cookies with your consent, and never for profiling — see "Advertising &amp; analytics" below.</li>
     <li><strong>Diagnostic / error reports</strong> — if something fails (e.g. a photo won't upload), we may record a short technical report (the error message, where it happened, the event code, and your browser type) so we can find and fix the problem. These contain <em>no</em> photos or personal content, and are used only to improve reliability.</li>
     <li><strong>Payment details</strong> — handled entirely by our payment provider (Stripe). We never see or store your full card number.</li>
   </ul>
@@ -52,6 +52,9 @@
     <li><strong>Hosting &amp; infrastructure</strong> — to store your data and serve the application securely.</li>
   </ul>
   <p>We share information with these providers only to the extent needed to deliver the service, and not for their own marketing.</p>
+
+  <h2>6a. Advertising &amp; analytics</h2>
+  <p>Where analytics or advertising measurement is enabled on this deployment, we use Google (Google Ads / Google Analytics) to understand how our marketing performs. This is implemented with <strong>Google Consent Mode v2</strong>: visitors in the EEA, the UK and Switzerland are asked to consent <em>before</em> any such data is shared with Google, using the banner shown on your first visit. You can decline (nothing is shared), and you can change your choice at any time — <a href="/?consent=1">reopen the consent options</a>. Outside those regions the tag runs by default; you can opt out there the same way, and we honour your browser's Global Privacy Control signal automatically. When enabled, this shares some data (such as a device/cookie identifier and pages viewed) with Google, which may process it on servers overseas, including in the United States. If the operator hasn't configured a tag, no analytics or advertising scripts are loaded at all.</p>
 
   <h2>7. Security</h2>
   <p>We protect your data with measures such as encrypted connections (HTTPS), hashed passwords, scoped access controls, and stripping embedded metadata from uploaded images. No system can be guaranteed perfectly secure, but we work continually to keep your information safe.</p>

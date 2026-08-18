@@ -48,9 +48,9 @@ docker compose up -d
 
 Snapdini is now on `HTTP_PORT` (default `8080`) — put your own TLS / reverse proxy in front.
 
-- **Fully free, no limits, when self-hosted.** Billing, email and the admin panel stay **off until
-  you add their keys** (`STRIPE_*`, `MAILGUN_*`, `ADMIN_*` in `.env` — all optional). `.env.example`
-  documents every setting.
+- **Fully free, no limits, when self-hosted.** Billing, email, the admin panel and analytics stay
+  **off until you add their keys** (`STRIPE_*`, `MAILGUN_*`, `ADMIN_*`, `GTAG_ID` in `.env` — all
+  optional; no `GTAG_ID` ⇒ zero third-party tracking). `.env.example` documents every setting.
 - **Upgrades** are just `docker compose pull && docker compose up -d` — DB migrations apply on boot.
 - **Pin a version** with `IMAGE_TAG` in `.env` (e.g. `IMAGE_TAG=1.0.2`; default `latest`). Point at
   your own registry with `IMAGE_PREFIX`.

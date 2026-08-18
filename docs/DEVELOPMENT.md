@@ -83,6 +83,14 @@ By default they're warm gradients; drop real photos in to replace them:
   the fonts baked into `Dockerfile.dev`). See that script's header to regenerate.
 - **Capacity / load testing** — uploads are the CPU-bound ceiling; see `loadtest/CAPACITY.md` and
   `npm run test:load` / `npm run test:load:multi`.
+- **Analytics / ads (optional, off by default)** — set **`GTAG_ID`** (a Google tag id, e.g.
+  `AW-…`/`G-…`) to load a Google tag with **Consent Mode v2**. Unset ⇒ no third-party scripts at all.
+  Logic lives in `web/src/lib/consent.ts` (unit-tested in `consent.test.ts`); the SSR hook
+  `web/src/hooks.server.ts` injects it into the `%snapdini.analytics%` slot in `app.html`. Visitors in
+  the EEA, UK and Switzerland get a consent banner (`ConsentBanner.svelte`, defaults denied there);
+  elsewhere it runs by default with a "Your Privacy Choices" opt-out link and Global Privacy Control
+  honoured. Region is detected from Cloudflare's `CF-IPCountry` header. Run the tests with
+  `cd web && npm test`.
 
 ## Releasing (maintainers)
 

@@ -69,6 +69,9 @@ services:
       - ORIGIN=${BASE_URL}
       # Server-side link-preview fetches hit Express directly inside the Docker network.
       - INTERNAL_API_BASE=http://app:3000
+      # Optional Google tag (Ads/Analytics). Empty = no tag, zero third-party tracking. Set your own
+      # id in .env to enable it (ships with Consent Mode v2 + an EEA/UK consent banner).
+      - GTAG_ID=${GTAG_ID:-}
     depends_on:
       - app
 

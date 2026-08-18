@@ -218,6 +218,7 @@
     <a href="/contact">Contact</a>
     <a href="/terms">Terms</a>
     <a href="/privacy">Privacy</a>
+    {#if $page.data.analyticsEnabled}<a href="/?consent=1">Your Privacy Choices</a>{/if}
     <a href="https://github.com/paytah232/snapdini" target="_blank" rel="noopener noreferrer">GitHub</a>
     <a href="https://buymeacoffee.com/paytah232" target="_blank" rel="noopener noreferrer">☕ Buy me a coffee</a>
     <button class="linklike" on:click={startDemo}>See the demo</button>

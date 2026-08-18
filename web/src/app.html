@@ -2,6 +2,9 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <!-- Analytics / ads tag (Google Consent Mode v2) — injected at SSR only when GTAG_ID is set
+         (see src/hooks.server.ts). No ID configured ⇒ nothing loads, zero third-party tracking. -->
+    %snapdini.analytics%
     <link rel="icon" href="/icon.svg" />
     <link rel="apple-touch-icon" href="/icon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
