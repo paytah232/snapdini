@@ -83,6 +83,8 @@ services:
       # Optional Google tag (Ads/Analytics). Empty = no tag, zero third-party tracking. Set your own
       # id in the stack's .env to enable it (Consent Mode v2 + EEA banner ship with it).
       - GTAG_ID=${GTAG_ID:-}
+      # Google Ads purchase-conversion label (the part after the "/" in the conversion's send_to).
+      - GADS_PURCHASE_LABEL=${GADS_PURCHASE_LABEL:-}
     depends_on:
       - app
 

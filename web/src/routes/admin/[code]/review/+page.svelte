@@ -8,6 +8,8 @@
   } from '$lib/events';
   import { applyEventTheme } from '$lib/theme';
   import { getAdminCode, saveAdminCode } from '$lib/session';
+  import { api } from '$lib/api';
+  import { firePurchaseConversion } from '$lib/conversions';
   import { showToast, showSuccess } from '$lib/toast';
   import { imgFallback, hidePoster } from '$lib/ui';
   import SlideshowPanel from '$lib/components/SlideshowPanel.svelte';
@@ -64,10 +66,26 @@
       ev = await getAdmin(code, orgCode);
       // Cache the code, then strip it from the address bar so the secret doesn't linger in the URL.
       saveAdminCode(code, orgCode);
-      // Returning from the $1 branding-removal checkout — celebrate + clean the URL.
-      if (new URLSearchParams(location.search).get('brandingpaid') === '1') {
+      // Returning from the branding-removal checkout — celebrate, fire the purchase conversion, clean the URL.
+      const sp = new URLSearchParams(location.search);
+      if (sp.get('brandingpaid') === '1') {
         showSuccess('Add-on unlocked — you can now generate a slideshow with no Snapdini frames 🎬');
         view = 'slideshow';
+        const sid = sp.get('session_id');
+        if (sid && $page.data.purchaseSendTo) {
+          try {
+            const s = await api<{ paid: boolean; amountTotalCents: number; currency: string; transactionId: string }>(
+              '/api/billing/session/' + encodeURIComponent(sid),
+            );
+            if (s?.paid) {
+              firePurchaseConversion((window as unknown as { gtag?: (...a: unknown[]) => void }).gtag, $page.data.purchaseSendTo, {
+                amountTotalCents: s.amountTotalCents,
+                currency: s.currency,
+                transactionId: s.transactionId,
+              });
+            }
+          } catch { /* conversion is best-effort */ }
+        }
       }
       if (location.hash || location.search) history.replaceState(null, '', location.pathname);
       document.title = `${ev.name} — Review — Snapdini`;

@@ -29,6 +29,30 @@ router.post('/quote', (req: Request, res: Response) => {
   res.json({ ...quote({ maxGuests, maxPhotos, aspectRatios, videoSeconds, durationHours, retentionDays }), billingEnabled });
 });
 
+// ── GET /api/billing/session/:id — minimal, non-PII lookup of a completed Checkout session ──
+// Used by the payment-success page to fire a Google Ads purchase conversion with the ACTUAL amount
+// charged (after any promo) + a stable transaction id. Returns only money fields — never customer
+// data. The Stripe session id is an unguessable secret, and we only report a paid session.
+router.get('/session/:id', async (req: Request, res: Response) => {
+  if (!billingEnabled || !stripe) return res.json({ paid: false });
+  const id = String(req.params.id || '');
+  if (!/^cs_[A-Za-z0-9_]+$/.test(id)) return res.status(400).json({ error: 'Invalid session id' });
+  try {
+    const s = await stripe.checkout.sessions.retrieve(id);
+    const paid = s.payment_status === 'paid' || s.payment_status === 'no_payment_required';
+    if (!paid) return res.json({ paid: false });
+    res.json({
+      paid: true,
+      amountTotalCents: typeof s.amount_total === 'number' ? s.amount_total : 0,
+      currency: (s.currency || CURRENCY).toUpperCase(),
+      // Prefer the PaymentIntent id as the order id; fall back to the session id.
+      transactionId: typeof s.payment_intent === 'string' ? s.payment_intent : s.id,
+    });
+  } catch {
+    return res.status(404).json({ error: 'Session not found' });
+  }
+});
+
 // ── POST /api/billing/checkout — start a Stripe Checkout session for a paid event ──
 // Body: { joinCode, organizerCode }. Authorized by the event's organizer code. Builds
 // the line items dynamically from the event's entitlement (no pre-created Stripe products),
@@ -68,7 +92,7 @@ router.post('/checkout', async (req: Request, res: Response) => {
     line_items: lineItems,
     allow_promotion_codes: true,   // Stripe-native promo codes (managed in site-admin)
     metadata: { eventId: event.id, kind: 'event', amountCents: String(q.amountCents) },
-    success_url: `${BASE_URL}/admin/${event.joinCode}?paid=1#${encodeURIComponent(organizerCode)}`,
+    success_url: `${BASE_URL}/admin/${event.joinCode}?paid=1&session_id={CHECKOUT_SESSION_ID}#${encodeURIComponent(organizerCode)}`,
     cancel_url: adminUrl,
   });
   res.json({ url: session.url });
@@ -134,7 +158,7 @@ router.post('/upgrade', async (req: Request, res: Response) => {
       guestCap: String(maxGuests), maxPhotos: String(q.maxPhotos), videoSeconds: String(q.videoSeconds),
       retentionDays: String(retentionDays), aspectRatios: JSON.stringify(q.aspectRatios), expiresAt: String(newExpiresAt),
     },
-    success_url: `${BASE_URL}/admin/${event.joinCode}?upgraded=1#${encodeURIComponent(organizerCode)}`,
+    success_url: `${BASE_URL}/admin/${event.joinCode}?upgraded=1&session_id={CHECKOUT_SESSION_ID}#${encodeURIComponent(organizerCode)}`,
     cancel_url: adminUrl,
   });
   res.json({ url: session.url, diffCents: diff });
@@ -160,7 +184,7 @@ router.post('/branding-removal', async (req: Request, res: Response) => {
     mode: 'payment',
     line_items: [{ price_data: { currency: CURRENCY, unit_amount: BRANDING_REMOVAL_CENTS, product_data: { name: 'Snapdini — remove slideshow intro/outro frames' } }, quantity: 1 }],
     metadata: { eventId: event.id, kind: 'branding' },
-    success_url: `${BASE_URL}/admin/${event.joinCode}/review?brandingpaid=1#${encodeURIComponent(organizerCode)}`,
+    success_url: `${BASE_URL}/admin/${event.joinCode}/review?brandingpaid=1&session_id={CHECKOUT_SESSION_ID}#${encodeURIComponent(organizerCode)}`,
     cancel_url: adminUrl,
   });
   res.json({ url: session.url });

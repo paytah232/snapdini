@@ -2,7 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
-  import { getConfig, getMe } from '$lib/api';
+  import { getConfig, getMe, api } from '$lib/api';
+  import { firePurchaseConversion } from '$lib/conversions';
   import {
     getAdmin, saveSettings, setReveal, toggleLock, deleteEvent,
     setHighlights, saveTheme, emailGallery, setAllowDownloads,
@@ -154,11 +155,33 @@
   onMount(async () => {
     const sp = new URLSearchParams(location.search);
     // Celebrate a fresh create / successful payment / upgrade with a modal (QR + share link).
+    const paidReturn = sp.get('paid') === '1';
+    const upgradedReturn = sp.get('upgraded') === '1';
     if (sp.get('created') === '1') welcome = { title: 'Your event is live! 🎉', sub: 'Share the link or QR below with your guests. Customise the theme, reveal mode and more right here whenever you like.' };
-    else if (sp.get('paid') === '1') welcome = { title: 'Payment received — your event is active! 🎉', sub: 'Share the link or QR below with your guests. Everything you paid for is unlocked.' };
-    else if (sp.get('upgraded') === '1') welcome = { title: 'Upgrade applied! 🎉', sub: 'Your event now includes the extra capacity. Nothing else to do — carry on.' };
+    else if (paidReturn) welcome = { title: 'Payment received — your event is active! 🎉', sub: 'Share the link or QR below with your guests. Everything you paid for is unlocked.' };
+    else if (upgradedReturn) welcome = { title: 'Upgrade applied! 🎉', sub: 'Your event now includes the extra capacity. Nothing else to do — carry on.' };
+    // Fire a Google Ads purchase conversion on a successful payment/upgrade return, with the real
+    // amount charged (looked up via the Stripe session, so promos are reflected). Best-effort:
+    // never blocks the page, no-op when analytics/label aren't configured.
+    if ((paidReturn || upgradedReturn) && $page.data.purchaseSendTo) {
+      const sid = sp.get('session_id');
+      if (sid) {
+        try {
+          const s = await api<{ paid: boolean; amountTotalCents: number; currency: string; transactionId: string }>(
+            '/api/billing/session/' + encodeURIComponent(sid),
+          );
+          if (s?.paid) {
+            firePurchaseConversion((window as unknown as { gtag?: (...a: unknown[]) => void }).gtag, $page.data.purchaseSendTo, {
+              amountTotalCents: s.amountTotalCents,
+              currency: s.currency,
+              transactionId: s.transactionId,
+            });
+          }
+        } catch { /* conversion is best-effort */ }
+      }
+    }
     // Strip the marker so a refresh doesn't re-show it (keep the #organizer hash).
-    if (sp.has('paid') || sp.has('upgraded') || sp.has('created')) history.replaceState(null, '', location.pathname + location.hash);
+    if (sp.has('paid') || sp.has('upgraded') || sp.has('created') || sp.has('session_id')) history.replaceState(null, '', location.pathname + location.hash);
     // Resolve identity first (and independently) so the Site-admin / My-events bar appears
     // promptly even if config is slow — and on every event, not just the viewer's own.
     try { const me = await getMe(); viewerLoggedIn = !!me.user; viewerIsAdmin = !!me.user?.isAdmin; } catch { /* anon organizer */ }
