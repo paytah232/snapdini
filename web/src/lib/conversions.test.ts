@@ -1,17 +1,20 @@
 import { describe, it, expect, vi } from 'vitest';
-import { purchaseSendTo, conversionArgs, firePurchaseConversion } from './conversions';
+import { composeSendTo, purchaseSendTo, conversionArgs, firePurchaseConversion, fireLeadConversion } from './conversions';
 
-describe('purchaseSendTo', () => {
+describe('composeSendTo', () => {
   it('composes tag id + label when both valid', () => {
-    expect(purchaseSendTo('AW-TEST123456', 'TESTlbl_123')).toBe('AW-TEST123456/TESTlbl_123');
-    expect(purchaseSendTo('  AW-TEST123  ', '  Lbl_abc-123  ')).toBe('AW-TEST123/Lbl_abc-123'); // trimmed
+    expect(composeSendTo('AW-TEST123456', 'TESTlbl_123')).toBe('AW-TEST123456/TESTlbl_123');
+    expect(composeSendTo('  AW-TEST123  ', '  Lbl_abc-123  ')).toBe('AW-TEST123/Lbl_abc-123'); // trimmed
   });
   it('is null when the id or label is missing / malformed', () => {
-    expect(purchaseSendTo('', 'TESTlbl_123')).toBeNull();
-    expect(purchaseSendTo('AW-TEST123456', '')).toBeNull();
-    expect(purchaseSendTo('not-a-tag', 'TESTlbl_123')).toBeNull();
-    expect(purchaseSendTo('AW-TEST123456', 'bad label!')).toBeNull();
-    expect(purchaseSendTo(null, null)).toBeNull();
+    expect(composeSendTo('', 'TESTlbl_123')).toBeNull();
+    expect(composeSendTo('AW-TEST123456', '')).toBeNull();
+    expect(composeSendTo('not-a-tag', 'TESTlbl_123')).toBeNull();
+    expect(composeSendTo('AW-TEST123456', 'bad label!')).toBeNull();
+    expect(composeSendTo(null, null)).toBeNull();
+  });
+  it('purchaseSendTo is the same generic composer (back-compat alias)', () => {
+    expect(purchaseSendTo).toBe(composeSendTo);
   });
 });
 
@@ -52,6 +55,28 @@ describe('firePurchaseConversion', () => {
     const gtag = vi.fn();
     expect(firePurchaseConversion(gtag, null, input)).toBe(false);
     expect(firePurchaseConversion(undefined, 'AW-1/x', input)).toBe(false);
+    expect(gtag).not.toHaveBeenCalled();
+  });
+});
+
+describe('fireLeadConversion (sign up / create event — no value)', () => {
+  it('fires a value-less conversion with a transaction_id', () => {
+    const gtag = vi.fn();
+    expect(fireLeadConversion(gtag, 'AW-TEST123456/TESTlbl_123', 'ABCD1234')).toBe(true);
+    expect(gtag).toHaveBeenCalledWith('event', 'conversion', {
+      send_to: 'AW-TEST123456/TESTlbl_123',
+      transaction_id: 'ABCD1234',
+    });
+  });
+  it('omits transaction_id when not provided', () => {
+    const gtag = vi.fn();
+    fireLeadConversion(gtag, 'AW-TEST123456/TESTlbl_123');
+    expect(gtag).toHaveBeenCalledWith('event', 'conversion', { send_to: 'AW-TEST123456/TESTlbl_123' });
+  });
+  it('is a no-op when the tag or send_to is missing', () => {
+    const gtag = vi.fn();
+    expect(fireLeadConversion(gtag, null, 'x')).toBe(false);
+    expect(fireLeadConversion(undefined, 'AW-1/x', 'x')).toBe(false);
     expect(gtag).not.toHaveBeenCalled();
   });
 });

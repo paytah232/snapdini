@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { getConfig, getMe, postJson } from '$lib/api';
+  import { fireLeadConversion } from '$lib/conversions';
   import Logo from '$lib/components/Logo.svelte';
 
   // Same-origin relative destination after auth (no open-redirect); default dashboard.
@@ -41,6 +42,8 @@
       msg = data.devLink
         ? { text, link: { href: data.devLink, label: 'Dev: click to verify →' }, ok: true }
         : { text, ok: true };
+      // Google Ads "Sign up" conversion (best-effort; no-op unless a label is configured).
+      fireLeadConversion((window as unknown as { gtag?: (...a: unknown[]) => void }).gtag, $page.data.signupSendTo);
     } catch (err) {
       msg = { text: err instanceof Error ? err.message : 'Sign-up failed', ok: false };
     } finally {

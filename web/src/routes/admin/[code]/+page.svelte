@@ -3,7 +3,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { getConfig, getMe, api } from '$lib/api';
-  import { firePurchaseConversion } from '$lib/conversions';
+  import { firePurchaseConversion, fireLeadConversion } from '$lib/conversions';
   import {
     getAdmin, saveSettings, setReveal, toggleLock, deleteEvent,
     setHighlights, saveTheme, emailGallery, setAllowDownloads,
@@ -157,9 +157,15 @@
     // Celebrate a fresh create / successful payment / upgrade with a modal (QR + share link).
     const paidReturn = sp.get('paid') === '1';
     const upgradedReturn = sp.get('upgraded') === '1';
-    if (sp.get('created') === '1') welcome = { title: 'Your event is live! 🎉', sub: 'Share the link or QR below with your guests. Customise the theme, reveal mode and more right here whenever you like.' };
+    const createdReturn = sp.get('created') === '1';
+    if (createdReturn) welcome = { title: 'Your event is live! 🎉', sub: 'Share the link or QR below with your guests. Customise the theme, reveal mode and more right here whenever you like.' };
     else if (paidReturn) welcome = { title: 'Payment received — your event is active! 🎉', sub: 'Share the link or QR below with your guests. Everything you paid for is unlocked.' };
     else if (upgradedReturn) welcome = { title: 'Upgrade applied! 🎉', sub: 'Your event now includes the extra capacity. Nothing else to do — carry on.' };
+    // Google Ads "Create event" conversion — fires for every new event (free ?created or paid ?paid),
+    // NOT for upgrades. Keyed by the join code so a revisit doesn't double-count. Best-effort.
+    if ((createdReturn || paidReturn) && $page.data.createSendTo) {
+      fireLeadConversion((window as unknown as { gtag?: (...a: unknown[]) => void }).gtag, $page.data.createSendTo, $page.params.code);
+    }
     // Fire a Google Ads purchase conversion on a successful payment/upgrade return, with the real
     // amount charged (looked up via the Stripe session, so promos are reflected). Best-effort:
     // never blocks the page, no-op when analytics/label aren't configured.
