@@ -7,9 +7,10 @@
   import { showToast } from '$lib/toast';
   import { reportClientError } from '$lib/report';
   import { imgFallback, hidePoster } from '$lib/ui';
-  import { putCapture, delCapture, listCaptures } from '$lib/captureStore';
+  import { putCapture, delCapture, listCaptures, saveProgress, getProgress } from '$lib/captureStore';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import Logo from '$lib/components/Logo.svelte';
+  import FeedbackModal from '$lib/components/FeedbackModal.svelte';
 
   export let identifier: string; // joinCode or slug
 
@@ -45,6 +46,7 @@
   let chunks: BlobPart[] = [];
 
   let settingsOpen = false;
+  let showFeedback = false;
   let screenFlash = false;       // selfie screen-flash
   let torchSupported = false;    // hardware torch (back camera, Android Chrome)
   let flashArmed = false;        // when armed, the torch fires for the shot (and lights video)
@@ -64,7 +66,7 @@
   let aspect = '1:1';
 
   // upload queue
-  interface QueueItem { id: string; blob: Blob; mediaType: 'photo' | 'video'; ext: string; status: 'pending' | 'uploading' | 'done' | 'error'; error?: string; progress?: number; size: number; durationSecs?: number; w?: number; h?: number; retries?: number; }
+  interface QueueItem { id: string; blob: Blob; mediaType: 'photo' | 'video'; ext: string; status: 'pending' | 'uploading' | 'done' | 'error'; error?: string; progress?: number; size: number; durationSecs?: number; w?: number; h?: number; retries?: number; uploadId?: string; doneChunks?: number[]; }
   const MAX_UPLOAD_RETRIES = 5;   // auto-retry a failing upload this many times (with backoff) before asking the user
   let queue: QueueItem[] = [];
   let uploading = false;
@@ -255,9 +257,12 @@
     standard: { w: 1920, h: 1080 },   // 1080p — the default
     smooth:   { w: 1280, h: 720 },    // 720p — for older / struggling devices
   };
-  let videoQuality: VidQuality = 'high';   // default to 4K; phones are usually capable, and we warn if it stutters
+  // Default 1080p — the reliable choice for smooth in-browser recording on phones (4K via
+  // MediaRecorder drops frames / overheats on most devices). 4K stays a deliberate opt-in.
+  let videoQuality: VidQuality = 'standard';
   let recBitrate = 10_000_000;
   let lowFpsWarned = false;                // one stutter warning per session unless quality changes
+  let pendingQuality: VidQuality | null = null;  // auto-downgrade to apply after the current clip
 
   // Match the recorder to the stream the camera actually negotiated (≈0.1 bits/pixel/frame),
   // so the file tracks the native resolution + frame rate instead of a guessed constant.
@@ -318,7 +323,7 @@
   }
 
   function pickCamera(id: string) {
-    if (id === deviceId) return;
+    if (recording || id === deviceId) return;
     deviceId = id;   // session-only — we always start from the reliable default each visit
     startCamera();
   }
@@ -336,7 +341,7 @@
   }
 
   // Quick front/back toggle. Clears any specific device pick so it follows facing again.
-  function flip() { deviceId = null; facing = facing === 'environment' ? 'user' : 'environment'; startCamera(); }
+  function flip() { if (recording) return; deviceId = null; facing = facing === 'environment' ? 'user' : 'environment'; startCamera(); }
 
   // Drive the hardware torch on/off (where supported). Used as a flash pulse for photos and a
   // continuous light for video.
@@ -527,6 +532,8 @@
       if (flashArmed && torchSupported) setTorch(false);
       stopFpsMonitor();
       recording = false; clearInterval(recTimer);
+      // If the clip stuttered, apply the queued quality downgrade now (re-acquires the stream).
+      if (pendingQuality) { const q = pendingQuality; pendingQuality = null; setVideoQuality(q); }
     }
   }
 
@@ -551,7 +558,9 @@
     const fps = secs > 0 ? fpsFrames / secs : 60;
     if (fps < 20 && !lowFpsWarned && videoQuality !== 'smooth') {
       lowFpsWarned = true;
-      showToast('Recording looks choppy — try a lower Video quality in ⚙ settings.', true);
+      // Auto-downgrade one step; applied after this clip finishes (re-acquiring mid-record would cut it).
+      pendingQuality = videoQuality === 'high' ? 'standard' : 'smooth';
+      showToast(`Recording looks choppy — switching to ${pendingQuality === 'standard' ? '1080p' : '720p'} for smoother clips.`, true);
     }
   }
   function stopFpsMonitor() {
@@ -580,14 +589,52 @@
     } catch { /* download blocked — ignore */ }
   }
 
+  let nativeVideoInput: HTMLInputElement;
+
+  // Read a video file's duration (seconds) via a throwaway <video> element. 0 if unreadable.
+  function readVideoDuration(file: File): Promise<number> {
+    return new Promise((resolve) => {
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      const done = (d: number) => { try { URL.revokeObjectURL(v.src); } catch { /* */ } resolve(isFinite(d) && d > 0 ? d : 0); };
+      v.onloadedmetadata = () => done(v.duration);
+      v.onerror = () => done(0);
+      try { v.src = URL.createObjectURL(file); } catch { resolve(0); }
+    });
+  }
+
+  // Native-camera fallback: the guest shoots with their phone's own camera app, then we upload the
+  // file through the same queue (chunked if large). Enforces the event's length limit BEFORE upload
+  // (the server enforces it too). Still counts as one shot.
+  async function nativeVideoPicked(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';   // allow re-picking the same file
+    if (!file) return;
+    if (photosRemaining <= 0) { showToast('No shots left on your roll', true); return; }
+    const dur = await readVideoDuration(file);
+    if (videoMaxSecs > 0 && dur > videoMaxSecs + 1) {
+      showToast(`That clip is ${Math.round(dur)}s — this event's limit is ${videoMaxSecs}s. Trim it and try again.`, true);
+      return;
+    }
+    const ext = (file.name.split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 4) || 'mp4';
+    enqueue(file, 'video', ext, dur ? { durationSecs: Math.round(dur) } : undefined);
+    showToast('Uploading your video…');
+  }
+
   // Restore any captures still queued in IndexedDB (from a previous session / outage).
   async function restoreQueue() {
     if (!ev) return;
     try {
       const stored = await listCaptures(ev.joinCode);
       const have = new Set(queue.map((q) => q.id));
-      const restored = stored.filter((s) => !have.has(s.id))
-        .map((s) => ({ id: s.id, blob: s.blob, mediaType: s.mediaType, ext: s.ext, status: 'pending' as const, size: s.blob?.size ?? 0 }));
+      const fresh = stored.filter((s) => !have.has(s.id));
+      // Pull each capture's chunk-resume state so a big upload continues where it left off.
+      const restored = await Promise.all(fresh.map(async (s) => {
+        const p = await getProgress(s.id).catch(() => null);
+        return { id: s.id, blob: s.blob, mediaType: s.mediaType, ext: s.ext, status: 'pending' as const, size: s.blob?.size ?? 0,
+          uploadId: p?.uploadId, doneChunks: p?.doneChunks };
+      }));
       if (restored.length) {
         queue = [...restored, ...queue];
         showToast(`${restored.length} saved photo${restored.length > 1 ? 's' : ''} still uploading…`);
@@ -603,30 +650,107 @@
     if (changed) { queue = queue; processQueue(); }
   }
 
+  // Anything larger than one chunk is uploaded in small ~5MB parts. Small parts mean a flaky
+  // connection only ever loses a few MB (not the whole file) on failure, each part stays well under
+  // Cloudflare's ~100MB body cap, and — with the resume state persisted per part — a suspended or
+  // reloaded tab continues from the last landed part instead of restarting. Photos (< one chunk)
+  // still upload in a single request.
+  const CHUNK_SIZE = 5 * 1024 * 1024;
+  const CHUNK_RETRIES = 4;   // per-part retries (with backoff) before the item's overall retry kicks in
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  // Single-shot upload (XHR so we get a live progress %). Resolves the server's { photosRemaining }.
+  function uploadSingle(item: QueueItem): Promise<{ photosRemaining: number }> {
+    return new Promise((resolve, reject) => {
+      const form = new FormData();
+      form.append('photo', item.blob, `media.${item.ext}`);
+      form.append('sessionToken', sessionToken!);
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/photos');
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable) { item.progress = Math.round((e.loaded / e.total) * 100); queue = queue; } };
+      xhr.onload = () => {
+        let d: { photosRemaining: number; error?: string } | null = null;
+        try { d = JSON.parse(xhr.responseText); } catch { /* non-JSON */ }
+        if (xhr.status >= 200 && xhr.status < 300 && d) resolve(d);
+        else reject(new Error(d?.error || `Upload failed (${xhr.status})`));
+      };
+      xhr.onerror = () => reject(new Error('Network error'));
+      xhr.ontimeout = () => reject(new Error('Upload timed out'));
+      xhr.send(form);
+    });
+  }
+
+  // Chunked upload: slice the blob into ~CHUNK_SIZE parts, POST each to /chunk, then /complete to
+  // reassemble server-side. Each landed part is recorded (uploadId + doneChunks persisted to
+  // IndexedDB) so a suspended/reloaded tab RESUMES from the last part rather than restarting; the
+  // server keeps parts for hours and chunk writes are idempotent, so resends are safe. Parts also
+  // retry individually with backoff before failing the item.
+  async function uploadChunked(item: QueueItem): Promise<{ photosRemaining: number }> {
+    const blob = item.blob;
+    const total = Math.ceil(blob.size / CHUNK_SIZE);
+    // Reuse a persisted upload id when resuming; otherwise mint a fresh one and record it.
+    let uploadId = item.uploadId;
+    if (!uploadId) {
+      uploadId = ((typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID() : (String(item.size) + Math.random().toString(36).slice(2))).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+      item.uploadId = uploadId;
+      item.doneChunks = [];
+    }
+    const done = new Set<number>(item.doneChunks || []);
+    const persist = () => { item.doneChunks = [...done]; saveProgress({ id: item.id, uploadId: uploadId!, doneChunks: item.doneChunks }).catch(() => {}); };
+    const setProgress = (frac: number) => { item.progress = Math.min(99, Math.round(((done.size + frac) / total) * 100)); queue = queue; };
+    setProgress(0);
+    const sendChunk = (index: number) => new Promise<void>((resolve, reject) => {
+      const start = index * CHUNK_SIZE;
+      const form = new FormData();
+      form.append('chunk', blob.slice(start, Math.min(blob.size, start + CHUNK_SIZE)), 'part');
+      form.append('sessionToken', sessionToken!);
+      form.append('uploadId', uploadId!);
+      form.append('index', String(index));
+      form.append('total', String(total));
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/photos/chunk');
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable) setProgress(e.loaded / e.total); };
+      xhr.onload = () => { (xhr.status >= 200 && xhr.status < 300) ? resolve() : reject(new Error(`Chunk ${index} failed (${xhr.status})`)); };
+      xhr.onerror = () => reject(new Error('Network error'));
+      xhr.send(form);
+    });
+    const sendWithRetry = async (index: number) => {
+      for (let attempt = 0; ; attempt++) {
+        try { await sendChunk(index); return; }
+        catch (e) { if (attempt >= CHUNK_RETRIES) throw e; await sleep(Math.min(8000, 500 * 2 ** attempt)); }
+      }
+    };
+    for (let i = 0; i < total; i++) {
+      if (done.has(i)) continue;   // already landed in a previous session — skip
+      await sendWithRetry(i);
+      done.add(i);
+      persist();
+      setProgress(0);
+    }
+    const complete = () => fetch('/api/photos/complete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+      body: JSON.stringify({ sessionToken, uploadId, total, ext: item.ext, mediaType: item.mediaType }),
+    });
+    let res = await complete();
+    if (res.status === 409) {   // server missing some parts → resend them, then retry complete
+      const body = await res.json().catch(() => ({ missing: [] as number[] }));
+      for (const i of (body.missing || [])) { await sendWithRetry(i); done.add(i); persist(); }
+      res = await complete();
+    }
+    const d = await res.json().catch(() => null);
+    if (!res.ok || !d) throw new Error((d && d.error) || `Upload failed (${res.status})`);
+    item.progress = 100; queue = queue;
+    return d as { photosRemaining: number };
+  }
+
   async function processQueue() {
     if (uploading) return;
     const item = queue.find((q) => q.status === 'pending');
     if (!item) return;
     uploading = true; item.status = 'uploading'; item.progress = 0; queue = queue;
     try {
-      const form = new FormData();
-      form.append('photo', item.blob, `media.${item.ext}`);
-      form.append('sessionToken', sessionToken!);
-      // XHR (not fetch) so we get a live upload % — uploads still run in the background, one at a time.
-      const data = await new Promise<{ photosRemaining: number }>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/api/photos');
-        xhr.upload.onprogress = (e) => { if (e.lengthComputable) { item.progress = Math.round((e.loaded / e.total) * 100); queue = queue; } };
-        xhr.onload = () => {
-          let d: { photosRemaining: number; error?: string } | null = null;
-          try { d = JSON.parse(xhr.responseText); } catch { /* non-JSON */ }
-          if (xhr.status >= 200 && xhr.status < 300 && d) resolve(d);
-          else reject(new Error(d?.error || `Upload failed (${xhr.status})`));
-        };
-        xhr.onerror = () => reject(new Error('Network error'));
-        xhr.ontimeout = () => reject(new Error('Upload timed out'));
-        xhr.send(form);
-      });
+      const data = (item.blob.size > CHUNK_SIZE || item.uploadId) ? await uploadChunked(item) : await uploadSingle(item);
       item.status = 'done'; item.progress = 100;
       // Never let the count flicker UP: the per-upload server value lags behind the local
       // optimistic count during a burst, so only ever take the lower of the two.
@@ -801,9 +925,9 @@
               <div class="sm-row col">
                 <span class="sm-labelwrap">
                   <span class="sm-label">Camera</span>
-                  <span class="sm-desc">Switch between the cameras on this device.</span>
+                  <span class="sm-desc">Switch between the cameras on this device.{#if recording} Stop recording to change.{/if}</span>
                 </span>
-                <select class="sm-select" aria-label="Choose camera" value={deviceId ?? ''} on:change={(e) => pickCamera(e.currentTarget.value)}>
+                <select class="sm-select" aria-label="Choose camera" value={deviceId ?? ''} disabled={recording} on:change={(e) => pickCamera(e.currentTarget.value)}>
                   {#each cameras as c}<option value={c.id}>{c.label}</option>{/each}
                 </select>
               </div>
@@ -816,19 +940,31 @@
                   <span class="sm-desc">Higher looks better; lower this if recording stutters.</span>
                 </span>
                 <select class="sm-select" aria-label="Video quality" value={videoQuality} on:change={(e) => setVideoQuality(e.currentTarget.value)}>
-                  <option value="high">High — 4K (default)</option>
-                  <option value="standard">Standard — 1080p</option>
+                  <option value="standard">Standard — 1080p (default)</option>
+                  <option value="high">High — 4K (larger, may stutter)</option>
                   <option value="smooth">Smooth — 720p (older phones)</option>
                 </select>
               </div>
+              <div class="sm-row col">
+                <span class="sm-labelwrap">
+                  <span class="sm-label">Trouble recording here?</span>
+                  <span class="sm-desc">Shoot with your phone’s own camera app instead, then upload it. Counts as one shot; keep it under {videoMaxSecs}s.</span>
+                </span>
+                <button class="sm-select" type="button" on:click={() => nativeVideoInput?.click()}>🎥 Record with phone camera</button>
+              </div>
+              <input bind:this={nativeVideoInput} type="file" accept="video/*" capture="environment" on:change={nativeVideoPicked} style="display:none" />
             {/if}
 
             {#if saveNote}<div class="sm-note">Now also saving a copy of each shot to your device.</div>{/if}
+
+            <div class="sm-row">
+              <button class="sm-select" type="button" on:click={() => { settingsOpen = false; showFeedback = true; }}>💬 Report a problem / feedback</button>
+            </div>
           </div>
         </div>
       {/if}
       {#if gridOn}<div class="grid"><span></span><span></span><span></span><span></span></div>{/if}
-      {#if recording}<div class="rec">● {Math.floor(recSecs / 60)}:{String(recSecs % 60).padStart(2, '0')}</div>{/if}
+      {#if recording}<div class="rec">● {Math.floor(recSecs / 60)}:{String(recSecs % 60).padStart(2, '0')}{#if videoMaxSecs > 0} / {Math.floor(videoMaxSecs / 60)}:{String(videoMaxSecs % 60).padStart(2, '0')}{/if}</div>{/if}
       {#if cameraStarting && !cameraError}
         <div class="cam-loading" transition:fade={{ duration: 120 }}>
           <div class="cam-spinner" aria-label="Starting camera"></div>
@@ -911,6 +1047,8 @@
   </div>
   {#if lbOpen}<Lightbox photos={shownPhotos} index={lbIndex} on:close={() => (lbOpen = false)} />{/if}
 {/if}
+
+{#if showFeedback}<FeedbackModal context="Camera ({ev?.joinCode ?? ''})" on:close={() => (showFeedback = false)} />{/if}
 
 <!-- Upload queue — shared across the camera and gallery screens; opened on demand. -->
 {#if drawerOpen}

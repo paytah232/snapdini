@@ -15,7 +15,7 @@ import { billingEnabled } from '../billing';
 
 const router = Router();
 
-import { UPLOADS_DIR } from '../paths';
+import { UPLOADS_DIR, INCOMING_DIR, eventDir, eventRelPath } from '../paths';
 const MAX_PHOTO_MB   = parseInt(process.env.MAX_FILE_SIZE_MB || '64'); // headroom for an 8K still at max quality (q100/4:4:4)
 const MAX_VIDEO_MB   = parseInt(process.env.MAX_VIDEO_SIZE_MB || '8192'); // plans for 90s 8K clips (multi-GB)
 const VIDEO_MAX_SECS = parseInt(process.env.VIDEO_MAX_SECONDS || '0');
@@ -30,10 +30,11 @@ function isVideoUpload(file: Express.Multer.File): boolean {
 }
 
 const storage = multer.diskStorage({
+  // Stage the upload first — the event id isn't known until we resolve the session in the handler,
+  // so we move the file into UPLOADS_DIR/<eventId>/ once we know it (same-filesystem atomic rename).
   destination(req, file, cb) {
-    const dir = UPLOADS_DIR;
-    fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
+    fs.mkdirSync(INCOMING_DIR, { recursive: true });
+    cb(null, INCOMING_DIR);
   },
   filename(req, file, cb) {
     const ext = isVideoUpload(file)
@@ -95,7 +96,80 @@ function photoRow(p: PhotoRowInput, myParticipantId: string | null) {
   };
 }
 
-// ── POST /api/photos — upload photo or video ──────────────────────────────────
+// ── Shared upload machinery (used by the single-shot POST / and the chunked /complete) ─────────
+
+type UploadParticipant = {
+  id: string; photosTaken: number; maxPhotos: number; isLocked: boolean;
+  startsAt: number; expiresAt: number; eventId: string; moderationEnabled: boolean; videoSeconds: number;
+};
+
+async function participantForUpload(sessionToken: string): Promise<UploadParticipant | null> {
+  const [p] = await db.select({
+    id: participants.id, photosTaken: participants.photosTaken, maxPhotos: events.maxPhotos,
+    isLocked: events.isLocked, startsAt: events.startsAt, expiresAt: events.expiresAt,
+    eventId: events.id, moderationEnabled: events.moderationEnabled, videoSeconds: events.videoSeconds,
+  }).from(participants).innerJoin(events, eq(events.id, participants.eventId))
+    .where(eq(participants.sessionToken, sessionToken));
+  return p ?? null;
+}
+
+// Returns {status,error} to reject the upload, or null if it's allowed right now.
+function gateUpload(p: UploadParticipant, isVideo: boolean): { status: number; error: string } | null {
+  const allowedVideoSecs = billingEnabled ? p.videoSeconds : VIDEO_MAX_SECS;
+  if (isVideo && allowedVideoSecs === 0) return { status: 403, error: 'Video uploads are not enabled for this event' };
+  const now = Date.now();
+  if (p.startsAt && now < p.startsAt)     return { status: 403, error: "Event hasn't started yet" };
+  if (p.isLocked)                         return { status: 403, error: 'Event is locked' };
+  if (now > p.expiresAt)                  return { status: 410, error: 'Event has ended' };
+  if (p.photosTaken >= p.maxPhotos)       return { status: 403, error: 'No shots remaining' };
+  return null;
+}
+
+// Move a fully-received staged file into the event folder, process it (strip+thumbnail for images,
+// probe+poster for video), insert the photo row, and bump the participant's count. Returns the
+// success payload. Throws an error tagged { status: 400 } for an invalid image (file cleaned first).
+async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo: boolean) {
+  const destDir = eventDir(p.eventId);
+  fs.mkdirSync(destDir, { recursive: true });
+  const baseName = path.basename(stagedPath);                       // <uuid>.ext
+  const finalPath = path.join(destDir, baseName);
+  fs.renameSync(stagedPath, finalPath);
+  const storedName = eventRelPath(p.eventId, baseName);             // "<eventId>/<uuid>.ext"
+  const sizeBytes = fs.statSync(finalPath).size;
+
+  let dims: { width?: number; height?: number; durationMs?: number } = {};
+  if (!isVideo) {
+    try { dims = await stripImageMetadata(finalPath); await makeThumbnail(finalPath); }
+    catch {
+      try { fs.unlinkSync(finalPath); } catch { /* */ }
+      const e = new Error('Invalid or unsupported image file') as Error & { status?: number }; e.status = 400; throw e;
+    }
+  } else {
+    dims = await probeVideoMeta(finalPath).catch(() => ({}));
+    await makeVideoPoster(finalPath).catch(() => false);
+    // Enforce the event's video length limit server-side (defense-in-depth): the in-browser recorder
+    // auto-stops at the limit, but a native-camera clip could be any length. Only when we can read a
+    // real duration; +3s tolerance for container rounding.
+    const allowed = billingEnabled ? p.videoSeconds : VIDEO_MAX_SECS;
+    if (allowed > 0 && typeof dims.durationMs === 'number' && dims.durationMs > (allowed + 3) * 1000) {
+      try { fs.unlinkSync(finalPath); } catch { /* */ }
+      const e = new Error(`Video is too long (max ${allowed}s for this event)`) as Error & { status?: number }; e.status = 413; throw e;
+    }
+  }
+
+  // Every item starts 'pending'; visibility is gated by the event's moderation SETTING at view time.
+  const status = 'pending';
+  const photoId = uuidv4();
+  await db.insert(photos).values({
+    id: photoId, eventId: p.eventId, participantId: p.id, filename: storedName,
+    mediaType: isVideo ? 'video' : 'photo', takenAt: Date.now(), status,
+    sizeBytes, width: dims.width ?? null, height: dims.height ?? null, durationMs: dims.durationMs ?? null,
+  });
+  await db.update(participants).set({ photosTaken: p.photosTaken + 1 }).where(eq(participants.id, p.id));
+  return { success: true, photoId, status, pendingModeration: status === 'pending', photosRemaining: p.maxPhotos - p.photosTaken - 1 };
+}
+
+// ── POST /api/photos — single-shot upload (photos + videos under the chunk threshold) ──────────
 
 router.post('/', upload.single('photo'), async (req: Request, res: Response) => {
   const { sessionToken } = req.body;
@@ -103,102 +177,115 @@ router.post('/', upload.single('photo'), async (req: Request, res: Response) => 
   if (!req.file)     return res.status(400).json({ error: 'No file uploaded' });
 
   const isVideo = isVideoUpload(req.file);
-
-  // multer's single fileSize limit is the larger (video) cap; enforce the smaller PHOTO cap here
-  // so an oversized image can't slip through under the video allowance.
+  // multer's single fileSize limit is the larger (video) cap; enforce the smaller PHOTO cap here.
   const perTypeMaxMb = isVideo ? MAX_VIDEO_MB : MAX_PHOTO_MB;
-  if (req.file.size > perTypeMaxMb * 1024 * 1024) {
-    fs.unlinkSync(req.file.path);
-    return res.status(413).json({ error: `${isVideo ? 'Video' : 'Photo'} too large (max ${perTypeMaxMb} MB)` });
-  }
+  if (req.file.size > perTypeMaxMb * 1024 * 1024) { fs.unlinkSync(req.file.path); return res.status(413).json({ error: `${isVideo ? 'Video' : 'Photo'} too large (max ${perTypeMaxMb} MB)` }); }
 
-  const [participant] = await db
-    .select({
-      id:                participants.id,
-      photosTaken:       participants.photosTaken,
-      maxPhotos:         events.maxPhotos,
-      isLocked:          events.isLocked,
-      startsAt:          events.startsAt,
-      expiresAt:         events.expiresAt,
-      eventId:           events.id,
-      moderationEnabled: events.moderationEnabled,
-      videoSeconds:      events.videoSeconds,
-    })
-    .from(participants)
-    .innerJoin(events, eq(events.id, participants.eventId))
-    .where(eq(participants.sessionToken, sessionToken));
-
+  const participant = await participantForUpload(sessionToken);
   if (!participant) { fs.unlinkSync(req.file.path); return res.status(403).json({ error: 'Invalid session' }); }
+  const gate = gateUpload(participant, isVideo);
+  if (gate) { fs.unlinkSync(req.file.path); return res.status(gate.status).json({ error: gate.error }); }
 
-  // Video allowed length: per-event entitlement when billing is on, else the global setting.
-  const allowedVideoSecs = billingEnabled ? participant.videoSeconds : VIDEO_MAX_SECS;
-  if (isVideo && allowedVideoSecs === 0) {
-    fs.unlinkSync(req.file.path);
-    return res.status(403).json({ error: 'Video uploads are not enabled for this event' });
+  try {
+    return res.json(await finalizeUpload(participant, req.file.path, isVideo));
+  } catch (e) {
+    return res.status((e as { status?: number }).status || 500).json({ error: (e as Error).message || 'Upload failed' });
   }
+});
 
-  const now = Date.now();
-  if (participant.startsAt && now < participant.startsAt) { fs.unlinkSync(req.file.path); return res.status(403).json({ error: "Event hasn't started yet" }); }
-  if (participant.isLocked)               { fs.unlinkSync(req.file.path); return res.status(403).json({ error: 'Event is locked' }); }
-  if (now > participant.expiresAt)        { fs.unlinkSync(req.file.path); return res.status(410).json({ error: 'Event has ended' }); }
-  if (participant.photosTaken >= participant.maxPhotos) { fs.unlinkSync(req.file.path); return res.status(403).json({ error: 'No shots remaining' }); }
+// ── Chunked upload (for videos larger than a single request can carry — Cloudflare caps bodies at
+// ~100MB). Client splits the blob into parts and POSTs each to /chunk; /complete reassembles them
+// and runs the SAME gating + finalize as a normal upload. ──────────────────────────────────────
 
-  // Display metadata: byte size always; dimensions/duration where we can read them.
-  let dims: { width?: number; height?: number; durationMs?: number } = {};
-  const sizeBytes = req.file.size;
+const CHUNK_MAX_MB = 100;
+const SAFE_UPLOAD_ID = /^[A-Za-z0-9_-]{8,64}$/;
+// Upper bound on part count. The client slices into ~5MB parts for resilient/resumable uploads;
+// divide by 4 (below the client size) so the bound tolerates smaller-than-expected parts, plus margin.
+const MAX_CHUNKS = Math.ceil(MAX_VIDEO_MB / 4) + 16;
+const uploadPartsDir = (uploadId: string) => path.join(INCOMING_DIR, `chunks-${uploadId}`);
 
-  // Strip metadata (EXIF/GPS) from images and validate they're real images. Videos pass
-  // through (metadata stripping for video would need ffmpeg; video is off by default).
-  if (!isVideo) {
-    try {
-      dims = await stripImageMetadata(req.file.path);  // keep full-res original, strip EXIF/GPS, get w×h
-      await makeThumbnail(req.file.path);              // fast grid thumbnail alongside it
-    }
-    catch { fs.unlinkSync(req.file.path); return res.status(400).json({ error: 'Invalid or unsupported image file' }); }
-  } else {
-    dims = await probeVideoMeta(req.file.path).catch(() => ({}));   // best-effort w×h + duration
-    await makeVideoPoster(req.file.path).catch(() => false);        // poster frame for grid display
+const chunkUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => { fs.mkdirSync(INCOMING_DIR, { recursive: true }); cb(null, INCOMING_DIR); },
+    filename: (_req, _file, cb) => cb(null, `part-${uuidv4()}`),
+  }),
+  limits: { fileSize: CHUNK_MAX_MB * 1024 * 1024 },
+});
+
+// Concatenate parts 0..total-1 in <dir> into <dest>, in order (streamed — never loads a part into memory).
+function concatParts(dir: string, total: number, dest: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const out = fs.createWriteStream(dest);
+    out.on('error', reject);
+    out.on('finish', () => resolve());
+    let i = 0;
+    const next = () => {
+      if (i >= total) { out.end(); return; }
+      const rd = fs.createReadStream(path.join(dir, String(i++)));
+      rd.on('error', reject);
+      rd.on('end', next);
+      rd.pipe(out, { end: false });
+    };
+    next();
+  });
+}
+
+// POST /api/photos/chunk — stage one part (multipart field 'chunk' + fields uploadId,index,total,sessionToken).
+router.post('/chunk', chunkUpload.single('chunk'), async (req: Request, res: Response) => {
+  const drop = () => { if (req.file) { try { fs.unlinkSync(req.file.path); } catch { /* */ } } };
+  const { sessionToken, uploadId } = req.body || {};
+  const index = parseInt(req.body?.index, 10);
+  const total = parseInt(req.body?.total, 10);
+  if (!req.file) return res.status(400).json({ error: 'No chunk uploaded' });
+  if (!sessionToken || !SAFE_UPLOAD_ID.test(String(uploadId || '')) || !Number.isInteger(index) || index < 0
+      || !Number.isInteger(total) || total < 1 || total > MAX_CHUNKS || index >= total) { drop(); return res.status(400).json({ error: 'Bad chunk request' }); }
+  if (!(await participantForUpload(sessionToken))) { drop(); return res.status(403).json({ error: 'Invalid session' }); }
+
+  const dir = uploadPartsDir(uploadId);
+  fs.mkdirSync(dir, { recursive: true });
+  try { fs.renameSync(req.file.path, path.join(dir, String(index))); }   // idempotent: a re-sent part overwrites
+  catch { drop(); return res.status(500).json({ error: 'Could not store chunk' }); }
+  res.json({ ok: true, index });
+});
+
+// POST /api/photos/complete — reassemble the staged parts and finalize (JSON body).
+router.post('/complete', async (req: Request, res: Response) => {
+  const { sessionToken, uploadId, ext, mediaType } = req.body || {};
+  const total = parseInt(req.body?.total, 10);
+  if (!sessionToken || !SAFE_UPLOAD_ID.test(String(uploadId || '')) || !Number.isInteger(total) || total < 1 || total > MAX_CHUNKS)
+    return res.status(400).json({ error: 'Bad complete request' });
+
+  const participant = await participantForUpload(sessionToken);
+  if (!participant) return res.status(403).json({ error: 'Invalid session' });
+
+  const isVideo = mediaType === 'video' || VIDEO_EXT_RE.test('x.' + String(ext || ''));
+  const dir = uploadPartsDir(uploadId);
+  const wipe = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* */ } };
+
+  const gate = gateUpload(participant, isVideo);
+  if (gate) { wipe(); return res.status(gate.status).json({ error: gate.error }); }
+
+  // All parts present + within the size cap?
+  const missing: number[] = [];
+  let totalBytes = 0;
+  for (let i = 0; i < total; i++) {
+    try { totalBytes += fs.statSync(path.join(dir, String(i))).size; } catch { missing.push(i); }
   }
+  if (missing.length) return res.status(409).json({ error: 'Missing chunks', missing });   // client resends these
+  const perTypeMaxMb = isVideo ? MAX_VIDEO_MB : MAX_PHOTO_MB;
+  if (totalBytes > perTypeMaxMb * 1024 * 1024) { wipe(); return res.status(413).json({ error: `${isVideo ? 'Video' : 'Photo'} too large (max ${perTypeMaxMb} MB)` }); }
 
-  // Every photo starts 'pending'. Visibility is gated by the event's moderation SETTING at view
-  // time (moderation on → only approved show; off → pending shows too), so enabling moderation
-  // later correctly holds already-uploaded photos instead of leaving them auto-approved.
-  const status = 'pending';
-  const photo = {
-    id:            uuidv4(),
-    eventId:       participant.eventId,
-    participantId: participant.id,
-    filename:      req.file.filename,
-    mediaType:     isVideo ? 'video' : 'photo',
-    takenAt:       now,
-    status,
-  };
+  const safeExt = /^(mp4|webm|mov|m4v|jpe?g|png|webp)$/i.test(String(ext || '')) ? String(ext).toLowerCase() : (isVideo ? 'mp4' : 'jpg');
+  const staged = path.join(INCOMING_DIR, `${uuidv4()}.${safeExt}`);
+  try { await concatParts(dir, total, staged); }
+  catch { try { fs.unlinkSync(staged); } catch { /* */ } wipe(); return res.status(500).json({ error: 'Reassembly failed' }); }
+  wipe();   // parts no longer needed
 
-  await db.insert(photos).values({
-    id:            photo.id,
-    eventId:       photo.eventId,
-    participantId: photo.participantId,
-    filename:      photo.filename,
-    mediaType:     photo.mediaType,
-    takenAt:       photo.takenAt,
-    status:        photo.status,
-    sizeBytes,
-    width:         dims.width ?? null,
-    height:        dims.height ?? null,
-    durationMs:    dims.durationMs ?? null,
-  });
-
-  await db.update(participants)
-    .set({ photosTaken: participant.photosTaken + 1 })
-    .where(eq(participants.id, participant.id));
-
-  res.json({
-    success:           true,
-    photoId:           photo.id,
-    status,
-    pendingModeration: status === 'pending',
-    photosRemaining:   participant.maxPhotos - participant.photosTaken - 1,
-  });
+  try {
+    return res.json(await finalizeUpload(participant, staged, isVideo));
+  } catch (e) {
+    return res.status((e as { status?: number }).status || 500).json({ error: (e as Error).message || 'Upload failed' });
+  }
 });
 
 // ── GET /api/photos/:joinCode/download — zip of originals (all or a selection) ──

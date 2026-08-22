@@ -12,10 +12,11 @@ import { db, init } from './db';
 import { events } from './schema';
 import { stripImageMetadata, backfillThumbnails } from './images';
 import { start as startCleanup } from './cleanup';
+import { migrateUploadsToPerEvent } from './migrate-uploads';
 import options from './options';
 import { publicBillingConfig } from './billing';
 import * as email from './email';
-import { UPLOADS_DIR } from './paths';
+import { UPLOADS_DIR, eventDir, eventRelPath } from './paths';
 import { MUSIC_DIR, probeHasAudioStream } from './slideshow';
 import authRoutes from './routes/auth';
 import eventsRoutes, { requireOrganizer } from './routes/events';
@@ -121,8 +122,14 @@ app.get('/app', (_req, res) => res.sendFile(path.join(__dirname, '../public/inde
 
 // Organizer-uploaded backing tracks live under /uploads but are NOT public media — they're only
 // read server-side when building a slideshow. Block direct HTTP access (this must precede the
-// static mount below; the slideshow builder reads them straight off disk, unaffected).
-app.use('/uploads/slideshow-audio', (_req: Request, res: Response) => res.status(404).end());
+// static mount below; the slideshow builder reads them straight off disk, unaffected). Covers both
+// the per-event `audio-*` files and the legacy `slideshow-audio/` dir (pre-per-event layout).
+app.use('/uploads', (req: Request, res: Response, next) => {
+  // Private assets: backing audio (per-event audio-* + legacy slideshow-audio/) and feedback
+  // screenshots (may contain sensitive info) — admins view those via an admin-gated route.
+  if (req.path.startsWith('/slideshow-audio/') || req.path.startsWith('/feedback/') || /\/audio-[^/]*$/.test(req.path)) return res.status(404).end();
+  next();
+});
 // Uploaded media is content-addressed by UUID filename and never mutates → cache hard.
 app.use('/uploads', express.static(UPLOADS_DIR, { immutable: true, maxAge: '365d' }));
 app.use(express.static(path.join(__dirname, '../public')));
@@ -143,12 +150,13 @@ app.get('/api/config', (_req, res) => {
 // ── Theme header-image upload ─────────────────────────────────────────────────
 
 const themeStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    const dir = path.join(UPLOADS_DIR, 'themes');
+  // Into the event's own folder (requireOrganizer has already set req.event before multer runs).
+  destination: (req, _file, cb) => {
+    const dir = eventDir((req as Request).event!.id);
     fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
   },
-  filename: (_req, _file, cb) => cb(null, `${uuidv4()}.jpg`),
+  filename: (_req, _file, cb) => cb(null, `theme-${uuidv4()}.jpg`),
 });
 const themeUpload = multer({
   storage: themeStorage,
@@ -165,20 +173,21 @@ app.post('/api/events/:joinCode/theme-image', requireOrganizer, themeUpload.sing
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try { await stripImageMetadata(req.file.path); }
   catch { fs.unlinkSync(req.file.path); return res.status(400).json({ error: 'Invalid or unsupported image file' }); }
-  res.json({ url: `/uploads/themes/${req.file.filename}` });
+  res.json({ url: `/uploads/${eventRelPath(req.event!.id, req.file.filename)}` });
 });
 
 // ── Custom slideshow backing track upload (organizer's own mp3 / wav / mp4 audio) ─────────────
 const audioStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    const dir = path.join(UPLOADS_DIR, 'slideshow-audio');
+  // Into the event's own folder. Named `audio-*` so the static-mount guard keeps it private and the
+  // slideshow builder can find it (it's the only `audio-` file per event).
+  destination: (req, _file, cb) => {
+    const dir = eventDir((req as Request).event!.id);
     fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
   },
-  // Prefixed with the event id so the slideshow builder can find it and the purge can clean it.
-  filename: (req, file, cb) => {
+  filename: (_req, file, cb) => {
     const ext = (file.originalname.split('.').pop() || 'mp3').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 4) || 'mp3';
-    cb(null, `${(req as Request).event!.id}-${uuidv4()}.${ext}`);
+    cb(null, `audio-${uuidv4()}.${ext}`);
   },
 });
 const audioUpload = multer({
@@ -199,9 +208,8 @@ app.post('/api/events/:joinCode/slideshow-audio', requireOrganizer, audioUpload.
   }
   // Keep only the newest custom track per event.
   try {
-    const dir = path.join(UPLOADS_DIR, 'slideshow-audio');
-    const prefix = req.event!.id + '-';
-    for (const f of fs.readdirSync(dir)) if (f.startsWith(prefix) && f !== req.file.filename) fs.unlinkSync(path.join(dir, f));
+    const dir = eventDir(req.event!.id);
+    for (const f of fs.readdirSync(dir)) if (f.startsWith('audio-') && f !== req.file.filename) fs.unlinkSync(path.join(dir, f));
   } catch { /* ignore */ }
   res.json({ ok: true, filename: req.file.filename });
 });
@@ -256,7 +264,10 @@ init()
     // Node's default 5-min requestTimeout would abort them mid-transfer. Allow up to an hour.
     server.requestTimeout = 60 * 60 * 1000;
     server.headersTimeout = 2 * 60 * 1000; // but headers must still arrive promptly (slow-loris guard)
-    // Best-effort: generate thumbnails for any pre-existing originals that lack one.
-    backfillThumbnails(UPLOADS_DIR).catch(() => {});
+    // One-off idempotent move of any pre-per-event assets into /uploads/<eventId>/, THEN backfill
+    // thumbnails (which now scans the event subfolders too). Both best-effort, off the request path.
+    migrateUploadsToPerEvent()
+      .catch((e) => console.error('[migrate] failed:', (e as Error).message))
+      .finally(() => { backfillThumbnails(UPLOADS_DIR).catch(() => {}); });
   })
   .catch((err) => { console.error('Failed to initialize database:', err); process.exit(1); });

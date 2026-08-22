@@ -109,6 +109,7 @@
   let slugCheckTimer: ReturnType<typeof setTimeout> | undefined;
 
   let startDate = '';
+  let todayStr = '';   // earliest selectable date (today) — the input's min
   let startTime = '';
   let durationHours: number | string = '';
   let maxPhotos: number | string = '';
@@ -138,6 +139,7 @@
     // Default the start to midnight at the beginning of the following day — events are almost
     // always planned ahead, and this avoids accidentally starting one mid-creation.
     const tm = new Date();
+    todayStr = `${tm.getFullYear()}-${pad(tm.getMonth() + 1)}-${pad(tm.getDate())}`;   // today = earliest allowed
     tm.setDate(tm.getDate() + 1);
     tm.setHours(0, 0, 0, 0);
     startDate = `${tm.getFullYear()}-${pad(tm.getMonth() + 1)}-${pad(tm.getDate())}`;
@@ -431,7 +433,7 @@
       <div class="field-row">
         <div class="field">
           <label for="start-date">Start date</label>
-          <input id="start-date" type="date" min={startDate} bind:value={startDate} />
+          <input id="start-date" type="date" min={todayStr} bind:value={startDate} />
         </div>
         <div class="field">
           <label for="start-time">Start time</label>

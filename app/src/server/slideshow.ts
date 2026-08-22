@@ -9,7 +9,7 @@ const NCPU = Math.max(2, os.cpus().length);   // use the box's cores for filteri
 import { and, asc, desc, eq, lt } from 'drizzle-orm';
 import { all, db } from './db';
 import { slideshows } from './schema';
-import { UPLOADS_DIR } from './paths';
+import { UPLOADS_DIR, eventDir, eventRelPath } from './paths';
 import { brandingRemovable as billingBrandingRemovable, BRANDING_REMOVAL_CENTS, billingEnabled as BILLING_ON } from './billing';
 
 const CARD_SECS = 3;   // how long the intro / outro branding cards show
@@ -212,7 +212,7 @@ export async function slideshowInfo(eventId: string) {
   } catch { /* none */ }
   let hasCustomAudio = false;
   try {
-    hasCustomAudio = fs.readdirSync(path.join(UPLOADS_DIR, 'slideshow-audio')).some((n) => n.startsWith(eventId + '-'));
+    hasCustomAudio = fs.readdirSync(eventDir(eventId)).some((n) => n.startsWith('audio-'));
   } catch { /* none */ }
   const job = jobs.get(eventId) ?? { status: 'idle' as unknown as Job['status'] };
   const recent = await listSlideshows(eventId);
@@ -255,7 +255,7 @@ export function startSlideshow(eventId: string, opts: Opts): Job {
   run(eventId, opts, id)
     .then(async (r) => {
       // Record this render so it shows in the "recent slideshows" list (versioned, not overwritten).
-      try { await db.insert(slideshows).values({ id, eventId, filename: `slideshows/${id}.mp4`, label: slideshowLabel(opts), resolution: (opts.resolution === '1080p' ? '1080p' : '4k'), createdAt: Date.now() }); } catch { /* best-effort */ }
+      try { await db.insert(slideshows).values({ id, eventId, filename: eventRelPath(eventId, `slideshow-${id}.mp4`), label: slideshowLabel(opts), resolution: (opts.resolution === '1080p' ? '1080p' : '4k'), createdAt: Date.now() }); } catch { /* best-effort */ }
       jobs.set(eventId, { status: 'done', url: r.url, truncated: r.truncated, progress: 100 });
     })
     .catch((e) => jobs.set(eventId, { status: 'error', error: String(e?.message || e) }));
@@ -370,11 +370,16 @@ async function run(eventId: string, opts: Opts, outId: string): Promise<{ url: s
 
   // ── Branding cards: a Snapdini intro (logo + event name / blurb / date) and a closing outro. ──
   // Skipped entirely when the organizer bought the "remove Snapdini frames" add-on (opts.branding=false).
+  // All render intermediates (cards, pre-scaled stills, normalised clips, concatenated audio) go in a
+  // private temp dir on the uploads volume — a dotfile dir so express.static never serves it, and on
+  // the same big volume so 4K frames don't fill a small container /tmp. Only the final mp4 lands in
+  // the event folder. The whole workDir is removed in the finally below.
+  const workDir = path.join(UPLOADS_DIR, '.ss-tmp', outId);
+  fs.mkdirSync(workDir, { recursive: true });
   const cardFiles: string[] = [];
   if (opts.branding !== false) try {
     const year = evMeta.starts_at ? new Date(evMeta.starts_at).getFullYear() : new Date().getFullYear();
-    const dir = path.join(UPLOADS_DIR, 'slideshows'); fs.mkdirSync(dir, { recursive: true });
-    const introPath = path.join(dir, `${outId}-intro.png`), outroPath = path.join(dir, `${outId}-outro.png`);
+    const introPath = path.join(workDir, `${outId}-intro.png`), outroPath = path.join(workDir, `${outId}-outro.png`);
     const dateStr = evMeta.starts_at ? new Date(evMeta.starts_at).toLocaleDateString('en-AU', { day: 'numeric', month: 'long', year: 'numeric' }) : '';
     await renderCard(Wp, Hp, [
       { text: clip(evMeta.name || 'Our Event', 38), size: 92, color: '#ffffff', weight: 800, dy: 480 },
@@ -395,7 +400,7 @@ async function run(eventId: string, opts: Opts, outId: string): Promise<{ url: s
   // Cards (already 1080p PNGs) and video clips are left untouched.
   const tempFiles: string[] = [...cardFiles];
   const cardSet = new Set(cardFiles);
-  const ssDir = path.join(UPLOADS_DIR, 'slideshows');
+  const ssDir = workDir;
   for (let i = 0; i < items.length; i++) {
     if (cardSet.has(items[i].path)) continue;
     if (items[i].isVideo) {
@@ -426,7 +431,7 @@ async function run(eventId: string, opts: Opts, outId: string): Promise<{ url: s
   // concatenated into a single temp file so the loop/trim path below is unchanged.
   const resolveTrack = (t: string): string | null => {
     if (t === '__custom__') {
-      try { const dir = path.join(UPLOADS_DIR, 'slideshow-audio'); const f = fs.readdirSync(dir).find((n) => n.startsWith(eventId + '-')); return f ? path.join(dir, f) : null; }
+      try { const dir = eventDir(eventId); const f = fs.readdirSync(dir).find((n) => n.startsWith('audio-')); return f ? path.join(dir, f) : null; }
       catch { return null; }
     }
     const p = path.join(MUSIC_DIR, path.basename(t));
@@ -443,9 +448,9 @@ async function run(eventId: string, opts: Opts, outId: string): Promise<{ url: s
     else music = trackPaths[0];   // concat failed → fall back to the first track
   }
 
-  const outDir = path.join(UPLOADS_DIR, 'slideshows');
+  const outDir = eventDir(eventId);
   fs.mkdirSync(outDir, { recursive: true });
-  const outPath = path.join(outDir, `${outId}.mp4`);
+  const outPath = path.join(outDir, `slideshow-${outId}.mp4`);
 
   const total = durs.reduce((a, b) => a + b, 0) - (items.length - 1) * T;   // final video length (s)
   const job = jobs.get(eventId);
@@ -457,8 +462,9 @@ async function run(eventId: string, opts: Opts, outId: string): Promise<{ url: s
     });
   } finally {
     for (const f of tempFiles) { try { fs.unlinkSync(f); } catch { /* gone */ } }   // clean up temp cards + pre-scaled stills
+    try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* gone */ }
   }
-  return { url: `/uploads/slideshows/${outId}.mp4`, truncated };
+  return { url: `/uploads/${eventRelPath(eventId, `slideshow-${outId}.mp4`)}`, truncated };
 }
 
 function buildArgs(items: Item[], durs: number[], music: string | null, outPath: string, keepVideoAudio: boolean, crf: number, Wp: number, Hp: number, loopMusic = true, padColor = 'black'): string[] {

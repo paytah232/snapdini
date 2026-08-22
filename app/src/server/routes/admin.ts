@@ -1,8 +1,10 @@
 import { Router, type Request, type Response } from 'express';
+import path from 'path';
 import { requireAdmin } from '../auth';
 import { get, all, run } from '../db';
 import { billingEnabled, stripe, CURRENCY } from '../billing';
 import { sweep } from '../cleanup';
+import { UPLOADS_DIR } from '../paths';
 
 // ── Site-admin API ────────────────────────────────────────────────────────────
 // Every route is gated by requireAdmin (signed-in user with the is_admin flag).
@@ -64,10 +66,17 @@ router.get('/users', async (_req: Request, res: Response) => {
 // Contact-form messages (DB-backed mailbox). Unhandled first, newest first.
 router.get('/contact', async (_req: Request, res: Response) => {
   const messages = await all(
-    `SELECT id, name, email, message, emailed, handled, created_at
+    `SELECT id, name, email, message, kind, image_filename AS "imageFilename", emailed, handled, created_at
        FROM contact_messages ORDER BY handled ASC, created_at DESC LIMIT 200`);
   const unhandled = await get<{ n: number }>(`SELECT count(*) AS n FROM contact_messages WHERE NOT handled`);
   res.json({ messages, unhandled: Number(unhandled?.n ?? 0) });
+});
+
+// Admin-gated view of a feedback screenshot (kept out of the public /uploads tree).
+router.get('/feedback-image/:file', (req: Request, res: Response) => {
+  const file = String(req.params.file || '');
+  if (!/^[A-Za-z0-9_-]+\.jpg$/.test(file)) return res.status(400).end();
+  return res.sendFile(path.join(UPLOADS_DIR, 'feedback', file));
 });
 router.post('/contact/:id/handled', async (req: Request, res: Response) => {
   await run(`UPDATE contact_messages SET handled = NOT handled WHERE id = ?`, [String(req.params.id)]);
@@ -155,6 +164,47 @@ router.post('/promos/:id/deactivate', async (req: Request, res: Response) => {
   if (!billingEnabled || !stripe) return res.status(400).json({ error: 'Billing is not enabled' });
   await stripe.promotionCodes.update(String(req.params.id), { active: false });
   res.json({ ok: true });
+});
+
+// ── Revenue & spend history ───────────────────────────────────────────────────
+// All money is events.amount_paid_cents (cumulative real $ per event, incl. upgrades + the branding
+// add-on). Time basis = the event's created_at (there's no separate per-payment timestamp). Read-only.
+router.get('/revenue', async (_req: Request, res: Response) => {
+  if (!billingEnabled) return res.json({ billingEnabled: false, currency: CURRENCY, totals: { all: 0, d30: 0, d7: 0 }, users: [] });
+  const now = Date.now();
+  const d30 = now - 30 * 24 * 3600 * 1000;
+  const d7 = now - 7 * 24 * 3600 * 1000;
+
+  const totals = await get<{ all_cents: number; d30_cents: number; d7_cents: number }>(
+    `SELECT COALESCE(SUM(amount_paid_cents),0) AS all_cents,
+            COALESCE(SUM(CASE WHEN created_at >= ? THEN amount_paid_cents ELSE 0 END),0) AS d30_cents,
+            COALESCE(SUM(CASE WHEN created_at >= ? THEN amount_paid_cents ELSE 0 END),0) AS d7_cents
+       FROM events WHERE amount_paid_cents > 0`, [d30, d7]);
+
+  const rows = await all<{ eventid: string; name: string; cents: number; createdat: number; branding: boolean; userid: string | null; email: string | null; displayname: string | null }>(
+    `SELECT e.id AS eventId, e.name AS name, e.amount_paid_cents AS cents, e.created_at AS createdAt,
+            e.branding_removal_paid AS branding, u.id AS userId, u.email AS email, u.display_name AS displayName
+       FROM events e LEFT JOIN users u ON u.id = e.owner_user_id
+      WHERE e.amount_paid_cents > 0
+      ORDER BY e.created_at DESC`);
+
+  // Group per owner (null owner → "(no account)").
+  const map = new Map<string, { userId: string | null; email: string; displayName: string | null; totalCents: number; events: { id: string; name: string; cents: number; createdAt: number; branding: boolean }[] }>();
+  for (const r of rows) {
+    const key = r.userid || '(none)';
+    let g = map.get(key);
+    if (!g) { g = { userId: r.userid, email: r.email || '(no account)', displayName: r.displayname, totalCents: 0, events: [] }; map.set(key, g); }
+    g.totalCents += r.cents;
+    g.events.push({ id: r.eventid, name: r.name, cents: r.cents, createdAt: r.createdat, branding: !!r.branding });
+  }
+  const users = [...map.values()].sort((a, b) => b.totalCents - a.totalCents);
+
+  res.json({
+    billingEnabled: true,
+    currency: CURRENCY,
+    totals: { all: totals?.all_cents || 0, d30: totals?.d30_cents || 0, d7: totals?.d7_cents || 0 },
+    users,
+  });
 });
 
 export default router;

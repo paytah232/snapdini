@@ -84,23 +84,37 @@ export async function makeVideoPoster(videoPath: string): Promise<boolean> {
   } catch { return false; }
 }
 
-// One-time/best-effort: generate missing thumbnails for pre-existing photo originals.
-// Scans the uploads dir for .jpg originals without a sibling _thumb.webp. Runs on boot.
+// Generate a missing thumbnail for one original if it doesn't already have a sibling _thumb.webp.
+async function backfillOne(original: string): Promise<boolean> {
+  const name = path.basename(original);
+  if (name.includes('_thumb')) return false;
+  const isPhoto = /\.jpe?g$/i.test(name);
+  const isVideo = /\.(mp4|webm|mov|m4v)$/i.test(name);
+  if (!isPhoto && !isVideo) return false;
+  const thumb = path.join(path.dirname(original), thumbName(name));
+  try { await fs.promises.access(thumb); return false; } catch { /* missing → make it */ }
+  try { if (isPhoto) await makeThumbnail(original); else await makeVideoPoster(original); return true; }
+  catch { return false; }
+}
+
+// One-time/best-effort: generate missing thumbnails for pre-existing photo originals. Scans the
+// uploads dir AND one level of event subfolders (/uploads/<eventId>/…, the per-event layout),
+// skipping dotdirs (staging / render temp). Runs on boot.
 export async function backfillThumbnails(uploadsDir: string): Promise<number> {
-  let entries: string[];
-  try { entries = await fs.promises.readdir(uploadsDir); }
+  let entries: import('fs').Dirent[];
+  try { entries = await fs.promises.readdir(uploadsDir, { withFileTypes: true }); }
   catch { return 0; }
   let made = 0;
-  for (const name of entries) {
-    if (name.includes('_thumb')) continue;
-    const isPhoto = /\.jpe?g$/i.test(name);
-    const isVideo = /\.(mp4|webm|mov|m4v)$/i.test(name);
-    if (!isPhoto && !isVideo) continue;
-    const original = path.join(uploadsDir, name);
-    const thumb = path.join(uploadsDir, thumbName(name));
-    try { await fs.promises.access(thumb); continue; } catch { /* missing → make it */ }
-    try { if (isPhoto) await makeThumbnail(original); else await makeVideoPoster(original); made++; }
-    catch { /* skip undecodable */ }
+  for (const ent of entries) {
+    if (ent.name.startsWith('.')) continue;                          // .incoming / .ss-tmp
+    if (ent.isDirectory()) {
+      // One level down: an event folder (or the legacy themes/ dir — harmless to scan).
+      let sub: string[];
+      try { sub = await fs.promises.readdir(path.join(uploadsDir, ent.name)); } catch { continue; }
+      for (const n of sub) if (await backfillOne(path.join(uploadsDir, ent.name, n))) made++;
+    } else if (await backfillOne(path.join(uploadsDir, ent.name))) {  // legacy flat files
+      made++;
+    }
   }
   if (made) console.log(`[thumbs] backfilled ${made} thumbnail(s)`);
   return made;

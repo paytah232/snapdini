@@ -72,7 +72,7 @@
         showSuccess('Add-on unlocked — you can now generate a slideshow with no Snapdini frames 🎬');
         view = 'slideshow';
         const sid = sp.get('session_id');
-        if (sid && $page.data.purchaseSendTo) {
+        if (sid && $page.data.purchaseSendTo && !$page.data.analyticsExclude) {
           try {
             const s = await api<{ paid: boolean; amountTotalCents: number; currency: string; transactionId: string }>(
               '/api/billing/session/' + encodeURIComponent(sid),

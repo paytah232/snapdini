@@ -23,6 +23,7 @@
   import Lightbox from '$lib/components/Lightbox.svelte';
   import PosterModal from '$lib/components/PosterModal.svelte';
   import EventImageEditor from '$lib/components/EventImageEditor.svelte';
+  import FeedbackModal from '$lib/components/FeedbackModal.svelte';
 
   const code = $page.params.code ?? '';
 
@@ -33,6 +34,7 @@
   let booting = true;
   let authBusy = false;
   let welcome: { title: string; sub: string } | null = null;  // post-create / post-payment celebration modal
+  let showFeedback = false;
   let viewerLoggedIn = false;   // for the top return bar
   let viewerIsAdmin = false;    // site admin drilled in via support-override → offer "back to site admin"
 
@@ -163,13 +165,13 @@
     else if (upgradedReturn) welcome = { title: 'Upgrade applied! 🎉', sub: 'Your event now includes the extra capacity. Nothing else to do — carry on.' };
     // Google Ads "Create event" conversion — fires for every new event (free ?created or paid ?paid),
     // NOT for upgrades. Keyed by the join code so a revisit doesn't double-count. Best-effort.
-    if ((createdReturn || paidReturn) && $page.data.createSendTo) {
+    if ((createdReturn || paidReturn) && $page.data.createSendTo && !$page.data.analyticsExclude) {
       fireLeadConversion((window as unknown as { gtag?: (...a: unknown[]) => void }).gtag, $page.data.createSendTo, $page.params.code);
     }
     // Fire a Google Ads purchase conversion on a successful payment/upgrade return, with the real
     // amount charged (looked up via the Stripe session, so promos are reflected). Best-effort:
     // never blocks the page, no-op when analytics/label aren't configured.
-    if ((paidReturn || upgradedReturn) && $page.data.purchaseSendTo) {
+    if ((paidReturn || upgradedReturn) && $page.data.purchaseSendTo && !$page.data.analyticsExclude) {
       const sid = sp.get('session_id');
       if (sid) {
         try {
@@ -882,8 +884,8 @@
         <div class="review-text">
           <div class="card-title">Review &amp; curate photos</div>
           <p class="hint">
-            {#if pendingPhotos.length}<strong class="pending-flag">{pendingPhotos.length} pending approval</strong> · {/if}
-            Approve, reject, favourite and rate — in a focused full-screen view.
+            {#if sModeration && pendingPhotos.length}<strong class="pending-flag">{pendingPhotos.length} pending approval</strong> · {/if}
+            {sModeration ? 'Approve, reject, favourite and rate' : 'Favourite, rate and reject'} — in a focused full-screen view.
           </p>
         </div>
         <div class="review-arrow">→</div>
@@ -1020,7 +1022,14 @@
   </div>
 {/if}
 
+<button class="fb-fab" type="button" on:click={() => (showFeedback = true)}>💬 Feedback</button>
+{#if showFeedback}<FeedbackModal context={`Manage (${$page.params.code})`} on:close={() => (showFeedback = false)} />{/if}
+
 <style>
+  .fb-fab { position: fixed; right: 14px; bottom: 14px; z-index: 90; padding: 8px 14px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); font: inherit;
+    font-size: .82rem; cursor: pointer; box-shadow: 0 6px 18px rgba(0,0,0,.18); }
+  .fb-fab:hover { color: var(--text); border-color: var(--accent); }
   /* Fixed-height nav bar, consistent across pages. */
   .topnav { display: flex; align-items: center; justify-content: space-between; gap: 12px;
     height: 56px; padding: 0 16px; border-bottom: 1px solid var(--border); }

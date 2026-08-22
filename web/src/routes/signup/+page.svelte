@@ -42,8 +42,9 @@
       msg = data.devLink
         ? { text, link: { href: data.devLink, label: 'Dev: click to verify →' }, ok: true }
         : { text, ok: true };
-      // Google Ads "Sign up" conversion (best-effort; no-op unless a label is configured).
-      fireLeadConversion((window as unknown as { gtag?: (...a: unknown[]) => void }).gtag, $page.data.signupSendTo);
+      // Google Ads "Sign up" conversion (best-effort; no-op unless a label is configured; skipped
+      // for excluded internal/admin accounts).
+      if (!$page.data.analyticsExclude) fireLeadConversion((window as unknown as { gtag?: (...a: unknown[]) => void }).gtag, $page.data.signupSendTo);
     } catch (err) {
       msg = { text: err instanceof Error ? err.message : 'Sign-up failed', ok: false };
     } finally {

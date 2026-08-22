@@ -35,6 +35,7 @@
 
   <h2>6. Pricing &amp; payment</h2>
   <p>Events for small gatherings are free. Larger events and optional add-ons are one-off purchases, with the price shown clearly before you pay. Payments are processed securely by our payment provider; applicable taxes may apply.</p>
+  <p>We may change our prices, plans and which features are included in each tier (including the free tier) at any time — for example, adjusting or removing a feature that is being misused or is no longer sustainable to offer for free. <strong>Any such change applies only to events created after the change;</strong> an event you have already created and paid for keeps the features and limits it had when you created it. The price you were shown at checkout is the price for that purchase.</p>
 
   <h2>7. Changes</h2>
   <p>We may update these terms as the service evolves; material changes will be reflected here with a new "last updated" date.</p>

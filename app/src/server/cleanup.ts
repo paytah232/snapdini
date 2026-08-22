@@ -3,7 +3,7 @@ import path from 'path';
 import { and, eq, isNotNull, lt, count } from 'drizzle-orm';
 import { db } from './db';
 import { events, photos, participants, clientErrors, slideshows, shares } from './schema';
-import { UPLOADS_DIR, uploadDiskPath } from './paths';
+import { UPLOADS_DIR, uploadDiskPath, eventDir, INCOMING_DIR } from './paths';
 import { thumbName } from './images';
 import { purgeOldSlideshows } from './slideshow';
 
@@ -57,11 +57,15 @@ export async function sweep(): Promise<number> {
       for (const s of ss) safeUnlink(path.join(UPLOADS_DIR, s.filename));
       await db.delete(slideshows).where(eq(slideshows.eventId, e.id));
     } catch { /* best-effort */ }
-    // Organizer's uploaded backing track(s), if any (named "<eventId>-*").
+    // Legacy pre-per-event backing track(s) in the shared slideshow-audio/ dir (named "<eventId>-*").
     try {
       const adir = path.join(UPLOADS_DIR, 'slideshow-audio');
       for (const f of fs.readdirSync(adir)) if (f.startsWith(`${e.id}-`)) safeUnlink(path.join(adir, f));
     } catch { /* none */ }
+    // Finally, remove the event's whole per-event folder — sweeps everything now stored there
+    // (audio, theme image, any leftover render temp), so nothing is orphaned. (Legacy flat files,
+    // if any, were already handled by the per-file unlinks above.)
+    try { fs.rmSync(eventDir(e.id), { recursive: true, force: true }); } catch { /* none */ }
 
     await db.delete(photos).where(eq(photos.eventId, e.id));
     await db.delete(participants).where(eq(participants.eventId, e.id)); // clears guest PII
@@ -77,6 +81,16 @@ export async function sweep(): Promise<number> {
     }).where(eq(events.id, e.id));
   }
   if (due.length) console.log(`[sweeper] purged media for ${due.length} event(s) (kept stats archive)`);
+
+  // Sweep abandoned upload staging — chunk-part dirs and staged single files that were never
+  // completed (client gave up mid-upload) — once they're older than 6h.
+  try {
+    const cutoff = Date.now() - 6 * 60 * 60 * 1000;
+    for (const name of fs.readdirSync(INCOMING_DIR)) {
+      const p = path.join(INCOMING_DIR, name);
+      try { if (fs.statSync(p).mtimeMs < cutoff) fs.rmSync(p, { recursive: true, force: true }); } catch { /* */ }
+    }
+  } catch { /* no staging dir yet */ }
 
   // Keep the diagnostics table bounded — drop client error reports older than the TTL.
   try { await db.delete(clientErrors).where(lt(clientErrors.createdAt, Date.now() - CLIENT_ERROR_TTL_MS)); }

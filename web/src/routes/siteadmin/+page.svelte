@@ -11,6 +11,15 @@
   let users: any[] = [];
   let error = '';
 
+  // ── Revenue ──
+  type RevUser = { userId: string | null; email: string; displayName: string | null; totalCents: number; events: { id: string; name: string; cents: number; createdAt: number; branding: boolean }[] };
+  let revenue: { billingEnabled: boolean; currency: string; totals: { all: number; d30: number; d7: number }; users: RevUser[] } | null = null;
+  let openUser: string | null = null;
+  const money = (cents: number, cur = revenue?.currency || 'AUD') =>
+    new Intl.NumberFormat(undefined, { style: 'currency', currency: (cur || 'AUD').toUpperCase() }).format((cents || 0) / 100);
+  const rowKey = (u: RevUser) => u.userId || u.email;
+  async function loadRevenue() { try { revenue = await api('/api/admin/revenue'); } catch { /* ignore */ } }
+
   // ── Promo codes ──
   let promoBilling = false;
   let promos: any[] = [];
@@ -150,6 +159,7 @@
       await loadPromos();
       await loadContact();
       await loadClientErrors();
+      await loadRevenue();
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -195,6 +205,48 @@
         {#each STAT_LABELS as [key, label]}
           <div class="stat"><div class="n">{stats[key] ?? 0}</div><div class="l">{label}</div></div>
         {/each}
+      </section>
+    {/if}
+
+    {#if revenue?.billingEnabled}
+      <section class="panel">
+        <h2>Revenue</h2>
+        <div class="rev-totals">
+          <div class="stat"><div class="n">{money(revenue.totals.all)}</div><div class="l">All time</div></div>
+          <div class="stat"><div class="n">{money(revenue.totals.d30)}</div><div class="l">Last 30 days</div></div>
+          <div class="stat"><div class="n">{money(revenue.totals.d7)}</div><div class="l">Last 7 days</div></div>
+        </div>
+        {#if revenue.users.length}
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Customer</th><th>Events</th><th>Total spent</th><th></th></tr></thead>
+              <tbody>
+                {#each revenue.users as u (rowKey(u))}
+                  <tr>
+                    <td>{u.email}{#if u.displayName} <span class="muted">({u.displayName})</span>{/if}</td>
+                    <td>{u.events.length}</td>
+                    <td>{money(u.totalCents)}</td>
+                    <td><button class="linklike" on:click={() => (openUser = openUser === rowKey(u) ? null : rowKey(u))}>{openUser === rowKey(u) ? 'Hide' : 'Details'}</button></td>
+                  </tr>
+                  {#if openUser === rowKey(u)}
+                    <tr class="drill"><td colspan="4">
+                      <table class="inner">
+                        <thead><tr><th>Event</th><th>Created</th><th>Paid</th></tr></thead>
+                        <tbody>
+                          {#each u.events as ev}
+                            <tr><td>{ev.name}{#if ev.branding} <span class="muted">· no-frames add-on</span>{/if}</td><td>{fmtDate(ev.createdAt)}</td><td>{money(ev.cents)}</td></tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    </td></tr>
+                  {/if}
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else}
+          <p class="muted">No paid events yet.</p>
+        {/if}
       </section>
     {/if}
 
@@ -295,7 +347,7 @@
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>From</th><th>Message</th><th>Emailed</th><th>Received</th><th></th></tr></thead>
+          <thead><tr><th>From</th><th>Type</th><th>Message</th><th>Emailed</th><th>Received</th><th></th></tr></thead>
           <tbody>
             {#each msgPaged as m}
               <tr class={m.handled ? 'done' : ''}>
@@ -303,13 +355,14 @@
                   <div>{m.name || 'Anonymous'}</div>
                   {#if m.email}<a class="muted" href={`mailto:${m.email}`}>{m.email}</a>{/if}
                 </td>
-                <td class="msg">{m.message}</td>
+                <td>{m.kind && m.kind !== 'contact' ? m.kind : 'contact'}</td>
+                <td class="msg">{m.message}{#if m.imageFilename}<br><a href={`/api/admin/feedback-image/${m.imageFilename.split('/').pop()}`} target="_blank" rel="noopener">📎 screenshot</a>{/if}</td>
                 <td>{m.emailed ? '✅' : '—'}</td>
                 <td class="muted">{fmtDate(m.created_at)}</td>
                 <td><button class="link-btn" on:click={() => toggleHandled(m.id)}>{m.handled ? 'reopen' : 'mark done'}</button></td>
               </tr>
             {/each}
-            {#if !msgFiltered.length}<tr><td colspan="5" class="muted">{contactMsgs.length ? (msgShowDone ? 'No matches.' : 'No open messages — switch to “All”.') : 'No messages yet.'}</td></tr>{/if}
+            {#if !msgFiltered.length}<tr><td colspan="6" class="muted">{contactMsgs.length ? (msgShowDone ? 'No matches.' : 'No open messages — switch to “All”.') : 'No messages yet.'}</td></tr>{/if}
           </tbody>
         </table>
       </div>
@@ -450,4 +503,9 @@
   .badge { background: #c0392b; color: #fff; border-radius: 999px; padding: 1px 9px; font-size: 0.72rem; font-weight: 700; }
   td.msg { white-space: normal; max-width: 480px; }
   tbody tr.done { opacity: 0.5; }
+  .rev-totals { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .rev-totals .stat { min-width: 130px; }
+  table.inner { width: 100%; margin: 2px 0; font-size: 0.82rem; }
+  tr.drill > td { background: var(--surface, #faf9f7); padding: 6px 10px; }
+  .linklike { background: none; border: none; color: var(--accent, #b8860b); cursor: pointer; font: inherit; text-decoration: underline; padding: 0; }
 </style>

@@ -87,6 +87,9 @@ services:
       - GADS_PURCHASE_LABEL=${GADS_PURCHASE_LABEL:-}
       - GADS_SIGNUP_LABEL=${GADS_SIGNUP_LABEL:-}
       - GADS_CREATE_LABEL=${GADS_CREATE_LABEL:-}
+      # Comma-separated emails whose signed-in sessions never fire conversions (site admins are always
+      # excluded). Keeps the operator's own testing out of the ad data. Needs INTERNAL_API_BASE (set).
+      - ANALYTICS_EXCLUDE_EMAILS=${ANALYTICS_EXCLUDE_EMAILS:-}
     depends_on:
       - app
 

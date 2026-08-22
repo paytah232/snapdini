@@ -187,6 +187,8 @@ export const contactMessages = pgTable('contact_messages', {
   name: text('name'),
   email: text('email'),
   message: text('message').notNull(),
+  kind: text('kind').notNull().default('contact'), // 'contact' | 'bug' | 'feedback' | 'suggestion'
+  imageFilename: text('image_filename'),           // optional screenshot (relative to UPLOADS_DIR, under feedback/)
   emailed: boolean('emailed').notNull().default(false), // was the support email delivered?
   handled: boolean('handled').notNull().default(false), // admin marked as dealt-with
   createdAt: ms('created_at').notNull(),
