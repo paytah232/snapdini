@@ -39,6 +39,13 @@ services:
       - MAILGUN_DOMAIN=${MAILGUN_DOMAIN:-}
       - MAILGUN_BASE=${MAILGUN_BASE:-}
       - SUPPORT_EMAIL=${SUPPORT_EMAIL:-}
+      # Customer lifecycle emails (welcome/nudge/check-in/survey) — off unless set to 1. Needs email configured.
+      - LIFECYCLE_EMAILS=${LIFECYCLE_EMAILS:-}
+      # Operator notifications to SUPPORT_EMAIL (daily digest + instant alerts) — off unless set to 1.
+      - OPS_NOTIFICATIONS=${OPS_NOTIFICATIONS:-}
+      - OPS_TZ=${OPS_TZ:-}                                   # e.g. Australia/Brisbane (digest/times); default is used if unset
+      - OPS_DIGEST_HOUR=${OPS_DIGEST_HOUR:-}                 # local hour for the daily digest (default 8)
+      - OPS_ERROR_SPIKE=${OPS_ERROR_SPIKE:-}                 # client-errors/hour that trigger a spike alert (default 20)
       # Site admin bootstrap (both unset = no admin, no shipped default credential).
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
