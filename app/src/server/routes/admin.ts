@@ -35,7 +35,8 @@ router.get('/events', async (_req: Request, res: Response) => {
   // Counts come from pre-aggregated subqueries joined on event_id (one grouped index scan each)
   // rather than a correlated count per row.
   const events = await all(
-    `SELECT e.join_code, e.slug, e.name, e.guest_cap, e.video_seconds, e.paid,
+    `SELECT e.id, e.join_code, e.slug, e.name, e.guest_cap, e.video_seconds, e.paid,
+            e.amount_paid_cents, e.refunded_at,
             e.organizer_code, e.purged_at, e.purge_at, e.expires_at, e.created_at,
             COALESCE(pc.n, 0) AS participants,
             COALESCE(phc.n, 0) AS photos,
@@ -94,6 +95,37 @@ router.get('/client-errors', async (_req: Request, res: Response) => {
 router.post('/client-errors/:id/handled', async (req: Request, res: Response) => {
   await run(`UPDATE client_errors SET handled = NOT handled WHERE id = ?`, [String(req.params.id)]);
   res.json({ ok: true });
+});
+
+// Post-event survey responses (newest first), with the event they belong to.
+router.get('/survey-responses', async (_req: Request, res: Response) => {
+  const responses = await all(
+    `SELECT s.id, s.overall, s.setup, s.guest_experience AS "guestExperience", s.value, s.nps,
+            s.comments, s.contact_opt_in AS "contactOptIn", s.created_at,
+            e.name AS "eventName", e.join_code AS "joinCode"
+       FROM survey_responses s JOIN events e ON e.id = s.event_id
+      ORDER BY s.created_at DESC LIMIT 200`);
+  res.json({ responses });
+});
+
+// One-click FULL refund of an event's payment via Stripe, then lock the event (a full refund is a
+// cancellation). Partial/goodwill refunds stay in the Stripe dashboard. Idempotent: refuses if
+// already refunded, and requires a payment intent on file (captured at checkout).
+router.post('/refund/:eventId', async (req: Request, res: Response) => {
+  if (!billingEnabled || !stripe) return res.status(400).json({ error: 'Billing is not enabled' });
+  const eventId = String(req.params.eventId);
+  const ev = await get<{ pi: string | null; refunded: number | null; cents: number }>(
+    `SELECT stripe_payment_intent AS pi, refunded_at AS refunded, amount_paid_cents AS cents FROM events WHERE id = ?`, [eventId]);
+  if (!ev) return res.status(404).json({ error: 'Event not found' });
+  if (ev.refunded) return res.status(400).json({ error: 'This event has already been refunded' });
+  if (!ev.pi) return res.status(400).json({ error: 'No Stripe payment on file — refund manually in the Stripe dashboard' });
+  try {
+    const refund = await stripe.refunds.create({ payment_intent: ev.pi });
+    await run(`UPDATE events SET refunded_at = ?, is_locked = true WHERE id = ?`, [Date.now(), eventId]);
+    res.json({ ok: true, refundId: refund.id, amountCents: ev.cents });
+  } catch (e) {
+    res.status(502).json({ error: 'Stripe refund failed: ' + (e as Error).message });
+  }
 });
 
 // Run the retention sweeper on demand (the same job the hourly timer runs) — purges events past

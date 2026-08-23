@@ -18,6 +18,9 @@ export const users = pgTable('users', {
   plan: text('plan').notNull().default('free'),
   stripeCustomerId: text('stripe_customer_id'),
   isAdmin: boolean('is_admin').notNull().default(false),  // site admin (bootstrapped from ADMIN_EMAIL env)
+  // Account lifecycle email guards (see lifecycle.ts) — one-shot, prevent double-sends.
+  accountWelcomeSentAt: ms('account_welcome_sent_at'),
+  activationNudgeSentAt: ms('activation_nudge_sent_at'),
   createdAt: ms('created_at').notNull(),
 });
 
@@ -92,10 +95,41 @@ export const events = pgTable('events', {
   purgedAt: ms('purged_at'),
   statParticipants: integer('stat_participants').notNull().default(0),
   statPhotos: integer('stat_photos').notNull().default(0),
+  // Customer lifecycle emails — one-shot guards so nothing double-sends (see lifecycle.ts).
+  welcomeSentAt: ms('welcome_sent_at'),
+  checkinSentAt: ms('checkin_sent_at'),
+  feedbackSentAt: ms('feedback_sent_at'),
+  surveyToken: text('survey_token'),                        // unguessable token for the post-event survey page
+  stripePaymentIntent: text('stripe_payment_intent'),       // captured at payment; enables one-click refund
+  refundedAt: ms('refunded_at'),                            // set when the operator refunds the event
   createdAt: ms('created_at').notNull(),
 }, (t) => ({
   slugIdx: uniqueIndex('idx_events_slug').on(t.slug).where(sql`${t.slug} IS NOT NULL`),
   ownerIdx: index('idx_events_owner').on(t.ownerUserId).where(sql`${t.ownerUserId} IS NOT NULL`),
+  surveyTokenIdx: uniqueIndex('idx_events_survey_token').on(t.surveyToken).where(sql`${t.surveyToken} IS NOT NULL`),
+}));
+
+// Small key/value store for operational state (last ops digest date, alert cooldowns, etc.).
+export const appState = pgTable('app_state', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  updatedAt: ms('updated_at').notNull(),
+});
+
+// Post-event feedback survey responses. One row per submission (an organizer may resubmit; we keep all).
+export const surveyResponses = pgTable('survey_responses', {
+  id: text('id').primaryKey(),
+  eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
+  overall: smallint('overall'),                             // 1–5
+  setup: smallint('setup'),                                 // 1–5
+  guestExperience: smallint('guest_experience'),            // 1–5
+  value: smallint('value'),                                 // 1–5
+  nps: smallint('nps'),                                     // 0–10
+  comments: text('comments'),                               // JSON blob of optional per-question + overall comments
+  contactOptIn: boolean('contact_opt_in').notNull().default(false),
+  createdAt: ms('created_at').notNull(),
+}, (t) => ({
+  eventIdx: index('idx_survey_event').on(t.eventId),
 }));
 
 export const participants = pgTable('participants', {

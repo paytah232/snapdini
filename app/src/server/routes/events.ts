@@ -13,6 +13,7 @@ import * as cleanup from '../cleanup';
 import { isRevealed, baseUrl, escapeHtml } from '../lib';
 import { startSlideshow, slideshowInfo, toggleSlideshowFavourite, deleteSlideshow, slideshowFile, streamSlideshow1080 } from '../slideshow';
 import { billingEnabled, quote, FREE_ALL_GUESTS, brandingRemovable } from '../billing';
+import { sendWelcome } from '../lifecycle';
 import options from '../options';
 
 const router = Router();
@@ -202,6 +203,10 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
   };
 
   await db.insert(events).values(event);
+
+  // Free events are live the moment they're created → send the event welcome now. Paid events get
+  // it from the Stripe webhook once payment settles. Idempotent + best-effort (never blocks create).
+  if (entPaid && event.ownerUserId) sendWelcome(event.id).catch((e) => console.error('[lifecycle] event welcome:', (e as Error).message));
 
   res.json({
     joinCode:      event.joinCode,

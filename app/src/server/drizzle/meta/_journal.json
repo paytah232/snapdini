@@ -148,6 +148,41 @@
       "when": 1784100000000,
       "tag": "0020_feedback_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1787500000000,
+      "tag": "0021_survey_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1787500100000,
+      "tag": "0022_refund",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1787500200000,
+      "tag": "0023_app_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1787500300000,
+      "tag": "0024_account_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1787500400000,
+      "tag": "0025_seed_lifecycle_guards",
+      "breakpoints": true
     }
   ]
 }

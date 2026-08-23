@@ -28,5 +28,6 @@ export const pricingFaqs: Faq[] = [
   { q: 'Is it a subscription?', a: 'No. Each paid event is a one-off charge — you pay per event, not monthly.' },
   { q: 'Can I upgrade after I’ve started?', a: 'Yes — you can top up guests, shots or length at any time, before or during the event, and only pay the difference.' },
   { q: 'Do you offer a discount?', a: 'Use the launch code LAUNCH20 at checkout for 20% off a paid event (limited time).' },
+  { q: 'Can I get a refund?', a: 'Yes — if you change your mind you can cancel a paid event for a full refund any time before it starts, from the event’s manage page or by emailing support@snapdini.com. Once an event has started, refunds are for faults on our side, reviewed case-by-case.' },
   { q: 'Can I self-host Snapdini for free?', a: 'Yes — Snapdini is open source (AGPL-3.0). You can self-host the full app for free from the public Docker images; billing is optional and only switches on if you add your own Stripe keys.' },
 ];

@@ -20,6 +20,25 @@
   const rowKey = (u: RevUser) => u.userId || u.email;
   async function loadRevenue() { try { revenue = await api('/api/admin/revenue'); } catch { /* ignore */ } }
 
+  // ── Survey responses ──
+  let surveys: any[] = [];
+  async function loadSurvey() { try { const r = await api<{ responses: any[] }>('/api/admin/survey-responses'); surveys = r.responses; } catch { /* ignore */ } }
+  const parseComments = (c: string | null): [string, string][] => { try { return c ? Object.entries(JSON.parse(c)) : []; } catch { return []; } };
+
+  // ── One-click refund (full refund + lock; a cancellation) ──
+  let refundingId: string | null = null;
+  async function doRefund(e: any) {
+    if (!e.id || e.refunded_at || refundingId) return;
+    if (!confirm(`Refund ${money(e.amount_paid_cents)} for “${e.name}” and lock the event?\n\nThis issues a FULL Stripe refund to the customer and cannot be undone here.`)) return;
+    refundingId = e.id;
+    try {
+      await postJson(`/api/admin/refund/${e.id}`, {});
+      events = events.map((x) => x.id === e.id ? { ...x, refunded_at: Date.now(), paid: false } : x);
+      showToast('Refund issued');
+    } catch (err) { showToast(err instanceof Error ? err.message : 'Refund failed', true); }
+    finally { refundingId = null; }
+  }
+
   // ── Promo codes ──
   let promoBilling = false;
   let promos: any[] = [];
@@ -160,6 +179,7 @@
       await loadContact();
       await loadClientErrors();
       await loadRevenue();
+      await loadSurvey();
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -280,7 +300,11 @@
                   <div class="purge-line">{purgeInfo(e)}</div>
                 </td>
                 <td class="muted nowrap">{fmtDate(e.created_at)}</td>
-                <td>{#if e.organizer_code}<a class="manage" href={`/admin/${e.join_code}#${encodeURIComponent(e.organizer_code)}`} title="Open the full manager for this event (support override)">Manage →</a>{/if}</td>
+                <td class="nowrap">
+                  {#if e.organizer_code}<a class="manage" href={`/admin/${e.join_code}#${encodeURIComponent(e.organizer_code)}`} title="Open the full manager for this event (support override)">Manage →</a>{/if}
+                  {#if e.paid && !e.refunded_at}<button class="mini-refund" on:click={() => doRefund(e)} disabled={refundingId === e.id} title="Full Stripe refund + lock">{refundingId === e.id ? '…' : 'Refund'}</button>
+                  {:else if e.refunded_at}<span class="refunded-tag" title="Refunded">↩ refunded</span>{/if}
+                </td>
               </tr>
             {/each}
             {#if !evFiltered.length}<tr><td colspan="6" class="muted">{events.length ? (evShowInactive ? 'No matches.' : 'No active events — switch to “All”.') : 'No events yet.'}</td></tr>{/if}
@@ -412,6 +436,34 @@
     </section>
 
     <section class="panel">
+      <h2>Survey responses <span class="count">{surveys.length}</span></h2>
+      {#if !surveys.length}
+        <p class="muted">No responses yet.</p>
+      {:else}
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Event</th><th>Overall</th><th>Setup</th><th>Guests</th><th>Value</th><th>NPS</th><th>Comments</th><th>Contact?</th><th>When</th></tr></thead>
+            <tbody>
+              {#each surveys as s}
+                <tr>
+                  <td><div class="ev-name">{s.eventName}</div><code class="ev-code">{s.joinCode}</code></td>
+                  <td class="score">{s.overall ?? '—'}</td>
+                  <td class="score">{s.setup ?? '—'}</td>
+                  <td class="score">{s.guestExperience ?? '—'}</td>
+                  <td class="score">{s.value ?? '—'}</td>
+                  <td class="score">{s.nps ?? '—'}</td>
+                  <td class="muted">{#each parseComments(s.comments) as [k, v]}<div class="cmt-line"><b>{k}:</b> {v}</div>{/each}</td>
+                  <td>{s.contactOptIn ? '✅' : '—'}</td>
+                  <td class="muted nowrap">{fmtDate(s.created_at)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+    </section>
+
+    <section class="panel">
       <h2>Users <span class="count">{usrFiltered.length}</span></h2>
       <input class="search" placeholder="Search users — email, name, plan…" bind:value={usrQuery} />
       <div class="table-scroll">
@@ -483,6 +535,12 @@
   code { background: var(--border, #f0f0f0); padding: 1px 6px; border-radius: 5px; }
   .manage { color: var(--accent); text-decoration: none; font-weight: 700; white-space: nowrap; }
   .manage:hover { text-decoration: underline; }
+  .mini-refund { margin-left: 8px; font-size: .74rem; font-weight: 700; padding: 3px 9px; border-radius: 6px;
+    border: 1px solid var(--danger, #c0392b); background: transparent; color: var(--danger, #c0392b); cursor: pointer; }
+  .mini-refund:disabled { opacity: .5; cursor: default; }
+  .refunded-tag { margin-left: 8px; font-size: .72rem; color: var(--text-muted); }
+  .score { text-align: center; font-variant-numeric: tabular-nums; font-weight: 700; }
+  .cmt-line { margin: 2px 0; }
   .btn { display: inline-block; margin-top: 10px; padding: 8px 14px; border-radius: 10px; background: var(--accent, #333); color: #fff; text-decoration: none; border: none; cursor: pointer; }
   .promo-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
   .in { padding: 8px 10px; border: 1px solid var(--border, #ddd); border-radius: 9px; font-size: 0.9rem; }

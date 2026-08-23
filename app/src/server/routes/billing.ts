@@ -3,6 +3,7 @@ import { eq, and, or } from 'drizzle-orm';
 import { billingEnabled, stripe, CURRENCY, publicBillingConfig, quote, brandingRemovable, BRANDING_REMOVAL_CENTS } from '../billing';
 import { db } from '../db';
 import { events } from '../schema';
+import { sendWelcome } from '../lifecycle';
 
 const router = Router();
 
@@ -206,7 +207,8 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
   }
 
   if (evt.type === 'checkout.session.completed') {
-    const session = evt.data.object as { metadata?: Record<string, string>; payment_status?: string; amount_total?: number | null };
+    const session = evt.data.object as { metadata?: Record<string, string>; payment_status?: string; amount_total?: number | null; payment_intent?: string | null };
+    const paymentIntent = typeof session.payment_intent === 'string' ? session.payment_intent : null;
     const m = session.metadata ?? {};
     const eventId = m.eventId;
     // Only grant entitlement once the session is actually settled (paid, or a genuine $0
@@ -235,7 +237,10 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
         // The $1 add-on: just flips the entitlement (doesn't touch the event's paid total/tier).
         await db.update(events).set({ brandingRemovalPaid: true }).where(eq(events.id, eventId));
       } else {
-        await db.update(events).set({ paid: true, amountPaidCents: paidNow }).where(eq(events.id, eventId));
+        await db.update(events).set({ paid: true, amountPaidCents: paidNow, stripePaymentIntent: paymentIntent ?? undefined }).where(eq(events.id, eventId));
+        // Welcome email (idempotent; no-op unless LIFECYCLE_EMAILS=1). Fire-and-forget so the
+        // webhook still 200s promptly even if email is slow/unavailable.
+        sendWelcome(eventId).catch((e) => console.error('[lifecycle] welcome trigger:', (e as Error).message));
       }
     }
   }

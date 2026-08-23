@@ -381,6 +381,30 @@
     }
   }
 
+  // ── Cancel / request a refund ────────────────────────────────────────────
+  // Opens a support request (kind='refund'); we never move money automatically. The server freezes
+  // an eligibility snapshot (requested-before-start ⇒ full refund) from the event's start time.
+  let showRefund = false;
+  let refundReason = '';
+  let refundBusy = false;
+  let refundDone = false;
+  async function requestRefund() {
+    if (refundBusy) return;
+    refundBusy = true;
+    try {
+      const fd = new FormData();
+      fd.append('kind', 'refund');
+      fd.append('eventCode', code);
+      fd.append('context', `Manage portal · ${ev?.name ?? ''}`);
+      fd.append('message', refundReason.trim() || 'The organizer requested to cancel this event and receive a refund.');
+      const r = await fetch('/api/contact', { method: 'POST', body: fd, credentials: 'same-origin' });
+      if (!r.ok) throw new Error('Could not send your request');
+      refundDone = true;
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Failed — please email support@snapdini.com', true);
+    } finally { refundBusy = false; }
+  }
+
   // ── Settings ─────────────────────────────────────────────────────────────
   function toggleAspect(value: string) {
     if (value !== '1:1' && !canAllShapes) return;   // non-square shapes need the frame pack
@@ -732,13 +756,48 @@
       </div>
       <div class="divider"></div>
 
-      <div class="toggle-row">
-        <div>
-          <div class="t-label">Delete event</div>
-          <div class="t-sub">Permanently remove all data</div>
+      {#if ev.amountPaidCents > 0}
+        <!-- Paid event: offer a refund request (money to return), plus a separate hard delete. -->
+        <div class="toggle-row">
+          <div>
+            <div class="t-label">Cancel event &amp; request a refund</div>
+            <div class="t-sub">Plans changed? Cancel before the event starts for a full refund</div>
+          </div>
+          {#if !showRefund}<button class="btn ghost sm" on:click={() => (showRefund = true)}>Request refund</button>{/if}
         </div>
-        <button class="btn danger sm" on:click={doDelete}>Delete</button>
-      </div>
+        {#if showRefund}
+          <div class="refund-box">
+            {#if refundDone}
+              <p class="refund-ok">✓ Request sent — we'll be in touch by email shortly.</p>
+            {:else}
+              <p class="refund-hint">Tell us briefly why (optional). If your event hasn't started yet, you're eligible for a full refund.</p>
+              <textarea bind:value={refundReason} rows="3" placeholder="e.g. our plans changed / booked by mistake"></textarea>
+              <div class="refund-actions">
+                <button class="btn ghost sm" on:click={() => (showRefund = false)} disabled={refundBusy}>Never mind</button>
+                <button class="btn danger sm" on:click={requestRefund} disabled={refundBusy}>{refundBusy ? 'Sending…' : 'Send refund request'}</button>
+              </div>
+            {/if}
+          </div>
+        {/if}
+        <div class="divider"></div>
+
+        <div class="toggle-row">
+          <div>
+            <div class="t-label">Delete event</div>
+            <div class="t-sub">Permanently remove all data</div>
+          </div>
+          <button class="btn danger sm" on:click={doDelete}>Delete</button>
+        </div>
+      {:else}
+        <!-- Free event: nothing to refund — cancelling simply removes it. -->
+        <div class="toggle-row">
+          <div>
+            <div class="t-label">Cancel event</div>
+            <div class="t-sub">Permanently remove this event and all its photos</div>
+          </div>
+          <button class="btn danger sm" on:click={doDelete}>Cancel event</button>
+        </div>
+      {/if}
     </div>
 
     <!-- Event settings -->
@@ -1070,6 +1129,12 @@
   .ghost { border-color: var(--border); color: var(--text); background: transparent; }
   .ghost:hover { border-color: var(--accent); }
   .danger { background: var(--danger); color: #fff; }
+  .refund-box { padding: 12px 0 4px; }
+  .refund-hint { color: var(--text-muted); font-size: .86rem; margin: 0 0 10px; }
+  .refund-ok { color: var(--accent); font-size: .9rem; margin: 0; }
+  .refund-box textarea { width: 100%; box-sizing: border-box; background: var(--bg, #100f0d); color: var(--text);
+    border: 1px solid var(--border); border-radius: 9px; padding: 9px 11px; font: inherit; resize: vertical; }
+  .refund-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
   .btn:disabled { opacity: 0.6; cursor: default; }
   .grow { flex: 1; }
 

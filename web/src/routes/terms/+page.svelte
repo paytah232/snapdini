@@ -25,6 +25,7 @@
   <h2>3. Issues, resolutions &amp; refunds</h2>
   <p>Your event matters to us, and we stand behind the service. If you experience a problem, contact us at <a href="mailto:support@snapdini.com">support@snapdini.com</a> and we'll work with you to resolve it promptly.</p>
   <p><strong>If a fault on our side prevents you from receiving what you paid for, we will make it right</strong> — by restoring the service, extending your event or photo retention at no charge, or issuing a refund, whichever is appropriate. Refund requests are reviewed on a case-by-case basis and, where due, returned to your original payment method.</p>
+  <p><strong>Changed your mind?</strong> You can cancel a paid event for a <strong>full refund any time before it starts</strong> — just open your event's manage page and choose "Cancel event &amp; request a refund", or email us. Once an event has started, refunds are limited to faults on our side as described above.</p>
 
   <h2>4. Your photos &amp; content</h2>
   <p>You and your guests own the photos you take. We store them only to provide the service, and we delete them after your event's retention period (you can extend retention on paid plans). You're responsible for having the right to capture and share the content uploaded to your event, and for complying with the wishes of the people in it.</p>

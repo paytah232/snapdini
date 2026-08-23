@@ -12,6 +12,8 @@ import { db, init } from './db';
 import { events } from './schema';
 import { stripImageMetadata, backfillThumbnails } from './images';
 import { start as startCleanup } from './cleanup';
+import { startLifecycle } from './lifecycle';
+import { startOps } from './ops-notify';
 import { migrateUploadsToPerEvent } from './migrate-uploads';
 import options from './options';
 import { publicBillingConfig } from './billing';
@@ -28,6 +30,7 @@ import clientErrorRoutes from './routes/clienterror';
 import adminRoutes from './routes/admin';
 import sharesRoutes from './routes/shares';
 import cohostsRoutes from './routes/cohosts';
+import surveyRoutes from './routes/survey';
 import { ensureAdminFromEnv } from './auth';
 import pkg from '../../package.json';
 
@@ -226,6 +229,7 @@ app.use('/api/client-error', clientErrorLimiter, clientErrorRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/shares', sharesRoutes);
 app.use('/api/cohosts', cohostsRoutes);
+app.use('/api/survey', surveyRoutes);
 // Bundled royalty-free backing tracks — public + immutable, served for the slideshow track preview.
 app.use('/api/music', express.static(MUSIC_DIR, { immutable: true, maxAge: '7d' }));
 
@@ -259,6 +263,8 @@ init()
   .then(async () => {
     await ensureAdminFromEnv(); // bootstrap a site admin from ADMIN_EMAIL/ADMIN_PASSWORD (no-op if unset)
     startCleanup(); // periodic retention sweep (deletes expired events + their files)
+    startLifecycle(); // customer lifecycle emails (welcome/check-in/survey) — off unless LIFECYCLE_EMAILS=1
+    startOps();       // operator notifications (daily digest + instant alerts) — off unless OPS_NOTIFICATIONS=1
     const server = app.listen(PORT, '0.0.0.0', () => console.log(`Snapdini running on port ${PORT}`));
     // Multi-GB media uploads (e.g. a 90s 4K/8K clip) can take a long time on event Wi-Fi/mobile;
     // Node's default 5-min requestTimeout would abort them mid-transfer. Allow up to an hour.

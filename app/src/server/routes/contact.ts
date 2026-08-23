@@ -4,8 +4,9 @@ import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import * as email from '../email';
+import { eq } from 'drizzle-orm';
 import { db } from '../db';
-import { contactMessages } from '../schema';
+import { contactMessages, events } from '../schema';
 import { escapeHtml } from '../lib';
 import { UPLOADS_DIR } from '../paths';
 import { stripImageMetadata } from '../images';
@@ -14,7 +15,21 @@ const router = Router();
 
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || '';
 const isEmail = (s: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
-const KINDS = new Set(['contact', 'bug', 'feedback', 'suggestion']);
+const KINDS = new Set(['contact', 'bug', 'feedback', 'suggestion', 'refund']);
+
+// Human snapshot (Sydney time) frozen at request time so refund eligibility can't drift later.
+function refundSnapshot(ev: { name: string; joinCode: string; startsAt: number; amountPaidCents: number }, now: number): string {
+  const fmt = (ms: number) => new Intl.DateTimeFormat('en-AU', { timeZone: process.env.OPS_TZ || 'Australia/Brisbane', dateStyle: 'medium', timeStyle: 'short' }).format(new Date(ms));
+  const eligible = now < ev.startsAt;
+  return [
+    `REFUND / CANCELLATION REQUEST`,
+    `Event: "${ev.name}" (${ev.joinCode})`,
+    `Paid: A$${(ev.amountPaidCents / 100).toFixed(2)}`,
+    `Requested: ${fmt(now)}`,
+    `Event starts: ${fmt(ev.startsAt)}`,
+    eligible ? `✅ BEFORE event start — full-refund eligible` : `⚠️ AFTER event start — fault-based/case-by-case only`,
+  ].join('\n');
+}
 
 // Optional screenshot for bug reports / feedback → UPLOADS_DIR/feedback/<uuid>.jpg. Kept out of the
 // public tree by the /uploads/feedback guard in index.ts; admins view it via an admin route.
@@ -46,8 +61,19 @@ router.post('/', shotUpload.single('screenshot'), async (req: Request, res: Resp
     catch { try { fs.unlinkSync(req.file.path); } catch { /* */ } return res.status(400).json({ error: 'That screenshot could not be read' }); }
   }
 
-  const fullMessage = context ? `${message}\n\n— from: ${context}` : message;
-  const label = kind === 'contact' ? 'contact message' : `${kind} report`;
+  // Refund/cancellation requests: freeze an eligibility snapshot from the event's start time.
+  let refundHeader = '';
+  if (kind === 'refund') {
+    const eventCode = String(req.body?.eventCode || '').trim();
+    if (eventCode) {
+      const [ev] = await db.select({ name: events.name, joinCode: events.joinCode, startsAt: events.startsAt, amountPaidCents: events.amountPaidCents })
+        .from(events).where(eq(events.joinCode, eventCode));
+      if (ev) refundHeader = refundSnapshot(ev, Date.now()) + '\n\n';
+    }
+  }
+
+  const fullMessage = refundHeader + (context ? `${message}\n\n— from: ${context}` : message);
+  const label = kind === 'contact' ? 'contact message' : kind === 'refund' ? 'refund / cancellation request' : `${kind} report`;
 
   let emailed = false;
   if (email.enabled && SUPPORT_EMAIL) {
@@ -59,6 +85,7 @@ router.post('/', shotUpload.single('screenshot'), async (req: Request, res: Resp
         html: email.htmlEmail(`New ${label}`, `
           <p><strong>From:</strong> ${escapeHtml(name || 'Anonymous')}${from ? ` &lt;${escapeHtml(from)}&gt;` : ''}</p>
           ${context ? `<p><strong>Where:</strong> ${escapeHtml(context)}</p>` : ''}
+          ${refundHeader ? `<pre style="white-space:pre-wrap;background:#14110b;border-left:3px solid #f0b429;padding:10px 12px;border-radius:0 8px 8px 0;color:#e8e0cf;font-size:13px">${escapeHtml(refundHeader.trim())}</pre>` : ''}
           <p style="white-space:pre-wrap">${escapeHtml(message)}</p>
           ${imageFilename ? '<p><em>(screenshot attached — view it in Site admin)</em></p>' : ''}
         `),
