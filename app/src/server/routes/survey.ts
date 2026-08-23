@@ -40,7 +40,7 @@ router.get('/:token', async (req: Request, res: Response) => {
 
   res.json({
     eventName: row.name,
-    ownerName: firstName(row.ownerName) || firstName(row.ownerEmail?.split('@')[0]),
+    ownerName: firstName(row.ownerName),   // '' when no name → page greets "Hi there" (never the email prefix)
     hadVideo: row.videoSeconds > 0,
     revealMode: row.revealMode,
     largeEvent: row.guestCap >= 60,

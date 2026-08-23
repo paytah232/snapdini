@@ -23,8 +23,10 @@ const enabled = () => process.env.LIFECYCLE_EMAILS === '1';
 const BASE = () => (process.env.BASE_URL || 'https://snapdini.com').replace(/\/$/, '');
 const excludeList = () => (process.env.ANALYTICS_EXCLUDE_EMAILS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 
-const firstName = (name?: string | null, emailAddr?: string | null) =>
-  (name || '').trim().split(/\s+/)[0] || (emailAddr ? emailAddr.split('@')[0] : '') || '';
+// First name for greetings. Deliberately does NOT fall back to the email prefix — a missing name
+// yields '' so emails say "Hi there" rather than leaking something like "Hi gillian.kieran40".
+const firstName = (name?: string | null, _emailAddr?: string | null) =>
+  (name || '').trim().split(/\s+/)[0] || '';
 
 const newToken = () => randomBytes(24).toString('base64url');
 

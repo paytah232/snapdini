@@ -32,11 +32,12 @@
   async function register(e: SubmitEvent) {
     e.preventDefault();
     if (submitting) return;
+    if (!name.trim()) { msg = { text: 'Please enter your name so we can address you properly.', ok: false }; return; }
     submitting = true;
     msg = null;
     try {
       const data = await postJson<{ devLink?: string }>('/api/auth/register', {
-        name, displayName: name, email, password
+        name: name.trim(), displayName: name.trim(), email, password
       });
       const text = 'Account created — check your email to verify and finish signing in.';
       msg = data.devLink
@@ -77,7 +78,7 @@
 
     <form on:submit={register}>
       <label for="name">Your name</label>
-      <input id="name" type="text" autocomplete="name" placeholder="Alex Rivera" maxlength="80" bind:value={name} />
+      <input id="name" type="text" autocomplete="name" placeholder="e.g. Alex Rivera" maxlength="80" required bind:value={name} />
 
       <label for="email">Email</label>
       <input id="email" type="email" autocomplete="email" placeholder="you@example.com" required bind:value={email} />

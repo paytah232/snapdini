@@ -41,6 +41,7 @@ router.post('/register', async (req: Request, res: Response) => {
   const password    = passwordRaw || '';
   const displayName = (displayNameRaw || '').trim().slice(0, 80) || null;
 
+  if (!displayName)           return res.status(400).json({ error: 'Please enter your name' });
   if (!validEmail(emailAddr)) return res.status(400).json({ error: 'Enter a valid email address' });
   if (password.length < 8)    return res.status(400).json({ error: 'Password must be at least 8 characters' });
 
