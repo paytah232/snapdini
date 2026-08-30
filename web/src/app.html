@@ -6,6 +6,10 @@
          (see src/hooks.server.ts). No ID configured ⇒ nothing loads, zero third-party tracking. -->
     %snapdini.analytics%
     <link rel="icon" href="/icon.svg" />
+    <!-- Crawlers, feed readers and some clients request /favicon.ico unconditionally,
+         regardless of the SVG above — serving it stops a steady trickle of 404s. -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="alternate icon" href="/favicon.ico" sizes="32x32" />
     <link rel="apple-touch-icon" href="/icon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <meta name="theme-color" content="#0f0f0f" />

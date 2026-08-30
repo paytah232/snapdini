@@ -105,6 +105,12 @@ services:
       retries: 5
 
   nginx:
+    # Each proxied request costs 2 fds (client + upstream). The image ships a 1024 soft
+    # limit against a 524288 hard limit, which caps real concurrency far below the box.
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     image: nginx:alpine
     restart: unless-stopped
     ports:

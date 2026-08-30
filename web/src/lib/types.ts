@@ -64,6 +64,8 @@ export interface AppConfig {
   videoMaxSeconds: number;
   emailEnabled: boolean;
   supportEmail: string | null;
+  /** Cloudflare Turnstile public site key; null = bot check disabled. */
+  turnstileSiteKey: string | null;
   options: AppOptions;
   billing: BillingConfig;
 }

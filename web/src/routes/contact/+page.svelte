@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { getConfig, postJson } from '$lib/api';
   import { showToast, showSuccess } from '$lib/toast';
+  import Turnstile from '$lib/components/Turnstile.svelte';
   import Logo from '$lib/components/Logo.svelte';
 
   let name = '';
@@ -9,6 +10,8 @@
   let message = '';
   // Honeypot — hidden from real users, filled only by naive bots. Verified server-side.
   let website = '';
+  let turnstileToken = '';
+  let turnstile: Turnstile;
   let sending = false;
   let sent = false;
   let supportEmail: string | null = null;
@@ -23,13 +26,14 @@
     if (!message.trim()) { showToast('Please enter a message', true); return; }
     sending = true;
     try {
-      await postJson('/api/contact', { name, email, message, website });
+      await postJson('/api/contact', { name, email, message, website, 'cf-turnstile-response': turnstileToken });
       sent = true;
       showSuccess('Thanks — we’ll be in touch!');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not send — try again', true);
     } finally {
       sending = false;
+      turnstile?.reset();   // Turnstile tokens are single-use
     }
   }
 </script>
@@ -63,6 +67,8 @@
 
         <label for="c-msg">Message</label>
         <textarea id="c-msg" rows="5" maxlength="5000" bind:value={message} placeholder="How can we help?"></textarea>
+
+      <Turnstile bind:token={turnstileToken} bind:this={turnstile} action="contact" />
 
         <button class="btn primary" type="submit" disabled={sending}>{sending ? 'Sending…' : 'Send message'}</button>
       </form>

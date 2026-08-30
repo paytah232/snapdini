@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { getConfig, getMe, postJson } from '$lib/api';
+  import Turnstile from '$lib/components/Turnstile.svelte';
   import Logo from '$lib/components/Logo.svelte';
 
   // Post-login destination — only same-origin relative paths (no open-redirect); default dashboard.
@@ -10,6 +11,8 @@
 
   let email = '';
   let password = '';
+  let turnstileToken = '';
+  let turnstile: Turnstile;
   let submitting = false;
 
   let googleEnabled = false;
@@ -39,7 +42,7 @@
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
+        body: JSON.stringify({ email, password, 'cf-turnstile-response': turnstileToken })
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -56,6 +59,7 @@
       msg = { text: err instanceof Error ? err.message : 'Sign-in failed', ok: false };
     } finally {
       submitting = false;
+      turnstile?.reset();   // Turnstile tokens are single-use
     }
   }
 
@@ -87,6 +91,8 @@
 
       <label for="password">Password</label>
       <input id="password" type="password" autocomplete="current-password" placeholder="Your password" required bind:value={password} />
+
+      <Turnstile bind:token={turnstileToken} bind:this={turnstile} action="login" />
 
       <button class="btn" type="submit" disabled={submitting}>
         {submitting ? 'Signing in…' : 'Sign in'}

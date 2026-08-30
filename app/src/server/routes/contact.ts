@@ -46,7 +46,7 @@ const shotUpload = multer({
 // POST /api/contact — public contact / feedback / bug-report form. ALWAYS stored in the DB (a durable
 // mailbox) so nothing is lost if email is unconfigured or the send fails; forwarded to SUPPORT_EMAIL
 // when email is configured. Accepts JSON (contact page) or multipart with an optional 'screenshot'.
-router.post('/', shotUpload.single('screenshot'), requireTurnstile(), async (req: Request, res: Response) => {
+router.post('/', shotUpload.single('screenshot'), requireTurnstile('contact'), async (req: Request, res: Response) => {
   const name = String(req.body?.name || '').trim().slice(0, 80);
   const from = String(req.body?.email || '').trim().slice(0, 200);
   const message = String(req.body?.message || '').trim().slice(0, 5000);

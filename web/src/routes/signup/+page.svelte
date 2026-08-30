@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { getConfig, getMe, postJson } from '$lib/api';
+  import Turnstile from '$lib/components/Turnstile.svelte';
   import { fireLeadConversion } from '$lib/conversions';
   import Logo from '$lib/components/Logo.svelte';
 
@@ -12,6 +13,8 @@
   let name = '';
   let email = '';
   let password = '';
+  let turnstileToken = '';
+  let turnstile: Turnstile;
   let submitting = false;
 
   let googleEnabled = false;
@@ -37,7 +40,7 @@
     msg = null;
     try {
       const data = await postJson<{ devLink?: string }>('/api/auth/register', {
-        name: name.trim(), displayName: name.trim(), email, password
+        name: name.trim(), displayName: name.trim(), email, password, 'cf-turnstile-response': turnstileToken
       });
       const text = 'Account created — check your email to verify and finish signing in.';
       msg = data.devLink
@@ -50,6 +53,7 @@
       msg = { text: err instanceof Error ? err.message : 'Sign-up failed', ok: false };
     } finally {
       submitting = false;
+      turnstile?.reset();   // Turnstile tokens are single-use
     }
   }
 
@@ -85,6 +89,8 @@
 
       <label for="password">Password</label>
       <input id="password" type="password" autocomplete="new-password" placeholder="At least 8 characters" required bind:value={password} />
+
+      <Turnstile bind:token={turnstileToken} bind:this={turnstile} action="register" />
 
       <button class="btn" type="submit" disabled={submitting}>
         {submitting ? 'Creating…' : 'Create account'}

@@ -114,13 +114,15 @@ const contactLimiter = rateLimit({
 });
 // Turnstile on the public write endpoints. POST only: GETs (e.g. /api/auth/me on every page load)
 // carry no widget token and must not be challenged.
-const turnstilePost = requireTurnstile();
-const turnstileOnPost = (req: Request, res: Response, next: NextFunction) =>
-  (req.method === 'POST' ? turnstilePost(req, res, next) : next());
+// `action` is bound per route: a token minted for the contact form must not be replayable
+// against login. Matches the data-action set on each widget.
+const onPost = (mw: ReturnType<typeof requireTurnstile>) =>
+  (req: Request, res: Response, next: NextFunction) =>
+    (req.method === 'POST' ? mw(req, res, next) : next());
 
 app.use('/api/contact', contactLimiter);
-app.use('/api/auth/register', turnstileOnPost);
-app.use('/api/auth/login', turnstileOnPost);
+app.use('/api/auth/register', onPost(requireTurnstile('register')));
+app.use('/api/auth/login', onPost(requireTurnstile('login')));
 app.use('/api/participants/email-my-photos', emailLimiter);
 app.use('/api/billing/checkout', emailLimiter);
 app.use('/api/billing/upgrade', emailLimiter);
