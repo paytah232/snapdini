@@ -17,6 +17,9 @@
 set -euo pipefail
 
 VERSION="${1:-latest}"
+# Git tags are v1.1.1 but image tags are 1.1.1, and people naturally paste the git tag.
+# Normalise once here so IMAGE_TAG is always the image form.
+VERSION="${VERSION#v}"
 # Deliberately operates on the CURRENT directory, not the script's own location: people copy
 # this script around, and guessing a path relative to $0 silently targets the wrong deployment.
 COMPOSE="docker compose"
@@ -27,6 +30,19 @@ warn(){ printf '  \033[33m!\033[0m %s\n' "$1"; }
 die(){ printf '  \033[31m✗\033[0m %s\n' "$1"; exit 1; }
 
 [ -f .env ] || die ".env not found — run this from your deployment directory."
+
+# Compose identifies a stack by PROJECT NAME, not by directory. If containers for this project are
+# already running but were started from somewhere else, `up -d` here would RECREATE them using THIS
+# directory's compose + .env — silently rebinding ports and swapping config. That is a live outage,
+# and it is easy to trigger from a copied or test deployment.
+proj=$(grep -oE '^name:[[:space:]]*[A-Za-z0-9_-]+' docker-compose.yml 2>/dev/null | awk '{print $2}' || true)
+proj="${proj:-$(basename "$PWD")}"
+running_dir=$(docker ps --filter "label=com.docker.compose.project=${proj}"   --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null | head -1 || true)
+if [ -n "$running_dir" ] && [ "$running_dir" != "$PWD" ]; then
+  die "project '${proj}' is already running from ${running_dir}.
+      Upgrading from here would recreate those containers with THIS directory's config.
+      Run the upgrade from ${running_dir}, or give this deployment its own 'name:' in docker-compose.yml."
+fi
 echo "▸ Snapdini upgrade → ${VERSION}"
 
 # ── 1. env keys the new release expects but your .env lacks ───────────────────
@@ -56,13 +72,41 @@ if [ -n "$notpassed" ]; then
 else ok "every .env setting is referenced by docker-compose.yml"; fi
 
 # ── 3. have your compose / nginx drifted from the release? ────────────────────
+# Compare against the files SHIPPED with the target release. Fetched from the repo at that tag —
+# there is no local copy to compare with, which is the whole reason this trap goes unnoticed.
+REF_BASE="${SNAPDINI_REF_BASE:-https://raw.githubusercontent.com/paytah232/snapdini}"
+ref_tag="$VERSION"; case "$ref_tag" in latest) ref_tag="main";; v*) ;; *) ref_tag="v${ref_tag}";; esac
+drift=0; fetched=0
 for f in docker-compose.yml nginx/default.conf; do
   [ -f "$f" ] || continue
-  ref=".upgrade-ref/${f}"
-  if [ -f "$ref" ] && ! diff -q "$ref" "$f" >/dev/null 2>&1; then
-    warn "$f differs from the shipped version — review: diff $ref $f"
+  tmp=$(mktemp)
+  if curl -fsSL --max-time 20 "${REF_BASE}/${ref_tag}/app/${f}" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    fetched=1
+    if ! diff -q "$tmp" "$f" >/dev/null 2>&1; then
+      drift=1
+      warn "$f differs from the ${ref_tag} release — review before upgrading:"
+      # diff exits 1 when files differ, which with pipefail would abort the run — the very case
+      # this check exists to report.
+      { diff "$tmp" "$f" || true; } | grep -E '^[<>]' | head -12 | sed 's/^/        /' || true
+      cp "$tmp" "${f}.shipped-${ref_tag}"
+      echo "        (full shipped copy saved as ${f}.shipped-${ref_tag})"
+    fi
   fi
+  rm -f "$tmp"
 done
+if [ "$fetched" = 0 ]; then warn "could not fetch the ${ref_tag} reference files — skipping drift check (offline?)"
+elif [ "$drift" = 0 ]; then ok "docker-compose.yml and nginx/default.conf match the release"; fi
+
+# ── 4. confirm the image exists before mutating anything ─────────────────────
+# A typo'd version must not leave .env pointing at a tag that does not exist — validate first,
+# mutate second.
+if [ "$VERSION" != "latest" ]; then
+  PREFIX=$(grep -oE '^IMAGE_PREFIX=.*' .env | cut -d= -f2 || true); PREFIX="${PREFIX:-ghcr.io/paytah232/snapdini}"
+  if command -v docker >/dev/null && ! docker manifest inspect "${PREFIX}-app:${VERSION}" >/dev/null 2>&1; then
+    die "no image ${PREFIX}-app:${VERSION} — check the version (image tags have no leading 'v')."
+  fi
+  ok "image ${PREFIX}-app:${VERSION} exists"
+fi
 
 # ── 4. back up, then upgrade ──────────────────────────────────────────────────
 cp -a .env ".env.bak-${TS}"; ok "backed up .env → .env.bak-${TS}"
@@ -79,7 +123,7 @@ echo "▸ pulling"; $COMPOSE pull
 echo "▸ starting (DB migrations run automatically on boot)"; $COMPOSE up -d
 
 # ── 5. verify ─────────────────────────────────────────────────────────────────
-PORT=$(grep -oE '^HTTP_PORT=.*' .env | cut -d= -f2); PORT="${PORT:-8080}"
+PORT=$(grep -oE '^HTTP_PORT=.*' .env | cut -d= -f2 || true); PORT="${PORT:-8080}"
 echo "▸ verifying on :${PORT}"
 for i in $(seq 1 30); do
   got=$(curl -fsS --max-time 5 "http://localhost:${PORT}/api/config" 2>/dev/null \

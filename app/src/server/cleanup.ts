@@ -114,7 +114,10 @@ export async function sweep(): Promise<number> {
         try { if (fs.statSync(f).mtimeMs < cutoff) { fs.unlinkSync(f); reclaimed++; } } catch { /* still held */ }
       }
       // A purged event's folder is left behind once its orphans are gone — drop it if now empty.
-      if (dir !== UPLOADS_DIR) {
+      // ONLY event folders (uuid-named): `.incoming`, `themes` and any other structural directory
+      // must survive. They are recreated on demand, so deleting them is not fatal, but it is churn
+      // and it makes the uploads tree look alarming to anyone inspecting it.
+      if (dir !== UPLOADS_DIR && /^[0-9a-f-]{36}$/i.test(path.basename(dir))) {
         try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* not empty / in use */ }
       }
     }
