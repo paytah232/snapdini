@@ -385,6 +385,35 @@
     }
   }
 
+  // ── Move to a new date ───────────────────────────────────────────────────
+  // Sits beside the refund option deliberately. An organizer whose event lapsed unused goes looking
+  // for "cancel/refund", not for a date field buried in Settings — and rescheduling keeps the sale,
+  // so it should be the first thing offered.
+  let showResched = false;
+  let rDate = '';
+  let rTime = '';
+  let reschedBusy = false;
+  $: canOfferReschedule = !!ev && ev.canReschedule === true && Date.now() >= ev.startsAt;
+
+  async function doReschedule() {
+    if (reschedBusy || !ev) return;
+    if (!rDate) { showToast('Pick a new date first', true); return; }
+    reschedBusy = true;
+    try {
+      const startsAt = new Date(`${rDate}T${rTime || '00:00'}`).getTime();
+      await api(`/api/events/${ev.joinCode}/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'x-organizer-code': orgCode },
+        body: JSON.stringify({ startsAt, startDate: rDate, startTime: rTime || '00:00' }),
+      });
+      showSuccess('Event moved — your guests can join from the new date.');
+      showResched = false;
+      await refresh();
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Could not move the event', true);
+    } finally { reschedBusy = false; }
+  }
+
   // ── Cancel / request a refund ────────────────────────────────────────────
   // Opens a support request (kind='refund'); we never move money automatically. The server freezes
   // an eligibility snapshot (requested-before-start ⇒ full refund) from the event's start time.
@@ -759,6 +788,33 @@
         <button class="btn ghost sm" on:click={doLock} disabled={actionBusy}>{ev.isLocked ? 'Unlock' : 'Lock'}</button>
       </div>
       <div class="divider"></div>
+
+      {#if canOfferReschedule}
+        <!-- Offered BEFORE the refund: the event is still usable, so moving it beats cancelling. -->
+        <div class="toggle-row">
+          <div>
+            <div class="t-label">Move to a new date</div>
+            <div class="t-sub">
+              {ev.isExpired ? 'This event ended without any guests joining' : 'No guests have joined yet'} — pick a new date and reuse everything you paid for{#if ev.rescheduleUntil}, up to {new Date(ev.rescheduleUntil).toLocaleDateString()}{/if}.
+            </div>
+          </div>
+          {#if !showResched}<button class="btn sm" on:click={() => { showResched = true; }}>Reschedule</button>{/if}
+        </div>
+        {#if showResched}
+          <div class="refund-box">
+            <p class="refund-hint">Your event length, guest cap and any extras carry over unchanged.</p>
+            <div class="row2">
+              <div class="field"><label for="r-date">New start date</label><input id="r-date" type="date" bind:value={rDate} /></div>
+              <div class="field"><label for="r-time">New start time</label><input id="r-time" type="time" bind:value={rTime} /></div>
+            </div>
+            <div class="refund-actions">
+              <button class="btn ghost sm" on:click={() => (showResched = false)} disabled={reschedBusy}>Never mind</button>
+              <button class="btn sm" on:click={doReschedule} disabled={reschedBusy}>{reschedBusy ? 'Moving…' : 'Move event'}</button>
+            </div>
+          </div>
+        {/if}
+        <div class="divider"></div>
+      {/if}
 
       {#if ev.amountPaidCents > 0}
         <!-- Paid event: offer a refund request (money to return), plus a separate hard delete. -->
