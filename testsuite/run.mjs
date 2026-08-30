@@ -252,11 +252,16 @@ async function main() {
   ok('event slug set via settings', dbq(`SELECT slug FROM events WHERE id='${eSet.id}'`) === 'my-event-url');
   await api('PUT', `/api/events/${eSet.joinCode}/settings`, { headers: org(eSet.organizerCode), body: { slug: '' } });
   ok('event slug cleared via settings', dbq(`SELECT COALESCE(slug,'∅') FROM events WHERE id='${eSet.id}'`) === '∅');
-  // Rescheduling: locked once started, allowed while upcoming.
-  const startedEv = await createEvent({ startsAt: past, durationHours: 2 });
+  // Rescheduling: the gate is USAGE, not time (changed 2026-08-30 — an event nobody joined can be
+  // moved even after it has ended). A started event with a guest is locked; see the dedicated
+  // 'Reschedule an unused event' group below for the full matrix.
+  const startedEv = await createEvent({ startsAt: past, durationHours: 6 });   // still live, so a guest can join
+  const startedTok = (await join(startedEv.joinCode, 'Locker')).json?.sessionToken;
+  ok('guest joined, so the event is now in use', !!startedTok);
   const origStart = dbq(`SELECT starts_at FROM events WHERE id='${startedEv.id}'`);
-  await api('PUT', `/api/events/${startedEv.joinCode}/settings`, { headers: org(startedEv.organizerCode), body: { startsAt: Date.now() + 5 * HOUR } });
-  ok('started event cannot be rescheduled', dbq(`SELECT starts_at FROM events WHERE id='${startedEv.id}'`) === origStart);
+  const rLocked = await api('PUT', `/api/events/${startedEv.joinCode}/settings`, { headers: org(startedEv.organizerCode), body: { startsAt: Date.now() + 5 * HOUR } });
+  ok('started event WITH GUESTS cannot be rescheduled', rLocked.status === 409, `status ${rLocked.status}`);
+  ok('locked event start unchanged', dbq(`SELECT starts_at FROM events WHERE id='${startedEv.id}'`) === origStart);
   const upcomingEv = await createEvent({ startsAt: Date.now() + 24 * HOUR, durationHours: 2 });
   const newStart = Date.now() + 48 * HOUR;
   await api('PUT', `/api/events/${upcomingEv.joinCode}/settings`, { headers: org(upcomingEv.organizerCode), body: { startsAt: newStart } });
@@ -546,6 +551,85 @@ async function main() {
     ok('purge sweep skipped — no admin creds on this env', true);
   }
   cookie = ownerCookie;
+
+  group('Reschedule an unused event (usage-gated, 6-month ceiling)');
+  {
+    const DAY = 86_400_000;
+    // A) An event that has ALREADY STARTED but nobody used can still be moved. This is the whole
+    //    point: the organizer bought, never got the QR in front of anyone, and the window lapsed.
+    const past = await createEvent({ startsAt: Date.now() - 3 * HOUR, durationHours: 1 });
+    const future = Date.now() + 3 * DAY;
+    const rA = await api('PUT', `/api/events/${past.joinCode}/settings`, { headers: org(past.organizerCode), body: { startsAt: future } });
+    ok('unused + already-started CAN be rescheduled', rA.status === 200, `status ${rA.status}`);
+    const movedTo = Number(dbq(`SELECT starts_at FROM events WHERE id='${past.id}'`));
+    ok('new start persisted', Math.abs(movedTo - future) < 2000, String(movedTo));
+
+    // Duration must be preserved — rescheduling is not a free way to lengthen a paid event.
+    const span = Number(dbq(`SELECT (expires_at - starts_at) FROM events WHERE id='${past.id}'`));
+    ok('duration preserved across a reschedule', span === HOUR, `${span}ms`);
+
+    // original_starts_at must NOT move, or repeated hops walk the event forward forever.
+    const anchorStart = Number(dbq(`SELECT original_starts_at FROM events WHERE id='${past.id}'`));
+    ok('original_starts_at stays the ORIGINAL start', anchorStart < Date.now(), String(anchorStart));
+
+    // B) Beyond ~6 months from the ORIGINAL start is refused.
+    const tooFar = anchorStart + 200 * DAY;
+    const rB = await api('PUT', `/api/events/${past.joinCode}/settings`, { headers: org(past.organizerCode), body: { startsAt: tooFar } });
+    ok('beyond the 6-month ceiling is refused', rB.status === 400, `status ${rB.status}`);
+    ok('refused move did not persist', Math.abs(Number(dbq(`SELECT starts_at FROM events WHERE id='${past.id}'`)) - future) < 2000);
+
+    // C) A start in the past is refused.
+    const rC = await api('PUT', `/api/events/${past.joinCode}/settings`, { headers: org(past.organizerCode), body: { startsAt: Date.now() - DAY } });
+    ok('a past start is refused', rC.status === 400, `status ${rC.status}`);
+
+    // D) Once a guest has joined, the start LOCKS — a live event must never shift under its guests.
+    const used = await createEvent({ startsAt: Date.now() - 2 * HOUR, durationHours: 6 });
+    const j = await join(used.joinCode, 'Guest A');
+    ok('guest joined the used event', j.status === 200, `status ${j.status}`);
+    const beforeLock = Number(dbq(`SELECT starts_at FROM events WHERE id='${used.id}'`));
+    const rD = await api('PUT', `/api/events/${used.joinCode}/settings`, { headers: org(used.organizerCode), body: { startsAt: Date.now() + 5 * DAY } });
+    ok('started + used CANNOT be rescheduled', rD.status === 409, `status ${rD.status}`);
+    ok('locked event start unchanged', Number(dbq(`SELECT starts_at FROM events WHERE id='${used.id}'`)) === beforeLock);
+
+    // E) A used but NOT-yet-started event can still be moved (guests joined early; nothing has run).
+    const early = await createEvent({ startsAt: Date.now() + 2 * DAY, durationHours: 4 });
+    await join(early.joinCode, 'Early Bird');
+    const rE = await api('PUT', `/api/events/${early.joinCode}/settings`, { headers: org(early.organizerCode), body: { startsAt: Date.now() + 4 * DAY } });
+    ok('upcoming event still reschedulable even with a guest', rE.status === 200, `status ${rE.status}`);
+
+    // F) Saving OTHER settings on a locked event must not be blocked by the reschedule guard —
+    //    the client re-sends the identical startsAt on every save (60s tolerance).
+    const rF = await api('PUT', `/api/events/${used.joinCode}/settings`, { headers: org(used.organizerCode), body: { name: 'Still Editable', startsAt: beforeLock } });
+    ok('unrelated settings still savable on a locked event', rF.status === 200, `status ${rF.status}`);
+    ok('name change persisted on locked event', dbq(`SELECT name FROM events WHERE id='${used.id}'`) === 'Still Editable');
+
+    // G) canReschedule / rescheduleUntil are exposed so the UI can show or hide the control.
+    const pub = await api('GET', `/api/events/${used.joinCode}`);
+    ok('canReschedule=false on a locked event', pub.json?.canReschedule === false, String(pub.json?.canReschedule));
+    const pub2 = await api('GET', `/api/events/${past.joinCode}`);
+    ok('canReschedule=true on an unused event', pub2.json?.canReschedule === true, String(pub2.json?.canReschedule));
+    ok('rescheduleUntil ~6 months past the original start',
+       Math.abs(Number(pub2.json?.rescheduleUntil) - (anchorStart + 183 * DAY)) < 2000, String(pub2.json?.rescheduleUntil));
+  }
+
+  group('Contact form: honeypot + validation');
+  {
+    const before = Number(dbq(`SELECT count(*) FROM contact_messages WHERE message='honeypot probe'`));
+    const rH = await api('POST', '/api/contact', { body: { name: 'Bot', email: 'bot@example.com', message: 'honeypot probe', website: 'http://spam.example' } });
+    ok('honeypot submission is accepted silently (200, not 400)', rH.status === 200, `status ${rH.status}`);
+    const after = Number(dbq(`SELECT count(*) FROM contact_messages WHERE message='honeypot probe'`));
+    ok('honeypot submission is NOT stored', after === before, `${before} -> ${after}`);
+
+    const rOk = await api('POST', '/api/contact', { body: { name: 'Real', email: 'real@example.com', message: 'genuine probe' } });
+    ok('a genuine submission still works', rOk.status === 200, `status ${rOk.status}`);
+    ok('genuine submission stored', Number(dbq(`SELECT count(*) FROM contact_messages WHERE message='genuine probe'`)) === 1);
+    dbq(`DELETE FROM contact_messages WHERE message IN ('genuine probe','honeypot probe')`);
+
+    const rEmpty = await api('POST', '/api/contact', { body: { message: '' } });
+    ok('empty message rejected', rEmpty.status === 400, `status ${rEmpty.status}`);
+    const rBadEmail = await api('POST', '/api/contact', { body: { message: 'x', email: 'not-an-email' } });
+    ok('malformed email rejected', rBadEmail.status === 400, `status ${rBadEmail.status}`);
+  }
 
   // ── Summary ──
   console.log(`\n${'═'.repeat(48)}\n${fail === 0 ? '✅' : '❌'}  ${pass} passed, ${fail} failed`);

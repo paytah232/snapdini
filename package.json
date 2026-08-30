@@ -4,7 +4,7 @@
   "description": "Top-level test/dev runner for Snapdini (app = Express/TS backend, web = SvelteKit frontend).",
   "scripts": {
     "typecheck": "(cd app && npm run typecheck) && (cd web && npm run check)",
-    "test:unit": "cd web && npm run test",
+    "test:unit": "cd web && npm run test && cd ../app && npm run test:unit",
     "test:integration": "node testsuite/run.mjs",
     "test:e2e": "cd web && npm run test:e2e",
     "test:load": "node loadtest/run.mjs",

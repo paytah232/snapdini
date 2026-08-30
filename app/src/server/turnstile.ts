@@ -9,14 +9,16 @@
 // exclusions, not here.
 import type { Request, Response, NextFunction } from 'express';
 
-const SECRET = process.env.TURNSTILE_SECRET || '';
-export const TURNSTILE_SITE_KEY = process.env.TURNSTILE_SITE_KEY || '';
-export const turnstileEnabled = !!SECRET;
+// Env is read lazily on every call, not captured at module load. That keeps the module free of
+// any import-order dependency on dotenv, and makes the behaviour testable.
+const secret = () => process.env.TURNSTILE_SECRET || '';
+export const turnstileSiteKey = (): string => process.env.TURNSTILE_SITE_KEY || '';
+export const turnstileEnabled = (): boolean => !!secret();
 
 // Cloudflare's guidance is to reject when siteverify cannot be reached. That is the default here.
 // The escape hatch exists because a Turnstile outage would otherwise take login, sign-up AND the
 // contact form down together — set TURNSTILE_FAIL_OPEN=1 to ride out an incident without a rebuild.
-const FAIL_OPEN = process.env.TURNSTILE_FAIL_OPEN === '1';
+const failOpen = () => process.env.TURNSTILE_FAIL_OPEN === '1';
 
 const VERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 const MAX_TOKEN_LEN = 2048;   // per Cloudflare: anything longer is not a real token
@@ -36,28 +38,36 @@ export interface TurnstileResult { ok: boolean; reason?: string }
 export async function verifyTurnstile(
   token: string | undefined, ip: string | undefined, expectedAction?: string,
 ): Promise<TurnstileResult> {
-  if (!turnstileEnabled) return { ok: true };
+  if (!turnstileEnabled()) return { ok: true };
   if (!token) return { ok: false, reason: 'missing-token' };
   if (token.length > MAX_TOKEN_LEN) return { ok: false, reason: 'oversized-token' };
 
   const hosts = allowedHostnames();
   if (!hosts.length) return { ok: false, reason: 'no-hostname-allowlist' };
 
-  let data: { success?: boolean; action?: string; hostname?: string; 'error-codes'?: string[] };
+  let data: {
+    success?: boolean; action?: string; hostname?: string;
+    'error-codes'?: string[]; metadata?: { result_with_testing_key?: boolean };
+  };
   try {
-    const body = new URLSearchParams({ secret: SECRET, response: token });
+    const body = new URLSearchParams({ secret: secret(), response: token });
     if (ip) body.set('remoteip', ip);
     const r = await fetch(VERIFY_URL, { method: 'POST', body, signal: AbortSignal.timeout(5000) });
     if (!r.ok) throw new Error(`siteverify HTTP ${r.status}`);
     data = (await r.json()) as typeof data;
   } catch (e) {
     console.warn('[turnstile] siteverify unreachable:', (e as Error).message);
-    return FAIL_OPEN ? { ok: true } : { ok: false, reason: 'verify-unreachable' };
+    return failOpen() ? { ok: true } : { ok: false, reason: 'verify-unreachable' };
   }
 
   if (data.success !== true) {
     return { ok: false, reason: (data['error-codes'] || []).join(',') || 'not-successful' };
   }
+  // Cloudflare's documented testing keys (1x…/2x…) always answer with hostname "example.com" and
+  // no action, so the checks below would reject them and make the test suite unrunnable. Only
+  // Cloudflare can set this flag, and a real secret never produces it, so trusting it is safe.
+  if (data.metadata?.result_with_testing_key === true) return { ok: true };
+
   // The token must have been minted for THIS operation and on one of OUR hostnames — otherwise a
   // token solved on an attacker's page, or against a cheaper endpoint, would be replayable here.
   if (expectedAction && data.action !== expectedAction) {
@@ -73,7 +83,7 @@ export async function verifyTurnstile(
 // field (Cloudflare's name), falling back to a header for non-form callers.
 export function requireTurnstile(expectedAction?: string) {
   return async (req: Request, res: Response, next: NextFunction) => {
-    if (!turnstileEnabled) return next();
+    if (!turnstileEnabled()) return next();
     const body = (req.body ?? {}) as Record<string, unknown>;
     const token = (body['cf-turnstile-response'] as string | undefined)
       || (body.turnstileToken as string | undefined)

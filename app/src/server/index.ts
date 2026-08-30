@@ -6,7 +6,7 @@ import fs from 'fs';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import { requireTurnstile, TURNSTILE_SITE_KEY, turnstileEnabled } from './turnstile';
+import { requireTurnstile, turnstileSiteKey, turnstileEnabled } from './turnstile';
 import { v4 as uuidv4 } from 'uuid';
 import { and, eq, or } from 'drizzle-orm';
 import { db, init } from './db';
@@ -108,8 +108,11 @@ app.use('/api', apiBackstop);
 // Contact form: a real person files one enquiry, not five an hour. Only worth having now that
 // req.ip resolves to the actual visitor — before the Cloudflare/Traefik real-IP fix this bucketed
 // every submission on earth together and was therefore useless.
+// Limit is env-tunable so the integration suite (which fires many submissions from one IP) can
+// raise it; production leaves it at the default 5.
 const contactLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: 'draft-7', legacyHeaders: false,
+  windowMs: 60 * 60 * 1000, limit: Number(process.env.CONTACT_RATE_LIMIT || 5),
+  standardHeaders: 'draft-7', legacyHeaders: false,
   message: { error: 'Too many messages — please wait a little while before sending another.' },
 });
 // Turnstile on the public write endpoints. POST only: GETs (e.g. /api/auth/me on every page load)
@@ -165,7 +168,7 @@ app.get('/api/config', (_req, res) => {
     emailEnabled: email.enabled,
     supportEmail: process.env.SUPPORT_EMAIL || null,
     // Public site key so the frontend can render the Turnstile widget; null = feature off.
-    turnstileSiteKey: turnstileEnabled ? (TURNSTILE_SITE_KEY || null) : null,
+    turnstileSiteKey: turnstileEnabled() ? (turnstileSiteKey() || null) : null,
     options, // single source for UI dropdowns (durations, shots, reveal modes/delays)
     billing: publicBillingConfig(), // billingEnabled=false when self-hosted → no Pro UI
   });

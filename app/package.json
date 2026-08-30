@@ -7,7 +7,8 @@
   "scripts": {
     "start": "tsx src/server/index.ts",
     "dev": "tsx watch src/server/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:unit": "tsx --test src/server/__tests__/*.test.ts"
   },
   "dependencies": {
     "archiver": "^8.0.0",

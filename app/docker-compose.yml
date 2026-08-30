@@ -10,10 +10,22 @@
 # Put your TLS / reverse proxy in front of HTTP_PORT (default 8080). Upgrades = bump IMAGE_TAG, pull, up.
 name: snapdini
 
+# Log retention. The Docker default is an UNBOUNDED json-file, which on a disk already at 83%
+# is a real outage risk. These caps keep a deep history for tracing (app/nginx ~250MB each,
+# roughly weeks at current volume) while making it impossible to fill the disk.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+    tag: "{{.Name}}"
+
+
 services:
   app:
     image: ${IMAGE_PREFIX:-ghcr.io/paytah232/snapdini}-app:${IMAGE_TAG:-latest}
     restart: unless-stopped
+    logging: *default-logging
     volumes:
       - ./data:/data
       - ${UPLOADS_HOST:-./data/uploads}:${UPLOADS_DIR:-/data/uploads}
@@ -69,6 +81,7 @@ services:
   web:
     image: ${IMAGE_PREFIX:-ghcr.io/paytah232/snapdini}-web:${IMAGE_TAG:-latest}
     restart: unless-stopped
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       - PORT=3000
@@ -92,6 +105,7 @@ services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *default-logging
     environment:
       - POSTGRES_USER=snapdini
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-snapdini}
@@ -113,6 +127,7 @@ services:
         hard: 65535
     image: nginx:alpine
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "${HTTP_PORT:-8080}:80"
     volumes:
