@@ -527,6 +527,11 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     expiresAt:      ev.expiresAt,
     isUpcoming:     now < ev.startsAt,
     isExpired:      now > ev.expiresAt,
+    // Reschedule eligibility, same rule the PUT /settings guard enforces: an event nobody ever
+    // joined can be moved even after it has ended. The admin UI needs this to decide whether to
+    // enable the start date/time fields.
+    canReschedule:   now < ev.startsAt || (participantRows.length === 0 && Number(photoCount) === 0),
+    rescheduleUntil: (ev.originalStartsAt ?? ev.startsAt) + RESCHEDULE_WINDOW_MS,
     isLocked:       !!ev.isLocked,
     isRevealed:     isRevealed(ev),
     revealedAt:     ev.revealedAt,

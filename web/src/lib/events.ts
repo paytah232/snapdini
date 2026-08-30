@@ -40,6 +40,9 @@ export interface PublicEvent {
   maxPhotos: number; revealMode: string; revealDelayHours: number; timezone: string | null;
   aspectRatios: string[]; videoSeconds: number; startsAt: number; expiresAt: number;
   isDemo: boolean; isUpcoming: boolean; isExpired: boolean; isLocked: boolean; isRevealed: boolean;
+  /** Server-side reschedule eligibility (usage-based, not time-based). Optional so an older API
+   *  simply falls back to the previous time check. */
+  canReschedule?: boolean; rescheduleUntil?: number;
   allowDownloads: boolean; noFlash: boolean; theme: EventTheme | null; participantCount: number; photoCount: number;
 }
 

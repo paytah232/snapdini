@@ -612,6 +612,14 @@ async function main() {
     ok('unrelated settings still savable on a locked event', rF.status === 200, `status ${rF.status}`);
     ok('name change persisted on locked event', dbq(`SELECT name FROM events WHERE id='${used.id}'`) === 'Still Editable');
 
+    // G0) The ADMIN route must expose it too — that is the endpoint the settings screen reads, and
+    //     the date fields stay disabled without it (the UI falls back to the old time-based rule).
+    const admU = await api('GET', `/api/events/${used.joinCode}/admin`, { headers: org(used.organizerCode) });
+    ok('admin route exposes canReschedule=false when used', admU.json?.canReschedule === false, String(admU.json?.canReschedule));
+    const admP = await api('GET', `/api/events/${past.joinCode}/admin`, { headers: org(past.organizerCode) });
+    ok('admin route exposes canReschedule=true when unused', admP.json?.canReschedule === true, String(admP.json?.canReschedule));
+    ok('admin route exposes rescheduleUntil', Number(admP.json?.rescheduleUntil) > Date.now(), String(admP.json?.rescheduleUntil));
+
     // G) canReschedule / rescheduleUntil are exposed so the UI can show or hide the control.
     const pub = await api('GET', `/api/events/${used.joinCode}`);
     ok('canReschedule=false on a locked event', pub.json?.canReschedule === false, String(pub.json?.canReschedule));

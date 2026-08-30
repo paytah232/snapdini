@@ -64,7 +64,11 @@
   let savingSettings = false;
   let baselineSig = '';     // settings signature at load — compared against to detect unsaved edits
   // Once an event has started, its start time is locked (can't reschedule).
-  $: eventStarted = !!ev && Date.now() >= ev.startsAt;
+  // Reschedule gate. The server's rule is USAGE-based, not time-based: an event nobody ever joined
+  // can still be moved, even after it has ended — the common case being an organizer who bought,
+  // never got the QR in front of guests, and watched the window lapse. Trust the server's
+  // `canReschedule` and only fall back to the old time check on an older API that omits it.
+  $: rescheduleLocked = !!ev && (ev.canReschedule === undefined ? Date.now() >= ev.startsAt : !ev.canReschedule);
   // Live-clean the custom URL as it's typed (server slugifies + validates on save).
   function onEventSlugInput() { sSlug = sSlug.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '').slice(0, 50); }
   // Unsaved settings edits. The Upgrade panel quotes off the SAVED event (e.g. its frame sizes), so
@@ -812,10 +816,16 @@
         <textarea id="s-blurb" maxlength="280" rows="2" bind:value={sBlurb}></textarea>
       </div>
       <div class="field-row">
-        <div class="field"><label for="s-date">Start date</label><input id="s-date" type="date" bind:value={sDate} disabled={eventStarted} /></div>
-        <div class="field"><label for="s-time">Start time</label><input id="s-time" type="time" bind:value={sTime} disabled={eventStarted} /></div>
+        <div class="field"><label for="s-date">Start date</label><input id="s-date" type="date" bind:value={sDate} disabled={rescheduleLocked} /></div>
+        <div class="field"><label for="s-time">Start time</label><input id="s-time" type="time" bind:value={sTime} disabled={rescheduleLocked} /></div>
       </div>
-      {#if eventStarted}<p class="field-hint" style="margin:-4px 0 10px">This event has started, so its start time is locked.</p>{/if}
+      {#if rescheduleLocked}
+        <p class="field-hint" style="margin:-4px 0 10px">Guests have already joined, so the start time is locked.</p>
+      {:else if ev?.isExpired}
+        <p class="field-hint" style="margin:-4px 0 10px">
+          This event ended without any guests joining, so you can still move it to a new date{#if ev?.rescheduleUntil} — up to {new Date(ev.rescheduleUntil).toLocaleDateString()}{/if}. Your paid settings and event length carry over.
+        </p>
+      {/if}
       <div class="field">
         <label for="s-tz">Timezone <span class="muted">(type to search)</span></label>
         <input id="s-tz" list="tz-datalist" autocomplete="off" placeholder="e.g. Australia/Brisbane" bind:value={sTimezone} />
