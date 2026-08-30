@@ -17,6 +17,11 @@ services:
       - ./src:/app/src         # live-mounted for dev — restart container to pick up code changes
       - ./assets:/app/assets:ro # bundled assets (slideshow music) — read-only
       - ./data:/data           # local data (Postgres lives in the db service; keep this on fast disk)
+      # The server reads its version from package.json (src/server/index.ts). src/ is mounted
+      # but package.json was not, so dev reported whatever version was baked into the image
+      # at build time and drifted further behind on every release. Read-only mount keeps the
+      # reported version honest without a rebuild.
+      - ./package.json:/app/package.json:ro
       # Heavy media (event photos/videos + theme images) lives here. Point UPLOADS_HOST at a
       # ZFS pool mounted over NFS to offload storage; leave it for the local default.
       # PERMISSIONS: the app runs as root in-container, so the host/NFS dir must be writable by
