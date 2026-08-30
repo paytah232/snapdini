@@ -31,7 +31,16 @@ function dbq(sql) {
 
 // ── HTTP helper with a session cookie jar ──
 let cookie = '';
+// Turnstile guards register/login/contact. The dev stack runs Cloudflare's TESTING keys, which
+// accept any well-formed token, so send a dummy on JSON posts — that exercises the real middleware
+// end to end rather than routing around it.
+const TURNSTILE_DUMMY = 'XXXX.DUMMY.TOKEN.XXXX';
+
 async function api(method, p, { body, headers = {}, raw = false } = {}) {
+  if (method === 'POST' && body && typeof body === 'object' && !(body instanceof FormData)
+      && body['cf-turnstile-response'] === undefined) {
+    body = { ...body, 'cf-turnstile-response': TURNSTILE_DUMMY };
+  }
   const h = { ...headers };
   if (cookie) h.cookie = cookie;
   if (body && !(body instanceof FormData)) { h['content-type'] = 'application/json'; }

@@ -51,6 +51,15 @@ services:
       - MAILGUN_DOMAIN=${MAILGUN_DOMAIN:-}
       - MAILGUN_BASE=${MAILGUN_BASE:-}
       - SUPPORT_EMAIL=${SUPPORT_EMAIL:-}
+      # Bot check (Cloudflare Turnstile). Unset secret = feature entirely inert, so this is safe
+      # to carry before keys exist. These MUST be listed here: the compose files pass env
+      # explicitly rather than via env_file, so anything absent from this list never reaches the
+      # container no matter what .env says.
+      - TURNSTILE_SITE_KEY=${TURNSTILE_SITE_KEY:-}
+      - TURNSTILE_SECRET=${TURNSTILE_SECRET:-}
+      - TURNSTILE_ALLOWED_HOSTNAMES=${TURNSTILE_ALLOWED_HOSTNAMES:-}
+      - TURNSTILE_FAIL_OPEN=${TURNSTILE_FAIL_OPEN:-}
+      - CONTACT_RATE_LIMIT=${CONTACT_RATE_LIMIT:-}
       # Customer lifecycle emails (welcome/nudge/check-in/survey) — off unless set to 1. Needs email configured.
       - LIFECYCLE_EMAILS=${LIFECYCLE_EMAILS:-}
       # Operator notifications to SUPPORT_EMAIL (daily digest + instant alerts) — off unless set to 1.

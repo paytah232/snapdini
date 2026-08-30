@@ -52,6 +52,15 @@ services:
       - MAILGUN_BASE=${MAILGUN_BASE:-}
       # System address the contact form emails (e.g. support@snapdini.com).
       - SUPPORT_EMAIL=${SUPPORT_EMAIL:-}
+      # Bot check (Cloudflare Turnstile). Unset secret = feature entirely inert, so this is safe
+      # to carry before keys exist. These MUST be listed here: the compose files pass env
+      # explicitly rather than via env_file, so anything absent from this list never reaches the
+      # container no matter what .env says.
+      - TURNSTILE_SITE_KEY=${TURNSTILE_SITE_KEY:-}
+      - TURNSTILE_SECRET=${TURNSTILE_SECRET:-}
+      - TURNSTILE_ALLOWED_HOSTNAMES=${TURNSTILE_ALLOWED_HOSTNAMES:-}
+      - TURNSTILE_FAIL_OPEN=${TURNSTILE_FAIL_OPEN:-}
+      - CONTACT_RATE_LIMIT=${CONTACT_RATE_LIMIT:-}
       # Site admin bootstrap (both unset = no admin, no shipped default credential).
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
