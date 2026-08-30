@@ -65,8 +65,8 @@
   let baselineSig = '';     // settings signature at load — compared against to detect unsaved edits
   // Once an event has started, its start time is locked (can't reschedule).
   // Settings keeps the start fields editable only while the event is still upcoming. Once it has
-  // started, moving it is handled solely by the "Move to a new date" action further down, so there
-  // is one obvious path instead of two competing ones.
+  // started, moving it is handled solely by the "Move to a new date" action, so there is one
+  // obvious path instead of two competing ones.
   $: startFieldsLocked = !!ev && Date.now() >= ev.startsAt;
   // Live-clean the custom URL as it's typed (server slugifies + validates on save).
   function onEventSlugInput() { sSlug = sSlug.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '').slice(0, 50); }
@@ -794,14 +794,14 @@
           <div>
             <div class="t-label">Move to a new date</div>
             <div class="t-sub">
-              {ev.isExpired ? 'This event ended without any guests joining' : 'No guests have joined yet'} — pick a new date and reuse everything you paid for{#if ev.rescheduleUntil}, up to {new Date(ev.rescheduleUntil).toLocaleDateString()}{/if}.
+              No guests joined{#if ev.rescheduleUntil} — move it any time before {new Date(ev.rescheduleUntil).toLocaleDateString()}{/if}
             </div>
           </div>
           {#if !showResched}<button class="btn sm" on:click={() => { showResched = true; }}>Reschedule</button>{/if}
         </div>
         {#if showResched}
           <div class="refund-box">
-            <p class="refund-hint">Your event length, guest cap and any extras carry over unchanged.</p>
+            <p class="refund-hint">Everything you paid for carries over.</p>
             <div class="row2">
               <div class="field"><label for="r-date">New start date</label><input id="r-date" type="date" bind:value={rDate} /></div>
               <div class="field"><label for="r-time">New start time</label><input id="r-time" type="time" bind:value={rTime} /></div>
@@ -876,11 +876,7 @@
       </div>
       {#if startFieldsLocked}
         <p class="field-hint" style="margin:-4px 0 10px">
-          {#if ev?.canReschedule}
-            This event has already started, so the time can’t be edited here — use <b>Move to a new date</b> below.
-          {:else}
-            Guests have already joined, so the start time is locked.
-          {/if}
+          {ev?.canReschedule ? 'Already started — use “Move to a new date”.' : 'Locked — guests have joined.'}
         </p>
       {/if}
       <div class="field">
