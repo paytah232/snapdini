@@ -113,6 +113,18 @@ describe('enabled', () => {
     f.mock.restore();
   });
 
+  test('FAIL_OPEN also covers a blocked widget (no token at all)', async () => {
+    // An ad blocker or privacy DNS stops the widget loading, so the client has nothing to send.
+    // That visitor is not a bot and must not be locked out of sign-up/login/contact.
+    const t = await load({ ...base, TURNSTILE_FAIL_OPEN: '1' });
+    assert.deepEqual(await t.verifyTurnstile(undefined, '1.2.3.4', 'login'), { ok: true });
+  });
+
+  test('without FAIL_OPEN a missing token is still refused', async () => {
+    const t = await load(base);
+    assert.equal((await t.verifyTurnstile(undefined, '1.2.3.4', 'login')).ok, false);
+  });
+
   test('TURNSTILE_FAIL_OPEN=1 rides out a Cloudflare outage', async () => {
     const t = await load({ ...base, TURNSTILE_FAIL_OPEN: '1' });
     const f = mock.method(globalThis, 'fetch', async () => { throw new Error('network down'); });

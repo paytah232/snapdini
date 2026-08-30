@@ -39,7 +39,15 @@ export async function verifyTurnstile(
   token: string | undefined, ip: string | undefined, expectedAction?: string,
 ): Promise<TurnstileResult> {
   if (!turnstileEnabled()) return { ok: true };
-  if (!token) return { ok: false, reason: 'missing-token' };
+  if (!token) {
+    // No token means the widget never produced one — usually because the visitor's network blocked
+    // challenges.cloudflare.com (ad blockers, privacy DNS such as Pi-hole, some corporate
+    // firewalls), not because they are a bot. Hard-failing here silently locks those people out of
+    // sign-up, login AND the contact form with no way to self-diagnose. When FAIL_OPEN is set we
+    // let them through and rely on the honeypot and per-IP limits, which are unaffected.
+    if (failOpen()) { console.warn('[turnstile] no token — allowing (TURNSTILE_FAIL_OPEN)'); return { ok: true }; }
+    return { ok: false, reason: 'missing-token' };
+  }
   if (token.length > MAX_TOKEN_LEN) return { ok: false, reason: 'oversized-token' };
 
   const hosts = allowedHostnames();
