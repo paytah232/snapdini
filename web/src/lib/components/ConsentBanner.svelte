@@ -1,23 +1,31 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { page } from '$app/stores';
 
   // Shown only to EEA/UK visitors who haven't chosen yet, and only when an analytics/ads tag is
   // actually configured (window.__snapdiniConsent is injected by hooks.server.ts). Consent Mode v2
   // already defaults those regions to "denied", so this banner is what flips them to "granted".
   let show = false;
 
+  let mounted = false;
+  onMount(() => { mounted = true; });
+
+  const cfg = () => (window as unknown as { __snapdiniConsent?: { enabled?: boolean; eea?: boolean } })
+    .__snapdiniConsent;
+
+  // `?consent=1` force-opens the banner regardless of region / prior choice — it is the "change
+  // your consent" entry point linked from the footer and privacy policy.
+  //
+  // This MUST be reactive on $page, not a one-shot onMount read: the banner lives in the persistent
+  // layout, so a client-side navigation to /?consent=1 never remounts it. Reading the URL only on
+  // mount made the footer link silently do nothing unless the page was hard-loaded.
+  $: if (mounted && $page.url.searchParams.has('consent')) show = true;
+
   onMount(() => {
-    const cfg = (window as unknown as { __snapdiniConsent?: { enabled?: boolean; eea?: boolean } })
-      .__snapdiniConsent;
-    if (!cfg?.enabled) return; // no tag configured → nothing to consent to
-    // `?consent=1` force-opens the banner regardless of region / prior choice — used to preview it
-    // and as a "change your consent" entry point (linked from the privacy policy).
-    const forced = new URLSearchParams(location.search).has('consent');
-    if (forced) {
-      show = true;
-      return;
-    }
-    if (!cfg.eea) return; // outside the consent-required regions → don't ask
+    const c = cfg();
+    if (!c?.enabled) return;   // no tag configured → nothing to consent to
+    if ($page.url.searchParams.has('consent')) { show = true; return; }
+    if (!c.eea) return;        // outside the consent-required regions → don't ask
     try {
       if (localStorage.getItem('snapdini-consent')) return; // already decided
     } catch {

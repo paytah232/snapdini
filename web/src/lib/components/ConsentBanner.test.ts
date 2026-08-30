@@ -1,5 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
+import { readable, writable } from 'svelte/store';
+
+// The banner reads `$page.url` so it can react to a client-side navigation to /?consent=1.
+// Drive that store directly; `setup()` keeps it in step with the simulated URL.
+const pageUrl = writable(new URL('http://localhost/'));
+vi.mock('$app/stores', () => ({
+  page: { subscribe: (fn: (v: { url: URL; data: Record<string, unknown> }) => void) =>
+    pageUrl.subscribe((url) => fn({ url, data: {} })) },
+}));
+
+
 import { tick } from 'svelte';
 import ConsentBanner from './ConsentBanner.svelte';
 
@@ -8,6 +19,7 @@ type ConsentCfg = { enabled: boolean; eea: boolean };
 function setup(cfg: ConsentCfg | undefined, opts: { search?: string; stored?: string } = {}) {
   (window as unknown as { __snapdiniConsent?: ConsentCfg }).__snapdiniConsent = cfg;
   window.history.replaceState({}, '', opts.search ?? '/');
+  pageUrl.set(new URL(opts.search ?? '/', 'http://localhost'));
   if (opts.stored) localStorage.setItem('snapdini-consent', opts.stored);
 }
 
@@ -64,6 +76,21 @@ describe('ConsentBanner — when it shows', () => {
   it('force-shows anywhere via ?consent=1 (preview / change-your-mind), even after deciding', async () => {
     setup({ enabled: true, eea: false }, { search: '/?consent=1', stored: 'granted' });
     await mount();
+    expect(banner()).not.toBeNull();
+  });
+});
+
+describe('ConsentBanner — reopening via the footer link', () => {
+  it('opens when ?consent arrives via CLIENT-SIDE navigation (no remount)', async () => {
+    // The banner lives in the persistent layout, so clicking the footer's "Your Privacy Choices"
+    // link never remounts it. Reading the URL only in onMount made that link silently do nothing.
+    setup({ enabled: true, eea: false }, { stored: 'granted' });
+    await mount();
+    expect(banner()).toBeNull();                            // nothing showing yet
+
+    pageUrl.set(new URL('http://localhost/?consent=1'));    // the footer link fires
+    await tick();
+
     expect(banner()).not.toBeNull();
   });
 });

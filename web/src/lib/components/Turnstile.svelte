@@ -57,6 +57,10 @@
       widgetId = w.turnstile.render(el, {
         sitekey: siteKey,
         theme: 'auto',
+        // 'flexible' fills the container instead of the fixed 300px default, so the widget matches
+        // the form rather than overhanging it. Cloudflare still enforces a 300px minimum, hence the
+        // scale fallback in the styles below for very narrow screens.
+        size: 'flexible',
         ...(action ? { action } : {}),
         callback: (t: string) => { token = t; },
         'expired-callback': () => { token = ''; },
@@ -78,5 +82,12 @@
 <div bind:this={el} class="turnstile"></div>
 
 <style>
+  .turnstile { width: 100%; }
   .turnstile:not(:empty) { margin: .75rem 0; }
+  /* The widget has a hard 300px minimum. Below that (small phones, or a narrow card with padding)
+     scale it down from the left edge so it can never overhang the form. */
+  @media (max-width: 360px) {
+    .turnstile { transform: scale(.85); transform-origin: left top; height: 60px; }
+  }
+  :global(.turnstile iframe) { max-width: 100% !important; }
 </style>
