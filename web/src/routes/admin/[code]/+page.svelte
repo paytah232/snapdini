@@ -64,11 +64,10 @@
   let savingSettings = false;
   let baselineSig = '';     // settings signature at load — compared against to detect unsaved edits
   // Once an event has started, its start time is locked (can't reschedule).
-  // Reschedule gate. The server's rule is USAGE-based, not time-based: an event nobody ever joined
-  // can still be moved, even after it has ended — the common case being an organizer who bought,
-  // never got the QR in front of guests, and watched the window lapse. Trust the server's
-  // `canReschedule` and only fall back to the old time check on an older API that omits it.
-  $: rescheduleLocked = !!ev && (ev.canReschedule === undefined ? Date.now() >= ev.startsAt : !ev.canReschedule);
+  // Settings keeps the start fields editable only while the event is still upcoming. Once it has
+  // started, moving it is handled solely by the "Move to a new date" action further down, so there
+  // is one obvious path instead of two competing ones.
+  $: startFieldsLocked = !!ev && Date.now() >= ev.startsAt;
   // Live-clean the custom URL as it's typed (server slugifies + validates on save).
   function onEventSlugInput() { sSlug = sSlug.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '').slice(0, 50); }
   // Unsaved settings edits. The Upgrade panel quotes off the SAVED event (e.g. its frame sizes), so
@@ -872,14 +871,16 @@
         <textarea id="s-blurb" maxlength="280" rows="2" bind:value={sBlurb}></textarea>
       </div>
       <div class="field-row">
-        <div class="field"><label for="s-date">Start date</label><input id="s-date" type="date" bind:value={sDate} disabled={rescheduleLocked} /></div>
-        <div class="field"><label for="s-time">Start time</label><input id="s-time" type="time" bind:value={sTime} disabled={rescheduleLocked} /></div>
+        <div class="field"><label for="s-date">Start date</label><input id="s-date" type="date" bind:value={sDate} disabled={startFieldsLocked} /></div>
+        <div class="field"><label for="s-time">Start time</label><input id="s-time" type="time" bind:value={sTime} disabled={startFieldsLocked} /></div>
       </div>
-      {#if rescheduleLocked}
-        <p class="field-hint" style="margin:-4px 0 10px">Guests have already joined, so the start time is locked.</p>
-      {:else if ev?.isExpired}
+      {#if startFieldsLocked}
         <p class="field-hint" style="margin:-4px 0 10px">
-          This event ended without any guests joining, so you can still move it to a new date{#if ev?.rescheduleUntil} — up to {new Date(ev.rescheduleUntil).toLocaleDateString()}{/if}. Your paid settings and event length carry over.
+          {#if ev?.canReschedule}
+            This event has already started, so the time can’t be edited here — use <b>Move to a new date</b> below.
+          {:else}
+            Guests have already joined, so the start time is locked.
+          {/if}
         </p>
       {/if}
       <div class="field">
@@ -1202,6 +1203,13 @@
     border: 1px solid var(--border); border-radius: 9px; padding: 9px 11px; font: inherit; resize: vertical; }
   .refund-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
   .btn:disabled { opacity: 0.6; cursor: default; }
+  /* Inputs had no disabled styling at all, so a locked field was indistinguishable from an editable
+     one. Grey the control and show a not-allowed cursor so the state is obvious at a glance. */
+  input:disabled, select:disabled, textarea:disabled {
+    opacity: .55; cursor: not-allowed; background: var(--surface-2, rgba(127,127,127,.12));
+    color: var(--text-muted); border-color: var(--border);
+  }
+  .field:has(input:disabled) label { opacity: .6; }
   .grow { flex: 1; }
 
   /* Cards */
