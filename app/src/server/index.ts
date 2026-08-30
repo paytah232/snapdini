@@ -6,6 +6,7 @@ import fs from 'fs';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
+import { requireTurnstile, TURNSTILE_SITE_KEY, turnstileEnabled } from './turnstile';
 import { v4 as uuidv4 } from 'uuid';
 import { and, eq, or } from 'drizzle-orm';
 import { db, init } from './db';
@@ -104,6 +105,22 @@ const loginLimiter = rateLimit({
   skip: (req) => req.method === 'GET',
 });
 app.use('/api', apiBackstop);
+// Contact form: a real person files one enquiry, not five an hour. Only worth having now that
+// req.ip resolves to the actual visitor — before the Cloudflare/Traefik real-IP fix this bucketed
+// every submission on earth together and was therefore useless.
+const contactLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: 'draft-7', legacyHeaders: false,
+  message: { error: 'Too many messages — please wait a little while before sending another.' },
+});
+// Turnstile on the public write endpoints. POST only: GETs (e.g. /api/auth/me on every page load)
+// carry no widget token and must not be challenged.
+const turnstilePost = requireTurnstile();
+const turnstileOnPost = (req: Request, res: Response, next: NextFunction) =>
+  (req.method === 'POST' ? turnstilePost(req, res, next) : next());
+
+app.use('/api/contact', contactLimiter);
+app.use('/api/auth/register', turnstileOnPost);
+app.use('/api/auth/login', turnstileOnPost);
 app.use('/api/participants/email-my-photos', emailLimiter);
 app.use('/api/billing/checkout', emailLimiter);
 app.use('/api/billing/upgrade', emailLimiter);
@@ -145,6 +162,8 @@ app.get('/api/config', (_req, res) => {
     videoMaxSeconds: parseInt(process.env.VIDEO_MAX_SECONDS || '0'),
     emailEnabled: email.enabled,
     supportEmail: process.env.SUPPORT_EMAIL || null,
+    // Public site key so the frontend can render the Turnstile widget; null = feature off.
+    turnstileSiteKey: turnstileEnabled ? (TURNSTILE_SITE_KEY || null) : null,
     options, // single source for UI dropdowns (durations, shots, reveal modes/delays)
     billing: publicBillingConfig(), // billingEnabled=false when self-hosted → no Pro UI
   });

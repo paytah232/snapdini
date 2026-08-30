@@ -23,6 +23,8 @@ const router = Router();
 const RETENTION_DAYS = parseInt(process.env.RETENTION_DAYS || '7');
 const DEMO_NAME = 'Demo Roll 🎞️'; // marks the public "see what it looks like" demo events
 const DAY_MS = 24 * 60 * 60 * 1000;
+// How far an UNUSED event may be moved from its original start (see PUT /:joinCode/settings).
+const RESCHEDULE_WINDOW_MS = 183 * DAY_MS;   // ~6 months
 // Global video length (self-host / billing-off default; per-event entitlement when billing on).
 const GLOBAL_VIDEO_SECONDS = parseInt(process.env.VIDEO_MAX_SECONDS || '0');
 
@@ -186,6 +188,7 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
     // Moderation only applies when photos aren't shown instantly.
     moderationEnabled: moderationEnabled === true && mode !== 'instant',
     startsAt,
+    originalStartsAt: startsAt,   // anchors the 6-month reschedule window
     expiresAt,
     revealedAt:      null,
     isLocked:        false,
@@ -374,6 +377,10 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
     isDemo:         !event.ownerUserId && event.name === DEMO_NAME,
     isUpcoming:     now < event.startsAt,
     isExpired:      now > event.expiresAt,
+    // Reschedule eligibility: an event no guest ever used can be moved, even after it has
+    // ended, up to 6 months from its ORIGINAL start (see PUT /:joinCode/settings).
+    canReschedule:   now < event.startsAt || (Number(participantCount) === 0 && Number(photoCount) === 0),
+    rescheduleUntil: (event.originalStartsAt ?? event.startsAt) + RESCHEDULE_WINDOW_MS,
     isLocked:       !!event.isLocked,
     isRevealed:     isRevealed(event),
     allowDownloads: !!event.allowDownloads,
@@ -808,17 +815,38 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
   const newBlurb = blurb === undefined ? ev.blurb : (typeof blurb === 'string' && blurb.trim() ? blurb.trim().slice(0, 280) : null);
 
   // Start: prefer a client-computed epoch (user's TZ); else parse date/time; else keep current.
-  // Once the event has started it can NO LONGER be rescheduled — the start time is locked.
+  // Reschedule policy: the gate is USAGE, not time. An event that no guest ever joined can be
+  // moved even after it has ended — the common support case is an organizer who bought, never got
+  // the QR in front of anyone, and watched the window lapse unused. The moment one guest joins or
+  // one photo exists the start locks for good, so a live event can never shift under its guests.
+  // `originalStartsAt` anchors the ceiling, otherwise repeated moves walk the event forward forever.
+  const anchorStart = ev.originalStartsAt ?? ev.startsAt;
+  const [pCount] = await db.select({ n: count() }).from(participants).where(eq(participants.eventId, ev.id));
+  const [phCount] = await db.select({ n: count() }).from(photos).where(eq(photos.eventId, ev.id));
+  const everUsed = Number(pCount?.n || 0) > 0 || Number(phCount?.n || 0) > 0;
   const alreadyStarted = Date.now() >= ev.startsAt;
+  const canReschedule = !alreadyStarted || !everUsed;
+
   let startsAt = ev.startsAt;
-  if (!alreadyStarted) {
-    const bodyStartsAt = (req.body as { startsAt?: number }).startsAt;
-    if (typeof bodyStartsAt === 'number' && bodyStartsAt > 0) {
-      startsAt = bodyStartsAt;
-    } else if (startDate) {
-      const parsed = new Date(`${startDate}T${startTime || '00:00'}`).getTime();
-      if (!isNaN(parsed)) startsAt = parsed;
+  const bodyStartsAt = (req.body as { startsAt?: number }).startsAt;
+  let requestedStart: number | null = null;
+  if (typeof bodyStartsAt === 'number' && bodyStartsAt > 0) requestedStart = bodyStartsAt;
+  else if (startDate) {
+    const parsed = new Date(`${startDate}T${startTime || '00:00'}`).getTime();
+    if (!isNaN(parsed)) requestedStart = parsed;
+  }
+  // Tolerance: the client recomputes the epoch on every save, so only treat a real move as a move.
+  if (requestedStart !== null && Math.abs(requestedStart - ev.startsAt) > 60_000) {
+    if (!canReschedule) {
+      return res.status(409).json({ error: 'This event has already started and guests have joined, so the start time is locked.' });
     }
+    if (requestedStart < Date.now()) {
+      return res.status(400).json({ error: 'Pick a start time in the future.' });
+    }
+    if (requestedStart > anchorStart + RESCHEDULE_WINDOW_MS) {
+      return res.status(400).json({ error: 'An event can be moved up to 6 months from its original start date.' });
+    }
+    startsAt = requestedStart;
   }
   // Duration is a PAID entitlement — only the Upgrades flow changes it. Settings may reschedule
   // the start, but the event's LENGTH is preserved (shift expiry to keep the same paid span);

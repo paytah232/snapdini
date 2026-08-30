@@ -7,6 +7,7 @@ import * as email from '../email';
 import { eq } from 'drizzle-orm';
 import { db } from '../db';
 import { contactMessages, events } from '../schema';
+import { requireTurnstile } from '../turnstile';
 import { escapeHtml } from '../lib';
 import { UPLOADS_DIR } from '../paths';
 import { stripImageMetadata } from '../images';
@@ -45,12 +46,20 @@ const shotUpload = multer({
 // POST /api/contact — public contact / feedback / bug-report form. ALWAYS stored in the DB (a durable
 // mailbox) so nothing is lost if email is unconfigured or the send fails; forwarded to SUPPORT_EMAIL
 // when email is configured. Accepts JSON (contact page) or multipart with an optional 'screenshot'.
-router.post('/', shotUpload.single('screenshot'), async (req: Request, res: Response) => {
+router.post('/', shotUpload.single('screenshot'), requireTurnstile(), async (req: Request, res: Response) => {
   const name = String(req.body?.name || '').trim().slice(0, 80);
   const from = String(req.body?.email || '').trim().slice(0, 200);
   const message = String(req.body?.message || '').trim().slice(0, 5000);
   const kind = KINDS.has(String(req.body?.kind)) ? String(req.body.kind) : 'contact';
   const context = String(req.body?.context || '').trim().slice(0, 300);   // e.g. the page/event it came from
+
+  // Honeypot: a field real users never see and never fill (hidden + aria-hidden + tabindex=-1 in
+  // the form). Accept SILENTLY with a 200 rather than erroring — a bot that gets a 400 learns to
+  // adapt, one that gets a cheerful success does not, and a real user is never affected.
+  if (String(req.body?.website || '').trim()) {
+    if (req.file) { try { fs.unlinkSync(req.file.path); } catch { /* */ } }
+    return res.json({ success: true });
+  }
 
   if (!message) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch { /* */ } } return res.status(400).json({ error: 'Please enter a message' }); }
   if (from && !isEmail(from)) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch { /* */ } } return res.status(400).json({ error: 'Enter a valid email (or leave it blank)' }); }

@@ -183,6 +183,13 @@
       "when": 1787500400000,
       "tag": "0025_seed_lifecycle_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1787500500000,
+      "tag": "0026_event_reschedule",
+      "breakpoints": true
     }
   ]
 }

@@ -71,6 +71,9 @@ export const events = pgTable('events', {
   revealDelayHours: integer('reveal_delay_hours').notNull().default(0),
   moderationEnabled: boolean('moderation_enabled').notNull().default(false),
   startsAt: ms('starts_at').notNull(),
+  // Anchor for the reschedule window: the start this event was FIRST created with.
+  // Bounds how far an unused event may be moved (see 0026_event_reschedule).
+  originalStartsAt: ms('original_starts_at'),
   expiresAt: ms('expires_at').notNull(),
   revealedAt: ms('revealed_at'),
   revealHidden: boolean('reveal_hidden').notNull().default(false),  // organizer "Hide photos" override — wins over mode/time
