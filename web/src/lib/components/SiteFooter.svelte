@@ -9,11 +9,15 @@
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { getConfig } from '$lib/api';
+  import { usecaseLinks } from '$lib/usecases';
 
   export let loggedIn = false;
   export let compact = false;
   export let showSupport = true;
   export let showNav = true;
+  /** "Popular uses" row: real internal links to the use-case landing pages. Off by default — it
+   *  belongs on marketing pages, not the capture flow or the dashboard, where it is just noise. */
+  export let showUses = false;
 
   let version = '';
   onMount(async () => {
@@ -47,6 +51,12 @@
       {#if showSupport}<a href={COFFEE} target="_blank" rel="noopener noreferrer">☕ Buy me a coffee</a>{/if}
       <slot />
     </div>
+    {#if showUses}
+      <nav class="uses" aria-label="Popular uses">
+        <span class="uses-label">Popular uses</span>
+        {#each usecaseLinks as u}<a href={`/${u.slug}`}>{u.label}</a>{/each}
+      </nav>
+    {/if}
     <span class="v">© 2026 Snapdini{version ? ` · v${version}` : ''}</span>
   </footer>
 {/if}
@@ -57,6 +67,11 @@
   .fl { display: flex; gap: 18px; font-size: .85rem; color: var(--text-muted); align-items: center; flex-wrap: wrap; }
   .fl a, .fl :global(.linklike) { color: var(--text-muted); text-decoration: none; background: none; border: none; cursor: pointer; font: inherit; }
   .fl a:hover, .fl :global(.linklike):hover { color: var(--text); }
+  .uses { flex-basis: 100%; order: 3; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline;
+    padding-top: 16px; margin-top: 4px; border-top: 1px solid var(--border); font-size: .8rem; }
+  .uses-label { color: var(--text); font-weight: 600; margin-right: 4px; }
+  .uses a { color: var(--text-muted); text-decoration: none; }
+  .uses a:hover { color: var(--text); text-decoration: underline; }
   .v { font-size: .72rem; color: var(--text-muted); font-family: var(--font-mono); }
   .version { margin-top: 28px; text-align: center; font-size: .75rem; color: var(--text-muted); }
   .version a { color: var(--text-muted); text-decoration: none; }

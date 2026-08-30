@@ -73,7 +73,7 @@
   <p class="copyright">© 2026 Snapdini. All rights reserved.</p>
 </main>
 
-<SiteFooter />
+<SiteFooter showUses />
 
 <style>
   .wrap { max-width: 720px; margin: 0 auto; padding: 28px 20px 72px; line-height: 1.6; }

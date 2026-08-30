@@ -143,7 +143,7 @@
   </div>
 </section>
 
-<SiteFooter {loggedIn} />
+<SiteFooter {loggedIn} showUses />
 
 <style>
   :global(body) { overflow-x: hidden; }

@@ -234,3 +234,14 @@ export const usecases: Record<string, UseCase> = {
 };
 
 export const useCaseSlugs = Object.keys(usecases);
+
+/** Short labels for the footer's "Popular uses" row. Derived from `usecases` so a new use-case
+ *  page appears in the footer automatically — the eyebrow ("For weddings") is trimmed to just the
+ *  subject ("Weddings"), which reads better as a link than a full page title. */
+export const usecaseLinks: { slug: string; label: string }[] = Object.values(usecases).map((u) => ({
+  slug: u.slug,
+  label: (() => {
+    const t = u.eyebrow.replace(/^For\s+/i, '').trim();
+    return t.charAt(0).toUpperCase() + t.slice(1);
+  })(),
+}));
