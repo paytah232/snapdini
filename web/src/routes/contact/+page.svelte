@@ -7,6 +7,8 @@
   let name = '';
   let email = '';
   let message = '';
+  // Honeypot — hidden from real users, filled only by naive bots. Verified server-side.
+  let website = '';
   let sending = false;
   let sent = false;
   let supportEmail: string | null = null;
@@ -21,7 +23,7 @@
     if (!message.trim()) { showToast('Please enter a message', true); return; }
     sending = true;
     try {
-      await postJson('/api/contact', { name, email, message });
+      await postJson('/api/contact', { name, email, message, website });
       sent = true;
       showSuccess('Thanks — we’ll be in touch!');
     } catch (err) {
@@ -54,6 +56,11 @@
         <label for="c-email">Your email</label>
         <input id="c-email" type="email" inputmode="email" autocomplete="email" maxlength="200" bind:value={email} placeholder="you@example.com" />
 
+        <div class="hp" aria-hidden="true">
+          <label for="c-website">Leave this field empty</label>
+          <input id="c-website" name="website" type="text" tabindex="-1" autocomplete="off" bind:value={website} />
+        </div>
+
         <label for="c-msg">Message</label>
         <textarea id="c-msg" rows="5" maxlength="5000" bind:value={message} placeholder="How can we help?"></textarea>
 
@@ -67,6 +74,7 @@
 </main>
 
 <style>
+  .hp { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
   main { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
   .card { width: 100%; max-width: 440px; background: var(--surface); border: 1px solid var(--border);
     border-radius: 16px; padding: 32px; }

@@ -6,6 +6,7 @@
   import { clearEventTheme } from '$lib/theme';
   import Toast from '$lib/components/Toast.svelte';
   import ConsentBanner from '$lib/components/ConsentBanner.svelte';
+  import InAppBrowserNotice from '$lib/components/InAppBrowserNotice.svelte';
 
   // Apply the saved appearance preference (defaults to dark). Per-event pages apply their
   // own theme; this governs the marketing/app chrome.
@@ -25,6 +26,7 @@
   });
 </script>
 
+<InAppBrowserNotice />
 <slot />
 <Toast />
 <ConsentBanner />
