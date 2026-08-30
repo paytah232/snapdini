@@ -77,14 +77,16 @@ app.use(cookieParser());
 // venue share one public IP, so join/upload/gallery are intentionally NOT IP-limited hard —
 // only a generous DoS backstop covers the rest of the API.
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, limit: 40, standardHeaders: 'draft-7', legacyHeaders: false,
+  windowMs: 15 * 60 * 1000, limit: Number(process.env.AUTH_RATE_LIMIT || 40),
+  standardHeaders: 'draft-7', legacyHeaders: false,
   message: { error: 'Too many attempts — please wait a few minutes and try again.' },
   // Only throttle credential POSTs (login/register/magic-link). GET /api/auth/me runs on every
   // page load, so counting it tripped "too many attempts" during normal navigation.
   skip: (req) => req.method === 'GET',
 });
 const apiBackstop = rateLimit({
-  windowMs: 60 * 1000, limit: 600, standardHeaders: 'draft-7', legacyHeaders: false,
+  windowMs: 60 * 1000, limit: Number(process.env.API_RATE_LIMIT || 600),
+  standardHeaders: 'draft-7', legacyHeaders: false,
   message: { error: 'Too many requests — slow down.' },
 });
 // Tighter limit for endpoints that send email or create Stripe sessions (abuse-prone).
@@ -100,7 +102,8 @@ const clientErrorLimiter = rateLimit({
 // Login gets a tighter cap than the general auth limiter to slow password guessing (argon2 already
 // makes each attempt expensive). Register stays on authLimiter — it's gated by email verification.
 const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, limit: 15, standardHeaders: 'draft-7', legacyHeaders: false,
+  windowMs: 15 * 60 * 1000, limit: Number(process.env.LOGIN_RATE_LIMIT || 15),
+  standardHeaders: 'draft-7', legacyHeaders: false,
   message: { error: 'Too many attempts — please wait a few minutes and try again.' },
   skip: (req) => req.method === 'GET',
 });

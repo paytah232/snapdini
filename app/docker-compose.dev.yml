@@ -61,6 +61,9 @@ services:
       - TURNSTILE_ALLOWED_HOSTNAMES=${TURNSTILE_ALLOWED_HOSTNAMES:-}
       - TURNSTILE_FAIL_OPEN=${TURNSTILE_FAIL_OPEN:-}
       - CONTACT_RATE_LIMIT=${CONTACT_RATE_LIMIT:-}
+      - AUTH_RATE_LIMIT=${AUTH_RATE_LIMIT:-}
+      - LOGIN_RATE_LIMIT=${LOGIN_RATE_LIMIT:-}
+      - API_RATE_LIMIT=${API_RATE_LIMIT:-}
       # Site admin bootstrap (both unset = no admin, no shipped default credential).
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
