@@ -875,7 +875,7 @@
         <div class="field"><label for="s-time">Start time</label><input id="s-time" type="time" bind:value={sTime} disabled={startFieldsLocked} /></div>
       </div>
       {#if startFieldsLocked}
-        <p class="field-hint" style="margin:-4px 0 10px">
+        <p class="hint" style="margin:-4px 0 10px">
           {ev?.canReschedule ? 'Already started — use “Move to a new date”.' : 'Locked — guests have joined.'}
         </p>
       {/if}
