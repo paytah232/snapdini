@@ -392,6 +392,16 @@
   let rDate = '';
   let rTime = '';
   let reschedBusy = false;
+  // Bound the picker to what the server will actually accept, so an invalid date can't be chosen.
+  // Dates must be local YYYY-MM-DD — toISOString() would shift by the UTC offset and could offer or
+  // withhold a day at the boundary.
+  const localDay = (ms: number) => {
+    const d = new Date(ms);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  };
+  $: reschedMinDate = localDay(Date.now());
+  $: reschedMaxDate = ev?.rescheduleUntil ? localDay(ev.rescheduleUntil) : undefined;
   $: canOfferReschedule = !!ev && ev.canReschedule === true && Date.now() >= ev.startsAt;
 
   async function doReschedule() {
@@ -803,7 +813,7 @@
           <div class="refund-box">
             <p class="refund-hint">Everything you paid for carries over.</p>
             <div class="row2">
-              <div class="field"><label for="r-date">New start date</label><input id="r-date" type="date" bind:value={rDate} /></div>
+              <div class="field"><label for="r-date">New start date</label><input id="r-date" type="date" bind:value={rDate} min={reschedMinDate} max={reschedMaxDate} /></div>
               <div class="field"><label for="r-time">New start time</label><input id="r-time" type="time" bind:value={rTime} /></div>
             </div>
             <div class="refund-actions">
@@ -871,7 +881,7 @@
         <textarea id="s-blurb" maxlength="280" rows="2" bind:value={sBlurb}></textarea>
       </div>
       <div class="field-row">
-        <div class="field"><label for="s-date">Start date</label><input id="s-date" type="date" bind:value={sDate} disabled={startFieldsLocked} /></div>
+        <div class="field"><label for="s-date">Start date</label><input id="s-date" type="date" bind:value={sDate} max={reschedMaxDate} disabled={startFieldsLocked} /></div>
         <div class="field"><label for="s-time">Start time</label><input id="s-time" type="time" bind:value={sTime} disabled={startFieldsLocked} /></div>
       </div>
       {#if startFieldsLocked}
