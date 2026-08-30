@@ -4,6 +4,7 @@
   import { showToast, showSuccess } from '$lib/toast';
   import Turnstile from '$lib/components/Turnstile.svelte';
   import Logo from '$lib/components/Logo.svelte';
+  import SiteFooter from '$lib/components/SiteFooter.svelte';
 
   let name = '';
   let email = '';
@@ -78,6 +79,8 @@
     {/if}
   </div>
 </main>
+
+<SiteFooter />
 
 <style>
   .hp { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }

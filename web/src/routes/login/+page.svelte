@@ -5,6 +5,7 @@
   import { getConfig, getMe, postJson } from '$lib/api';
   import Turnstile from '$lib/components/Turnstile.svelte';
   import Logo from '$lib/components/Logo.svelte';
+  import SiteFooter from '$lib/components/SiteFooter.svelte';
 
   // Post-login destination — only same-origin relative paths (no open-redirect); default dashboard.
   $: nextDest = (() => { const n = $page.url.searchParams.get('next'); return n && n.startsWith('/') && !n.startsWith('//') ? n : '/dashboard'; })();
@@ -121,6 +122,8 @@
   </div>
   <div class="version">{version ? 'Snapdini v' + version : ''}</div>
 </main>
+
+<SiteFooter showSupport={false} />
 
 <style>
   main {

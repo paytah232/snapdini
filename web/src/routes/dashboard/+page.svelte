@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { getMe, getConfig, postJson } from '$lib/api';
+  import SiteFooter from '$lib/components/SiteFooter.svelte';
   import { getMyEvents, listMyCohostInvites, acceptCohost, type MyEvent, type MyCohostInvite } from '$lib/events';
   import { clearAllAdminCodes } from '$lib/session';
   import { showToast, showSuccess } from '$lib/toast';
@@ -187,7 +188,7 @@
     {/if}
   {/if}
 
-  <div class="version">© 2026 Snapdini{#if version} · v{version}{/if} · <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> · <a href="https://buymeacoffee.com/paytah232" target="_blank" rel="noopener noreferrer">☕ Buy me a coffee</a></div>
+  <SiteFooter compact loggedIn />
 </div>
 
 <style>
@@ -247,8 +248,5 @@
     border: 1px dashed var(--border); border-radius: 14px; }
   .empty p { margin: 0 0 18px; }
 
-  .version { text-align: center; font-size: 0.72rem; color: var(--text-muted); margin-top: 36px;
-    font-family: var(--font-mono); }
-  .version a { color: var(--text-muted); }
   .version a:hover { color: var(--accent); }
 </style>

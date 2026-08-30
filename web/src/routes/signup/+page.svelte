@@ -6,6 +6,7 @@
   import Turnstile from '$lib/components/Turnstile.svelte';
   import { fireLeadConversion } from '$lib/conversions';
   import Logo from '$lib/components/Logo.svelte';
+  import SiteFooter from '$lib/components/SiteFooter.svelte';
 
   // Same-origin relative destination after auth (no open-redirect); default dashboard.
   $: nextDest = (() => { const n = $page.url.searchParams.get('next'); return n && n.startsWith('/') && !n.startsWith('//') ? n : '/dashboard'; })();
@@ -115,6 +116,8 @@
   </div>
   <div class="version">{version ? 'Snapdini v' + version : ''}</div>
 </main>
+
+<SiteFooter showSupport={false} />
 
 <style>
   main {

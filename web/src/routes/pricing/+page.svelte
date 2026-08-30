@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { getConfig, getMe } from '$lib/api';
   import { page } from '$app/stores';
+  import SiteFooter from '$lib/components/SiteFooter.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import { appearance, setAppearance } from '$lib/appearance';
   import { guestTiers, addOns, pricingFaqs } from '$lib/pricing';
@@ -121,19 +122,7 @@
   </div>
 </section>
 
-<footer>
-  <a class="brand" href={loggedIn ? '/dashboard' : '/'}><Logo /></a>
-  <div class="fl">
-    {#if loggedIn}<a href="/dashboard">My events</a>{:else}<a href="/login">Sign in</a>{/if}
-    <a href="/signup">Start free</a>
-    <a href="/contact">Contact</a>
-    <a href="/terms">Terms</a>
-    <a href="/privacy">Privacy</a>
-    {#if $page.data.analyticsEnabled}<a href="/?consent=1">Your Privacy Choices</a>{/if}
-    <a href="https://github.com/paytah232/snapdini" target="_blank" rel="noopener noreferrer">GitHub</a>
-  </div>
-  <span class="v">© 2026 Snapdini{version ? ` · v${version}` : ''}</span>
-</footer>
+<SiteFooter {loggedIn} showSupport={false} />
 
 <style>
   :global(body) { overflow-x: hidden; }
@@ -188,11 +177,6 @@
   .faq-item p { color: var(--text-muted); margin: 10px 0 0; line-height: 1.5; }
   .cta-card { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 48px 40px; text-align: center; }
   .cta-card p { color: var(--text-muted); margin: 14px auto 26px; max-width: 44ch; }
-  footer { border-top: 1px solid var(--border); max-width: 1080px; margin: 40px auto 0; padding: 30px 24px;
-    display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
-  .fl { display: flex; gap: 18px; font-size: .85rem; color: var(--text-muted); align-items: center; }
-  .fl a { color: var(--text-muted); text-decoration: none; }
-  .v { font-size: .72rem; color: var(--text-muted); font-family: var(--font-mono); }
   @media (max-width: 860px) { .tiers { grid-template-columns: 1fr 1fr; } .addons { grid-template-columns: 1fr; } }
   @media (max-width: 520px) { .tiers { grid-template-columns: 1fr; } }
 </style>

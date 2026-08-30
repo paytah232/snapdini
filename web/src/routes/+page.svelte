@@ -4,6 +4,7 @@
   import { showToast } from '$lib/toast';
   import { modalFocus } from '$lib/ui';
   import { page } from '$app/stores';
+  import SiteFooter from '$lib/components/SiteFooter.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import { appearance, setAppearance } from '$lib/appearance';
 
@@ -209,22 +210,9 @@
   </div>
 </section>
 
-<footer>
-  <a class="brand" href={loggedIn ? '/dashboard' : '/'}><Logo /></a>
-  <div class="fl">
-    {#if loggedIn}<a href="/dashboard">My events</a>{:else}<a href="/login">Sign in</a>{/if}
-    <a href="/signup">Start free</a>
-    <a href="/pricing">Pricing</a>
-    <a href="/contact">Contact</a>
-    <a href="/terms">Terms</a>
-    <a href="/privacy">Privacy</a>
-    {#if $page.data.analyticsEnabled}<a href="/?consent=1">Your Privacy Choices</a>{/if}
-    <a href="https://github.com/paytah232/snapdini" target="_blank" rel="noopener noreferrer">GitHub</a>
-    <a href="https://buymeacoffee.com/paytah232" target="_blank" rel="noopener noreferrer">☕ Buy me a coffee</a>
-    <button class="linklike" on:click={startDemo}>See the demo</button>
-  </div>
-  <span class="v">© 2026 Snapdini{version ? ` · v${version}` : ''}</span>
-</footer>
+<SiteFooter {loggedIn}>
+  <button class="linklike" on:click={startDemo}>See the demo</button>
+</SiteFooter>
 
 <svelte:window on:keydown={(e) => { if (e.key === 'Escape' && qr) qr = null; }} />
 
@@ -313,11 +301,6 @@
   .cta-card { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 54px 40px; text-align: center; }
   .cta-card h2 { margin-left: auto; margin-right: auto; }
   .cta-card p { color: var(--text-muted); margin: 14px auto 28px; max-width: 44ch; }
-  footer { border-top: 1px solid var(--border); max-width: 1080px; margin: 40px auto 0; padding: 30px 24px;
-    display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
-  .fl { display: flex; gap: 18px; font-size: .85rem; color: var(--text-muted); align-items: center; }
-  .fl a, .linklike { color: var(--text-muted); text-decoration: none; background: none; border: none; cursor: pointer; font: inherit; }
-  .v { font-size: .72rem; color: var(--text-muted); font-family: var(--font-mono); }
   .modal { position: fixed; inset: 0; background: rgba(0,0,0,.86); z-index: 200; display: flex; align-items: center; justify-content: center; padding: 24px; }
   .modal-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 28px; max-width: 340px; text-align: center; }
   .modal-card img { width: 220px; height: 220px; border-radius: 10px; background: #fff; }

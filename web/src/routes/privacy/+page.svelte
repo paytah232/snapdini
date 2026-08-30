@@ -1,5 +1,6 @@
 <script lang="ts">
   import Logo from '$lib/components/Logo.svelte';
+  import SiteFooter from '$lib/components/SiteFooter.svelte';
   const updated = 'June 2026';
 </script>
 
@@ -71,6 +72,8 @@
   <p class="foot"><a href="/">← Back to Snapdini</a> · <a href="/terms">Terms &amp; Conditions</a></p>
   <p class="copyright">© 2026 Snapdini. All rights reserved.</p>
 </main>
+
+<SiteFooter />
 
 <style>
   .wrap { max-width: 720px; margin: 0 auto; padding: 28px 20px 72px; line-height: 1.6; }
