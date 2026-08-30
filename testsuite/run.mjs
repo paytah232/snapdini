@@ -640,6 +640,25 @@ async function main() {
     }
     cookie = ownerCookie;
 
+    // H1) An unused PAID event must still exist the day its reschedule deadline falls, not be
+    //     swept that morning. Age it to one hour before the deadline and confirm it survives.
+    const nearEdge = await createEvent({ startsAt: Date.now() - 4 * HOUR, durationHours: 1 });
+    const edgeAnchor = Date.now() - (183 * DAY) + HOUR;   // deadline is ~1h away
+    dbq(`UPDATE events SET paid=true, amount_paid_cents=2000, original_starts_at=${edgeAnchor}, starts_at=${edgeAnchor}, purge_at=${Date.now() - 1000} WHERE id='${nearEdge.id}'`);
+    if (adminLogin2.status === 200) {
+      // Re-authenticate: the previous block restored the owner cookie, and run-sweep is admin-only.
+      await api('POST', '/api/auth/login', { body: { email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD } });
+      await api('POST', '/api/admin/run-sweep');
+      ok('unused paid event survives right up to its reschedule deadline',
+         dbq(`SELECT COALESCE(purged_at::text,'null') FROM events WHERE id='${nearEdge.id}'`) === 'null');
+      // Past the deadline + grace it becomes purgeable like anything else.
+      dbq(`UPDATE events SET original_starts_at=${Date.now() - (185 * DAY)}, starts_at=${Date.now() - (185 * DAY)}, purge_at=${Date.now() - 1000} WHERE id='${nearEdge.id}'`);
+      ok('sweep authorised', (await api('POST', '/api/admin/run-sweep')).status === 200);
+      ok('past the deadline + grace it is finally purged',
+         dbq(`SELECT COALESCE(purged_at::text,'null') FROM events WHERE id='${nearEdge.id}'`) !== 'null');
+      cookie = ownerCookie;
+    }
+
     // H) An unused event whose media was already purged by retention must come back clean, not
     //    stuck reading as archived.
     dbq(`UPDATE events SET purged_at=${Date.now()} WHERE id='${past.id}'`);

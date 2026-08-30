@@ -10,7 +10,7 @@ import { events, participants, photos, shares, eventCohosts, users, type Event }
 import * as email from '../email';
 import * as auth from '../auth';
 import * as cleanup from '../cleanup';
-import { isRevealed, baseUrl, escapeHtml } from '../lib';
+import { isRevealed, baseUrl, escapeHtml, RESCHEDULE_WINDOW_MS } from '../lib';
 import { startSlideshow, slideshowInfo, toggleSlideshowFavourite, deleteSlideshow, slideshowFile, streamSlideshow1080 } from '../slideshow';
 import { billingEnabled, quote, FREE_ALL_GUESTS, brandingRemovable } from '../billing';
 import { sendWelcome } from '../lifecycle';
@@ -23,8 +23,6 @@ const router = Router();
 const RETENTION_DAYS = parseInt(process.env.RETENTION_DAYS || '7');
 const DEMO_NAME = 'Demo Roll 🎞️'; // marks the public "see what it looks like" demo events
 const DAY_MS = 24 * 60 * 60 * 1000;
-// How far an UNUSED event may be moved from its original start (see PUT /:joinCode/settings).
-const RESCHEDULE_WINDOW_MS = 183 * DAY_MS;   // ~6 months
 // Global video length (self-host / billing-off default; per-event entitlement when billing on).
 const GLOBAL_VIDEO_SECONDS = parseInt(process.env.VIDEO_MAX_SECONDS || '0');
 

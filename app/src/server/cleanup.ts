@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { and, eq, isNotNull, lt, count } from 'drizzle-orm';
 import { db } from './db';
+import { RESCHEDULE_WINDOW_MS, RESCHEDULE_RETENTION_GRACE_MS } from './lib';
 import { events, photos, participants, clientErrors, slideshows, shares } from './schema';
 import { UPLOADS_DIR, uploadDiskPath, eventDir, INCOMING_DIR } from './paths';
 import { thumbName } from './images';
@@ -23,10 +24,6 @@ export function unlinkUpload(filename?: string | null): void {
 
 // Delete every file owned by an event (photos + theme header image) from disk.
 // Call this BEFORE deleting the event row (the row cascade removes DB records).
-// Mirrors the reschedule ceiling in routes/events.ts — an unused event stays purgeable only
-// once it can no longer be moved.
-const RESCHEDULE_WINDOW_MS = 183 * 24 * 60 * 60 * 1000;
-
 export async function deleteEventFiles(eventId: string): Promise<void> {
   const rows = await db.select({ filename: photos.filename }).from(photos).where(eq(photos.eventId, eventId));
   for (const p of rows) unlinkUpload(p.filename);
@@ -62,7 +59,8 @@ export async function sweep(): Promise<number> {
     // Leave those alone until the reschedule window itself closes; it is one empty row.
     if (Number(pc?.n ?? 0) === 0 && Number(phc?.n ?? 0) === 0) {
       const anchor = e.originalStartsAt ?? e.startsAt;
-      if (Date.now() < anchor + RESCHEDULE_WINDOW_MS) { skipped++; continue; }
+      // + grace so the record always outlives the deadline it advertises.
+      if (Date.now() < anchor + RESCHEDULE_WINDOW_MS + RESCHEDULE_RETENTION_GRACE_MS) { skipped++; continue; }
     }
 
     await deleteEventFiles(e.id);                 // photo/video + theme image files
@@ -96,6 +94,32 @@ export async function sweep(): Promise<number> {
     }).where(eq(events.id, e.id));
   }
   if (due.length) console.log(`[sweeper] purged media for ${due.length - skipped} event(s) (kept stats archive)` + (skipped ? `; skipped ${skipped} unused event(s) still inside the reschedule window` : ''));
+
+  // Reclaim NFS silly-rename orphans. Uploads live on an NFS share, and unlinking a file that some
+  // process still has open does not free it there — the server renames it to `.nfs*` and keeps it
+  // forever. The retention purge hits exactly that case (deleting an event's photos while a read is
+  // in flight), so every purge can strand megabytes AND leave the event folder undeletable. Retry
+  // once they are cold: if a holder remains the unlink simply fails again and we try next sweep.
+  try {
+    const cutoff = Date.now() - 60 * 60 * 1000;   // an hour is well past any in-flight read
+    const dirs = [UPLOADS_DIR, ...fs.readdirSync(UPLOADS_DIR, { withFileTypes: true })
+      .filter((d) => d.isDirectory()).map((d) => path.join(UPLOADS_DIR, d.name))];
+    let reclaimed = 0;
+    for (const dir of dirs) {
+      let names: string[] = [];
+      try { names = fs.readdirSync(dir); } catch { continue; }
+      for (const n of names) {
+        if (!n.startsWith('.nfs')) continue;
+        const f = path.join(dir, n);
+        try { if (fs.statSync(f).mtimeMs < cutoff) { fs.unlinkSync(f); reclaimed++; } } catch { /* still held */ }
+      }
+      // A purged event's folder is left behind once its orphans are gone — drop it if now empty.
+      if (dir !== UPLOADS_DIR) {
+        try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* not empty / in use */ }
+      }
+    }
+    if (reclaimed) console.log(`[sweeper] reclaimed ${reclaimed} stale NFS orphan(s)`);
+  } catch (e) { console.warn('[sweeper] nfs orphan sweep:', (e as Error).message); }
 
   // Sweep abandoned upload staging — chunk-part dirs and staged single files that were never
   // completed (client gave up mid-upload) — once they're older than 6h.

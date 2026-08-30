@@ -35,3 +35,15 @@ export function escapeHtml(str: unknown): string {
   const map: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   return String(str).replace(/[&<>"']/g, (c) => map[c]);
 }
+
+
+// ── Reschedule window ────────────────────────────────────────────────────────
+// How far an UNUSED event may be moved from its ORIGINAL start. Defined once and imported by both
+// the settings guard (routes/events.ts) and the retention sweeper (cleanup.ts) — they must agree,
+// or an event gets purged while it is still advertised as reschedulable.
+export const RESCHEDULE_WINDOW_MS = 183 * 24 * 60 * 60 * 1000;   // ~6 months
+
+// Retention keeps an unused event a little BEYOND its own deadline. Without this the sweeper's
+// cutoff and the reschedule cutoff are the same instant, so an hourly sweep can delete the event on
+// the very last day the organizer is still entitled to move it.
+export const RESCHEDULE_RETENTION_GRACE_MS = 24 * 60 * 60 * 1000;   // one day
