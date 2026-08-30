@@ -896,7 +896,14 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
   // settings save doesn't silently shorten retention the organizer paid to extend.
   const purgeAt  = expiresAt + (ev.retentionDays || RETENTION_DAYS) * DAY_MS;
 
+  // A rescheduled event is live again, so clear any archive marker. Retention can purge an unused
+  // event's (empty) media before the organizer gets round to moving it; without this the event
+  // would come back carrying purgedAt and read as archived forever. Safe because reschedule is only
+  // permitted while the event has no participants and no photos — there is nothing to un-delete.
+  const clearedPurgedAt = startsAt !== ev.startsAt ? { purgedAt: null } : {};
+
   await db.update(events).set({
+    ...clearedPurgedAt,
     name: newName, blurb: newBlurb, startsAt, expiresAt, revealMode: mode,
     revealDelayHours: revealDelay, moderationEnabled: moderation, allowDownloads: allowDl,
     noFlash: noFlashV, timezone: tz, slug: newSlug, aspectRatios: aspects, ratingMode: rMode, purgeAt,

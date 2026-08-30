@@ -23,6 +23,10 @@ export function unlinkUpload(filename?: string | null): void {
 
 // Delete every file owned by an event (photos + theme header image) from disk.
 // Call this BEFORE deleting the event row (the row cascade removes DB records).
+// Mirrors the reschedule ceiling in routes/events.ts — an unused event stays purgeable only
+// once it can no longer be moved.
+const RESCHEDULE_WINDOW_MS = 183 * 24 * 60 * 60 * 1000;
+
 export async function deleteEventFiles(eventId: string): Promise<void> {
   const rows = await db.select({ filename: photos.filename }).from(photos).where(eq(photos.eventId, eventId));
   for (const p of rows) unlinkUpload(p.filename);
@@ -43,12 +47,23 @@ export async function deleteEventFiles(eventId: string): Promise<void> {
 // (names/emails) — but KEEP a slim event record (settings + final stats) as the organizer's
 // history. The record's purge_at is cleared so it isn't swept again.
 export async function sweep(): Promise<number> {
-  const due = await db.select({ id: events.id }).from(events)
+  let skipped = 0;
+  const due = await db.select({ id: events.id, startsAt: events.startsAt, originalStartsAt: events.originalStartsAt })
+    .from(events)
     .where(and(isNotNull(events.purgeAt), lt(events.purgeAt, Date.now())));
   for (const e of due) {
     // snapshot final stats before deleting the child rows
     const [pc] = await db.select({ n: count() }).from(participants).where(eq(participants.eventId, e.id));
     const [phc] = await db.select({ n: count() }).from(photos).where(eq(photos.eventId, e.id));
+
+    // Retention exists to delete guest media and PII. An event nobody ever joined has neither, so
+    // purging it destroys nothing and only costs the organizer the ability to reschedule it — the
+    // exact case (bought, guests never scanned the QR, window lapsed) reschedule was built for.
+    // Leave those alone until the reschedule window itself closes; it is one empty row.
+    if (Number(pc?.n ?? 0) === 0 && Number(phc?.n ?? 0) === 0) {
+      const anchor = e.originalStartsAt ?? e.startsAt;
+      if (Date.now() < anchor + RESCHEDULE_WINDOW_MS) { skipped++; continue; }
+    }
 
     await deleteEventFiles(e.id);                 // photo/video + theme image files
     // All slideshow renders for this event (versioned files + rows), incl. favourited ones.
@@ -80,7 +95,7 @@ export async function sweep(): Promise<number> {
       statPhotos: Number(phc?.n ?? 0),
     }).where(eq(events.id, e.id));
   }
-  if (due.length) console.log(`[sweeper] purged media for ${due.length} event(s) (kept stats archive)`);
+  if (due.length) console.log(`[sweeper] purged media for ${due.length - skipped} event(s) (kept stats archive)` + (skipped ? `; skipped ${skipped} unused event(s) still inside the reschedule window` : ''));
 
   // Sweep abandoned upload staging — chunk-part dirs and staged single files that were never
   // completed (client gave up mid-upload) — once they're older than 6h.
