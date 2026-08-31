@@ -91,7 +91,8 @@ const apiBackstop = rateLimit({
 });
 // Tighter limit for endpoints that send email or create Stripe sessions (abuse-prone).
 const emailLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false,
+  windowMs: 15 * 60 * 1000, limit: Number(process.env.EMAIL_RATE_LIMIT || 20),
+  standardHeaders: 'draft-7', legacyHeaders: false,
   message: { error: 'Too many requests — please wait a few minutes.' },
 });
 // Client error reports: allow bursts but cap a runaway client from flooding us.
@@ -133,6 +134,9 @@ app.use('/api/participants/email-my-photos', emailLimiter);
 app.use('/api/billing/checkout', emailLimiter);
 app.use('/api/billing/upgrade', emailLimiter);
 app.use('/api/auth/login', loginLimiter);
+// Per-address cooldown lives in the route; this caps one IP hammering MANY addresses, which is
+// the bulk-signup vector (magic-link creates an account for any new address).
+app.use('/api/auth/magic-link', emailLimiter);
 // Demo events are public + unauthenticated and create real (throwaway) rows — cap creation per IP.
 app.use('/api/events/demo', rateLimit({
   windowMs: 15 * 60 * 1000, limit: 15, standardHeaders: 'draft-7', legacyHeaders: false,

@@ -64,6 +64,7 @@ services:
       - AUTH_RATE_LIMIT=${AUTH_RATE_LIMIT:-}
       - LOGIN_RATE_LIMIT=${LOGIN_RATE_LIMIT:-}
       - API_RATE_LIMIT=${API_RATE_LIMIT:-}
+      - EMAIL_RATE_LIMIT=${EMAIL_RATE_LIMIT:-}
       # Site admin bootstrap (both unset = no admin, no shipped default credential).
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}

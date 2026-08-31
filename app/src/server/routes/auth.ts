@@ -1,9 +1,9 @@
 import crypto from 'crypto';
 import { Router, type Request, type Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and, sql, desc } from 'drizzle-orm';
 import { db } from '../db';
-import { users, authIdentities } from '../schema';
+import { users, authIdentities, emailTokens } from '../schema';
 import * as email from '../email';
 import * as auth from '../auth';
 import { baseUrl } from '../lib';
@@ -103,6 +103,11 @@ router.post('/login', async (req: Request, res: Response) => {
   res.json({ user: auth.publicUser(user) });
 });
 
+// Minimum gap between sign-in/verification emails for the SAME address. Derived from the last
+// token's created_at, so no schema change. Guards two things: a user impatiently re-requesting, and
+// someone using this endpoint (which creates an account for any new address) as a mail cannon.
+const RESEND_COOLDOWN_MS = 5 * 60 * 1000;
+
 // ── POST /api/auth/magic-link ─────────────────────────────────────────────────
 // Sends a one-time sign-in link. Creates the account if the email is new (so it
 // doubles as passwordless signup). Always returns ok (don't reveal who has an account).
@@ -117,6 +122,18 @@ router.post('/magic-link', async (req: Request, res: Response) => {
     await db.insert(users).values({ id, email: emailAddr, plan: 'free', createdAt: Date.now() });
     user = { id };
   }
+  // Per-address cooldown. Same generic wording as the success case so this cannot be used to
+  // discover which addresses exist.
+  const [last] = await db.select({ createdAt: emailTokens.createdAt })
+    .from(emailTokens)
+    .where(and(eq(emailTokens.userId, user.id), eq(emailTokens.purpose, 'magic_login')))
+    .orderBy(desc(emailTokens.createdAt))
+    .limit(1);
+  if (last && Date.now() - Number(last.createdAt) < RESEND_COOLDOWN_MS) {
+    const wait = Math.ceil((RESEND_COOLDOWN_MS - (Date.now() - Number(last.createdAt))) / 60000);
+    return res.status(429).json({ error: `A sign-in link was just sent. Please wait ${wait} more minute${wait === 1 ? '' : 's'} before requesting another.` });
+  }
+
   const token  = await auth.createEmailToken(user.id, 'magic_login');
   const link   = `${baseUrl(req)}/api/auth/magic?token=${token}`;
   const result = await email.sendAuthLink({ to: emailAddr, kind: 'magic', link });

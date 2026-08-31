@@ -29,6 +29,7 @@
   let refundingId: string | null = null;
   async function doRefund(e: any) {
     if (!e.id || e.refunded_at || refundingId) return;
+    if (!(e.amount_paid_cents > 0)) return;   // nothing was taken — never call Stripe
     if (!confirm(`Refund ${money(e.amount_paid_cents)} for “${e.name}” and lock the event?\n\nThis issues a FULL Stripe refund to the customer and cannot be undone here.`)) return;
     refundingId = e.id;
     try {
@@ -63,7 +64,7 @@
   const pageCount = (n: number) => Math.max(1, Math.ceil(n / PAGE));
 
   $: evFiltered = events.filter((e) => match([e.name, e.slug, e.join_code, e.owner], evQuery) && (evShowInactive || eventActive(e)));
-  $: usrFiltered = users.filter((u) => match([u.email, u.display_name, u.plan], usrQuery));
+  $: usrFiltered = users.filter((u) => match([u.email, u.display_name], usrQuery));
   $: msgFiltered = contactMsgs.filter((m) => match([m.name, m.email, m.message], msgQuery) && (msgShowDone || !m.handled));
   // Reset to page 1 whenever a query or filter changes (and clamp if a page goes out of range).
   $: { void evQuery; void evShowInactive; evPage = 1; }
@@ -305,7 +306,10 @@
                 <td class="muted nowrap">{fmtDate(e.created_at)}</td>
                 <td class="nowrap">
                   {#if e.organizer_code}<a class="manage" href={`/admin/${e.join_code}#${encodeURIComponent(e.organizer_code)}`} title="Open the full manager for this event (support override)">Manage →</a>{/if}
-                  {#if e.paid && !e.refunded_at}<button class="mini-refund" on:click={() => doRefund(e)} disabled={refundingId === e.id} title="Full Stripe refund + lock">{refundingId === e.id ? '…' : 'Refund'}</button>
+                  <!-- `paid` is true for demos and free-tier events (both amount 0), so gating on it
+                       offered a Refund button beside 25 events with nothing to refund. Gate on money
+                       actually taken, and render nothing at all when there is none. -->
+                  {#if e.amount_paid_cents > 0 && !e.refunded_at}<button class="mini-refund" on:click={() => doRefund(e)} disabled={refundingId === e.id} title="Full Stripe refund + lock">{refundingId === e.id ? '…' : 'Refund'}</button>
                   {:else if e.refunded_at}<span class="refunded-tag" title="Refunded">↩ refunded</span>{/if}
                 </td>
               </tr>
@@ -468,23 +472,22 @@
 
     <section class="panel">
       <h2>Users <span class="count">{usrFiltered.length}</span></h2>
-      <input class="search" placeholder="Search users — email, name, plan…" bind:value={usrQuery} />
+      <input class="search" placeholder="Search users — email or name…" bind:value={usrQuery} />
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Email</th><th>Name</th><th>Plan</th><th>Events</th><th>Verified</th><th>Admin</th><th>Joined</th></tr></thead>
+          <thead><tr><th>Email</th><th>Name</th><th>Events</th><th>Verified</th><th>Admin</th><th>Joined</th></tr></thead>
           <tbody>
             {#each usrPaged as u}
               <tr>
                 <td>{u.email}</td>
                 <td class="muted">{u.display_name || '—'}</td>
-                <td>{u.plan}</td>
                 <td>{u.events}</td>
                 <td>{u.email_verified_at ? '✅' : '—'}</td>
                 <td>{u.is_admin ? '🎩' : '—'}</td>
                 <td class="muted">{fmtDate(u.created_at)}</td>
               </tr>
             {/each}
-            {#if !usrFiltered.length}<tr><td colspan="7" class="muted">{users.length ? 'No matches.' : 'No users yet.'}</td></tr>{/if}
+            {#if !usrFiltered.length}<tr><td colspan="6" class="muted">{users.length ? 'No matches.' : 'No users yet.'}</td></tr>{/if}
           </tbody>
         </table>
       </div>
