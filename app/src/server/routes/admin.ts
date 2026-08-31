@@ -20,9 +20,16 @@ router.get('/overview', async (_req: Request, res: Response) => {
     `SELECT
        (SELECT count(*) FROM users)                          AS users,
        (SELECT count(*) FROM users WHERE is_admin)           AS admins,
-       (SELECT count(*) FROM events)                         AS events,
-       (SELECT count(*) FROM events WHERE paid)              AS paid_events,
-       (SELECT count(*) FROM events WHERE expires_at > ?)    AS active_events,
+       -- Demo events are created unauthenticated (owner_user_id IS NULL) and are flagged paid=true
+       -- with amount_paid_cents = 0 so they bypass billing. Counting them as "paid" reported 21
+       -- demos alongside 2 real sales. Real events and demos are now counted separately, and
+       -- "paid" means money was actually taken.
+       (SELECT count(*) FROM events WHERE owner_user_id IS NOT NULL)  AS events,
+       (SELECT count(*) FROM events WHERE owner_user_id IS NULL)      AS demo_events,
+       (SELECT count(*) FROM events
+         WHERE amount_paid_cents > 0 AND refunded_at IS NULL)         AS paid_events,
+       (SELECT count(*) FROM events
+         WHERE expires_at > ? AND owner_user_id IS NOT NULL)          AS active_events,
        (SELECT count(*) FROM participants)                   AS participants,
        (SELECT count(*) FROM photos)                         AS photos`,
     [now],

@@ -189,7 +189,8 @@
 
   const STAT_LABELS: [string, string][] = [
     ['users', 'Users'], ['events', 'Events'], ['active_events', 'Active'],
-    ['paid_events', 'Paid'], ['participants', 'Guests'], ['photos', 'Photos'], ['admins', 'Admins'],
+    ['paid_events', 'Paid'], ['demo_events', 'Demos trialled'],
+    ['participants', 'Guests'], ['photos', 'Photos'], ['admins', 'Admins'],
   ];
 </script>
 
@@ -294,7 +295,9 @@
                   <div>👥 {e.participants}/{e.guest_cap} guests</div>
                   <div>🖼 {e.photos} photos</div>
                 </td>
-                <td>{e.paid ? '✅' : '—'}</td>
+                <!-- `paid` is true for demos too (they bypass billing), so a tick here read as a
+                     sale. Show the amount actually taken, and label demos as what they are. -->
+                <td>{!e.owner ? 'Demo' : e.amount_paid_cents > 0 ? `$${(e.amount_paid_cents / 100).toFixed(2)}${e.refunded_at ? ' (refunded)' : ''}` : '—'}</td>
                 <td class="stacked">
                   <div class="ev-status">{e.purged_at ? '🗑 purged' : relExpiry(e.expires_at)}</div>
                   <div class="purge-line">{purgeInfo(e)}</div>
@@ -543,7 +546,11 @@
   .cmt-line { margin: 2px 0; }
   .btn { display: inline-block; margin-top: 10px; padding: 8px 14px; border-radius: 10px; background: var(--accent, #333); color: #fff; text-decoration: none; border: none; cursor: pointer; }
   .promo-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
-  .in { padding: 8px 10px; border: 1px solid var(--border, #ddd); border-radius: 9px; font-size: 0.9rem; }
+  /* `.search` already set these; `.in` did not, so the promo-code inputs fell back to the
+     browser default (white) and ignored dark mode. */
+  .in { padding: 8px 10px; border: 1px solid var(--border, #ddd); border-radius: 9px; font-size: 0.9rem;
+        background: var(--bg); color: var(--text); }
+  .in::placeholder { color: var(--text-muted); }
   .in.sm { width: 110px; }
   .promo-form .btn { margin-top: 0; }
   .field-hint { font-size: 0.76rem; color: var(--text-muted); margin: 2px 0 12px; }
