@@ -16,6 +16,9 @@ export const users = pgTable('users', {
   displayName: text('display_name'),
   emailVerifiedAt: ms('email_verified_at'),
   plan: text('plan').notNull().default('free'),
+  // Guest-referral attribution, stamped from the `ref` cookie at signup. A guest may sign up long
+  // before they run anything, so this is captured separately from the per-event stamp.
+  referredByEventId: text('referred_by_event_id'),
   stripeCustomerId: text('stripe_customer_id'),
   isAdmin: boolean('is_admin').notNull().default(false),  // site admin (bootstrapped from ADMIN_EMAIL env)
   // Account lifecycle email guards (see lifecycle.ts) — one-shot, prevent double-sends.
@@ -105,6 +108,14 @@ export const events = pgTable('events', {
   surveyToken: text('survey_token'),                        // unguessable token for the post-event survey page
   stripePaymentIntent: text('stripe_payment_intent'),       // captured at payment; enables one-click refund
   refundedAt: ms('refunded_at'),                            // set when the operator refunds the event
+  // ── Guest referral funnel ──────────────────────────────────────────────────
+  referredByEventId: text('referred_by_event_id'),          // whose gallery sent this host here
+  galleryViews: integer('gallery_views').notNull().default(0),
+  referralClicks: integer('referral_clicks').notNull().default(0),
+  // Single-use Stripe promotion code issued to the host for their NEXT event (~90 days).
+  hostRewardCode: text('host_reward_code'),
+  hostRewardExpiresAt: ms('host_reward_expires_at'),
+  hostRewardSentAt: ms('host_reward_sent_at'),
   createdAt: ms('created_at').notNull(),
 }, (t) => ({
   slugIdx: uniqueIndex('idx_events_slug').on(t.slug).where(sql`${t.slug} IS NOT NULL`),
@@ -130,6 +141,11 @@ export const surveyResponses = pgTable('survey_responses', {
   nps: smallint('nps'),                                     // 0–10
   comments: text('comments'),                               // JSON blob of optional per-question + overall comments
   contactOptIn: boolean('contact_opt_in').notNull().default(false),
+  // Consent to be QUOTED publicly — deliberately separate from contactOptIn, which is only consent
+  // to be contacted. Asked only when the score is high enough that it is a reasonable request.
+  testimonialOk: boolean('testimonial_ok').notNull().default(false),
+  testimonialName: text('testimonial_name'),
+  publishedAt: ms('published_at'),            // set when the operator actually publishes it
   createdAt: ms('created_at').notNull(),
 }, (t) => ({
   eventIdx: index('idx_survey_event').on(t.eventId),
@@ -162,6 +178,10 @@ export const photos = pgTable('photos', {
   width: integer('width'),
   height: integer('height'),
   durationMs: integer('duration_ms'),
+  // Gallery engagement. Counters, not an events table — at this volume they answer every question
+  // we have without unbounded growth.
+  viewCount: integer('view_count').notNull().default(0),
+  downloadCount: integer('download_count').notNull().default(0),
 }, (t) => ({
   eventIdx: index('idx_photos_event').on(t.eventId),
   eventStatusIdx: index('idx_photos_event_status').on(t.eventId, t.status),

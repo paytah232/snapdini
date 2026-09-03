@@ -210,7 +210,7 @@
   </div>
 </section>
 
-<SiteFooter {loggedIn} showUses>
+<SiteFooter {loggedIn} showUses showSupport={false}>
   <button class="linklike" on:click={startDemo}>See the demo</button>
 </SiteFooter>
 

@@ -27,6 +27,7 @@ import participantsRoutes from './routes/participants';
 import photosRoutes from './routes/photos';
 import billingRoutes, { stripeWebhookHandler } from './routes/billing';
 import contactRoutes from './routes/contact';
+import trackRoutes from './routes/track';
 import clientErrorRoutes from './routes/clienterror';
 import adminRoutes from './routes/admin';
 import sharesRoutes from './routes/shares';
@@ -128,6 +129,8 @@ const onPost = (mw: ReturnType<typeof requireTurnstile>) =>
     (req.method === 'POST' ? mw(req, res, next) : next());
 
 app.use('/api/contact', contactLimiter);
+// Public, best-effort counters + referral attribution. Under the /api backstop limiter.
+app.use('/api/track', trackRoutes);
 app.use('/api/auth/register', onPost(requireTurnstile('register')));
 app.use('/api/auth/login', onPost(requireTurnstile('login')));
 app.use('/api/participants/email-my-photos', emailLimiter);

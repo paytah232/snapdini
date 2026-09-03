@@ -81,9 +81,17 @@ router.post('/:token', async (req: Request, res: Response) => {
   }
 
   const contactOptIn = b.contactOptIn === true || b.contactOptIn === 'true';
+  // Publish consent is only honoured alongside a genuinely positive score. Two reasons: we should
+  // never quote an unhappy customer, and it stops a mis-set flag turning lukewarm feedback into
+  // marketing copy. The client only shows the ask when the score is high; this enforces it.
+  const positive = (overall ?? 0) >= 4 || (nps ?? -1) >= 8;
+  const testimonialOk = positive && (b.testimonialOk === true || b.testimonialOk === 'true');
+  const testimonialName = testimonialOk
+    ? (String(b.testimonialName || '').trim().slice(0, 80) || null)
+    : null;
   await db.insert(surveyResponses).values({
     id: uuidv4(), eventId: ev.id, overall, setup, guestExperience, value, nps, comments,
-    contactOptIn, createdAt: Date.now(),
+    contactOptIn, testimonialOk, testimonialName, createdAt: Date.now(),
   });
 
   // Instant operator alert on a low score (best-effort; never blocks the response).

@@ -72,6 +72,11 @@ export const DURATION_TIERS = [
 
 // Retention add-on (one-off, cents). Standard 1 week kept free; longer costs (storage).
 export const RETENTION_FREE_DAYS = 7;
+// Paid events include 30 days as standard. A 7-day default on a memories product is a landmine:
+// anyone who does not notice the add-on can genuinely lose their photos, which is far worse than
+// the lost upsell. 30 days is generous enough to cover "we'll grab them next weekend" without
+// committing us to a year of storage for every event.
+export const RETENTION_PAID_DAYS = 30;
 export const RETENTION_TIERS = [
   { maxDays: 7,   amountCents: 0 },       // 1 week — included
   { maxDays: 31,  amountCents: 300 },     // 1 month — +$3
@@ -116,6 +121,10 @@ const durationTierFor = (hours: number) =>
   DURATION_TIERS.find((t) => hours <= t.maxHours) ?? DURATION_TIERS[DURATION_TIERS.length - 1];
 const retentionTierFor = (days: number) =>
   RETENTION_TIERS.find((t) => days <= t.maxDays) ?? RETENTION_TIERS[RETENTION_TIERS.length - 1];
+// Included allowance depends on the tier: free events get 7 days, paid events 30. Anything at or
+// below the allowance costs nothing; only genuine upgrades are charged.
+const retentionCentsFor = (days: number, includedDays: number) =>
+  days <= includedDays ? 0 : retentionTierFor(days).amountCents;
 
 /** Compute the price + feature set for an event configuration. Pure — no Stripe calls.
  * Model: guest tiers gate the FEATURES (shots/frames/video are free for ≤10 guests, paid from 11).
@@ -132,7 +141,9 @@ export function quote(input: QuoteInput): Quote {
 
   // Always-charged add-ons (independent of the guest tier).
   const durationCents = durationTierFor(durationHours).amountCents;
-  const retentionCents = retentionTierFor(retentionDays).amountCents;
+  // Charged against the allowance for the branch we end up in (set below), not a flat ladder.
+  const retentionCentsFree = retentionCentsFor(retentionDays, RETENTION_FREE_DAYS);
+  const retentionCentsPaid = retentionCentsFor(retentionDays, RETENTION_PAID_DAYS);
 
   // Finalize a quote: sum every component, derive amount + requiresPayment.
   const finalize = (q: Omit<Quote, 'amountCents' | 'requiresPayment'>): Quote => {
@@ -144,7 +155,7 @@ export function quote(input: QuoteInput): Quote {
   if (g <= FREE_ALL_GUESTS) {
     return finalize({
       maxGuests: g, maxPhotos: reqShots, aspectRatios: reqAspects, videoSeconds, durationHours, retentionDays,
-      tier: 'free', baseCents: 0, shotsCents: 0, frameCents: 0, videoCents: 0, durationCents, retentionCents,
+      tier: 'free', baseCents: 0, shotsCents: 0, frameCents: 0, videoCents: 0, durationCents, retentionCents: retentionCentsFree,
       framePack: hasNonSquare(reqAspects), features: { video: true, aspects: 'all' }, notes,
     });
   }
@@ -155,7 +166,7 @@ export function quote(input: QuoteInput): Quote {
     notes.push(`Over ${PAID_TIERS[PAID_TIERS.length - 1].maxGuests} guests — contact us for a custom plan.`);
     return finalize({
       maxGuests: g, maxPhotos: reqShots, aspectRatios: reqAspects, videoSeconds, durationHours, retentionDays,
-      tier: 'custom', baseCents: 0, shotsCents: 0, frameCents: 0, videoCents: 0, durationCents, retentionCents,
+      tier: 'custom', baseCents: 0, shotsCents: 0, frameCents: 0, videoCents: 0, durationCents, retentionCents: retentionCentsFree,
       framePack: hasNonSquare(reqAspects), features: { video: true, aspects: 'all' }, notes,
     });
   }
@@ -166,7 +177,8 @@ export function quote(input: QuoteInput): Quote {
   return finalize({
     maxGuests: g, maxPhotos: reqShots, aspectRatios: reqAspects, videoSeconds: addon ? videoSeconds : 0, durationHours, retentionDays,
     tier: 'paid', baseCents: paidTier.amountCents, shotsCents: shotsTierFor(reqShots).amountCents,
-    frameCents: framePack ? FRAME_PACK_CENTS : 0, videoCents: addon?.amountCents ?? 0, durationCents, retentionCents,
+    frameCents: framePack ? FRAME_PACK_CENTS : 0, videoCents: addon?.amountCents ?? 0, durationCents,
+    retentionCents: retentionCentsPaid,
     framePack, features: { video: !!addon, aspects: 'all' }, notes,
   });
 }
@@ -185,6 +197,7 @@ export function publicBillingConfig() {
     durationFreeHours: DURATION_FREE_HOURS,
     durationTiers: DURATION_TIERS,
     retentionFreeDays: RETENTION_FREE_DAYS,
+    retentionPaidDays: RETENTION_PAID_DAYS,
     retentionTiers: RETENTION_TIERS,
   };
 }

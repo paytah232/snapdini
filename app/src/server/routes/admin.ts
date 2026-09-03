@@ -108,7 +108,9 @@ router.post('/client-errors/:id/handled', async (req: Request, res: Response) =>
 router.get('/survey-responses', async (_req: Request, res: Response) => {
   const responses = await all(
     `SELECT s.id, s.overall, s.setup, s.guest_experience AS "guestExperience", s.value, s.nps,
-            s.comments, s.contact_opt_in AS "contactOptIn", s.created_at,
+            s.comments, s.contact_opt_in AS "contactOptIn",
+            s.testimonial_ok AS "testimonialOk", s.testimonial_name AS "testimonialName",
+            s.published_at AS "publishedAt", s.created_at,
             e.name AS "eventName", e.join_code AS "joinCode"
        FROM survey_responses s JOIN events e ON e.id = s.event_id
       ORDER BY s.created_at DESC LIMIT 200`);

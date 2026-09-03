@@ -11,8 +11,9 @@ import * as email from '../email';
 import * as auth from '../auth';
 import * as cleanup from '../cleanup';
 import { isRevealed, baseUrl, escapeHtml, RESCHEDULE_WINDOW_MS } from '../lib';
+import { referrerFromCookie, isSelfReferral } from '../referrals';
 import { startSlideshow, slideshowInfo, toggleSlideshowFavourite, deleteSlideshow, slideshowFile, streamSlideshow1080 } from '../slideshow';
-import { billingEnabled, quote, FREE_ALL_GUESTS, brandingRemovable } from '../billing';
+import { billingEnabled, quote, FREE_ALL_GUESTS, brandingRemovable, RETENTION_PAID_DAYS } from '../billing';
 import { sendWelcome } from '../lifecycle';
 import options from '../options';
 
@@ -152,14 +153,22 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
   const reqShots = Math.min(Math.max(parseInt(maxPhotos as string, 10) || 12, 1), 100);
   const reqAspects = sanitizeAspects((req.body as { aspectRatios?: unknown }).aspectRatios);
   const reqDuration = Math.max(1, parseFloat(durationHours as string) || 24);
-  const reqRetention = Math.min(Math.max(parseInt((req.body as { retentionDays?: unknown }).retentionDays as string, 10) || RETENTION_DAYS, 1), 366);
+  // Paid events DEFAULT to the 30-day allowance rather than the 7-day free-tier floor. Anyone who
+  // never touches the retention control still gets a month, so a customer cannot silently lose
+  // their photos a week after the event — the failure mode that matters most on a memories product.
+  const wantsPaidTier = reqGuests > FREE_ALL_GUESTS;
+  const retentionDefault = wantsPaidTier ? Math.max(RETENTION_PAID_DAYS, RETENTION_DAYS) : RETENTION_DAYS;
+  const reqRetention = Math.min(Math.max(parseInt((req.body as { retentionDays?: unknown }).retentionDays as string, 10) || retentionDefault, 1), 366);
   const q = quote({ maxGuests: reqGuests, maxPhotos: reqShots, aspectRatios: reqAspects, videoSeconds: reqVideo, durationHours: reqDuration, retentionDays: reqRetention });
   // When billing is on, store the entitled config from the quote (≤10 = free with everything; 11+ paid).
   const entGuestCap = reqGuests;
   const entVideoSeconds = billingEnabled ? q.videoSeconds : reqVideo;
   const entMaxPhotos = billingEnabled ? q.maxPhotos : reqShots;
   const entAspects = billingEnabled ? q.aspectRatios : reqAspects;
-  const entRetentionDays = billingEnabled ? q.retentionDays : reqRetention;
+  const entRetentionDays = Math.max(
+    billingEnabled ? q.retentionDays : reqRetention,
+    q.tier === 'paid' ? RETENTION_PAID_DAYS : 0,   // the allowance is a floor, not just free headroom
+  );
   const entPaid = billingEnabled ? !q.requiresPayment : true;
 
   let joinCode: string;
@@ -187,6 +196,14 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
     moderationEnabled: moderationEnabled === true && mode !== 'instant',
     startsAt,
     originalStartsAt: startsAt,   // anchors the 6-month reschedule window
+    referredByEventId: await (async () => {
+      // A host's own next event is not a referral, so ignore the cookie when it points at an event
+      // they own themselves.
+      const srcId = await referrerFromCookie(req);
+      if (!srcId) return null;
+      const [src] = await db.select({ ownerUserId: events.ownerUserId }).from(events).where(eq(events.id, srcId));
+      return isSelfReferral(src?.ownerUserId ?? null, req.user?.id ?? null) ? null : srcId;
+    })(),
     expiresAt,
     revealedAt:      null,
     isLocked:        false,

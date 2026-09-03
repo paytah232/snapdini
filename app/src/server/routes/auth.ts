@@ -7,6 +7,7 @@ import { users, authIdentities, emailTokens } from '../schema';
 import * as email from '../email';
 import * as auth from '../auth';
 import { baseUrl } from '../lib';
+import { referrerFromCookie } from '../referrals';
 
 const router = Router();
 
@@ -61,8 +62,12 @@ router.post('/register', async (req: Request, res: Response) => {
       .where(eq(users.id, userId));
   } else {
     userId = uuidv4();
+    // Guest-referral attribution: which event's gallery sent them here. Captured at signup as well
+    // as at event creation, because a guest often signs up well before running anything.
+    const referredByEventId = await referrerFromCookie(req);
     await db.insert(users).values({
       id: userId, email: emailAddr, passwordHash: hash, displayName, plan: 'free', createdAt: now,
+      referredByEventId,
     });
   }
 
@@ -119,7 +124,8 @@ router.post('/magic-link', async (req: Request, res: Response) => {
   let [user] = await db.select({ id: users.id }).from(users).where(eq(users.email, emailAddr));
   if (!user) {
     const id = uuidv4();
-    await db.insert(users).values({ id, email: emailAddr, plan: 'free', createdAt: Date.now() });
+    await db.insert(users).values({ id, email: emailAddr, plan: 'free', createdAt: Date.now(),
+      referredByEventId: await referrerFromCookie(req) });
     user = { id };
   }
   // Per-address cooldown. Same generic wording as the success case so this cannot be used to

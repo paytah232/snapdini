@@ -565,6 +565,60 @@ async function main() {
   }
   cookie = ownerCookie;
 
+  group('Survey: testimonial consent is gated on positive feedback');
+  {
+    const tEv = await createEvent({ revealMode: 'instant' });
+    // survey_token is only minted when the post-event survey email sends (lifecycle.ts), so mint
+    // one directly — otherwise this group silently skips and proves nothing.
+    const tok = `ittok${Date.now()}`;
+    dbq(`UPDATE events SET survey_token='${tok}' WHERE join_code='${tEv.joinCode}'`);
+    if (tok && tok !== '') {
+      // Unhappy feedback must NOT yield publish consent even if the flag is set.
+      await api('POST', `/api/survey/${tok}`, { body: { overall: 2, nps: 3, testimonialOk: true, testimonialName: 'Nope' } });
+      ok('publish consent refused on poor feedback',
+         dbq(`SELECT testimonial_ok::text FROM survey_responses WHERE event_id='${tEv.id}' ORDER BY created_at DESC LIMIT 1`) === 'false');
+      ok('no name stored when consent is refused',
+         dbq(`SELECT COALESCE(testimonial_name,'null') FROM survey_responses WHERE event_id='${tEv.id}' ORDER BY created_at DESC LIMIT 1`) === 'null');
+      // Happy feedback with consent is accepted, name and all.
+      await api('POST', `/api/survey/${tok}`, { body: { overall: 5, nps: 10, testimonialOk: true, testimonialName: 'Gillian D.' } });
+      ok('publish consent accepted on strong feedback',
+         dbq(`SELECT testimonial_ok::text FROM survey_responses WHERE event_id='${tEv.id}' ORDER BY created_at DESC LIMIT 1`) === 'true');
+      ok('credited name stored', dbq(`SELECT testimonial_name FROM survey_responses WHERE event_id='${tEv.id}' ORDER BY created_at DESC LIMIT 1`) === 'Gillian D.');
+      // Consent must stay OFF by default for a happy respondent who did not tick it.
+      await api('POST', `/api/survey/${tok}`, { body: { overall: 5, nps: 10 } });
+      ok('consent is opt-IN, never assumed',
+         dbq(`SELECT testimonial_ok::text FROM survey_responses WHERE event_id='${tEv.id}' ORDER BY created_at DESC LIMIT 1`) === 'false');
+    } else {
+      ok('survey token absent — testimonial consent skipped', true);
+    }
+  }
+
+  group('Retention allowance (paid events include 30 days)');
+  {
+    // A 7-day default on a memories product means a customer who never touches the control loses
+    // their photos a week after the event. Paid tiers now include 30 days as a floor.
+    const paidEv = await createEvent({ maxGuests: 60, durationHours: 6 });   // no retentionDays given
+    ok('paid event defaults to 30-day retention',
+       Number(dbq(`SELECT retention_days FROM events WHERE join_code='${paidEv.joinCode}'`)) === 30,
+       dbq(`SELECT retention_days FROM events WHERE join_code='${paidEv.joinCode}'`));
+
+    // The allowance is a floor: posting a smaller value must not drop a paid event below it.
+    const lowEv = await createEvent({ maxGuests: 60, durationHours: 6, retentionDays: 7 });
+    ok('a paid event cannot be created below the allowance',
+       Number(dbq(`SELECT retention_days FROM events WHERE join_code='${lowEv.joinCode}'`)) >= 30,
+       dbq(`SELECT retention_days FROM events WHERE join_code='${lowEv.joinCode}'`));
+
+    // Free tier keeps the 7-day floor — the allowance is a paid benefit.
+    const freeEv = await createEvent({ maxGuests: 10, durationHours: 6 });
+    ok('free event still defaults to 7 days',
+       Number(dbq(`SELECT retention_days FROM events WHERE join_code='${freeEv.joinCode}'`)) === 7,
+       dbq(`SELECT retention_days FROM events WHERE join_code='${freeEv.joinCode}'`));
+
+    // purge_at must follow retention, not lag behind it.
+    const span = Number(dbq(`SELECT (purge_at - expires_at) FROM events WHERE join_code='${paidEv.joinCode}'`));
+    ok('purge_at reflects the 30 days', span === 30 * 86_400_000, `${span}ms`);
+  }
+
   group('Auth: magic-link cooldown + admin overview counts');
   {
     // magic-link creates an account for any new address AND is the "resend my sign-in link" the

@@ -20,9 +20,19 @@
   export let showUses = false;
 
   let version = '';
+  // Self-hosted instances (billing disabled) always show the maker links — that IS the audience,
+  // and hiding the source of an AGPL project from the people running it would be perverse.
+  // On the hosted product they are suppressed wherever someone is deciding whether to buy:
+  // "Buy me a coffee" beside a checkout reads as a hobby project at the worst possible moment.
+  let selfHosted = false;
   onMount(async () => {
-    try { version = (await getConfig()).version; } catch { /* offline — footer still renders */ }
+    try {
+      const cfg = await getConfig();
+      version = cfg.version;
+      selfHosted = !cfg.billing?.billingEnabled;
+    } catch { /* offline — footer still renders */ }
   });
+  $: supportVisible = showSupport || selfHosted;
 
   const GITHUB = 'https://github.com/paytah232/snapdini';
   const COFFEE = 'https://buymeacoffee.com/paytah232';
@@ -33,7 +43,7 @@
     © 2026 Snapdini{#if version} · v{version}{/if} ·
     <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> ·
     <a href={GITHUB} target="_blank" rel="noopener noreferrer">GitHub</a>
-    {#if showSupport} · <a href={COFFEE} target="_blank" rel="noopener noreferrer">☕ Buy me a coffee</a>{/if}
+    {#if supportVisible} · <a href={COFFEE} target="_blank" rel="noopener noreferrer">☕ Buy me a coffee</a>{/if}
   </div>
 {:else}
   <footer>
@@ -48,7 +58,7 @@
       <a href="/privacy">Privacy</a>
       {#if $page.data.analyticsEnabled}<a href="/?consent=1">Your Privacy Choices</a>{/if}
       <a href={GITHUB} target="_blank" rel="noopener noreferrer">GitHub</a>
-      {#if showSupport}<a href={COFFEE} target="_blank" rel="noopener noreferrer">☕ Buy me a coffee</a>{/if}
+      {#if supportVisible}<a href={COFFEE} target="_blank" rel="noopener noreferrer">☕ Buy me a coffee</a>{/if}
       <slot />
     </div>
     {#if showUses}

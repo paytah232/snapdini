@@ -80,7 +80,7 @@
   </div>
 </main>
 
-<SiteFooter showUses />
+<SiteFooter showUses showSupport={false} />
 
 <style>
   .hp { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }

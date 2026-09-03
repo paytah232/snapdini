@@ -8,6 +8,11 @@
   let nps = -1;
   const comments: Record<string, string> = {};
   let contactOptIn = false;
+  // Only ask to quote someone who is actually happy. Asking after mediocre feedback is tone-deaf,
+  // and the server enforces the same threshold so this cannot be bypassed.
+  let testimonialOk = false;
+  let testimonialName = '';
+  $: happy = overall >= 4 || nps >= 8;
   let openComment: Record<string, boolean> = {};
 
   let busy = false, done = false, err = '';
@@ -29,6 +34,8 @@
         nps: nps >= 0 ? nps : undefined,
         comments: { ...comments, ...(video ? { video: String(video) } : {}) },
         contactOptIn,
+        testimonialOk: happy && testimonialOk,
+        testimonialName: happy && testimonialOk ? testimonialName : undefined,
       };
       const r = await fetch(`/api/survey/${data.token}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
@@ -134,6 +141,20 @@
           <small>Only if it'd help — to fix something or follow up on an idea. Never marketing.</small></span>
       </label>
 
+      <!-- Only shown once the feedback is genuinely positive. The server applies the same threshold,
+           so a tampered payload cannot turn lukewarm feedback into a public quote. -->
+      {#if happy}
+        <label class="opt">
+          <input type="checkbox" bind:checked={testimonialOk} />
+          <span>Happy for us to share this as a review on our website</span>
+        </label>
+        {#if testimonialOk}
+          <input class="tname" type="text" maxlength="80" bind:value={testimonialName}
+                 placeholder="Name to credit (e.g. Gillian D., or leave blank)" />
+          <p class="sub" style="margin:4px 0 0">We'll only use the words you wrote above, never your email.</p>
+        {/if}
+      {/if}
+
       {#if err}<p class="err">{err}</p>{/if}
       <button class="btn primary" on:click={submit} disabled={busy}>{busy ? 'Sending…' : 'Send feedback'}</button>
       <p class="tiny">Feedback for <b>{data.eventName}</b> · Snapdini</p>
@@ -142,6 +163,8 @@
 </main>
 
 <style>
+  .tname { width: 100%; margin-top: 8px; padding: 8px 10px; border: 1px solid var(--border);
+    border-radius: 9px; background: var(--bg); color: var(--text); font-size: .9rem; }
   :global(body) { background: var(--bg, #100f0d); }
   .wrap { min-height: 100vh; display: flex; align-items: flex-start; justify-content: center; padding: 32px 16px 64px; }
   .card { width: min(560px, 100%); background: var(--surface, #191713); color: var(--text, #f4efe4);
