@@ -27,7 +27,7 @@ export const pricingFaqs: Faq[] = [
   { q: 'Is it really free?', a: 'Yes — up to 10 guests is free forever with all features, no credit card required. You only pay if you need a bigger event or an add-on.' },
   { q: 'Is it a subscription?', a: 'No. Each paid event is a one-off charge — you pay per event, not monthly.' },
   { q: 'Can I upgrade after I’ve started?', a: 'Yes — you can top up guests, shots or length at any time, before or during the event, and only pay the difference.' },
-  { q: 'Do you offer a discount?', a: 'Use the launch code LAUNCH20 at checkout for 20% off a paid event (limited time).' },
+  { q: 'Do you offer a discount?', a: 'Events with up to 10 guests are free forever, with every feature — most people never need to pay at all. After a paid event we email the host a single-use thank-you code towards their next one. We also honour any promo code we have sent you at checkout.' },
   { q: 'Can I get a refund?', a: 'Yes — if you change your mind you can cancel a paid event for a full refund any time before it starts, from the event’s manage page or by emailing support@snapdini.com. Once an event has started, refunds are for faults on our side, reviewed case-by-case.' },
   { q: 'Can I self-host Snapdini for free?', a: 'Yes — Snapdini is open source (AGPL-3.0). You can self-host the full app for free from the public Docker images; billing is optional and only switches on if you add your own Stripe keys.' },
 ];

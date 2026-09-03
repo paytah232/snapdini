@@ -66,7 +66,6 @@
   <div class="eyebrow"><span class="dot"></span> Pricing</div>
   <h1>Free to start. <em>Pay once</em> per event.</h1>
   <p class="lede">Up to 10 guests is free forever, with every feature. Bigger events are a single one-off charge — no subscription, no surprises.</p>
-  <p class="promo">🎉 Launch offer: use code <b>LAUNCH20</b> at checkout for <b>20% off</b> any paid event.</p>
 </header>
 
 <section class="band">
@@ -146,8 +145,6 @@
   h1 { font-size: clamp(2.3rem, 5.5vw, 3.6rem); font-weight: 850; line-height: 1.06; letter-spacing: -.02em; }
   :global(.hero h1 em) { font-style: normal; color: var(--accent); }
   .lede { font-size: 1.12rem; color: var(--text-muted); max-width: 50ch; margin: 22px auto 18px; }
-  .promo { font-size: .92rem; background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
-    display: inline-block; padding: 8px 18px; color: var(--text); }
   .band { max-width: 1080px; margin: 0 auto; padding: 40px 24px; }
   .band:not(.cta-band) + .band, .band.cta-band { border-top: 1px solid var(--border); }
   .tiers { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }

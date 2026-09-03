@@ -143,7 +143,10 @@ app.use('/api/auth/login', loginLimiter);
 app.use('/api/auth/magic-link', emailLimiter);
 // Demo events are public + unauthenticated and create real (throwaway) rows — cap creation per IP.
 app.use('/api/events/demo', rateLimit({
-  windowMs: 15 * 60 * 1000, limit: 15, standardHeaders: 'draft-7', legacyHeaders: false,
+  // Env-tunable like every other limiter: the integration suite creates a demo event per run and
+  // now finishes in ~30s, so a hardcoded 15/15min blocked repeat runs. Prod keeps the default.
+  windowMs: 15 * 60 * 1000, limit: Number(process.env.DEMO_RATE_LIMIT || 15),
+  standardHeaders: 'draft-7', legacyHeaders: false,
   message: { error: 'Too many demo events — please wait a few minutes.' },
 }));
 // Organizer-triggered outbound email (gallery blast + co-host invites) — throttle to prevent a

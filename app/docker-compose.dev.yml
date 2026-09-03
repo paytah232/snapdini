@@ -66,6 +66,17 @@ services:
       - API_RATE_LIMIT=${API_RATE_LIMIT:-}
       - EMAIL_RATE_LIMIT=${EMAIL_RATE_LIMIT:-}
       - COUNTER_FLUSH_MS=${COUNTER_FLUSH_MS:-}
+      # Present in the prod compose file but previously absent here, which meant the lifecycle
+      # emails and operator notifications could not be exercised on the dev stack AT ALL — setting
+      # them in .env did nothing, because compose passes env explicitly.
+      - LIFECYCLE_EMAILS=${LIFECYCLE_EMAILS:-}
+      - OPS_NOTIFICATIONS=${OPS_NOTIFICATIONS:-}
+      - OPS_DIGEST_HOUR=${OPS_DIGEST_HOUR:-8}
+      - OPS_ERROR_SPIKE=${OPS_ERROR_SPIKE:-20}
+      - OPS_TZ=${OPS_TZ:-Australia/Brisbane}
+      - DEMO_RATE_LIMIT=${DEMO_RATE_LIMIT:-15}
+      - HOST_REWARD_PERCENT=${HOST_REWARD_PERCENT:-20}
+      - HOST_REWARD_DAYS=${HOST_REWARD_DAYS:-90}
       # Site admin bootstrap (both unset = no admin, no shipped default credential).
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
