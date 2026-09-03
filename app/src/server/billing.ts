@@ -12,7 +12,11 @@ export const stripe: Stripe | null = billingEnabled
   ? new Stripe(process.env.STRIPE_SECRET_KEY as string)
   : null;
 
-export const CURRENCY = (process.env.BILLING_CURRENCY || 'usd').toLowerCase();
+// Default AUD, matching the tier amounts below: PAID_TIERS et al are hardcoded AUD figures
+// (500 = A$5 … 5900 = A$59). Defaulting to USD charged those same numbers as dollars, i.e. a ~55%
+// unintended price rise for any self-hoster who never set this. The comment already claimed AUD;
+// the code did not. Set BILLING_CURRENCY explicitly for any other currency AND re-check the tiers.
+export const CURRENCY = (process.env.BILLING_CURRENCY || 'aud').toLowerCase();
 
 // ── Pricing model (per-event one-off pass) ────────────────────────────────────
 // ≤10 guests → free, every feature included · paid from 11, base scales by guest count + opt-in

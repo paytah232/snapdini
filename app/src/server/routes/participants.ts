@@ -183,6 +183,15 @@ router.post('/email-my-photos', async (req: Request, res: Response) => {
         <p>You took <strong>${photoCount} photo${photoCount !== 1 ? 's' : ''}</strong> at <strong>${escapeHtml(p.eventName)}</strong>.</p>
         <p style="margin:24px 0"><a href="${galUrl}" class="btn">View Gallery →</a></p>
         <p style="color:#888;font-size:0.85em">Your photos appear under your name <strong>${escapeHtml(p.name)}</strong> in the gallery.</p>
+        <!-- Surface 2 of 3: a guest who asked for their photos has self-selected as engaged, which
+             makes this the warmest referral moment we get. Leads with the free tier, not a discount:
+             the barrier is not price, it is that a guest has no idea this is something they can run
+             themselves — nothing in the guest flow ever told them. -->
+        <hr style="border:none;border-top:1px solid #2a2418;margin:22px 0 16px" />
+        <p style="font-size:0.9em;color:#b8ab8d">
+          Hosting something yourself? Snapdini is <strong>free for up to 10 guests</strong> —
+          <a href="${baseUrl(req)}/?ref=${encodeURIComponent(p.joinCode)}">start your own event</a>.
+        </p>
       `),
     });
     res.json({ success: true });

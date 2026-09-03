@@ -64,6 +64,7 @@ services:
       - LOGIN_RATE_LIMIT=${LOGIN_RATE_LIMIT:-}
       - API_RATE_LIMIT=${API_RATE_LIMIT:-}
       - EMAIL_RATE_LIMIT=${EMAIL_RATE_LIMIT:-}
+      - COUNTER_FLUSH_MS=${COUNTER_FLUSH_MS:-}
       # Customer lifecycle emails (welcome/nudge/check-in/survey) — off unless set to 1. Needs email configured.
       - LIFECYCLE_EMAILS=${LIFECYCLE_EMAILS:-}
       # Operator notifications to SUPPORT_EMAIL (daily digest + instant alerts) — off unless set to 1.

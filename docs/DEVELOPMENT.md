@@ -60,6 +60,18 @@ By default they're warm gradients; drop real photos in to replace them:
 
 ## Notes & gotchas
 
+**Write-behind counters.** Gallery views, per-photo views/downloads and referral clicks are hot-path
+writes on the guest side, so they never touch Postgres inline. `app/src/server/counters.ts` keeps
+in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interval with a single
+`UPDATE … FROM (VALUES …)` per table — 100 photo views become one statement. The tracking routes in
+`routes/track.ts` respond **before** doing any work, and the browser sends beacons
+(`navigator.sendBeacon`) so nothing blocks navigation. Tunables and caveats:
+
+- `COUNTER_FLUSH_MS` (default `5000`) — flush interval. The dev stack sets `400` so tests do not sleep.
+- Counters are flushed on `SIGTERM`/`SIGINT`, but an unclean kill loses at most one interval's worth.
+  These are engagement metrics, not billing data — that trade is deliberate.
+- The map is capped (20k keys) so a hostile client cannot grow it without bound.
+
 - **Typecheck runs on the HOST, not in the container** — `tsconfig.json` isn't bind-mounted, so `tsc`
   inside the app container can't find it. Use `npm run typecheck` from `app/` (or the root).
 - **`BASE_URL` is REQUIRED in production** — it's baked into QR codes, email/verify links, Stripe

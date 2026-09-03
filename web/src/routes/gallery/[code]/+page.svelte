@@ -8,6 +8,8 @@
   import OgHead from '$lib/components/OgHead.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import { imgFallback, hidePoster } from '$lib/ui';
+  import StartYourOwn from '$lib/components/StartYourOwn.svelte';
+  import { trackGalleryView, trackPhotos } from '$lib/referral';
   import type { PageData } from './$types';
 
   export let data: PageData;
@@ -20,6 +22,9 @@
   let revealed = false;
   let revealMode = '';
   let revealAt: number | null = null;
+  // "Just revealed" = within 48h of the gallery unlocking. That window is the reveal moment for an
+  // at_end/manual event, when guests come back and see everything at once.
+  $: justRevealed = revealed && !!revealAt && Date.now() - revealAt < 48 * 3600 * 1000;
   let photoCount = 0;
 
   let photos: Photo[] = [];
@@ -57,9 +62,13 @@
     hasHighlights = data.hasHighlights ?? false;
     allowDownloads = data.allowDownloads !== false;
     photos = data.photos ?? [];
+    // Engagement: the ids this viewer actually received. Batched and fire-and-forget — a counter
+    // must never delay or break the gallery.
+    trackPhotos(code, photos.map((p) => p.id), 'view');
   }
 
   onMount(async () => {
+    trackGalleryView(code);
     try {
       event = await getEvent(code);
       document.title = `${event.name} — Snapdini`;
@@ -118,11 +127,15 @@
   }
   function downloadAll() {
     if (!allowDownloads) { showToast('Downloads are disabled for this event', true); return; }
+    // Counted here, not in zipHref: that builder can be evaluated during render, which would
+    // record downloads that never happened.
+    trackPhotos(code, photos.map((p) => p.id), 'download');
     showToast('Preparing your download…');
     location.href = zipHref();
   }
   function downloadSelected() {
     if (!selected.size) return;
+    trackPhotos(code, [...selected], 'download');
     showToast('Preparing your download…');
     location.href = zipHref([...selected]);
   }
@@ -209,6 +222,11 @@
         </button>
       {/each}
     </div>
+  {/if}
+  <!-- Surface 1 of 3: every guest lands here, and no email address is required to reach them.
+       Only shown once photos are actually visible — pitching before the reveal is noise. -->
+  {#if revealed && photos.length}
+    <StartYourOwn sourceJoinCode={code} emphasis={justRevealed} />
   {/if}
 </main>
 

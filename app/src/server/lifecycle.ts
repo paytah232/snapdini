@@ -4,6 +4,7 @@ import { db } from './db';
 import { events, users } from './schema';
 import * as email from './email';
 import { welcomeEmail, checkinEmail, surveyEmail, accountWelcomeEmail, activationNudgeEmail, type LifecycleView } from './lifecycle-emails';
+import { ensureHostReward } from './host-reward';
 
 // Customer lifecycle emails, run in-process on a timer (same shape as the retention sweep). Welcome
 // fires immediately from the Stripe webhook; check-in and survey are found by the sweep. Every send
@@ -172,7 +173,12 @@ async function sweep(): Promise<void> {
     // Mint a survey token if the event doesn't have one yet.
     let token = info.ev.surveyToken;
     if (!token) { token = newToken(); await db.update(events).set({ surveyToken: token }).where(eq(events.id, ev.id)); }
-    const mail = surveyEmail(buildView(info.ev, info.ownerName, { surveyUrl: `${BASE()}/survey/${token}` }));
+    // Mint the thank-you discount here rather than at event creation, so we never create Stripe
+    // objects for events that were cancelled or never happened. Optional by design — a Stripe
+    // failure must not stop the survey going out.
+    const reward = await ensureHostReward(ev.id).catch(() => null);
+    const view = buildView(info.ev, info.ownerName, { surveyUrl: `${BASE()}/survey/${token}` });
+    const mail = surveyEmail({ ...view, hostReward: reward ?? undefined });
     try { await email.sendMail({ to: info.ownerEmail, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com' }); }
     catch (e) { await db.update(events).set({ feedbackSentAt: null }).where(eq(events.id, ev.id)); console.error(`[lifecycle] survey ${ev.id} failed: ${(e as Error).message}`); }
   }

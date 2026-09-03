@@ -9,6 +9,7 @@
   import { imgFallback, hidePoster } from '$lib/ui';
   import { putCapture, delCapture, listCaptures, saveProgress, getProgress } from '$lib/captureStore';
   import Lightbox from '$lib/components/Lightbox.svelte';
+  import StartYourOwn from '$lib/components/StartYourOwn.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import FeedbackModal from '$lib/components/FeedbackModal.svelte';
 
@@ -1043,6 +1044,11 @@
         <span class="big">{galleryRevealed ? '📷' : '🔒'}</span>
         <p class="muted">{galleryRevealed ? (galleryFilter === 'mine' ? 'You haven’t taken any yet — switch to All.' : 'Nothing here yet.') : 'You haven’t taken any photos yet.'}</p>
       </div>
+    {/if}
+    <!-- Referral surface 2: a guest lands here when their roll is spent, which is the moment they
+         have just finished using the product. Emphasised only then, not on a casual gallery peek. -->
+    {#if ev?.joinCode}
+      <StartYourOwn sourceJoinCode={ev.joinCode} emphasis={photosRemaining === 0 && ownCount > 0} />
     {/if}
   </div>
   {#if lbOpen}<Lightbox photos={shownPhotos} index={lbIndex} on:close={() => (lbOpen = false)} />{/if}

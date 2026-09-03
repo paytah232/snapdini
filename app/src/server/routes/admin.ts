@@ -37,6 +37,40 @@ router.get('/overview', async (_req: Request, res: Response) => {
   res.json({ stats, now });
 });
 
+// ── GET /api/admin/referral-funnel ────────────────────────────────────────────
+// The whole point of the referral work: does a guest who came from someone else's gallery actually
+// run an event? Codes-redeemed is a vanity metric; the step that matters is signup → event created,
+// because that is exactly where paid traffic dies.
+router.get('/referral-funnel', async (_req: Request, res: Response) => {
+  const totals = await get<Record<string, number>>(
+    `SELECT
+       (SELECT COALESCE(sum(gallery_views), 0)   FROM events)                             AS gallery_views,
+       (SELECT COALESCE(sum(referral_clicks), 0) FROM events)                             AS referral_clicks,
+       (SELECT count(*) FROM users  WHERE referred_by_event_id IS NOT NULL)               AS referred_signups,
+       (SELECT count(*) FROM events WHERE referred_by_event_id IS NOT NULL)               AS referred_events,
+       (SELECT count(*) FROM events WHERE referred_by_event_id IS NOT NULL
+                                     AND amount_paid_cents > 0 AND refunded_at IS NULL)   AS referred_paid,
+       (SELECT COALESCE(sum(amount_paid_cents), 0) FROM events
+         WHERE referred_by_event_id IS NOT NULL AND refunded_at IS NULL)                  AS referred_cents`);
+
+  // Which galleries are actually generating anything, so the operator knows where it works.
+  const sources = await all(
+    `SELECT e.join_code, e.name, e.gallery_views, e.referral_clicks,
+            (SELECT count(*) FROM users  u WHERE u.referred_by_event_id = e.id) AS signups,
+            (SELECT count(*) FROM events c WHERE c.referred_by_event_id = e.id) AS events_created
+       FROM events e
+      WHERE e.gallery_views > 0 OR e.referral_clicks > 0
+      ORDER BY e.referral_clicks DESC, e.gallery_views DESC
+      LIMIT 50`);
+
+  // Engagement, so "did anyone look at the photos" is answerable without a separate tool.
+  const engagement = await get<Record<string, number>>(
+    `SELECT COALESCE(sum(view_count),0) AS photo_views, COALESCE(sum(download_count),0) AS photo_downloads
+       FROM photos`);
+
+  res.json({ totals, sources, engagement });
+});
+
 // Recent events (newest first).
 router.get('/events', async (_req: Request, res: Response) => {
   // Counts come from pre-aggregated subqueries joined on event_id (one grouped index scan each)

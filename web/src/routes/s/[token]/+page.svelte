@@ -8,6 +8,8 @@
   import Lightbox from '$lib/components/Lightbox.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import OgHead from '$lib/components/OgHead.svelte';
+  import StartYourOwn from '$lib/components/StartYourOwn.svelte';
+  import { referralLink } from '$lib/referral';
   import type { PageData } from './$types';
 
   export let data: PageData;
@@ -79,8 +81,11 @@
   function dlHref(ids?: string[]): string {
     return `/api/shares/${token}/download${ids && ids.length ? `?ids=${ids.join(',')}` : ''}`;
   }
-  function downloadAll() { showToast('Preparing your download…'); location.href = dlHref(); }
-  function downloadSelected() { if (!selected.size) return; showToast('Preparing your download…'); location.href = dlHref([...selected]); }
+  // Referral surface 3: someone who just downloaded these photos has got real value out of the
+  // product, so that is when the "start your own" card earns its emphasis.
+  let downloaded = false;
+  function downloadAll() { downloaded = true; showToast('Preparing your download…'); location.href = dlHref(); }
+  function downloadSelected() { if (!selected.size) return; downloaded = true; showToast('Preparing your download…'); location.href = dlHref([...selected]); }
 </script>
 
 <svelte:head><title>Shared photos — Snapdini</title></svelte:head>
@@ -133,7 +138,12 @@
     </div>
   {/if}
 
-  <footer>© 2026 Snapdini · <a href="/">Make your own event →</a></footer>
+  <!-- `s:` source rather than the join code: a share is a view-only surface and must not hand out
+       the code that lets someone join the event and shoot. Resolved server-side in referrals.ts. -->
+  {#if !loading && !error && revealed}
+    <StartYourOwn sourceJoinCode={`s:${token}`} emphasis={downloaded} />
+  {/if}
+  <footer>© 2026 Snapdini · <a href={referralLink(`s:${token}`)}>Make your own event →</a></footer>
 </main>
 
 {#if lbOpen}<Lightbox photos={photos} index={lbIndex} on:close={() => (lbOpen = false)} />{/if}

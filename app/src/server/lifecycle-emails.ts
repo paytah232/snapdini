@@ -22,6 +22,8 @@ export interface LifecycleView {
   unsubUrl?: string;
   startsSoon?: boolean;              // event begins within a few days of booking → fold the
                                      // pre-flight into the welcome and skip the standalone check-in
+  /** Optional post-event thank-you discount for the host's NEXT event. */
+  hostReward?: { code: string; percentOff: number; expiresAt: number };
 }
 
 // The 3-point pre-flight, shared by the check-in and the short-notice welcome.
@@ -204,6 +206,19 @@ export function activationNudgeEmail(v: { ownerName: string; createUrl: string; 
 
 // ── 3. POST-EVENT SURVEY (3 days after) ──────────────────────────────────────
 export function surveyEmail(v: LifecycleView): { subject: string; preheader: string; html: string } {
+  // Thank-you discount for their NEXT event. Rendered only when one was minted (paid, unrefunded).
+  const rewardBlock = v.hostReward
+    ? `<div style="padding:18px 0 0">
+         <div style="border:1px dashed #6b5c2e;border-radius:12px;padding:16px;background:#14110b;text-align:center">
+           <div style="font-size:13px;color:#b8ab8d;margin-bottom:6px">A thank-you for hosting</div>
+           <div style="font-size:22px;font-weight:700;letter-spacing:2px;color:#f0b429">${esc(v.hostReward.code)}</div>
+           <div style="font-size:13px;color:#e8e0cf;margin-top:6px">
+             ${v.hostReward.percentOff}% off your next event — use it by
+             ${new Date(v.hostReward.expiresAt).toLocaleDateString('en-AU', { day: 'numeric', month: 'long', year: 'numeric' })}
+           </div>
+         </div>
+       </div>`
+    : '';
   const subject = `How did ${v.eventName} go? (2 mins) 🎩`;
   const preheader = `Two minutes to tell us how Snapdini did — it shapes what we build next.`;
   const base = v.surveyUrl || v.manageUrl;
@@ -222,6 +237,7 @@ export function surveyEmail(v: LifecycleView): { subject: string; preheader: str
     </tr></table>`,
     `<p style="font-size:13px;color:${C.subtle};margin:6px 0 0">Then a handful of quick questions — comments optional, skip any you like.</p>`,
     btn('Take the 2-minute survey', base),
+    rewardBlock,
     sign('Thank you — truly.'),
   ].join('');
 

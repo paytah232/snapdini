@@ -5,6 +5,7 @@ import { eq, and, sql, inArray } from 'drizzle-orm';
 import { db } from '../db';
 import { events, photos } from '../schema';
 import { captureReferral } from '../referrals';
+import { bumpPhotoViews, bumpPhotoDownloads, bumpGalleryView } from '../counters';
 
 const router = Router();
 
@@ -22,12 +23,12 @@ router.post('/ref', async (req: Request, res: Response) => {
 // One gallery view. Counted per page load, not per photo render.
 router.post('/gallery/:joinCode', async (req: Request, res: Response) => {
   const code = String(req.params.joinCode || '').toUpperCase().slice(0, 40);
-  try {
-    await db.update(events)
-      .set({ galleryViews: sql`${events.galleryViews} + 1` })
-      .where(eq(events.joinCode, code));
-  } catch { /* never fail a page view over a counter */ }
+  // Respond first; the counter is coalesced in memory and flushed in batches (see counters.ts).
   res.json({ ok: true });
+  try {
+    const [ev] = await db.select({ id: events.id }).from(events).where(eq(events.joinCode, code));
+    if (ev) bumpGalleryView(ev.id);
+  } catch { /* never let a counter surface as an error */ }
 });
 
 // ── POST /api/track/photos  { ids: string[], kind: 'view' | 'download' } ──────
@@ -42,20 +43,15 @@ router.post('/photos', async (req: Request, res: Response) => {
     : [];
   if (!ids.length || !code) return res.json({ ok: true, counted: 0 });
 
+  res.json({ ok: true, counted: ids.length });
   try {
-    const [ev] = await db.select({ id: events.id }).from(events).where(eq(events.joinCode, code));
-    if (!ev) return res.json({ ok: true, counted: 0 });
-    const col = kind === 'download' ? photos.downloadCount : photos.viewCount;
-    const result = await db.update(photos)
-      .set(kind === 'download'
-        ? { downloadCount: sql`${photos.downloadCount} + 1` }
-        : { viewCount: sql`${photos.viewCount} + 1` })
-      .where(and(eq(photos.eventId, ev.id), inArray(photos.id, ids)));
-    void col; void result;
-    return res.json({ ok: true, counted: ids.length });
-  } catch {
-    return res.json({ ok: true, counted: 0 });
-  }
+    // Scope the ids to this event so a caller cannot bump counters across the instance, then hand
+    // off. The scoping read is indexed and cheap; the writes are batched elsewhere.
+    const owned = await db.select({ id: photos.id }).from(photos)
+      .where(and(eq(photos.eventId, sql`(SELECT id FROM events WHERE join_code = ${code})`), inArray(photos.id, ids)));
+    const ownedIds = owned.map((r) => r.id);
+    if (ownedIds.length) (kind === 'download' ? bumpPhotoDownloads : bumpPhotoViews)(ownedIds);
+  } catch { /* analytics only */ }
 });
 
 export default router;

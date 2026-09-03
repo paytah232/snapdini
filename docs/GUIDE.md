@@ -25,6 +25,8 @@ The rest of this guide is the full reference for each page.
 - [4 · Guest capture](#4-guest-capture)
 - [5 · Public sharing & gallery](#5-public-sharing--gallery)
 - [6 · Site administration](#6-site-administration)
+- [Guest referrals & gallery stats](#guest-referrals--gallery-stats)
+- [Moderation, reveal & retention](#moderation-reveal--retention--how-it-behaves)
 
 ---
 
@@ -178,6 +180,13 @@ Anyone with the link (no account). Resolves to the whole gallery, favourites, or
 ### Event gallery — `/gallery/<code>`
 The public gallery for an event.
 - **⭐ Highlights / 📷 All photos** toggle, lightbox, and the same reveal-gating + optional downloads.
+- **"Start your own"** — a footer card inviting guests to run their own event. It is emphasised for
+  48 hours after a reveal (the moment guests are most impressed) and carries the source event's join
+  code, so sign-ups can be attributed back to the gallery that produced them. See
+  [Guest referrals](#guest-referrals--gallery-stats) below.
+- **Gallery stats** — views and downloads are counted per photo and per gallery. Counting is
+  fire-and-forget from the browser (`navigator.sendBeacon`) and batched server-side, so it never slows
+  a page down.
 
 ---
 
@@ -187,10 +196,45 @@ Platform operators only, at **`/siteadmin`**. A red "Site admin mode" banner; ev
 filters and paging.
 - **Events** — all events with status + purge timing; **Manage →** opens any event's panel (support
   override).
-- **Users** — accounts, plan, event counts, verified/admin flags (view-only).
+- **Users** — accounts, event counts, **verified**/admin flags (view-only). Accounts must verify
+  their email before they can create an event, which is what blocks bulk sign-up spam.
 - **Contact messages** — the contact-form mailbox; mark done / reopen.
 - **Client errors** — device error reports; resolve / reopen.
 - **Promo codes** (billing on) — create Stripe-backed discount codes guests redeem at checkout.
+- **Referral funnel** — where new organizers came from, and gallery engagement. See
+  [Guest referrals](#guest-referrals--gallery-stats).
+
+---
+
+## Guest referrals & gallery stats
+
+Every guest who sees a gallery is a plausible next customer, so three surfaces carry a referral link
+back to the event that introduced them:
+
+1. The **gallery footer** card described above.
+2. The **guest "roll finished"** screen, once a guest has used their last shot.
+3. The **download/share** confirmation.
+
+**How attribution works**
+
+- The link is `/(signup|/)?ref=<join code>`. On arrival the code is stored in a first-party cookie
+  (`snapdini_ref`, 60 days, httpOnly, `SameSite=Lax`), so a guest who wanders off and returns later is
+  still credited.
+- At sign-up and at event creation the cookie is resolved to the source event and recorded on
+  `users.referred_by_event_id` / `events.referred_by_event_id`. Self-referral (the host clicking their
+  own link) is ignored.
+- **No discount is attached to the guest link.** It exists to measure where organic growth comes from.
+
+**Host reward**
+
+When a paid, unrefunded event finishes, the host is emailed a single-use code (`THANKS######`,
+20% off, valid 90 days) alongside their feedback request. The code is minted in Stripe on demand and
+stored on the event, so it is never re-issued.
+
+**Measuring it** — `/siteadmin` → *Referral funnel* shows clicks → sign-ups → events → paid events,
+plus the galleries producing the most referrals and per-photo view/download engagement.
+
+---
 
 ---
 
@@ -203,3 +247,12 @@ filters and paging.
   excluded everywhere; restoring returns them to pending.
 - **Retention:** photos + guest data are deleted after the event's retention window; a slim stats-only
   record is kept. Freed custom URLs become available again.
+- **Retention windows:** free events keep photos for **7 days**. Paid events include **30 days** as
+  standard, extendable to **3 months** or **12 months** as a paid add-on. When the window expires the
+  photos and guest data are deleted and a slim stats-only record is kept; freed custom URLs become
+  available again.
+- **Reschedule:** an event that has not been used — no guests joined, no photos taken — can be moved
+  to any start time within **6 months of its original start date**, even after its original start has
+  passed. Its retention clock restarts from the new date, and the purge sweeper leaves unused events
+  alone until that whole window (plus a day's grace) has elapsed, so a paid organizer who never ran
+  their event does not silently lose it.

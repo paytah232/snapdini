@@ -112,6 +112,12 @@
     catch (e) { showToast((e as Error).message, true); }
   }
 
+  // ── Referral funnel ──
+  let funnel: any = null;
+  async function loadFunnel() {
+    try { funnel = await api<any>('/api/admin/referral-funnel'); } catch { funnel = null; }
+  }
+
   async function loadPromos() {
     try {
       const r = await api<{ billingEnabled: boolean; promos: any[] }>('/api/admin/promos');
@@ -134,6 +140,7 @@
       showToast('Promo code created');
       pCode = ''; pValue = ''; pMax = ''; pExpiry = '';
       await loadPromos();
+      await loadFunnel();
     } catch (e) { showToast((e as Error).message, true); }
     finally { pBusy = false; }
   }
@@ -328,6 +335,38 @@
     </section>
 
     <section class="panel">
+      <!-- Referral funnel. The step that matters is signups → events created: that is exactly
+           where paid traffic dies, so it is the comparison worth watching. -->
+      {#if funnel}
+        <h2>Referral funnel</h2>
+        <div class="stats">
+          <div class="stat"><b>{funnel.totals?.gallery_views ?? 0}</b><span>Gallery views</span></div>
+          <div class="stat"><b>{funnel.totals?.referral_clicks ?? 0}</b><span>Referral clicks</span></div>
+          <div class="stat"><b>{funnel.totals?.referred_signups ?? 0}</b><span>Referred signups</span></div>
+          <div class="stat"><b>{funnel.totals?.referred_events ?? 0}</b><span>Events created</span></div>
+          <div class="stat"><b>{funnel.totals?.referred_paid ?? 0}</b><span>Paid</span></div>
+          <div class="stat"><b>{((funnel.totals?.referred_cents ?? 0) / 100).toFixed(2)}</b><span>Revenue</span></div>
+          <div class="stat"><b>{funnel.engagement?.photo_views ?? 0}</b><span>Photo views</span></div>
+          <div class="stat"><b>{funnel.engagement?.photo_downloads ?? 0}</b><span>Downloads</span></div>
+        </div>
+        {#if funnel.sources?.length}
+          <table>
+            <thead><tr><th>Source gallery</th><th>Views</th><th>Clicks</th><th>Signups</th><th>Events</th></tr></thead>
+            <tbody>
+              {#each funnel.sources as srcRow}
+                <tr>
+                  <td>{srcRow.name} <span class="muted">({srcRow.join_code})</span></td>
+                  <td>{srcRow.gallery_views}</td><td>{srcRow.referral_clicks}</td>
+                  <td>{srcRow.signups}</td><td>{srcRow.events_created}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {:else}
+          <p class="muted">No gallery activity yet — this fills in once guests view a gallery.</p>
+        {/if}
+      {/if}
+
       <h2>Promo codes <span class="count">{promos.length}</span></h2>
       {#if !promoBilling}
         <p class="muted">Billing isn't enabled on this instance, so promo codes are off.</p>

@@ -28,6 +28,7 @@ import photosRoutes from './routes/photos';
 import billingRoutes, { stripeWebhookHandler } from './routes/billing';
 import contactRoutes from './routes/contact';
 import trackRoutes from './routes/track';
+import { startCounters } from './counters';
 import clientErrorRoutes from './routes/clienterror';
 import adminRoutes from './routes/admin';
 import sharesRoutes from './routes/shares';
@@ -298,6 +299,7 @@ init()
     await ensureAdminFromEnv(); // bootstrap a site admin from ADMIN_EMAIL/ADMIN_PASSWORD (no-op if unset)
     startCleanup(); // periodic retention sweep (deletes expired events + their files)
     startLifecycle(); // customer lifecycle emails (welcome/check-in/survey) — off unless LIFECYCLE_EMAILS=1
+    startCounters();  // write-behind flush loop for gallery/referral counters
     startOps();       // operator notifications (daily digest + instant alerts) — off unless OPS_NOTIFICATIONS=1
     const server = app.listen(PORT, '0.0.0.0', () => console.log(`Snapdini running on port ${PORT}`));
     // Multi-GB media uploads (e.g. a 90s 4K/8K clip) can take a long time on event Wi-Fi/mobile;

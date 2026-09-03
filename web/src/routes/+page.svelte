@@ -4,6 +4,7 @@
   import { showToast } from '$lib/toast';
   import { modalFocus } from '$lib/ui';
   import { page } from '$app/stores';
+  import { claimReferral } from '$lib/referral';
   import SiteFooter from '$lib/components/SiteFooter.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import { appearance, setAppearance } from '$lib/appearance';
@@ -41,6 +42,11 @@
       (navigator.maxTouchPoints > 1 && Math.min(innerWidth, innerHeight) < 820));
 
   onMount(async () => {
+    // A guest arriving from someone's gallery: tell the server so it can set the attribution
+    // cookie. Guests never sign up, so this link is the only way to connect "was a guest" to
+    // "later ran their own event".
+    const ref = $page.url.searchParams.get('ref');
+    if (ref) claimReferral(ref);
     try { version = (await getConfig()).version; } catch { /* offline */ }
     try { loggedIn = !!(await getMe()).user; } catch { /* not signed in */ }
   });
