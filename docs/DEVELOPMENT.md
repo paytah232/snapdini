@@ -58,6 +58,30 @@ By default they're warm gradients; drop real photos in to replace them:
   deliberate: relying on the `load` event alone misses **already-cached** images (the image finishes
   before the handler attaches), which made the resize hit-or-miss. Keep both paths.
 
+## Integration suite layout
+
+`testsuite/run.mjs` is an orchestrator, not the tests. It discovers `testsuite/specs/*.mjs`, runs
+them as **separate child processes** in a concurrency pool (`--jobs`, default 4), buffers each
+spec's output so parallel runs stay readable, and aggregates the pass/fail totals. `npm run
+test:integration` still just calls it.
+
+- `--only=<substring>` runs one spec in a few seconds — the normal loop while writing a test.
+- Specs named `9x-` are **serial**: they call `POST /api/admin/run-sweep` (which purges every
+  eligible event in the database) or compare `/api/admin/overview` counts against a live
+  `SELECT count(*)`. Anything creating an event concurrently races them, so they run alone after
+  the pool. Put a new spec in the `9x-` band if it sweeps or counts globally.
+- `testsuite/lib/harness.mjs` holds the shared helpers. Process-level parallelism drove three of
+  its details: the cookie jar is `session.cookie` (an exported `let` cannot be reassigned by an
+  importer), the test account is unique per **process** (a per-second suffix collided when two
+  specs started in the same second), and `spec()` gives each process its own verified owner and
+  tears it down. `createEvent()` records event **ids** so teardown can delete the whole upload
+  directory — looking filenames up from `photos` failed once a sweep had already deleted the rows.
+- Ownerless rows (demo events) survive deleting the test user, so a spec that creates one must push
+  its join code to `orphanJoinCodes`.
+- Timing-sensitive assertions: the write-behind counter tests read the DB shortly after a request to
+  prove nothing is written inline. Keep `COUNTER_FLUSH_MS` comfortably above that gap — at 400ms the
+  flush landed first once the suite got fast enough.
+
 ## Notes & gotchas
 
 **Write-behind counters.** Gallery views, per-photo views/downloads and referral clicks are hot-path

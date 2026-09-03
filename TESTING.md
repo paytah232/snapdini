@@ -139,5 +139,43 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
 ## Automated coverage (no manual test needed)
 - Moderation default + enable-later hold, decouple (favourite ≠ approve), reveal/hide override, retention purge (thumbnails, custom audio, slideshows), `/mine` counts, reject-bin, client-error capture, custom-audio validation, **share v2 (all/favourites/selected + slug rename + reveal-gating + zip download)**, **slideshow versioning + download endpoint**, **frame-pack settings gate**, **no-flash persistence**, **restore→pending**, **own-photos-visible-after-reveal**, **11+ paid tier**, **co-hosts (invite/accept/manage-by-identity/owner-only-delete/remove)**, timezones, billing-amount audit.
 - **1.0 additions:** settings `noFlash` round-trip + `noFlash` on the join / `/me` / `/admin` responses; **event slug** set/clear + **too-short 400 / duplicate 409**; **reschedule locked once started** (allowed while upcoming); **share-create no longer auto-claims a slug** (token URL) + default label leads with the event name; **`/qr` returns a logo-baked PNG**; **co-host pending-invite list** (appears / drops off on accept); **10s video tier = $2**; **frame-removal always paid** (branding:false → 402 until bought); **purge frees the event slug + deletes share rows** (via admin `/run-sweep`); `photoIds` capped on moderate/highlights; login rate-limited.
-- Run from `devel/`: `npm test` (typecheck → unit → integration → e2e). Integration suite: **174 passed, 0 failed**.
+- Run from `devel/`: `npm test` (typecheck → unit → integration → e2e). Integration suite:
+  **252 passed, 0 failed** in ~37s.
+- The integration suite is an orchestrator (`testsuite/run.mjs`) over per-area specs in
+  `testsuite/specs/`, run as separate processes in a concurrency pool. Useful flags:
+  `--only=<substring>` (one spec — a few seconds), `--jobs=N`, `--serial`, `--list`.
+  Specs named `9x-` touch global DB state (`run-sweep`, admin-overview counts) and run alone
+  after the pool, so nothing can create an event while they are counting.
+- **1.2 additions:** referral attribution (cookie is httpOnly and resolves to the event id;
+  a referred signup *and* their first event are both attributed; a host referring themselves is
+  not counted; a cookie outliving its event is ignored); write-behind counters coalesce and do
+  not write on the request path; `download_count` is separate from `view_count`; no unpaid or
+  refunded event holds a host reward code; testimonial consent is gated on positive feedback.
 - **DB:** migration `0019_perf_indexes` adds indexes on the hot paths (`photos(event_id)`, `(event_id,status)`, `(event_id,taken_at)`, `(participant_id)`, `participants(event_id)`, `event_cohosts lower(email)`, and the user-FK cascade columns).
+
+## 17. Version 1.2 — referrals, gallery stats, retention (verify these)
+- [ ] **Gallery referral card:** open a revealed gallery → a **"Liked this? / Start your own"** card
+      sits under the photos, and its link carries `?ref=<join code>`. Within 48h of a reveal the
+      wording becomes **"Want this at yours?"**.
+- [ ] **Guest roll-finished card:** as a guest, use your last shot → your own gallery shows the same
+      card, emphasised (it should NOT be emphasised on a casual gallery visit with shots left).
+- [ ] **Shared-link card:** open `/s/<token>`, hit **Download all** → the card appears emphasised.
+      Its link uses `s:<token>`, **never the join code** (a share is view-only by design).
+- [ ] **Attribution:** follow a `?ref=` link, sign up, create an event → `/siteadmin` →
+      **Referral funnel** shows the click, the signup and the event against that source gallery.
+- [ ] **Gallery stats:** scroll a gallery, download a photo → per-photo **views/downloads** climb in
+      the funnel's engagement figures. They should update a few seconds later, not instantly.
+- [ ] **Testimonial consent:** open a survey link, score **4-5 / NPS 8+** → a
+      **"Happy for us to share this as a review on our website"** checkbox appears with an optional
+      name field. Score low → the ask must **not** appear.
+- [ ] **Retention:** create a free event → **7 days**. Create a paid one → **30 days included**, with
+      **3-month** and **12-month** add-ons priced above it. The pricing page must say the same.
+- [ ] **Reschedule:** open an event that has **started but had no guests join** → *Move to a new date*
+      is offered, capped at 6 months from the ORIGINAL start. Once a guest joins, it locks.
+- [ ] **Pricing page:** no **LAUNCH20** claim anywhere (it expired 2026-07-28); the discount FAQ
+      leads with the free-under-10-guests tier and the post-event host code.
+- [ ] **Maker links:** hosted (billing on) → **no "Buy me a coffee"** on home / pricing / use-case /
+      contact / login / signup. Self-hosted (billing off) → **always visible**.
+- [ ] **Turnstile:** contact, signup and login submit cleanly. Verify from **outside the LAN** — the
+      widget is blocked by Pi-hole on-network.
+- [ ] **Dark mode:** `/siteadmin` promo-code inputs are **not white-on-white** in dark mode.
