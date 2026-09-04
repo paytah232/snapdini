@@ -16,14 +16,14 @@ export const guestTiers: GuestTier[] = [
 
 export const addOns: AddOn[] = [
   { ic: '🎞️', name: 'More shots per guest', detail: '12 free → 24 (+A$3), 36 (+A$5) or 48 (+A$8).' },
-  { ic: '⏱️', name: 'Longer event window', detail: 'Up to 48h free → 72h (+A$2), 1 week (+A$5) or 1 year (+A$10).' },
-  { ic: '📦', name: 'Photos kept a month', detail: 'Paid events include 30 days. Extend to 3 months (+A$8) or a full year (+A$15). Free events keep photos 7 days.' },
+  { ic: '⏱️', name: 'Longer event window', detail: 'Up to 48h free → 72h (+A$2), 1 week (+A$5), 1 month (+A$10) or 3 months (+A$25).' },
+  { ic: '📦', name: 'Photos kept a month', detail: 'Paid events include a full month (31 days). Extend to 3 months (+A$8), 6 months (+A$12) or a full year (+A$20). Free events keep photos 7 days.' },
   { ic: '🎬', name: 'Video clips', detail: 'Let guests capture short video clips alongside photos (from +A$2).' },
   { ic: '🖼️', name: 'Remove Snapdini branding', detail: 'Clean photo frames and slideshow without the Snapdini mark (paid add-on).' },
 ];
 
 export const pricingFaqs: Faq[] = [
-  { q: 'How much does Snapdini cost?', a: 'It’s free for events of up to 10 guests with every feature included. Larger events are a one-off pass — A$5 for up to 25 guests, scaling to A$59 for up to 400 — with optional add-ons for extra shots, longer events, longer photo retention and video. Paid events keep photos for 30 days as standard.' },
+  { q: 'How much does Snapdini cost?', a: 'It’s free for events of up to 10 guests with every feature included. Larger events are a one-off pass — A$5 for up to 25 guests, scaling to A$59 for up to 400 — with optional add-ons for extra shots, longer events, longer photo retention and video. Paid events keep photos for a full month (31 days) as standard.' },
   { q: 'Is it really free?', a: 'Yes — up to 10 guests is free forever with all features, no credit card required. You only pay if you need a bigger event or an add-on.' },
   { q: 'Is it a subscription?', a: 'No. Each paid event is a one-off charge — you pay per event, not monthly.' },
   { q: 'Can I upgrade after I’ve started?', a: 'Yes — you can top up guests, shots or length at any time, before or during the event, and only pay the difference.' },

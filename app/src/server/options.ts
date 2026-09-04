@@ -13,6 +13,8 @@ const options = {
     { value: 48,  label: '2 days' },
     { value: 72,  label: '3 days' },
     { value: 168, label: '1 week' },
+    { value: 720, label: '1 month' },
+    { value: 2160, label: '3 months' },
   ],
   // Values aligned to the price tiers (12 free · 24 +$3 · 36 +$5 · 48 +$8) so each option is its own price.
   shotsPerPerson: [12, 24, 36, 48].map((n) => ({ value: n, label: String(n) })),

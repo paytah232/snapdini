@@ -66,7 +66,7 @@
   const shotChoices = (options?.shotsPerPerson ?? []).map((s) => Number(s.value)).filter((n) => n >= maxPhotos);
   const videoChoices = [0, ...billing.videoAddons.map((v) => v.seconds)].filter((n) => n >= videoSeconds);
   const retentionChoices = billing.retentionTiers.filter((t) => t.maxDays >= retentionDays);
-  const retLabel = (d: number) => d <= 7 ? '1 week' : d <= 31 ? '1 month' : d <= 92 ? '3 months' : '1 year';
+  const retLabel = (d: number) => d <= 7 ? '1 week' : d <= 31 ? '1 month' : d <= 92 ? '3 months' : d <= 182 ? '6 months' : '1 year';
   // Duration is a paid add-on, so it belongs here too — offer lengths ≥ the current event length.
   const durationChoices = (options?.durations ?? []).map((d) => Number(d.value)).filter((n) => n >= durationHours);
   const durLabel = (h: number) => (options?.durations ?? []).find((d) => Number(d.value) === h)?.label ?? `${h}h`;

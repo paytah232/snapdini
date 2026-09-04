@@ -71,21 +71,30 @@ export const DURATION_TIERS = [
   { maxHours: 48,   amountCents: 0 },     // up to 2 days — included
   { maxHours: 72,   amountCents: 200 },   // 3 days — +$2
   { maxHours: 168,  amountCents: 500 },   // up to 1 week — +$5
-  { maxHours: 8760, amountCents: 1000 },  // longer — +$10
+  { maxHours: 720,  amountCents: 1000 },  // 1 month — +$10
+  { maxHours: 2160, amountCents: 2500 },  // 3 months — +$25
 ] as const;
+// The old top tier was a YEAR-long window for $10. Nobody runs a year-long event, and it was not
+// even offered in the create form (the options list stopped at 1 week), so it was dead weight that
+// also under-priced the genuinely long windows. 1 month and 3 months are the real long-tail cases
+// (exhibitions, touring shows, season-long clubs), and they now cost what the storage warrants.
 
 // Retention add-on (one-off, cents). Standard 1 week kept free; longer costs (storage).
 export const RETENTION_FREE_DAYS = 7;
-// Paid events include 30 days as standard. A 7-day default on a memories product is a landmine:
+// Paid events include a full month (31 days) as standard. A 7-day default on a memories product is a landmine:
 // anyone who does not notice the add-on can genuinely lose their photos, which is far worse than
-// the lost upsell. 30 days is generous enough to cover "we'll grab them next weekend" without
+// the lost upsell. A month is generous enough to cover "we'll grab them next weekend" without
 // committing us to a year of storage for every event.
-export const RETENTION_PAID_DAYS = 30;
+export const RETENTION_PAID_DAYS = 31;
 export const RETENTION_TIERS = [
-  { maxDays: 7,   amountCents: 0 },       // 1 week — included
-  { maxDays: 31,  amountCents: 300 },     // 1 month — +$3
+  { maxDays: 7,   amountCents: 0 },       // 1 week — included on free events
+  // "1 month" is deliberately the GENEROUS month: 31 days retained, so the purge lands on the
+  // 32nd day. Kept exactly equal to RETENTION_PAID_DAYS so a paid event picking "1 month" is never
+  // charged an add-on for a day or two beyond its included allowance — that reads as a bug.
+  { maxDays: 31,  amountCents: 300 },     // 1 month — +$3 (included on paid events)
   { maxDays: 92,  amountCents: 800 },     // 3 months — +$8
-  { maxDays: 365, amountCents: 1500 },    // 1 year — +$15
+  { maxDays: 182, amountCents: 1200 },    // 6 months — +$12
+  { maxDays: 365, amountCents: 2000 },    // 1 year — +$20
 ] as const;
 
 export type Tier = 'free' | 'paid' | 'custom';

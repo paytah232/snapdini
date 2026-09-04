@@ -98,7 +98,8 @@
   };
   // Photo-retention choices (built from the server tiers) + their add-on cost.
   $: retentionChoices = (billing?.retentionTiers ?? []).map((t) => {
-    const label = t.maxDays <= 7 ? '1 week' : t.maxDays <= 31 ? '1 month' : t.maxDays <= 92 ? '3 months' : '1 year';
+    const label = t.maxDays <= 7 ? '1 week' : t.maxDays <= 31 ? '1 month'
+      : t.maxDays <= 92 ? '3 months' : t.maxDays <= 182 ? '6 months' : '1 year';
     return { days: t.maxDays, amountCents: t.amountCents, label };
   });
 

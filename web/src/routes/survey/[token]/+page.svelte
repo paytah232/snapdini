@@ -144,14 +144,14 @@
       <!-- Only shown once the feedback is genuinely positive. The server applies the same threshold,
            so a tampered payload cannot turn lukewarm feedback into a public quote. -->
       {#if happy}
-        <label class="opt">
+        <label class="optin">
           <input type="checkbox" bind:checked={testimonialOk} />
-          <span>Happy for us to share this as a review on our website</span>
+          <span>Happy for us to share this as a review on our website
+            <small>We'll quote the words you wrote above — never your email.</small></span>
         </label>
         {#if testimonialOk}
           <input class="tname" type="text" maxlength="80" bind:value={testimonialName}
                  placeholder="Name to credit (e.g. Gillian D., or leave blank)" />
-          <p class="sub" style="margin:4px 0 0">We'll only use the words you wrote above, never your email.</p>
         {/if}
       {/if}
 

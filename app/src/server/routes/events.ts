@@ -153,7 +153,7 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
   const reqShots = Math.min(Math.max(parseInt(maxPhotos as string, 10) || 12, 1), 100);
   const reqAspects = sanitizeAspects((req.body as { aspectRatios?: unknown }).aspectRatios);
   const reqDuration = Math.max(1, parseFloat(durationHours as string) || 24);
-  // Paid events DEFAULT to the 30-day allowance rather than the 7-day free-tier floor. Anyone who
+  // Paid events DEFAULT to the full-month allowance rather than the 7-day free-tier floor. Anyone who
   // never touches the retention control still gets a month, so a customer cannot silently lose
   // their photos a week after the event — the failure mode that matters most on a memories product.
   const wantsPaidTier = reqGuests > FREE_ALL_GUESTS;
