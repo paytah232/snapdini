@@ -83,6 +83,26 @@ await spec('10-referral-attribution', async () => {
        dbq(`SELECT view_count FROM photos WHERE id='${pid}'`));
   }
 
+  group('Guest photo-emails are budgeted per guest, not per venue wifi');
+  // The whole point: 60 guests at a party share ONE public IP. A per-IP budget meant the 21st guest
+  // was refused, and guests could exhaust the budget /api/billing/checkout shares — blocking the
+  // host from paying mid-event.
+  const evE = await createEvent({ revealMode: 'instant' });
+  const gA = (await join(evE.joinCode, 'Guest A')).json?.sessionToken;
+  const gB = (await join(evE.joinCode, 'Guest B')).json?.sessionToken;
+  ok('two guests joined for the budget check', !!gA && !!gB);
+  if (gA && gB) {
+    const mail = (tok) => api('POST', '/api/participants/email-my-photos',
+      { body: { sessionToken: tok, emailOverride: 'guest@example.com' } });
+    const LIMIT = 5;                                    // GUEST_EMAIL_RATE_LIMIT default
+    let blockedEarly = 0;
+    for (let i = 0; i < LIMIT; i++) if ((await mail(gA)).status === 429) blockedEarly++;
+    ok('a guest can email themselves up to their own limit', blockedEarly === 0, `${blockedEarly} blocked early`);
+    ok('the guest IS throttled past their own limit', (await mail(gA)).status === 429);
+    // The regression: guest B has spent nothing, and shares guest A's IP.
+    ok('a SECOND guest on the same IP is unaffected', (await mail(gB)).status !== 429);
+  }
+
   group('Host reward is never issued for an event that took no money');
   ok('an unpaid event carries no reward code',
      val(`SELECT host_reward_code FROM events WHERE id='${src.id}'`) === 'null',

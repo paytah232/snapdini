@@ -134,7 +134,28 @@ app.use('/api/contact', contactLimiter);
 app.use('/api/track', trackRoutes);
 app.use('/api/auth/register', onPost(requireTurnstile('register')));
 app.use('/api/auth/login', onPost(requireTurnstile('login')));
-app.use('/api/participants/email-my-photos', emailLimiter);
+// A guest emailing themselves their own gallery link is a PER-PERSON action, but a whole party is
+// behind one venue wifi — a single public IP. Sharing emailLimiter's 20/15min meant the 21st guest
+// at a 60-guest event was simply refused; worse, guests could exhaust the budget that
+// /api/billing/checkout and /api/billing/upgrade share, blocking the HOST from paying mid-event.
+// So key it on the guest's own session instead, behind a generous per-IP backstop that still bounds
+// how many distinct buckets one address can create (an unbounded key space is a memory vector).
+const guestEmailIpBackstop = rateLimit({
+  windowMs: 15 * 60 * 1000, limit: Number(process.env.GUEST_EMAIL_IP_LIMIT || 200),
+  standardHeaders: 'draft-7', legacyHeaders: false,
+  message: { error: 'Too many requests from this network — try again in a few minutes.' },
+});
+const guestEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, limit: Number(process.env.GUEST_EMAIL_RATE_LIMIT || 5),
+  standardHeaders: 'draft-7', legacyHeaders: false,
+  // express.json() runs above, so the body is parsed by the time this sees the request.
+  keyGenerator: (req: Request) => {
+    const t = (req.body as { sessionToken?: unknown } | undefined)?.sessionToken;
+    return typeof t === 'string' && t ? `s:${t}` : `ip:${req.ip}`;
+  },
+  message: { error: "You've already emailed yourself a few times — check your inbox, including spam." },
+});
+app.use('/api/participants/email-my-photos', guestEmailIpBackstop, guestEmailLimiter);
 app.use('/api/billing/checkout', emailLimiter);
 app.use('/api/billing/upgrade', emailLimiter);
 app.use('/api/auth/login', loginLimiter);
