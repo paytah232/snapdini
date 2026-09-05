@@ -249,6 +249,8 @@
       photosRemaining = r.photosRemaining;
       canBuyShots = !!r.canBuyShots;
       canAskHost = !!r.canAskHost;
+      faceMatching = !!r.faceMatching;
+      faceEnrolled = !!r.faceEnrolled;
       saveSession(r.joinCode, r.sessionToken);
       if (r.recovered) showToast(`Welcome back! You've ${photosRemaining} shot${photosRemaining === 1 ? '' : 's'} left.`);
       await enterCamera();
