@@ -1,4 +1,10 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { getConfig } from '$lib/api';
+  // The face-matching section describes something a deployment may not run at all. Showing it
+  // unconditionally would make the policy inaccurate for every self-hoster without an ML URL.
+  let faceAvailable = false;
+  onMount(async () => { try { faceAvailable = !!(await getConfig()).faceMatchingAvailable; } catch { /* leave it hidden */ } });
   import Logo from '$lib/components/Logo.svelte';
   import SiteFooter from '$lib/components/SiteFooter.svelte';
   const updated = 'June 2026';
@@ -57,6 +63,7 @@
   <h2>6a. Advertising &amp; analytics</h2>
   <p>Where analytics or advertising measurement is enabled on this deployment, we use Google (Google Ads / Google Analytics) to understand how our marketing performs. This is implemented with <strong>Google Consent Mode v2</strong>: visitors in the EEA, the UK and Switzerland are asked to consent <em>before</em> any such data is shared with Google, using the banner shown on your first visit. You can decline (nothing is shared), and you can change your choice at any time — <a href="/?consent=1">reopen the consent options</a>. Outside those regions the tag runs by default; you can opt out there the same way, and we honour your browser's Global Privacy Control signal automatically. When enabled, this shares some data (such as a device/cookie identifier and pages viewed) with Google, which may process it on servers overseas, including in the United States. If the operator hasn't configured a tag, no analytics or advertising scripts are loaded at all.</p>
 
+  {#if faceAvailable}
   <h2>6b. Finding photos of yourself (face matching)</h2>
 
   <p>
@@ -118,7 +125,7 @@
     feature off for the whole event — or email us and we will remove any matches referring to you.
 
   </p>
-
+  {/if}
 
   <h2>7. Security</h2>
   <p>We protect your data with measures such as encrypted connections (HTTPS), hashed passwords, scoped access controls, and stripping embedded metadata from uploaded images. No system can be guaranteed perfectly secure, but we work continually to keep your information safe.</p>

@@ -63,6 +63,7 @@ export interface AppConfig {
   version: string;
   videoMaxSeconds: number;
   videoHardMaxSeconds?: number;
+  faceMatchingAvailable?: boolean;
   emailEnabled: boolean;
   supportEmail: string | null;
   /** Cloudflare Turnstile public site key; null = bot check disabled. */

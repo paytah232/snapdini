@@ -91,7 +91,8 @@
   let track: MediaStreamTrack | null = null;
   let focusRing: { x: number; y: number } | null = null;
   let focusTimer: ReturnType<typeof setTimeout> | undefined;
-  let cameraError = '';          // set when getUserMedia fails (permission/no-camera)
+  let cameraError = '';          // a technical failure (no camera, driver, etc)
+  let cameraDenied = false;      // the guest declined — different screen, different tone
   let cameraStarting = false;    // true while the stream is (re)acquiring — shows a spinner
   let cameraPaused = false;      // user explicitly turned the camera off (manual privacy/battery)
   let focusSupported = false;     // true only if the device exposes tap-to-focus controls
@@ -216,6 +217,11 @@
     // pagehide also fires on navigation away / back-forward-cache, where visibilitychange/onDestroy
     // can be skipped — make sure the camera is always released when the page is left.
     window.addEventListener('pagehide', stopCamera);
+    // Back-forward cache: pressing Back restores this page from memory WITHOUT re-running onMount,
+    // so a guest who had been on the join screen sees the name form again and can join a SECOND
+    // time — a new participant, a fresh roll, and any top-up they bought stranded on the old row.
+    // pageshow is the only event that fires in that case.
+    window.addEventListener('pageshow', (e) => { if ((e as PageTransitionEvent).persisted) void restoreIfSessionExists(); });
     // Refresh the camera list if one is plugged in/out mid-session (hot-plug).
     navigator.mediaDevices?.addEventListener?.('devicechange', refreshCameras);
   });
@@ -259,6 +265,9 @@
     if (joinEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(joinEmail)) { showToast("That email doesn't look right", true); return; }
     joining = true;
     try {
+      // Last line of defence: if this browser already holds a session for the event, use it instead
+      // of creating a second participant. Cheap, and it closes any path bfcache handling misses.
+      if (await restoreIfSessionExists()) return;
       const r = await joinEvent(identifier, joinName.trim(), joinEmail.trim() || undefined);
       sessionToken = r.sessionToken;
       serverRemaining = r.photosRemaining;
@@ -307,7 +316,7 @@
     focusSupported = 'pointsOfInterest' in caps || 'focusMode' in caps;
     // Hardware torch (back camera on Android Chrome). iOS Safari never exposes it.
     torchSupported = 'torch' in caps && !!caps.torch;   // a fresh stream always starts with the torch physically off
-    cameraError = '';
+    cameraError = ''; cameraDenied = false;
     matchRecBitrate();   // size the recorder to whatever the camera actually gave us
     applyViewfinderAspect();
   }
@@ -364,10 +373,14 @@
         cameraStarting = false;
         const denied = err2 instanceof DOMException && (err2.name === 'NotAllowedError' || err2.name === 'SecurityError');
         const missing = err2 instanceof DOMException && err2.name === 'NotFoundError';
-        cameraError = denied
-          ? 'Camera access is blocked. Enable it in your browser settings, then tap Retry.'
-          : missing ? 'No camera found on this device.' : 'Couldn’t start the camera.';
-        reportClientError(`camera: ${err2 instanceof Error ? err2.name + ' ' + err2.message : 'failed'}`, 'camera', ev?.joinCode);
+        // A denial is a CHOICE, not a fault. The old copy read as a settings problem and never said
+        // why we need the camera or what we cannot reach — which is the actual worry.
+        cameraDenied = denied;
+        cameraError = denied ? '' : missing ? 'No camera found on this device.' : "Couldn't start the camera.";
+        // Genuine faults stay 'camera'; a declined permission gets its own context so it does not sit
+        // in the operator's open-issues digest looking like a bug.
+        reportClientError(`camera: ${err2 instanceof Error ? err2.name + ' ' + err2.message : 'failed'}`,
+          denied ? 'camera-denied' : 'camera', ev?.joinCode);
         return;
       }
     }
@@ -953,6 +966,45 @@
     } catch { /* a failed refresh must never disturb a gallery that is already rendered */ }
   }
 
+  // If this browser already holds a session for this event, put them straight back in it rather
+
+  // than offering the join form again. Used on bfcache restore and as a guard before joining.
+
+  async function restoreIfSessionExists(): Promise<boolean> {
+
+    if (!ev) return false;
+
+    const token = getSession(ev.joinCode);
+
+    if (!token) return false;
+
+    try {
+
+      const me = await getMe(token);
+
+      sessionToken = token;
+
+      serverRemaining = me.photosRemaining;
+
+      canBuyShots = !!me.canBuyShots; canAskHost = !!me.canAskHost;
+
+      faceMatching = !!me.faceMatching; faceEnrolled = !!me.faceEnrolled;
+
+      if (screen === 'join' || screen === 'loading') { screen = 'camera'; startCamera(); }
+
+      return true;
+
+    } catch {
+
+      clearSession(ev.joinCode);   // stale token — let them join properly
+
+      return false;
+
+    }
+
+  }
+
+
   async function openGallery() {
     screen = 'gallery';
     galleryFilter = 'mine';   // default to the guest's own shots each visit
@@ -1141,7 +1193,24 @@
           <div class="cam-spinner" aria-label="Starting camera"></div>
         </div>
       {/if}
-      {#if cameraError}
+      {#if cameraDenied}
+        <!-- People decline because they do not know what they are granting. Say what it is for and,
+             more importantly, what we cannot reach — that is the actual worry. -->
+        <div class="cam-error cam-denied">
+          <span class="big" aria-hidden="true">📷</span>
+          <p class="cd-lead">We need your camera to take photos for this event.</p>
+          <ul class="cd-list">
+            <li>We <b>can't</b> see your photo library or camera roll.</li>
+            <li>We <b>can't</b> save anything to your device.</li>
+            <li>We only ever receive the shots you actually take here.</li>
+          </ul>
+          <button class="btn primary" on:click={startCamera}>Allow camera</button>
+          <p class="cd-hint">
+            If nothing happens, your browser is remembering an earlier “don't allow”. On iPhone tap
+            <b>aA</b> in the address bar → <b>Website Settings</b> → <b>Camera</b> → <b>Allow</b>, then tap above again.
+          </p>
+        </div>
+      {:else if cameraError}
         <div class="cam-error">
           <span class="big" aria-hidden="true">🎥</span>
           <p>{cameraError}</p>
@@ -1371,6 +1440,13 @@
   .cam-error .big { font-size: 48px; }
   .cam-error p { max-width: 30ch; line-height: 1.4; }
   .cam-error .btn { width: auto; min-width: 150px; }
+  /* The denial screen carries more than one line, so it needs room the generic error state does not. */
+  .cam-denied { gap: 12px; padding: 24px 22px; }
+  .cd-lead { font-size: 1.02rem; font-weight: 600; max-width: 26ch; }
+  .cd-list { list-style: none; margin: 0; padding: 0; max-width: 30ch; text-align: left;
+    display: flex; flex-direction: column; gap: 6px; font-size: .88rem; line-height: 1.45; opacity: .92; }
+  .cd-list li::before { content: '✓ '; opacity: .65; }
+  .cd-hint { font-size: .78rem; opacity: .72; max-width: 32ch; line-height: 1.5; margin-top: 2px; }
   /* Full-stage gesture layer: drag left/right to set brightness, tap to focus. Sits above the
      video but below the controls (z 6). touch-action:none stops the browser hijacking the swipe. */
   .gesture-layer { position: absolute; inset: 0; z-index: 2; background: transparent; touch-action: pan-y; -webkit-tap-highlight-color: transparent; }

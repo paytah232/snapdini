@@ -204,6 +204,9 @@ app.get('/api/config', (_req, res) => {
     // Absolute ceiling for an uploaded clip. The event's own videoSeconds is a PRICE tier, not a
     // technical limit — over-length clips are kept (see photos.ts), so the client must not block on it.
     videoHardMaxSeconds: parseInt(process.env.VIDEO_HARD_MAX_SECONDS || '600'),
+    // Whether this deployment can do face matching at all. A boolean, never the URL — the privacy
+    // policy keys off it, because describing a feature a self-hoster does not run is simply untrue.
+    faceMatchingAvailable: !!(process.env.MACHINE_LEARNING_URL || '').trim(),
     emailEnabled: email.enabled,
     supportEmail: process.env.SUPPORT_EMAIL || null,
     // Public site key so the frontend can render the Turnstile widget; null = feature off.
