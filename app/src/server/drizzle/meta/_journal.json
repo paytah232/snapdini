@@ -232,6 +232,13 @@
       "when": 1788800000000,
       "tag": "0032_guest_requests_switch",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1788900000000,
+      "tag": "0033_face_matching",
+      "breakpoints": true
     }
   ]
 }

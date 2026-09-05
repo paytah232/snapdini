@@ -4,7 +4,7 @@
 // and they are applied automatically on boot (see db.ts → init()).
 // Epoch-ms timestamps are BIGINT with mode:'number' (node-postgres BIGINT parser is
 // set to Number in db.ts, so values round-trip as JS numbers).
-import { pgTable, text, integer, bigint, boolean, smallint, uniqueIndex, index } from 'drizzle-orm/pg-core';
+import { pgTable, text, integer, bigint, boolean, smallint, real, primaryKey, uniqueIndex, index } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 const ms = (name: string) => bigint(name, { mode: 'number' });
@@ -77,6 +77,8 @@ export const events = pgTable('events', {
   guestMayBuyFrames: boolean('guest_may_buy_frames').notNull().default(false),
   // Separate from buying: a host may take top-ups yet not want request notices, or vice versa.
   guestMayRequest: boolean('guest_may_request').notNull().default(true),
+  // Off by default: a self-hoster who has not thought about biometrics gets no face matching.
+  faceMatchingEnabled: boolean('face_matching_enabled').notNull().default(false),
   revealMode: text('reveal_mode').notNull().default('instant'),
   revealDelayHours: integer('reveal_delay_hours').notNull().default(0),
   moderationEnabled: boolean('moderation_enabled').notNull().default(false),
@@ -172,6 +174,10 @@ export const participants = pgTable('participants', {
   amountPaidCents: integer('amount_paid_cents').notNull().default(0),
   stripePaymentIntent: text('stripe_payment_intent'),
   requestedMoreAt: ms('requested_more_at'),
+  // The enrolled guest's OWN template, with their consent. Sensitive information — never returned
+  // by any API, and the only face vector this system persists.
+  faceEmbedding: text('face_embedding'),
+  faceConsentAt: ms('face_consent_at'),
   joinedAt: ms('joined_at').notNull(),
 }, (t) => ({
   eventIdx: index('idx_participants_event').on(t.eventId),
@@ -288,3 +294,12 @@ export type Session = typeof sessions.$inferSelect;
 export type Event = typeof events.$inferSelect;
 export type Participant = typeof participants.$inferSelect;
 export type Photo = typeof photos.$inferSelect;
+
+// Which enrolled guest appears in which photo. This is the durable output of face matching and is
+// deliberately NOT a biometric template — just an association between two rows we already hold.
+export const photoFaces = pgTable('photo_faces', {
+  photoId: text('photo_id').notNull().references(() => photos.id, { onDelete: 'cascade' }),
+  participantId: text('participant_id').notNull().references(() => participants.id, { onDelete: 'cascade' }),
+  score: real('score').notNull(),
+  createdAt: ms('created_at').notNull(),
+}, (t) => ({ pk: primaryKey({ columns: [t.photoId, t.participantId] }) }));

@@ -7,6 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { and, asc, count, desc, eq, inArray, ne, or } from 'drizzle-orm';
 import { db } from '../db';
 import { effectiveMaxPhotos, hasShotsLeft, photosRemaining as remainingFor } from '../allowance';
+import { matchNewPhoto } from './faces';
 import { events, participants, photos } from '../schema';
 import { stripImageMetadata, makeThumbnail, makeVideoPoster, thumbName } from '../images';
 import { probeVideoMeta } from '../slideshow';
@@ -217,6 +218,10 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     source,
   });
   await db.update(participants).set({ photosTaken: p.photosTaken + 1 }).where(eq(participants.id, p.id));
+  // Face matching, if the host enabled it and anyone has enrolled. Deliberately not awaited:
+  // it runs against the thumbnail after this response, and a slow or dead ML container must
+  // never hold up a guest's upload.
+  void matchNewPhoto(p.eventId, photoId, storedName);
   return { success: true, photoId, status, pendingModeration: status === 'pending', photosRemaining: Math.max(0, effectiveMaxPhotos(p) - p.photosTaken - 1) };
 }
 
