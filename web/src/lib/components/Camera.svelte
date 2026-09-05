@@ -290,7 +290,7 @@
     applyEventTheme(ev?.theme);
     if (ev?.isExpired || ev?.isLocked) { showToast(ev.isLocked ? 'Event is locked' : 'Event has ended'); }
     if (ev) { try { saveToDevice = localStorage.getItem('savedev_' + ev.joinCode) === '1'; } catch { /* ignore */ } }
-    try { const q = localStorage.getItem('snap_vidq'); if (q === 'high' || q === 'standard' || q === 'smooth') videoQuality = q; } catch { /* ignore */ }
+    try { const q = localStorage.getItem('snap_vidq'); if (q === 'high' || q === 'standard' || q === 'smooth' || q === 'phone') videoQuality = q; } catch { /* ignore */ }
     await startCamera();
     restoreQueue();
     if (typeof window !== 'undefined') {
@@ -326,8 +326,10 @@
   // collapses), so we request a sane ceiling per the chosen quality. 'Standard' (1080p30) is the
   // reliable default; bump to High or drop to Smooth from the camera settings.
   const RES_PHOTO = { width: { ideal: 7680 }, height: { ideal: 4320 } };
-  type VidQuality = 'high' | 'standard' | 'smooth';
-  const VQ_RES: Record<VidQuality, { w: number; h: number }> = {
+  // 'phone' is not a resolution — it means "don't record in the browser at all, hand me to the
+  // phone's own camera app". Persisted like the others, so choosing it once makes it the mode.
+  type VidQuality = 'high' | 'standard' | 'smooth' | 'phone';
+  const VQ_RES: Record<Exclude<VidQuality, 'phone'>, { w: number; h: number }> = {
     high:     { w: 3840, h: 2160 },   // 4K — only on capable devices
     standard: { w: 1920, h: 1080 },   // 1080p — the default
     smooth:   { w: 1280, h: 720 },    // 720p — for older / struggling devices
@@ -348,6 +350,34 @@
   let benchStep: VidQuality | null = null;
   let benchResult: { results: Record<string, number>; best: VidQuality } | null = null;
   let benchPrompt = false;
+  // Guest feedback: offered beside the referral card and on the spent-roll card, because someone
+  // who does NOT want to run their own event may still have something worth telling us.
+  let fbOpen = false;
+  let fbRating = 0;
+  let fbComment = '';
+  let fbSent = false;
+  let fbBusy = false;
+
+  async function sendGuestFeedback(dismissed = false) {
+    if (!sessionToken || fbBusy) return;
+    fbBusy = true;
+    try {
+      await fetch('/api/participants/feedback', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+        body: JSON.stringify(dismissed ? { sessionToken, dismissed: true }
+                                       : { sessionToken, rating: fbRating || undefined, comment: fbComment || undefined }),
+      });
+      if (!dismissed) { fbSent = true; showToast('Thanks — that helps a lot'); }
+      fbOpen = false;
+    } catch { showToast('Could not send that just now', true); }
+    fbBusy = false;
+  }
+  // ONE bar, used for both the recommendation and the warning. They were different numbers (24 and
+  // 30) and could contradict each other: a phone measuring 29fps at 4K got "we've set you to 4K"
+  // and "4K isn't smooth" on the same panel. 24 is the film standard and the honest floor for
+  // something that still reads as video; phone cameras commonly report 29.97, so 29 is fine.
+  const SMOOTH_FPS = 24;
+  const fpsLabel = (n: number) => (n >= 28 ? 'Smooth' : n >= SMOOTH_FPS ? 'Good' : 'Choppy');
 
   // Match the recorder to the stream the camera actually negotiated (≈0.1 bits/pixel/frame),
   // so the file tracks the native resolution + frame rate instead of a guessed constant.
@@ -362,7 +392,8 @@
     cameraStarting = true;   // show a spinner while the camera (re)acquires — the brief black flash now reads as "working"
     // Only grab the mic in video mode (avoids an unnecessary mic prompt while taking photos).
     const audio = videoMaxSecs !== 0 && videoMode;
-    const q = VQ_RES[videoQuality];
+    // 'phone' never records in-browser, so it never asks for a resolution.
+    const q = VQ_RES[videoQuality === 'phone' ? 'standard' : videoQuality];
     const res = videoMode
       ? { width: { ideal: q.w }, height: { ideal: q.h }, frameRate: { ideal: 30 } }
       : RES_PHOTO;
@@ -450,16 +481,21 @@
       try { if (!localStorage.getItem('snap_vidbench')) benchPrompt = true; } catch { /* ignore */ }
     }
     videoMode = v;
+    // In phone mode, switching to video means "open the phone's camera" — that is the whole point
+    // of picking it, and re-acquiring a browser stream we are not going to record from is waste.
+    if (v && videoQuality === 'phone') { nativeVideoInput?.click(); return; }
     await startCamera();
   }
 
   // Video quality is a per-device preference; lowering it helps weaker phones record smoothly.
   async function setVideoQuality(q: string) {
-    if (q !== 'high' && q !== 'standard' && q !== 'smooth') return;
+    if (q !== 'high' && q !== 'standard' && q !== 'smooth' && q !== 'phone') return;
     if (recording || q === videoQuality) return;
     videoQuality = q;
     lowFpsWarned = false;   // let a fresh warning fire if the new quality still struggles
     try { localStorage.setItem('snap_vidq', q); } catch { /* ignore */ }
+    // PHONE mode has no resolution to re-acquire — it hands straight to the native camera instead.
+    if (q === 'phone') { if (videoMode) nativeVideoInput?.click(); return; }
     if (videoMode) await startCamera();   // re-acquire at the new resolution
   }
 
@@ -903,7 +939,7 @@
 
     try {
 
-      for (const q of ['high', 'standard', 'smooth'] as VidQuality[]) {
+      for (const q of ['high', 'standard', 'smooth'] as VidQuality[]) {   // 'phone' is not measurable
 
         benchStep = q;
 
@@ -921,7 +957,7 @@
 
       // still looks like video rather than a slideshow.
 
-      const best = (['high', 'standard', 'smooth'] as VidQuality[]).find((q) => results[q] >= 24) || 'smooth';
+      const best = (['high', 'standard', 'smooth'] as VidQuality[]).find((q) => results[q] >= SMOOTH_FPS) || 'smooth';
 
       benchResult = { results, best };
 
@@ -1189,6 +1225,12 @@
     </div>
   </div>
 {:else if screen === 'camera'}
+  <!-- always in the DOM while the camera screen is up. It used to live inside the settings
+       sheet, which is conditionally rendered — so with the sheet closed the binding was
+       undefined and every "use my own camera" button silently did nothing. Three separate
+       call sites depended on it. -->
+  <input bind:this={nativeVideoInput} type="file" accept="video/*" capture="environment"
+         on:change={nativeVideoPicked} style="display:none" />
   <div id="cam-root" class="cam">
     <div class="viewfinder">
       <!-- svelte-ignore a11y-media-has-caption -->
@@ -1280,6 +1322,7 @@
                   <option value="standard">Standard — 1080p (default)</option>
                   <option value="high">High — 4K (larger, may stutter)</option>
                   <option value="smooth">Smooth — 720p (older phones)</option>
+                    <option value="phone">My phone's camera — best quality, opens your camera app</option>
                 </select>
               </div>
               <div class="sm-row col">
@@ -1289,7 +1332,6 @@
                 </span>
                 <button class="sm-select" type="button" on:click={() => nativeVideoInput?.click()}>🎥 Record with phone camera</button>
               </div>
-              <input bind:this={nativeVideoInput} type="file" accept="video/*" capture="environment" on:change={nativeVideoPicked} style="display:none" />
             {/if}
 
             {#if saveNote}<div class="sm-note">Now also saving a copy of each shot to your device.</div>{/if}
@@ -1372,9 +1414,9 @@
         {:else if benchResult}
           <div class="bench-title">Your phone handles</div>
           <ul class="bench-list">
-            <li><b>4K</b><span>{benchResult.results.high} fps</span></li>
-            <li><b>1080p</b><span>{benchResult.results.standard} fps</span></li>
-            <li><b>720p</b><span>{benchResult.results.smooth} fps</span></li>
+            <li><b>4K</b><span>{benchResult.results.high} fps · {fpsLabel(benchResult.results.high)}</span></li>
+            <li><b>1080p</b><span>{benchResult.results.standard} fps · {fpsLabel(benchResult.results.standard)}</span></li>
+            <li><b>720p</b><span>{benchResult.results.smooth} fps · {fpsLabel(benchResult.results.smooth)}</span></li>
           </ul>
           <div class="bench-sub">
             We've set you to <b>{benchResult.best === 'high' ? '4K' : benchResult.best === 'standard' ? '1080p' : '720p'}</b>.
@@ -1383,9 +1425,9 @@
           <!-- If 4K did not hold 30fps, the honest answer is that this phone records better in its OWN
                camera app than in a browser. Say so and hand them the button, rather than letting them
                find out on a clip they cannot re-shoot. -->
-          {#if benchResult.results.high < 30}
+          {#if benchResult.best !== 'high'}
             <div class="bench-native">
-              <span>4K isn't smooth in the browser on this phone — your own camera app will do better.</span>
+              <span>4K didn't hold up in the browser on this phone — your own camera app will do better if you want it.</span>
               {#if !showShapes}
                 <!-- The phone's camera will not honour the event's frame shape, so ask nicely. -->
                 <span class="bench-note">This event is square, so try to frame it that way — your camera app won't do it for you.</span>
@@ -1393,7 +1435,7 @@
               {#if videoMaxSecs > 0}
                 <span class="bench-note">Keep it to about {videoMaxSecs}s — that's this event's limit.</span>
               {/if}
-              <button class="btn ghost sm" on:click={() => { benchResult = null; benchPrompt = false; nativeVideoInput?.click(); }}>
+              <button class="btn ghost sm" on:click={() => { benchResult = null; benchPrompt = false; void setVideoQuality('phone'); nativeVideoInput?.click(); }}>
                 🎥 Shoot with my own camera
               </button>
             </div>
@@ -1414,7 +1456,7 @@
         <span>Choppy? Your phone's own camera will do better.</span>
       {#if !showShapes}<span class="bench-note">This event is square — try to frame it that way.</span>{/if}
       {#if videoMaxSecs > 0}<span class="bench-note">Keep it to about {videoMaxSecs}s.</span>{/if}
-        <button class="btn primary sm" on:click={() => nativeVideoInput?.click()}>🎥 Use phone camera</button>
+        <button class="btn primary sm" on:click={() => { void setVideoQuality('phone'); nativeVideoInput?.click(); }}>🎥 Use phone camera</button>
       </div>
     {/if}
     {#if outOfShots && (canAskHost || canBuyShots)}
@@ -1463,25 +1505,6 @@
         {/if}
       </div>
     {/if}
-    <!-- The same offer, in the gallery: this is where a guest lands after a failed upload, and
-         telling them they are out of shots without showing the way forward is a dead end. -->
-    {#if photosRemaining <= 0 && (canAskHost || canBuyShots)}
-      <div class="oos-panel gallery">
-        <div class="oos-title">That's your roll</div>
-        <div class="oos-actions">
-          {#if canAskHost}
-            <button class="btn ghost sm" on:click={askHostForMore} disabled={askedHost}>
-              {askedHost ? '✓ Host asked' : 'Ask the host for more'}
-            </button>
-          {/if}
-          {#if canBuyShots}
-            <button class="btn primary sm" on:click={buyMoreShots} disabled={buying}>
-              {buying ? 'Opening…' : 'Get 12 more'}
-            </button>
-          {/if}
-        </div>
-      </div>
-    {/if}
     {#if faceMatching && sessionToken}
       <FaceFinder {sessionToken} bind:enrolled={faceEnrolled} onMatched={(ids) => (facePhotoIds = ids)} />
     {/if}
@@ -1516,6 +1539,80 @@
         <p class="muted">{galleryRevealed ? (galleryFilter === 'mine' ? 'You haven’t taken any yet — switch to All.' : 'Nothing here yet.') : 'You haven’t taken any photos yet.'}</p>
       </div>
     {/if}
+    <!-- The same offer, in the gallery: this is where a guest lands after a failed upload, and
+         telling them they are out of shots without showing the way forward is a dead end. -->
+    {#if photosRemaining <= 0 && (canAskHost || canBuyShots)}
+      <div class="oos-panel oos-inline">
+        <div class="oos-title">That's your roll</div>
+        <div class="oos-actions">
+          {#if canAskHost}
+            <button class="btn ghost sm" on:click={askHostForMore} disabled={askedHost}>
+              {askedHost ? '✓ Host asked' : 'Ask the host for more'}
+            </button>
+          {/if}
+          {#if canBuyShots}
+            <button class="btn primary sm" on:click={buyMoreShots} disabled={buying}>
+              {buying ? 'Opening…' : 'Get 12 more'}
+            </button>
+          {/if}
+        </div>
+      </div>
+    {/if}
+
+    <!-- Beside the referral card, not inside it: someone who does not want to run their own
+
+         event may still have something to say, and burying feedback in a settings sheet gets
+
+         you feedback only from people already hunting for a button. -->
+
+    {#if sessionToken && !fbSent}
+
+      {#if fbOpen}
+
+        <div class="fb-panel">
+
+          <div class="fb-title">How was it?</div>
+
+          <div class="fb-stars">
+
+            {#each [1, 2, 3, 4, 5] as n}
+
+              <button class="fb-star" class:on={fbRating >= n} on:click={() => (fbRating = n)}
+
+                      aria-label={`${n} out of 5`}>★</button>
+
+            {/each}
+
+          </div>
+
+          <textarea class="fb-text" rows="2" maxlength="2000" bind:value={fbComment}
+
+                    placeholder="Anything you'd change? (optional)"></textarea>
+
+          <div class="fb-actions">
+
+            <button class="fb-link" on:click={() => sendGuestFeedback(true)}>No thanks</button>
+
+            <button class="btn primary sm" disabled={fbBusy || (!fbRating && !fbComment.trim())}
+
+                    on:click={() => sendGuestFeedback()}>{fbBusy ? 'Sending…' : 'Send'}</button>
+
+          </div>
+
+        </div>
+
+      {:else}
+
+        <div class="fb-cta-row">
+
+          <button class="fb-cta" on:click={() => (fbOpen = true)}>💬 Leave feedback</button>
+
+        </div>
+
+      {/if}
+
+    {/if}
+
     <!-- Referral surface 2: a guest lands here when their roll is spent, which is the moment they
          have just finished using the product. Emphasised only then, not on a casual gallery peek. -->
     {#if ev?.joinCode}
@@ -1719,6 +1816,25 @@
     background: rgba(0,0,0,.72); border: 1px solid rgba(255,255,255,.22); backdrop-filter: blur(6px);
     color: #fff; font-size: .86rem; line-height: 1.4;
   }
+  .fb-cta-row { display: flex; justify-content: center; margin: 10px 0 4px; }
+  .fb-cta, .fb-link {
+    background: none; border: none; cursor: pointer; font-size: .84rem;
+    color: var(--text-muted, #a39b8c); text-decoration: underline; text-underline-offset: 2px;
+  }
+  .fb-panel {
+    max-width: 520px; margin: 14px auto 4px; padding: 15px 17px; text-align: left;
+    border: 1px solid var(--border, #3a3630); border-radius: 14px; background: var(--surface, #17150f);
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .fb-title { font-size: .95rem; font-weight: 600; }
+  .fb-stars { display: flex; gap: 4px; }
+  .fb-star { background: none; border: none; cursor: pointer; font-size: 1.5rem; line-height: 1;
+    color: var(--border, #3a3630); padding: 0 2px; }
+  .fb-star.on { color: var(--accent, #f0b429); }
+  .fb-text { width: 100%; resize: vertical; border-radius: 9px; padding: 8px 10px; font: inherit;
+    font-size: .87rem; background: var(--bg, #100f0d); color: var(--text, #f2ece0);
+    border: 1px solid var(--border, #3a3630); }
+  .fb-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
   .oos-panel {
     /* Clears the shutter rather than sitting over it: the controls row is ~110px tall and the
        button overhangs it, so this starts well above the whole cluster. */
@@ -1729,12 +1845,14 @@
     background: rgba(0,0,0,.72); border: 1px solid rgba(255,255,255,.22); backdrop-filter: blur(6px);
     box-shadow: 0 8px 28px rgba(0,0,0,.4);
   }
-  /* In the gallery it is ordinary page content, not an overlay. */
-  .oos-panel.gallery {
+  /* In the gallery it is ordinary page content, not an overlay. Named oos-inline, NOT .gallery —
+     that class belongs to the gallery screen itself and carries min-height:100dvh, which made this
+     card expand to fill the viewport. */
+  .oos-panel.oos-inline {
     position: static; transform: none; margin: 14px auto; background: var(--surface-2, #1e1b14);
     border-color: var(--border, #3a3630); box-shadow: none; backdrop-filter: none;
   }
-  .oos-panel.gallery .oos-title { color: var(--text, #f2ece0); }
+  .oos-panel.oos-inline .oos-title { color: var(--text, #f2ece0); }
   .oos-title { color: #fff; font-size: .9rem; font-weight: 600; }
   .oos-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
   .shutter { width: 76px; height: 76px; border-radius: 50%; border: 4px solid #fff; background: transparent;

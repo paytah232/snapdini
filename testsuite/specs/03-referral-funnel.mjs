@@ -26,12 +26,12 @@ await spec('03-referral-funnel', async () => {
 
     // …and are coalesced into one additive update after the flush window.
     await new Promise((r) => setTimeout(r, 3500));   // dev COUNTER_FLUSH_MS=2500
-    ok('gallery views land after the flush, coalesced',
-       Number(dbq(`SELECT gallery_views FROM events WHERE id='${src.id}'`)) === 2,
-       dbq(`SELECT gallery_views FROM events WHERE id='${src.id}'`));
-    ok('referral click counted on the SOURCE event',
-       Number(dbq(`SELECT referral_clicks FROM events WHERE id='${src.id}'`)) === 1,
-       dbq(`SELECT referral_clicks FROM events WHERE id='${src.id}'`));
+    // read ONCE: a counter flush between the two reads made the message contradict the test
+    const v1 = dbq(`SELECT gallery_views FROM events WHERE id='${src.id}'`);
+    ok('gallery views land after the flush, coalesced', Number(v1) === 2, v1);
+    // read ONCE: a counter flush between the two reads made the message contradict the test
+    const v2 = dbq(`SELECT referral_clicks FROM events WHERE id='${src.id}'`);
+    ok('referral click counted on the SOURCE event', Number(v2) === 1, v2);
 
     // A shared-link page must never hand out the join code (that would let a viewer join and shoot),
     // so its referral link carries `s:<share token>` instead. Same attribution, no extra exposure.
@@ -43,9 +43,9 @@ await spec('03-referral-funnel', async () => {
     ok('a share token that does not exist is ignored',
        (await api('POST', '/api/track/ref', { body: { ref: 's:nosuchsharetoken' } })).status === 200);
     await new Promise((r) => setTimeout(r, 3500));
-    ok('share-token referral credits the same source event',
-       Number(dbq(`SELECT referral_clicks FROM events WHERE id='${src.id}'`)) === 2,
-       dbq(`SELECT referral_clicks FROM events WHERE id='${src.id}'`));
+    // read ONCE: a counter flush between the two reads made the message contradict the test
+    const v3 = dbq(`SELECT referral_clicks FROM events WHERE id='${src.id}'`);
+    ok('share-token referral credits the same source event', Number(v3) === 2, v3);
 
     // Photo counters are scoped to the event: ids from elsewhere must not be bumped.
     const other = await createEvent({ revealMode: 'instant' });
@@ -55,9 +55,9 @@ await spec('03-referral-funnel', async () => {
     if (otherPhoto) {
       await api('POST', '/api/track/photos', { body: { joinCode: src.joinCode, kind: 'view', ids: [otherPhoto] } });
       await new Promise((r) => setTimeout(r, 3500));   // dev COUNTER_FLUSH_MS=2500
-      ok('a photo from another event is NOT counted',
-         Number(dbq(`SELECT view_count FROM photos WHERE id='${otherPhoto}'`)) === 0,
-         dbq(`SELECT view_count FROM photos WHERE id='${otherPhoto}'`));
+      // read ONCE: a counter flush between the two reads made the message contradict the test
+    const v4 = dbq(`SELECT view_count FROM photos WHERE id='${otherPhoto}'`);
+    ok('a photo from another event is NOT counted', Number(v4) === 0, v4);
     }
 
     // The funnel endpoint reflects it (admin-only).

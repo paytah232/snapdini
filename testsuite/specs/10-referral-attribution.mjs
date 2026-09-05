@@ -75,12 +75,12 @@ await spec('10-referral-attribution', async () => {
   if (pid) {
     await api('POST', '/api/track/photos', { body: { joinCode: src.joinCode, ids: [pid], kind: 'download' } });
     await new Promise((r) => setTimeout(r, 3500));       // dev COUNTER_FLUSH_MS=2500
-    ok('download_count increments after the flush',
-       Number(dbq(`SELECT download_count FROM photos WHERE id='${pid}'`)) === 1,
-       dbq(`SELECT download_count FROM photos WHERE id='${pid}'`));
-    ok('a download does not inflate view_count',
-       Number(dbq(`SELECT view_count FROM photos WHERE id='${pid}'`)) === 0,
-       dbq(`SELECT view_count FROM photos WHERE id='${pid}'`));
+    // Read ONCE. Querying again for the failure message lets a counter flush land between the two
+    // reads, producing the nonsense "expected 1, got 1".
+    const dl = dbq(`SELECT download_count FROM photos WHERE id='${pid}'`);
+    ok('download_count increments after the flush', Number(dl) === 1, dl);
+    const vc = dbq(`SELECT view_count FROM photos WHERE id='${pid}'`);
+    ok('a download does not inflate view_count', Number(vc) === 0, vc);
   }
 
   group('Guest photo-emails are budgeted per guest, not per venue wifi');
