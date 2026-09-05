@@ -40,6 +40,13 @@
   let cameras: { id: string; label: string }[] = [];   // available video inputs (for the picker)
   let deviceId: string | null = null;                   // specific chosen camera (multi-camera systems)
   let videoMaxSecs = 0;
+  // Set from /me. The guest UI must offer only what the server will actually accept — the host
+  // controls buying and asking independently.
+  let canBuyShots = false;
+  let canAskHost = false;
+  let askedHost = false;
+  let buying = false;
+  $: outOfShots = photosRemaining <= 0 && screen === 'camera';
   let videoHardMaxSecs = 600;   // server's absolute ceiling; the event's own limit is a price tier
   // A guest gets a brief chance to take back a shot they have just fluffed — a thumb over the lens,
   // a blink. Short on purpose: the window is what stops "delete and reshoot" becoming an unlimited
@@ -162,6 +169,8 @@
         const me = await getMe(token);
         sessionToken = token;
         photosRemaining = me.photosRemaining;
+        canBuyShots = !!me.canBuyShots;
+        canAskHost = !!me.canAskHost;
         allowDownloads = me.allowDownloads;
         await enterCamera();
         return;
@@ -220,6 +229,8 @@
       const r = await joinEvent(identifier, joinName.trim(), joinEmail.trim() || undefined);
       sessionToken = r.sessionToken;
       photosRemaining = r.photosRemaining;
+      canBuyShots = !!r.canBuyShots;
+      canAskHost = !!r.canAskHost;
       saveSession(r.joinCode, r.sessionToken);
       if (r.recovered) showToast(`Welcome back! You've ${photosRemaining} shot${photosRemaining === 1 ? '' : 's'} left.`);
       await enterCamera();
@@ -855,6 +866,32 @@
     } catch { showToast('Could not delete that one — try again', true); }
   }
 
+  async function buyMoreShots() {
+    if (!sessionToken || buying) return;
+    buying = true;
+    try {
+      const r = await fetch('/api/billing/guest-upgrade', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin', body: JSON.stringify({ sessionToken }),
+      });
+      const d = await r.json().catch(() => null);
+      if (!r.ok || !d?.url) { showToast(d?.error || 'Could not start checkout', true); buying = false; return; }
+      window.location.href = d.url;    // Stripe; we come back to /join/<code>?topup=1
+    } catch { showToast('Could not start checkout', true); buying = false; }
+  }
+
+  async function askHostForMore() {
+    if (!sessionToken || askedHost) return;
+    askedHost = true;                  // optimistic: the ask is recorded once per guest anyway
+    try {
+      await fetch('/api/billing/guest-request-more', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin', body: JSON.stringify({ sessionToken }),
+      });
+      showToast('Asked the host — they will see it on their dashboard');
+    } catch { showToast('Could not send that just now', true); askedHost = false; }
+  }
+
   async function refreshGalleryIfOpen() {
     if (screen !== 'gallery' || !sessionToken) return;
     try {
@@ -1083,6 +1120,27 @@
       {/if}
       <button class="round" on:click={flip} title="Flip camera" aria-label="Flip camera" disabled={recording}>🔄</button>
     </div>
+    <!-- Nothing about upgrades exists until the roll is actually spent: no upsell furniture during
+         the event. Each path shows only if the host allows it, so a guest is never offered a button
+         the server would refuse. Asking comes first — the host buying for everyone is better value
+         than one guest buying for themselves. -->
+    {#if outOfShots && (canAskHost || canBuyShots)}
+      <div class="oos-panel">
+        <div class="oos-title">That's your roll</div>
+        <div class="oos-actions">
+          {#if canAskHost}
+            <button class="btn ghost sm" on:click={askHostForMore} disabled={askedHost}>
+              {askedHost ? '✓ Host asked' : 'Ask the host for more'}
+            </button>
+          {/if}
+          {#if canBuyShots}
+            <button class="btn primary sm" on:click={buyMoreShots} disabled={buying}>
+              {buying ? 'Opening…' : 'Get 12 more'}
+            </button>
+          {/if}
+        </div>
+      </div>
+    {/if}
   </div>
 {:else if screen === 'gallery'}
   <div class="gallery">
@@ -1300,6 +1358,15 @@
   .round { width: 52px; height: 52px; border-radius: 50%; border: none; background: rgba(255,255,255,0.15); color: #fff; font-size: 1.3rem; cursor: pointer; position: relative; }
   .badge { position: absolute; top: -4px; right: -4px; background: var(--accent); color: var(--accent-ink, #111); border-radius: 999px; min-width: 18px; height: 18px; font-size: 0.65rem; font-weight: bold; display: flex; align-items: center; justify-content: center; padding: 0 4px; }
   .badge.error { background: #c0392b; color: #fff; }
+  .oos-panel {
+    position: absolute; left: 50%; bottom: 118px; transform: translateX(-50%); z-index: 7;
+    /* .topbar-style ancestors are pointer-events:none over a gesture layer that eats taps. */
+    pointer-events: auto; display: flex; flex-direction: column; align-items: center; gap: 9px;
+    padding: 13px 16px; border-radius: 14px; max-width: 92vw;
+    background: rgba(0,0,0,.66); border: 1px solid rgba(255,255,255,.22); backdrop-filter: blur(5px);
+  }
+  .oos-title { color: #fff; font-size: .9rem; font-weight: 600; }
+  .oos-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
   .shutter { width: 76px; height: 76px; border-radius: 50%; border: 4px solid #fff; background: transparent;
     cursor: pointer; padding: 0; display: flex; align-items: center; justify-content: center; -webkit-tap-highlight-color: transparent; }
   .shutter:disabled { opacity: 0.4; }

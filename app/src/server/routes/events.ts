@@ -4,7 +4,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { v4 as uuidv4 } from 'uuid';
 import QRCode from 'qrcode';
 import sharp from 'sharp';
-import { eq, and, or, sql, inArray, count, desc } from 'drizzle-orm';
+import { eq, and, or, sql, inArray, count, desc, isNotNull } from 'drizzle-orm';
 import { db } from '../db';
 import { events, participants, photos, shares, eventCohosts, users, type Event } from '../schema';
 import * as email from '../email';
@@ -399,10 +399,6 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
     isLocked:       !!event.isLocked,
     isRevealed:     isRevealed(event),
     allowDownloads: !!event.allowDownloads,
-    guestMayBuyShots: !!event.guestMayBuyShots,
-    guestMayBuyVideo: !!event.guestMayBuyVideo,
-    guestMayBuyFrames: !!event.guestMayBuyFrames,
-    guestMayRequest: !!event.guestMayRequest,
     noFlash:        !!event.noFlash,
     theme:          event.theme ? JSON.parse(event.theme) : null,
     participantCount,
@@ -515,6 +511,7 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     email: participants.email,
     photosTaken: participants.photosTaken,
     joinedAt: participants.joinedAt,
+    requestedMoreAt: participants.requestedMoreAt,
   }).from(participants).where(eq(participants.eventId, ev.id)).orderBy(participants.joinedAt);
   const [{ c: photoCount }] = await db.select({ c: count() }).from(photos).where(eq(photos.eventId, ev.id));
   // "Pending" only means "needs action" when moderation is ON. With it off, pending photos are
@@ -555,6 +552,13 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     isRevealed:     isRevealed(ev),
     revealedAt:     ev.revealedAt,
     allowDownloads: !!ev.allowDownloads,
+    // Host-only settings: these must never appear on the public event GET, which guests read.
+    guestMayBuyShots:  !!ev.guestMayBuyShots,
+    guestMayBuyVideo:  !!ev.guestMayBuyVideo,
+    guestMayBuyFrames: !!ev.guestMayBuyFrames,
+    guestMayRequest:   !!ev.guestMayRequest,
+    // Guests who asked for more. Shown on the host's own pages, never pushed at them mid-event.
+    upgradeRequests:   participantRows.filter((r) => !!(r as { requestedMoreAt?: number | null }).requestedMoreAt).length,
     noFlash:        !!ev.noFlash,
     theme:          ev.theme ? JSON.parse(ev.theme) : null,
     // entitlement (for the upgrades section; only meaningful when billing is on)

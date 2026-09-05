@@ -344,6 +344,54 @@
     }
   }
 
+  // One handler for the guest-permission switches, through the normal settings PUT — which only
+
+  // writes keys that are present, so flipping one cannot disturb the other.
+
+  // Derived here rather than inline: a TS type assertion containing braces inside a template
+
+  // expression breaks Svelte's parser. Default ON when the field is absent (older payloads).
+
+  $: guestBuyOn = (ev as unknown as { guestMayBuyShots?: boolean } | null)?.guestMayBuyShots !== false;
+
+  $: guestAskOn = (ev as unknown as { guestMayRequest?: boolean } | null)?.guestMayRequest !== false;
+
+
+  async function setGuestFlag(key: 'guestMayBuyShots' | 'guestMayRequest', e: Event) {
+
+    const input = e.currentTarget as HTMLInputElement;
+
+    const checked = input.checked;
+
+    try {
+
+      const r = await fetch(`/api/events/${code}/settings`, {
+
+        method: 'PUT',
+
+        headers: { 'Content-Type': 'application/json', 'X-Organizer-Code': orgCode },
+
+        body: JSON.stringify({ [key]: checked }),
+
+      });
+
+      if (!r.ok) throw new Error((await r.json().catch(() => null))?.error || 'Failed');
+
+      if (ev) ev = { ...ev, [key]: checked } as typeof ev;
+
+      showToast(checked ? 'Turned on' : 'Turned off');
+
+    } catch (err) {
+
+      input.checked = !checked;
+
+      showToast(err instanceof Error ? err.message : 'Failed', true);
+
+    }
+
+  }
+
+
   async function onAllowDownloads(e: Event) {
     const checked = (e.currentTarget as HTMLInputElement).checked;
     try {
@@ -788,6 +836,32 @@
         </label>
       </div>
       <div class="divider"></div>
+
+        <div class="toggle-row">
+          <div>
+            <div class="t-label">Guests can buy more shots</div>
+            <div class="t-sub">A guest who runs out can top up their own roll for A$3. You're not charged.</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" checked={guestBuyOn}
+                   on:change={(e) => setGuestFlag('guestMayBuyShots', e)} />
+            <span class="track"></span>
+          </label>
+        </div>
+        <div class="divider"></div>
+
+        <div class="toggle-row">
+          <div>
+            <div class="t-label">Guests can ask you for more</div>
+            <div class="t-sub">Shows on your dashboard. Turn off if you'd rather not be asked mid-event.</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" checked={guestAskOn}
+                   on:change={(e) => setGuestFlag('guestMayRequest', e)} />
+            <span class="track"></span>
+          </label>
+        </div>
+        <div class="divider"></div>
 
       <div class="toggle-row">
         <div>

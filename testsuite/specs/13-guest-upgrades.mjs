@@ -3,7 +3,7 @@
 // The dangerous property is the ALLOWANCE, not the payment: a guest's purchased shots are added on
 // top of the event's roll, so a second sum anywhere would hand a paying guest their old limit back.
 // These tests pin that, plus the host's ability to switch the whole thing off.
-import { api, createEvent, dbq, group, join, ok, spec, upload } from '../lib/harness.mjs';
+import { api, createEvent, dbq, group, join, ok, org, spec, upload } from '../lib/harness.mjs';
 
 const remaining = async (tok) => (await api('GET', '/api/participants/me', { headers: { 'X-Session-Token': tok } })).json?.photosRemaining;
 
@@ -94,4 +94,21 @@ await spec('13-guest-upgrades', async () => {
        me?.canBuyShots === c.buy && me?.canAskHost === c.ask,
        `canBuyShots=${me?.canBuyShots} canAskHost=${me?.canAskHost}`);
   }
+
+  group('Host settings never leak to guests');
+  // These went on the PUBLIC event GET by mistake once. A guest reading the event should learn
+  // nothing about the host's permission settings or how many people have asked for more.
+  const lev = await createEvent({ revealMode: 'instant' });
+  const pub = (await api('GET', `/api/events/${lev.joinCode}`)).json || {};
+  const leaked = Object.keys(pub).filter((k) => k.startsWith('guestMay') || k === 'upgradeRequests');
+  ok('public event GET exposes no host permission fields', leaked.length === 0, leaked.join(', '));
+  const adm = (await api('GET', `/api/events/${lev.joinCode}/admin`, { headers: org(lev.organizerCode) })).json || {};
+  ok('the organiser DOES see them', typeof adm.guestMayBuyShots === 'boolean' && typeof adm.upgradeRequests === 'number',
+     JSON.stringify({ b: adm.guestMayBuyShots, r: adm.upgradeRequests }));
+
+  // and the count is real, not a stub
+  const lt = (await join(lev.joinCode, 'Asker Two')).json?.sessionToken;
+  await api('POST', '/api/billing/guest-request-more', { body: { sessionToken: lt } });
+  const adm2 = (await api('GET', `/api/events/${lev.joinCode}/admin`, { headers: org(lev.organizerCode) })).json || {};
+  ok('upgradeRequests counts a real ask', adm2.upgradeRequests === 1, `${adm2.upgradeRequests}`);
 });

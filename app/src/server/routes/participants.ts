@@ -52,6 +52,8 @@ router.post('/', async (req: Request, res: Response) => {
         sessionToken,
         joinCode:        event.joinCode,
         photosRemaining: remainingFor({ maxPhotos: event.maxPhotos, extraPhotos: existing.extraPhotos, photosTaken: existing.photosTaken }),
+        canBuyShots: !!event.guestMayBuyShots,
+        canAskHost: !!event.guestMayRequest,
         eventName:       event.name,
         noFlash:         !!event.noFlash,
         recovered:       true,
@@ -87,6 +89,8 @@ router.post('/', async (req: Request, res: Response) => {
     sessionToken,
     joinCode:        event.joinCode,
     photosRemaining: remainingFor({ maxPhotos: event.maxPhotos, photosTaken: 0 }),
+        canBuyShots: !!event.guestMayBuyShots,
+        canAskHost: !!event.guestMayRequest,
     eventName:       event.name,
     noFlash:         !!event.noFlash,
   });
