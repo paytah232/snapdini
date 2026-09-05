@@ -118,9 +118,14 @@ router.post('/guest-upgrade', async (req: Request, res: Response) => {
 router.post('/guest-request-more', async (req: Request, res: Response) => {
   const sessionToken = String(req.body?.sessionToken || '');
   if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
-  const [p] = await db.select({ id: participants.id, requestedMoreAt: participants.requestedMoreAt })
-    .from(participants).where(eq(participants.sessionToken, sessionToken));
+  const [p] = await db.select({
+      id: participants.id, requestedMoreAt: participants.requestedMoreAt,
+      mayRequest: events.guestMayRequest,
+    }).from(participants).innerJoin(events, eq(events.id, participants.eventId))
+    .where(eq(participants.sessionToken, sessionToken));
   if (!p) return res.status(403).json({ error: 'Invalid session' });
+  // A host can take top-ups without wanting to field requests mid-event, so this is its own switch.
+  if (!p.mayRequest) return res.status(403).json({ error: 'The host has turned off guest requests for this event' });
   if (!p.requestedMoreAt) {
     await db.update(participants).set({ requestedMoreAt: Date.now() }).where(eq(participants.id, p.id));
   }

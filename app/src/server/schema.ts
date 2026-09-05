@@ -75,6 +75,8 @@ export const events = pgTable('events', {
   guestMayBuyShots: boolean('guest_may_buy_shots').notNull().default(true),
   guestMayBuyVideo: boolean('guest_may_buy_video').notNull().default(false),
   guestMayBuyFrames: boolean('guest_may_buy_frames').notNull().default(false),
+  // Separate from buying: a host may take top-ups yet not want request notices, or vice versa.
+  guestMayRequest: boolean('guest_may_request').notNull().default(true),
   revealMode: text('reveal_mode').notNull().default('instant'),
   revealDelayHours: integer('reveal_delay_hours').notNull().default(0),
   moderationEnabled: boolean('moderation_enabled').notNull().default(false),

@@ -69,4 +69,29 @@ await spec('13-guest-upgrades', async () => {
   ok('asking twice does not move the timestamp — one ask per guest',
      dbq(`SELECT requested_more_at FROM participants WHERE id='${askPid}'`) === first,
      `${first} -> ${dbq(`SELECT requested_more_at FROM participants WHERE id='${askPid}'`)}`);
+
+  group('Buying and asking are separate switches — all four combinations');
+  // A host may want the money without the interruptions, or the control without refusing to be
+  // asked. Both switches are independent and both are enforced server-side.
+  const combos = [
+    { buy: true,  ask: true,  buyStatus: [200, 503], askStatus: 200, label: 'both on' },
+    { buy: true,  ask: false, buyStatus: [200, 503], askStatus: 403, label: 'buy on, ask off' },
+    { buy: false, ask: true,  buyStatus: [403],      askStatus: 200, label: 'buy off, ask on' },
+    { buy: false, ask: false, buyStatus: [403],      askStatus: 403, label: 'both off — full control' },
+  ];
+  for (const c of combos) {
+    const cev = await createEvent({ revealMode: 'instant', maxPhotos: 12 });
+    dbq(`UPDATE events SET guest_may_buy_shots=${c.buy}, guest_may_request=${c.ask} WHERE id='${cev.id}'`);
+    const ct = (await join(cev.joinCode, `Guest ${c.label}`)).json?.sessionToken;
+    const buy = await api('POST', '/api/billing/guest-upgrade',      { body: { sessionToken: ct } });
+    const ask = await api('POST', '/api/billing/guest-request-more', { body: { sessionToken: ct } });
+    // 503 = Stripe not configured on this stack; either way it is NOT a permission refusal.
+    ok(`${c.label}: buying ${c.buy ? 'allowed' : 'refused'}`, c.buyStatus.includes(buy.status), `status ${buy.status}`);
+    ok(`${c.label}: asking ${c.ask ? 'allowed' : 'refused'}`, ask.status === c.askStatus, `status ${ask.status}`);
+    // and the guest's own /me must advertise exactly the options that will actually work
+    const me = (await api('GET', '/api/participants/me', { headers: { 'X-Session-Token': ct } })).json;
+    ok(`${c.label}: /me advertises the right options`,
+       me?.canBuyShots === c.buy && me?.canAskHost === c.ask,
+       `canBuyShots=${me?.canBuyShots} canAskHost=${me?.canAskHost}`);
+  }
 });

@@ -402,6 +402,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
     guestMayBuyShots: !!event.guestMayBuyShots,
     guestMayBuyVideo: !!event.guestMayBuyVideo,
     guestMayBuyFrames: !!event.guestMayBuyFrames,
+    guestMayRequest: !!event.guestMayRequest,
     noFlash:        !!event.noFlash,
     theme:          event.theme ? JSON.parse(event.theme) : null,
     participantCount,
@@ -811,8 +812,9 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
   const ev = req.event!;
   const { name, blurb, startDate, startTime, revealMode,
           revealDelayHours, moderationEnabled, allowDownloads, noFlash, timezone, ratingMode, slug,
-                  guestMayBuyShots, guestMayBuyVideo, guestMayBuyFrames } = req.body as {
+                  guestMayBuyShots, guestMayBuyVideo, guestMayBuyFrames, guestMayRequest } = req.body as {
               guestMayBuyShots?: boolean; guestMayBuyVideo?: boolean; guestMayBuyFrames?: boolean;
+    guestMayRequest?: boolean;
     name?: string; blurb?: string; startDate?: string; startTime?: string;
     revealMode?: string; revealDelayHours?: number | string; moderationEnabled?: boolean;
     allowDownloads?: boolean; noFlash?: boolean; timezone?: string; ratingMode?: string; slug?: string;
@@ -931,7 +933,8 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
     // touches the name, must not silently switch guest top-ups off.
     ...(typeof guestMayBuyShots  === 'boolean' ? { guestMayBuyShots }  : {}),
     ...(typeof guestMayBuyVideo  === 'boolean' ? { guestMayBuyVideo }  : {}),
-    ...(typeof guestMayBuyFrames === 'boolean' ? { guestMayBuyFrames } : {}), timezone: tz, slug: newSlug, aspectRatios: aspects, ratingMode: rMode, purgeAt,
+    ...(typeof guestMayBuyFrames === 'boolean' ? { guestMayBuyFrames } : {}),
+    ...(typeof guestMayRequest   === 'boolean' ? { guestMayRequest }   : {}), timezone: tz, slug: newSlug, aspectRatios: aspects, ratingMode: rMode, purgeAt,
   }).where(eq(events.id, ev.id));
 
   res.json({

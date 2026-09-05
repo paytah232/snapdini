@@ -225,6 +225,13 @@
       "when": 1788700000000,
       "tag": "0031_guest_upgrades",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1788800000000,
+      "tag": "0032_guest_requests_switch",
+      "breakpoints": true
     }
   ]
 }

@@ -107,6 +107,7 @@ router.get('/me', async (req: Request, res: Response) => {
       maxPhotos:      events.maxPhotos,
       extraPhotos:    participants.extraPhotos,
       guestMayBuyShots: events.guestMayBuyShots,
+      guestMayRequest:  events.guestMayRequest,
       eventName:      events.name,
       joinCode:       events.joinCode,
       slug:           events.slug,
@@ -136,6 +137,7 @@ router.get('/me', async (req: Request, res: Response) => {
     maxPhotos:       effectiveMaxPhotos(p),
       extraPhotos:     p.extraPhotos,
       canBuyShots:     !!p.guestMayBuyShots,
+      canAskHost:      !!p.guestMayRequest,
     allowDownloads:  !!p.allowDownloads,
     noFlash:         !!p.noFlash,
   });
