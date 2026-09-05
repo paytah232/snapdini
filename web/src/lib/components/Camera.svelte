@@ -41,6 +41,15 @@
   let deviceId: string | null = null;                   // specific chosen camera (multi-camera systems)
   let videoMaxSecs = 0;
   let videoHardMaxSecs = 600;   // server's absolute ceiling; the event's own limit is a price tier
+  // A guest gets a brief chance to take back a shot they have just fluffed — a thumb over the lens,
+  // a blink. Short on purpose: the window is what stops "delete and reshoot" becoming an unlimited
+  // roll. Mirrors PHOTO_DELETE_WINDOW_SECONDS on the server; the server is the authority.
+  const undoWindowMs = 60_000;
+  let lastShot: { id: string; at: number } | null = null;
+  let nowTick = Date.now();
+  let undoTimer: ReturnType<typeof setInterval> | undefined;
+  $: undoLeft = lastShot ? Math.ceil((lastShot.at + undoWindowMs - nowTick) / 1000) : 0;
+  $: canUndo = !!lastShot && undoLeft > 0;
   let videoMode = false;
   let recording = false;
   let recSecs = 0;
@@ -193,6 +202,7 @@
   }
 
   onDestroy(() => {
+    clearInterval(undoTimer);
     // onDestroy also runs during SSR, where `document` is undefined — guard it.
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
     if (typeof navigator !== 'undefined') navigator.mediaDevices?.removeEventListener?.('devicechange', refreshCameras);
@@ -681,7 +691,7 @@
   const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
   // Single-shot upload (XHR so we get a live progress %). Resolves the server's { photosRemaining }.
-  function uploadSingle(item: QueueItem): Promise<{ photosRemaining: number }> {
+  function uploadSingle(item: QueueItem): Promise<{ photosRemaining: number; photoId?: string }> {
     return new Promise((resolve, reject) => {
       const form = new FormData();
       form.append('photo', item.blob, `media.${item.ext}`);
@@ -707,7 +717,7 @@
   // IndexedDB) so a suspended/reloaded tab RESUMES from the last part rather than restarting; the
   // server keeps parts for hours and chunk writes are idempotent, so resends are safe. Parts also
   // retry individually with backoff before failing the item.
-  async function uploadChunked(item: QueueItem): Promise<{ photosRemaining: number }> {
+  async function uploadChunked(item: QueueItem): Promise<{ photosRemaining: number; photoId?: string }> {
     const blob = item.blob;
     const total = Math.ceil(blob.size / CHUNK_SIZE);
     // Reuse a persisted upload id when resuming; otherwise mint a fresh one and record it.
@@ -763,7 +773,7 @@
     const d = await res.json().catch(() => null);
     if (!res.ok || !d) throw new Error((d && d.error) || `Upload failed (${res.status})`);
     item.progress = 100; queue = queue;
-    return d as { photosRemaining: number };
+    return d as { photosRemaining: number; photoId?: string };
   }
 
   async function processQueue() {
@@ -774,6 +784,7 @@
     try {
       const data = (item.blob.size > CHUNK_SIZE || item.uploadId) ? await uploadChunked(item) : await uploadSingle(item);
       item.status = 'done'; item.progress = 100;
+      if (data?.photoId) startUndo(String(data.photoId));
       void refreshGalleryIfOpen();   // show it straight away if they are watching the gallery
       // Never let the count flicker UP: the per-upload server value lags behind the local
       // optimistic count during a burst, so only ever take the lower of the two.
@@ -814,6 +825,34 @@
   // a grid that silently lacked the shot they just took — it only appeared if they navigated away
   // and back. Refresh in place instead. No-op unless the gallery is the visible screen, so it costs
   // nothing during a burst of captures on the camera screen.
+  function startUndo(id: string) {
+    lastShot = { id, at: Date.now() };
+    nowTick = Date.now();
+    clearInterval(undoTimer);
+    // One ticker while a window is open, cleared when it closes — no permanent second-by-second timer.
+    undoTimer = setInterval(() => {
+      nowTick = Date.now();
+      if (lastShot && nowTick > lastShot.at + undoWindowMs) { lastShot = null; clearInterval(undoTimer); }
+    }, 1000);
+  }
+
+  async function undoLastShot() {
+    if (!lastShot || !sessionToken) return;
+    const id = lastShot.id;
+    lastShot = null; clearInterval(undoTimer);
+    try {
+      const r = await fetch(`/api/photos/${id}`, {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin', body: JSON.stringify({ sessionToken }),
+      });
+      if (!r.ok) { showToast('That one is part of the roll now', true); return; }
+      const d = await r.json().catch(() => null);
+      if (typeof d?.photosRemaining === 'number') photosRemaining = d.photosRemaining;
+      galleryPhotos = galleryPhotos.filter((p) => p.id !== id);
+      showToast('Deleted — that shot is back on your roll');
+    } catch { showToast('Could not delete that one — try again', true); }
+  }
+
   async function refreshGalleryIfOpen() {
     if (screen !== 'gallery' || !sessionToken) return;
     try {
@@ -920,6 +959,13 @@
           <div class="evname"><Logo word={false} color={ev?.theme?.accent ?? ''} /> {ev?.name}</div>
         {/if}
         <div class="counter" class:low={photosRemaining <= 5}>{photosRemaining}<small>left</small></div>
+        <!-- Only while the window is open. It removes itself, so a guest is never offered an undo
+             the server would refuse — and never told the limit is negotiable after that. -->
+        {#if canUndo}
+          <button class="undo-chip" on:click={undoLastShot} aria-label="Delete the shot you just took">
+            ↩ Undo <span class="undo-secs">{undoLeft}s</span>
+          </button>
+        {/if}
       </div>
       <div class="rail">
         {#if facing === 'user'}<button class="ctrl" on:click={() => (screenFlash = !screenFlash)} class:active={screenFlash} title="Flash" aria-label="Flash">⚡</button>{/if}
@@ -1050,6 +1096,9 @@
           <button class="btn ghost sm queue-btn" on:click={() => (drawerOpen = true)} aria-label="Upload queue{pendingCount ? ` (${pendingCount} uploading)` : ''}">
             ⬆ Queue{#if pendingCount}<span class="qbadge" class:error={hasUploadError}>{pendingCount}</span>{/if}
           </button>
+        {/if}
+        {#if canUndo}
+          <button class="btn ghost sm" on:click={undoLastShot} aria-label="Delete the shot you just took">↩ Undo {undoLeft}s</button>
         {/if}
         <button class="btn ghost sm" on:click={backToCamera}>← Camera</button>
       </div>
@@ -1196,6 +1245,18 @@
   .home-btn { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px;
     background: rgba(0,0,0,0.5); color: #fff; text-decoration: none; font-weight: 700; font-size: 0.8rem;
     padding: 8px 14px; border-radius: 999px; backdrop-filter: blur(4px); }
+  .undo-chip {
+    /* .topbar is pointer-events:none so taps fall through to the gesture layer beneath it — this
+       is the one child that must actually be tappable, so it opts back in. Without this the chip
+       renders perfectly and does nothing, which is exactly how it failed the first browser test. */
+    pointer-events: auto;
+    display: inline-flex; align-items: center; gap: 6px; margin-left: 10px;
+    background: rgba(0,0,0,.55); color: #fff; border: 1px solid rgba(255,255,255,.35);
+    border-radius: 999px; padding: 5px 11px; font-size: .78rem; font-weight: 600;
+    cursor: pointer; backdrop-filter: blur(3px);
+  }
+  .undo-chip:active { transform: scale(.96); }
+  .undo-secs { opacity: .7; font-variant-numeric: tabular-nums; }
   .counter { font-family: var(--font-mono); font-size: 1.5rem; font-weight: bold; color: #fff; text-align: right; line-height: 1; }
   .counter.low { color: var(--danger); } .counter small { display: block; font-size: 0.6rem; opacity: 0.7; text-transform: uppercase; }
   .rail { position: absolute; top: 64px; right: 14px; display: flex; flex-direction: column; gap: 10px; z-index: 6; }

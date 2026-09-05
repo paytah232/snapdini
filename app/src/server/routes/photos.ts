@@ -30,6 +30,11 @@ const VIDEO_MAX_SECS = parseInt(process.env.VIDEO_MAX_SECONDS || '0');
 //   VIDEO_GRACE_SECONDS    > 0 caps how far past the purchased limit we accept (0 = no cap, the
 //                          default, i.e. deliberately open while we gather data on how often it happens)
 //   VIDEO_HARD_MAX_SECONDS absolute ceiling — a storage/abuse guard, never a pricing gate
+// A guest may take back a shot they have just fluffed — a thumb over the lens, a lid-shut blink —
+// and get the frame back on their roll. Deliberately SHORT: "that was my thumb" is known within a
+// couple of seconds, whereas a long window turns a 12-shot roll into unlimited retries and the
+// limited roll stops meaning anything. After it closes the frame is permanent.
+const DELETE_WINDOW_MS = parseInt(process.env.PHOTO_DELETE_WINDOW_SECONDS || '60') * 1000;
 const VIDEO_GRACE_SECS    = parseInt(process.env.VIDEO_GRACE_SECONDS || '0');
 const VIDEO_HARD_MAX_SECS = parseInt(process.env.VIDEO_HARD_MAX_SECONDS || '600');
 
@@ -214,6 +219,46 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
 }
 
 // ── POST /api/photos — single-shot upload (photos + videos under the chunk threshold) ──────────
+
+// ── DELETE /api/photos/:id — a guest takes back their own shot, inside the window ─────────────
+// Distinct statuses on purpose: the client shows a different thing for "not yours" than for
+// "too late", and a single 403 for both would make the countdown UI impossible to get right.
+router.delete('/:id', async (req: Request, res: Response) => {
+  const sessionToken = String(req.body?.sessionToken || req.query?.sessionToken || '');
+  if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
+
+  const [me] = await db
+    .select({ id: participants.id, eventId: participants.eventId, photosTaken: participants.photosTaken,
+              isLocked: events.isLocked, expiresAt: events.expiresAt, maxPhotos: events.maxPhotos })
+    .from(participants)
+    .innerJoin(events, eq(events.id, participants.eventId))
+    .where(eq(participants.sessionToken, sessionToken));
+  if (!me) return res.status(403).json({ error: 'Invalid session' });
+
+  const [photo] = await db
+    .select({ id: photos.id, participantId: photos.participantId, filename: photos.filename, takenAt: photos.takenAt })
+    .from(photos).where(eq(photos.id, String(req.params.id)));
+  // Same answer for "does not exist" and "belongs to another guest": whether a given photo id
+  // exists in someone else's roll is not this guest's business.
+  if (!photo || photo.participantId !== me.id) return res.status(404).json({ error: 'Photo not found' });
+
+  if (me.isLocked) return res.status(423).json({ error: 'The host has locked this event' });
+  if (Date.now() > Number(me.expiresAt)) return res.status(410).json({ error: 'This event has ended' });
+  if (Date.now() - Number(photo.takenAt) > DELETE_WINDOW_MS) {
+    return res.status(410).json({ error: 'Too late to delete this one — it is part of the roll now' });
+  }
+
+  // Inside the window nobody has meaningfully seen it, so remove it outright rather than leaving a
+  // rejected row for the host to wonder about.
+  await db.delete(photos).where(eq(photos.id, photo.id));
+  const remaining = Math.max(0, Number(me.photosTaken) - 1);
+  await db.update(participants).set({ photosTaken: remaining }).where(eq(participants.id, me.id));
+  for (const f of [photo.filename, photo.filename.replace(/\.[^.]+$/, '_thumb.webp')]) {
+    try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch { /* already gone is fine */ }
+  }
+
+  res.json({ success: true, photosRemaining: Math.max(0, Number(me.maxPhotos) - remaining) });
+});
 
 router.post('/', upload.single('photo'), async (req: Request, res: Response) => {
   const { sessionToken } = req.body;
