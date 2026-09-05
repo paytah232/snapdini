@@ -201,3 +201,18 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
 - [ ] **Purchased shots survive** the host lowering the event roll.
 - [ ] **Sales close** in the last 15 minutes of an event.
 - [ ] **`/siteadmin` → Guest top-ups** lists paid guests and offers a refund.
+
+## 19. Version 1.4 — face matching (verify these)
+- [ ] **Absent by default:** with no `MACHINE_LEARNING_URL`, nothing about face matching appears
+      anywhere and `/api/faces/enrol` returns 503.
+- [ ] **Host gate:** with the host switch OFF, a guest sees no "Find photos of me" control and the
+      endpoint refuses with 403.
+- [ ] **Consent gate:** the checkbox is **never pre-ticked**; the selfie button stays disabled until
+      it is ticked; submitting without consent is refused server-side too.
+- [ ] **It works:** enrol with a selfie → told how many photos you were found in → a **Me** chip
+      appears in your gallery showing exactly those photos.
+- [ ] **It discriminates:** a photo of somebody else is NOT matched to you.
+- [ ] **Withdrawal:** "Stop and delete" removes the template and every match; the Me chip disappears
+      and `/api/faces/mine` reports you as not enrolled.
+- [ ] **No leakage:** no API response anywhere contains an `embedding`.
+- [ ] **Privacy page** section 6b explains face templates in plain language.

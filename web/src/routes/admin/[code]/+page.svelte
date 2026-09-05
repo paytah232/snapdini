@@ -355,9 +355,11 @@
   $: guestBuyOn = (ev as unknown as { guestMayBuyShots?: boolean } | null)?.guestMayBuyShots !== false;
 
   $: guestAskOn = (ev as unknown as { guestMayRequest?: boolean } | null)?.guestMayRequest !== false;
+  // Face matching defaults OFF and stays off unless a host deliberately turns it on.
+  $: faceOn = (ev as unknown as { faceMatchingEnabled?: boolean } | null)?.faceMatchingEnabled === true;
 
 
-  async function setGuestFlag(key: 'guestMayBuyShots' | 'guestMayRequest', e: Event) {
+  async function setGuestFlag(key: 'guestMayBuyShots' | 'guestMayRequest' | 'faceMatchingEnabled', e: Event) {
 
     const input = e.currentTarget as HTMLInputElement;
 
@@ -858,6 +860,21 @@
           <label class="switch">
             <input type="checkbox" checked={guestAskOn}
                    on:change={(e) => setGuestFlag('guestMayRequest', e)} />
+            <span class="track"></span>
+          </label>
+        </div>
+        <div class="divider"></div>
+
+        <div class="toggle-row">
+          <div>
+            <div class="t-label">Let guests find photos of themselves</div>
+            <div class="t-sub">
+              A guest can upload a selfie to find the photos they appear in. Only guests who opt in are
+              recognised, and their face data is deleted the moment they withdraw. Off unless you turn it on.
+            </div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" checked={faceOn} on:change={(e) => setGuestFlag('faceMatchingEnabled', e)} />
             <span class="track"></span>
           </label>
         </div>

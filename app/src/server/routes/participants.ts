@@ -112,6 +112,8 @@ router.get('/me', async (req: Request, res: Response) => {
       extraPhotos:    participants.extraPhotos,
       guestMayBuyShots: events.guestMayBuyShots,
       guestMayRequest:  events.guestMayRequest,
+      faceMatching:     events.faceMatchingEnabled,
+      faceConsentAt:    participants.faceConsentAt,
       eventName:      events.name,
       joinCode:       events.joinCode,
       slug:           events.slug,
@@ -142,6 +144,8 @@ router.get('/me', async (req: Request, res: Response) => {
       extraPhotos:     p.extraPhotos,
       canBuyShots:     !!p.guestMayBuyShots,
       canAskHost:      !!p.guestMayRequest,
+      faceMatching:    !!p.faceMatching,
+      faceEnrolled:    !!p.faceConsentAt,
     allowDownloads:  !!p.allowDownloads,
     noFlash:         !!p.noFlash,
   });

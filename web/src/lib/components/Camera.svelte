@@ -11,6 +11,7 @@
   import { putCapture, delCapture, listCaptures, saveProgress, getProgress } from '$lib/captureStore';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import StartYourOwn from '$lib/components/StartYourOwn.svelte';
+  import FaceFinder from '$lib/components/FaceFinder.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import FeedbackModal from '$lib/components/FeedbackModal.svelte';
 
@@ -44,6 +45,10 @@
   // controls buying and asking independently.
   let canBuyShots = false;
   let canAskHost = false;
+  // Face matching: host switch + this guest's own enrolment state, both from /me.
+  let faceMatching = false;
+  let faceEnrolled = false;
+  let facePhotoIds: string[] = [];
   let askedHost = false;
   let buying = false;
   $: outOfShots = photosRemaining <= 0 && screen === 'camera';
@@ -105,10 +110,12 @@
   let galleryRevealed = true;
   // Gallery filter — when the host reveals everyone's shots, default to the guest's own ('mine')
   // but let them switch to All / Others. Photos already arrive newest-first from the server.
-  let galleryFilter: 'mine' | 'all' | 'others' = 'mine';
+  // 'me' = photos face matching says this guest appears in; only offered once they have enrolled.
+  let galleryFilter: 'mine' | 'all' | 'others' | 'me' = 'mine';
   $: ownCount = galleryPhotos.filter((p) => p.isOwn).length;
   $: othersCount = galleryPhotos.length - ownCount;
-  $: shownPhotos = galleryFilter === 'all' ? galleryPhotos
+  $: shownPhotos = galleryFilter === 'me' ? galleryPhotos.filter((p) => facePhotoIds.includes(p.id))
+    : galleryFilter === 'all' ? galleryPhotos
     : galleryFilter === 'mine' ? galleryPhotos.filter((p) => p.isOwn)
     : galleryPhotos.filter((p) => !p.isOwn);
   let revealMsg = '';
@@ -180,6 +187,8 @@
         photosRemaining = me.photosRemaining;
         canBuyShots = !!me.canBuyShots;
         canAskHost = !!me.canAskHost;
+        faceMatching = !!me.faceMatching;
+        faceEnrolled = !!me.faceEnrolled;
         allowDownloads = me.allowDownloads;
         await enterCamera();
         return;
@@ -1174,7 +1183,13 @@
         <button class="gchip" class:on={galleryFilter === 'mine'} on:click={() => (galleryFilter = 'mine')}>Mine <span class="n">{ownCount}</span></button>
         <button class="gchip" class:on={galleryFilter === 'all'} on:click={() => (galleryFilter = 'all')}>All <span class="n">{galleryPhotos.length}</span></button>
         <button class="gchip" class:on={galleryFilter === 'others'} on:click={() => (galleryFilter = 'others')}>Others <span class="n">{othersCount}</span></button>
+        {#if faceEnrolled}
+          <button class="gchip" class:on={galleryFilter === 'me'} on:click={() => (galleryFilter = 'me')}>Me <span class="n">{facePhotoIds.length}</span></button>
+        {/if}
       </div>
+    {/if}
+    {#if faceMatching && sessionToken}
+      <FaceFinder {sessionToken} bind:enrolled={faceEnrolled} onMatched={(ids) => (facePhotoIds = ids)} />
     {/if}
     {#if shownPhotos.length}
       <div class="pgrid">

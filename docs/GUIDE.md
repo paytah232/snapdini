@@ -247,6 +247,14 @@ plus the galleries producing the most referrals and per-photo view/download enga
   excluded everywhere; restoring returns them to pending.
 - **Retention:** photos + guest data are deleted after the event's retention window; a slim stats-only
   record is kept. Freed custom URLs become available again.
+- **Find the photos I'm in** (optional, off by default): a guest may upload a selfie and be shown
+  the photos from that event they appear in. Requires `MACHINE_LEARNING_URL` pointing at an Immich
+  machine-learning container (image bytes over HTTP — no volume mounts), the **host** to switch it on
+  per event, and the **guest** to consent explicitly. Only an enrolled guest's own face template is
+  stored; every other face is compared and discarded inside the request, and what persists is a
+  photo↔guest link, not biometric data. Withdrawing deletes the template and every match.
+  **Read `docs/PIA-face-matching.md` before enabling this on a hosted deployment** — a face template
+  is sensitive information under the Privacy Act and this is not a feature to switch on casually.
 - **Taking a shot back:** for **60 seconds** after a photo lands, a guest sees a bin on that photo
   in their own gallery, with a countdown. Deleting it removes the photo and **returns the frame to
   their roll**. After the window it is permanent — a longer window would turn a limited roll into

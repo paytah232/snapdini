@@ -57,6 +57,69 @@
   <h2>6a. Advertising &amp; analytics</h2>
   <p>Where analytics or advertising measurement is enabled on this deployment, we use Google (Google Ads / Google Analytics) to understand how our marketing performs. This is implemented with <strong>Google Consent Mode v2</strong>: visitors in the EEA, the UK and Switzerland are asked to consent <em>before</em> any such data is shared with Google, using the banner shown on your first visit. You can decline (nothing is shared), and you can change your choice at any time — <a href="/?consent=1">reopen the consent options</a>. Outside those regions the tag runs by default; you can opt out there the same way, and we honour your browser's Global Privacy Control signal automatically. When enabled, this shares some data (such as a device/cookie identifier and pages viewed) with Google, which may process it on servers overseas, including in the United States. If the operator hasn't configured a tag, no analytics or advertising scripts are loaded at all.</p>
 
+  <h2>6b. Finding photos of yourself (face matching)</h2>
+
+  <p>
+
+    Some events offer an optional feature that finds the photos you appear in. It is
+
+    <b>off unless the event host turns it on</b>, and it does nothing until <b>you</b> choose to use it
+
+    and tick the consent box. We never switch it on for you and never infer your agreement.
+
+  </p>
+
+  <p>
+
+    If you use it, we create a <b>face template</b> — a numeric representation of your facial geometry —
+
+    from a selfie you supply. Under the Privacy Act 1988 (Cth) a face template is
+
+    <b>sensitive information</b>, which is why we ask for your express consent first.
+
+  </p>
+
+  <ul>
+
+    <li><b>Your selfie is not kept.</b> It is used to build the template and deleted in the same request.</li>
+
+    <li><b>Only your own template is stored</b>, and only while you keep the feature on. It is never
+
+        shown to the host, to other guests, or returned by our API.</li>
+
+    <li>To find your photos we examine faces in that event's photos. Those comparisons are
+
+        <b>momentary</b> — nothing about anyone else is stored, and no template is ever created for a
+
+        person who has not asked for this.</li>
+
+    <li>What we keep is a <b>list of which photos you appear in</b>. That is a list of photo
+
+        references, not facial data.</li>
+
+    <li>It applies to <b>that one event only</b>. We never match you across events, never build a
+
+        profile, and never share face data with anyone.</li>
+
+    <li><b>Stop whenever you like.</b> Withdrawing deletes your template and every match derived from
+
+        it, immediately. Everything also goes when the event's photos are deleted.</li>
+
+    <li>All of this runs on <b>our own servers in Australia</b>. Face data is never sent overseas
+
+        and never sent to a third party.</li>
+
+  </ul>
+
+  <p>
+
+    If you would rather not appear in anyone's results, tell the event host — they can turn the
+
+    feature off for the whole event — or email us and we will remove any matches referring to you.
+
+  </p>
+
+
   <h2>7. Security</h2>
   <p>We protect your data with measures such as encrypted connections (HTTPS), hashed passwords, scoped access controls, and stripping embedded metadata from uploaded images. No system can be guaranteed perfectly secure, but we work continually to keep your information safe.</p>
 

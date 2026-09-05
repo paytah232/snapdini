@@ -557,6 +557,7 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     guestMayBuyVideo:  !!ev.guestMayBuyVideo,
     guestMayBuyFrames: !!ev.guestMayBuyFrames,
     guestMayRequest:   !!ev.guestMayRequest,
+    faceMatchingEnabled: !!ev.faceMatchingEnabled,
     // Guests who asked for more. Shown on the host's own pages, never pushed at them mid-event.
     upgradeRequests:   participantRows.filter((r) => !!(r as { requestedMoreAt?: number | null }).requestedMoreAt).length,
     noFlash:        !!ev.noFlash,
@@ -816,9 +817,9 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
   const ev = req.event!;
   const { name, blurb, startDate, startTime, revealMode,
           revealDelayHours, moderationEnabled, allowDownloads, noFlash, timezone, ratingMode, slug,
-                  guestMayBuyShots, guestMayBuyVideo, guestMayBuyFrames, guestMayRequest } = req.body as {
+                  guestMayBuyShots, guestMayBuyVideo, guestMayBuyFrames, guestMayRequest, faceMatchingEnabled } = req.body as {
               guestMayBuyShots?: boolean; guestMayBuyVideo?: boolean; guestMayBuyFrames?: boolean;
-    guestMayRequest?: boolean;
+    guestMayRequest?: boolean; faceMatchingEnabled?: boolean;
     name?: string; blurb?: string; startDate?: string; startTime?: string;
     revealMode?: string; revealDelayHours?: number | string; moderationEnabled?: boolean;
     allowDownloads?: boolean; noFlash?: boolean; timezone?: string; ratingMode?: string; slug?: string;
@@ -938,7 +939,8 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
     ...(typeof guestMayBuyShots  === 'boolean' ? { guestMayBuyShots }  : {}),
     ...(typeof guestMayBuyVideo  === 'boolean' ? { guestMayBuyVideo }  : {}),
     ...(typeof guestMayBuyFrames === 'boolean' ? { guestMayBuyFrames } : {}),
-    ...(typeof guestMayRequest   === 'boolean' ? { guestMayRequest }   : {}), timezone: tz, slug: newSlug, aspectRatios: aspects, ratingMode: rMode, purgeAt,
+    ...(typeof guestMayRequest   === 'boolean' ? { guestMayRequest }   : {}),
+    ...(typeof faceMatchingEnabled === 'boolean' ? { faceMatchingEnabled } : {}), timezone: tz, slug: newSlug, aspectRatios: aspects, ratingMode: rMode, purgeAt,
   }).where(eq(events.id, ev.id));
 
   res.json({
