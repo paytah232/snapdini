@@ -22,7 +22,13 @@
 
   let ev: PublicEvent | null = null;
   let sessionToken: string | null = null;
-  let photosRemaining = 0;
+  // What the server says is left. It only ever counts photos that have actually UPLOADED.
+  let serverRemaining = 0;
+  // Queued-but-not-yet-uploaded shots are RESERVED. Deriving the display from
+  // (server - in flight) is what stops a burst of captures being forgotten the moment anything
+  // re-reads /me — which is how a 12-shot roll could be spammed past 12.
+  $: pendingUploads = queue.filter((q) => q.status === 'pending' || q.status === 'uploading').length;
+  $: photosRemaining = Math.max(0, serverRemaining - pendingUploads);
 
   // Demo showcase: link into the host + gallery views (organizer code stashed at demo start).
   let demoOrg = '';
@@ -193,7 +199,7 @@
           window.history.replaceState({}, '', window.location.pathname);
         }
         sessionToken = token;
-        photosRemaining = me.photosRemaining;
+        serverRemaining = me.photosRemaining;
         canBuyShots = !!me.canBuyShots;
         canAskHost = !!me.canAskHost;
         faceMatching = !!me.faceMatching;
@@ -255,7 +261,7 @@
     try {
       const r = await joinEvent(identifier, joinName.trim(), joinEmail.trim() || undefined);
       sessionToken = r.sessionToken;
-      photosRemaining = r.photosRemaining;
+      serverRemaining = r.photosRemaining;
       canBuyShots = !!r.canBuyShots;
       canAskHost = !!r.canAskHost;
       faceMatching = !!r.faceMatching;
@@ -636,7 +642,6 @@
   function enqueue(blob: Blob, mediaType: 'photo' | 'video', ext: string, source: 'capture' | 'upload' = 'capture', extra?: { durationSecs?: number; w?: number; h?: number }) {
     const id = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
     queue = [...queue, { id, blob, mediaType, source, ext, status: 'pending', size: blob.size, ...extra }];
-    photosRemaining = Math.max(0, photosRemaining - 1);
     // Persist to IndexedDB immediately so the capture survives an outage / reload / closed tab.
     if (sessionToken && ev) putCapture({ id, joinCode: ev.joinCode, sessionToken, blob, mediaType, source, ext, createdAt: Date.now() }).catch(() => {});
     if (saveToDevice) saveToDeviceCopy(blob, ext);
@@ -829,10 +834,26 @@
       void refreshGalleryIfOpen();   // show it straight away if they are watching the gallery
       // Never let the count flicker UP: the per-upload server value lags behind the local
       // optimistic count during a burst, so only ever take the lower of the two.
-      photosRemaining = Math.min(photosRemaining, data.photosRemaining);
+      // Authoritative: this already accounts for every uploaded photo including this one.
+      serverRemaining = data.photosRemaining;
       delCapture(item.id).catch(() => {});   // uploaded → drop from the offline queue
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : 'Upload failed';
+      // "No shots remaining" is a settled answer, not a transient failure. Retrying it five times
+      // with backoff spams the server and makes the guest watch the same refusal repeatedly before
+      // being told anything useful. Stop at once, correct the count, and point at whatever the host
+      // has actually allowed.
+      if (/no shots remaining/i.test(errMsg)) {
+        serverRemaining = 0;
+        queue = queue.filter((q) => q.id !== item.id);   // it can never succeed
+        delCapture(item.id).catch(() => {});
+        uploading = false;
+        showToast(canBuyShots || canAskHost
+          ? "That's your roll — ask the host or top up below"
+          : "That's your roll — no shots left");
+        processQueue();
+        return;
+      }
       item.retries = (item.retries || 0) + 1;
       reportClientError(errMsg, 'upload', ev?.joinCode);
       if (item.retries <= MAX_UPLOAD_RETRIES) {
@@ -857,7 +878,6 @@
   function retryItem(item: QueueItem) {
     if (item.status !== 'error') return;
     item.status = 'pending'; item.error = undefined; item.retries = 0;   // fresh round of auto-retries
-    photosRemaining = Math.max(0, photosRemaining - 1);
     queue = queue;
     processQueue();
   }
@@ -890,7 +910,7 @@
       });
       if (!r.ok) { showToast('That one is part of the roll now', true); return; }
       const d = await r.json().catch(() => null);
-      if (typeof d?.photosRemaining === 'number') photosRemaining = d.photosRemaining;
+      if (typeof d?.photosRemaining === 'number') serverRemaining = d.photosRemaining;
       galleryPhotos = galleryPhotos.filter((p) => p.id !== id);
       showToast('Deleted — that shot is back on your roll');
     } catch { showToast('Could not delete that one — try again', true); }
@@ -1204,6 +1224,25 @@
         {/if}
       </div>
     {/if}
+    <!-- The same offer, in the gallery: this is where a guest lands after a failed upload, and
+         telling them they are out of shots without showing the way forward is a dead end. -->
+    {#if photosRemaining <= 0 && (canAskHost || canBuyShots)}
+      <div class="oos-panel gallery">
+        <div class="oos-title">That's your roll</div>
+        <div class="oos-actions">
+          {#if canAskHost}
+            <button class="btn ghost sm" on:click={askHostForMore} disabled={askedHost}>
+              {askedHost ? '✓ Host asked' : 'Ask the host for more'}
+            </button>
+          {/if}
+          {#if canBuyShots}
+            <button class="btn primary sm" on:click={buyMoreShots} disabled={buying}>
+              {buying ? 'Opening…' : 'Get 12 more'}
+            </button>
+          {/if}
+        </div>
+      </div>
+    {/if}
     {#if faceMatching && sessionToken}
       <FaceFinder {sessionToken} bind:enrolled={faceEnrolled} onMatched={(ids) => (facePhotoIds = ids)} />
     {/if}
@@ -1408,12 +1447,21 @@
   .badge { position: absolute; top: -4px; right: -4px; background: var(--accent); color: var(--accent-ink, #111); border-radius: 999px; min-width: 18px; height: 18px; font-size: 0.65rem; font-weight: bold; display: flex; align-items: center; justify-content: center; padding: 0 4px; }
   .badge.error { background: #c0392b; color: #fff; }
   .oos-panel {
-    position: absolute; left: 50%; bottom: 118px; transform: translateX(-50%); z-index: 7;
+    /* Clears the shutter rather than sitting over it: the controls row is ~110px tall and the
+       button overhangs it, so this starts well above the whole cluster. */
+    position: absolute; left: 50%; bottom: 190px; transform: translateX(-50%); z-index: 7;
     /* .topbar-style ancestors are pointer-events:none over a gesture layer that eats taps. */
-    pointer-events: auto; display: flex; flex-direction: column; align-items: center; gap: 9px;
-    padding: 13px 16px; border-radius: 14px; max-width: 92vw;
-    background: rgba(0,0,0,.66); border: 1px solid rgba(255,255,255,.22); backdrop-filter: blur(5px);
+    pointer-events: auto; display: flex; flex-direction: column; align-items: center; gap: 11px;
+    padding: 16px 20px; border-radius: 16px; width: min(340px, 88vw);
+    background: rgba(0,0,0,.72); border: 1px solid rgba(255,255,255,.22); backdrop-filter: blur(6px);
+    box-shadow: 0 8px 28px rgba(0,0,0,.4);
   }
+  /* In the gallery it is ordinary page content, not an overlay. */
+  .oos-panel.gallery {
+    position: static; transform: none; margin: 14px auto; background: var(--surface-2, #1e1b14);
+    border-color: var(--border, #3a3630); box-shadow: none; backdrop-filter: none;
+  }
+  .oos-panel.gallery .oos-title { color: var(--text, #f2ece0); }
   .oos-title { color: #fff; font-size: .9rem; font-weight: 600; }
   .oos-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
   .shutter { width: 76px; height: 76px; border-radius: 50%; border: 4px solid #fff; background: transparent;
