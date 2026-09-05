@@ -1380,6 +1380,24 @@
             We've set you to <b>{benchResult.best === 'high' ? '4K' : benchResult.best === 'standard' ? '1080p' : '720p'}</b>.
             Change it any time in settings.
           </div>
+          <!-- If 4K did not hold 30fps, the honest answer is that this phone records better in its OWN
+               camera app than in a browser. Say so and hand them the button, rather than letting them
+               find out on a clip they cannot re-shoot. -->
+          {#if benchResult.results.high < 30}
+            <div class="bench-native">
+              <span>4K isn't smooth in the browser on this phone — your own camera app will do better.</span>
+              {#if !showShapes}
+                <!-- The phone's camera will not honour the event's frame shape, so ask nicely. -->
+                <span class="bench-note">This event is square, so try to frame it that way — your camera app won't do it for you.</span>
+              {/if}
+              {#if videoMaxSecs > 0}
+                <span class="bench-note">Keep it to about {videoMaxSecs}s — that's this event's limit.</span>
+              {/if}
+              <button class="btn ghost sm" on:click={() => { benchResult = null; benchPrompt = false; nativeVideoInput?.click(); }}>
+                🎥 Shoot with my own camera
+              </button>
+            </div>
+          {/if}
           <button class="btn primary sm" on:click={() => { benchResult = null; benchPrompt = false; }}>Got it</button>
         {:else}
           <div class="bench-title">Check what your phone can record?</div>
@@ -1394,6 +1412,8 @@
     {#if videoStruggling && videoMode && !recording}
       <div class="vid-fallback">
         <span>Choppy? Your phone's own camera will do better.</span>
+      {#if !showShapes}<span class="bench-note">This event is square — try to frame it that way.</span>{/if}
+      {#if videoMaxSecs > 0}<span class="bench-note">Keep it to about {videoMaxSecs}s.</span>{/if}
         <button class="btn primary sm" on:click={() => nativeVideoInput?.click()}>🎥 Use phone camera</button>
       </div>
     {/if}
@@ -1680,6 +1700,12 @@
   }
   .bench-title { font-size: .95rem; font-weight: 700; }
   .bench-sub { font-size: .82rem; opacity: .82; line-height: 1.45; }
+  .bench-native {
+    display: flex; flex-direction: column; gap: 8px; align-items: center; text-align: center;
+    padding: 11px 12px; border-radius: 11px; font-size: .82rem; line-height: 1.45;
+    background: rgba(240,180,41,.12); border: 1px solid rgba(240,180,41,.4);
+  }
+  .bench-note { font-size: .76rem; opacity: .85; }
   .bench-actions { display: flex; gap: 8px; }
   .bench-list { list-style: none; margin: 2px 0; padding: 0; width: 100%;
     display: flex; flex-direction: column; gap: 4px; font-size: .86rem; }

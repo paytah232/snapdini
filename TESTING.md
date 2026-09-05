@@ -202,6 +202,13 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
 - [ ] **Sales close** in the last 15 minutes of an event.
 - [ ] **`/siteadmin` → Guest top-ups** lists paid guests and offers a refund.
 
+- [ ] **Video capability check:** switching to video for the first time offers a check. Running it
+      reports real fps for 4K / 1080p / 720p, names the quality it picked, states the event's video
+      limit, and waits for **Got it**. If 4K misses 30fps it also offers the phone's own camera and —
+      on a square-only event — asks them to frame it square. Asked once per device; Skip is honoured.
+- [ ] **Uploads pause while recording:** shoot a photo then immediately record — the clip should not
+      stutter from the photo uploading underneath it.
+
 ## 19. Version 1.4 — face matching (verify these)
 - [ ] **Absent by default:** with no `MACHINE_LEARNING_URL`, nothing about face matching appears
       anywhere and `/api/faces/enrol` returns 503.
