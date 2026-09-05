@@ -239,6 +239,13 @@
       "when": 1788900000000,
       "tag": "0033_face_matching",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1789000000000,
+      "tag": "0034_guest_feedback",
+      "breakpoints": true
     }
   ]
 }

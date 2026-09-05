@@ -178,6 +178,7 @@ export const participants = pgTable('participants', {
   // by any API, and the only face vector this system persists.
   faceEmbedding: text('face_embedding'),
   faceConsentAt: ms('face_consent_at'),
+  feedbackAskedAt: ms('feedback_asked_at'),
   joinedAt: ms('joined_at').notNull(),
 }, (t) => ({
   eventIdx: index('idx_participants_event').on(t.eventId),
@@ -303,3 +304,14 @@ export const photoFaces = pgTable('photo_faces', {
   score: real('score').notNull(),
   createdAt: ms('created_at').notNull(),
 }, (t) => ({ pk: primaryKey({ columns: [t.photoId, t.participantId] }) }));
+
+// How it felt to USE the thing, from the people who used it. Separate from the host's survey and
+// from support: a different respondent, a different question.
+export const guestFeedback = pgTable('guest_feedback', {
+  id: text('id').primaryKey(),
+  eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
+  participantId: text('participant_id').notNull().references(() => participants.id, { onDelete: 'cascade' }),
+  rating: smallint('rating'),
+  comment: text('comment'),
+  createdAt: ms('created_at').notNull(),
+});

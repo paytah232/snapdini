@@ -338,6 +338,16 @@
   let recBitrate = 10_000_000;
   let lowFpsWarned = false;                // one stutter warning per session unless quality changes
   let pendingQuality: VidQuality | null = null;  // auto-downgrade to apply after the current clip
+  // Set when recording is struggling. Surfaces the phone-camera fallback ON the camera screen —
+  // it already existed, but only inside the settings sheet, which is not where someone fighting a
+  // choppy clip is going to look.
+  let videoStruggling = false;
+  // One-off video capability check, so a guest is told what their phone can actually do rather
+  // than discovering it halfway through a clip they cannot re-shoot.
+  let benchRunning = false;
+  let benchStep: VidQuality | null = null;
+  let benchResult: { results: Record<string, number>; best: VidQuality } | null = null;
+  let benchPrompt = false;
 
   // Match the recorder to the stream the camera actually negotiated (≈0.1 bits/pixel/frame),
   // so the file tracks the native resolution + frame rate instead of a guessed constant.
@@ -434,6 +444,11 @@
   // (max-res stills vs smooth 1080p30 recording) and only grabs the mic for video.
   async function setMode(v: boolean) {
     if (recording || v === videoMode) return;
+    // First time on video for this device: offer the capability check before they shoot anything
+    // they cannot re-take. Cached, so it is asked once and never again.
+    if (v) {
+      try { if (!localStorage.getItem('snap_vidbench')) benchPrompt = true; } catch { /* ignore */ }
+    }
     videoMode = v;
     await startCamera();
   }
@@ -613,6 +628,7 @@
       recording = false; clearInterval(recTimer);
       // If the clip stuttered, apply the queued quality downgrade now (re-acquires the stream).
       if (pendingQuality) { const q = pendingQuality; pendingQuality = null; setVideoQuality(q); }
+      processQueue();   // recording is over — let the queue move again
     }
   }
 
@@ -635,11 +651,20 @@
   function checkFps() {
     const secs = (performance.now() - fpsStart) / 1000;
     const fps = secs > 0 ? fpsFrames / secs : 60;
-    if (fps < 20 && !lowFpsWarned && videoQuality !== 'smooth') {
+    if (fps < 20 && videoQuality === 'smooth') {
+      // Nothing left to downgrade to. Previously this said nothing, leaving the guest with a bad
+      // clip and no idea there was another way to do it.
+      videoStruggling = true;
+      if (!lowFpsWarned) {
+        lowFpsWarned = true;
+        showToast('Your phone is struggling to record here — try shooting with its own camera app instead.', true);
+      }
+    } else if (fps < 20 && !lowFpsWarned && videoQuality !== 'smooth') {
       lowFpsWarned = true;
       // Auto-downgrade one step; applied after this clip finishes (re-acquiring mid-record would cut it).
       pendingQuality = videoQuality === 'high' ? 'standard' : 'smooth';
-      showToast(`Recording looks choppy — switching to ${pendingQuality === 'standard' ? '1080p' : '720p'} for smoother clips.`, true);
+      videoStruggling = true;
+      showToast(`Recording looks choppy — dropping to ${pendingQuality === 'standard' ? '1080p' : '720p'}. You can also shoot with your phone's own camera.`, true);
     }
   }
   function stopFpsMonitor() {
@@ -835,8 +860,97 @@
     return d as { photosRemaining: number; photoId?: string };
   }
 
+  // One-off capability check, run the first time a guest switches to video. It measures the
+
+  // PREVIEW frame rate at each resolution rather than guessing from the user agent — the same
+
+  // requestVideoFrameCallback counting the live stutter detector uses, just done deliberately
+
+  // and before anything is recorded. Result is cached per device so it never runs twice.
+
+  async function measureFps(ms = 1400): Promise<number> {
+
+    const v = videoEl as RVFCVideo | null;
+
+    if (!v?.requestVideoFrameCallback) return 60;   // can't measure — assume capable
+
+    let frames = 0; const t0 = performance.now(); let h = 0;
+
+    const tick = () => { frames++; h = v.requestVideoFrameCallback!(tick); };
+
+    h = v.requestVideoFrameCallback(tick);
+
+    await new Promise((r) => setTimeout(r, ms));
+
+    if (h && v.cancelVideoFrameCallback) v.cancelVideoFrameCallback(h);
+
+    const secs = (performance.now() - t0) / 1000;
+
+    return secs > 0 ? frames / secs : 60;
+
+  }
+
+
+  async function runVideoBenchmark() {
+
+    if (benchRunning || recording) return;
+
+    benchRunning = true; benchResult = null;
+
+    const startedAt = videoQuality;
+
+    const results: Record<string, number> = {};
+
+    try {
+
+      for (const q of ['high', 'standard', 'smooth'] as VidQuality[]) {
+
+        benchStep = q;
+
+        videoQuality = q;
+
+        await startCamera();                 // re-acquires the stream at this resolution
+
+        await new Promise((r) => setTimeout(r, 600));   // let it settle before counting
+
+        results[q] = Math.round(await measureFps());
+
+      }
+
+      // Recommend the highest resolution that held up. 24fps is the floor for something that
+
+      // still looks like video rather than a slideshow.
+
+      const best = (['high', 'standard', 'smooth'] as VidQuality[]).find((q) => results[q] >= 24) || 'smooth';
+
+      benchResult = { results, best };
+
+      videoQuality = best;
+
+      try { localStorage.setItem('snap_vidbench', JSON.stringify({ results, best, at: Date.now() })); } catch { /* ignore */ }
+
+      try { localStorage.setItem('snap_vidq', best); } catch { /* ignore */ }
+
+      await startCamera();
+
+    } catch {
+
+      videoQuality = startedAt; await startCamera();
+
+    }
+
+    benchStep = null; benchRunning = false;
+
+  }
+
+
   async function processQueue() {
     if (uploading) return;
+    // uploads pause while recording. A chunked multi-megabyte upload competes with the hardware
+    // encoder for CPU, memory bandwidth and the network radio, which is why the same phone can
+    // record 4K perfectly one moment and stutter badly the next — it depends entirely on whether
+    // a previous capture happened to still be going up. Recording wins; the queue resumes after.
+    if (recording) return;
     const item = queue.find((q) => q.status === 'pending');
     if (!item) return;
     uploading = true; item.status = 'uploading'; item.progress = 0; queue = queue;
@@ -1247,6 +1361,42 @@
          the event. Each path shows only if the host allows it, so a guest is never offered a button
          the server would refuse. Asking comes first — the host buying for everyone is better value
          than one guest buying for themselves. -->
+    <!-- The phone-camera fallback already existed, but only inside the settings sheet. Someone
+         whose clip just stuttered is not going to go looking for it, so put it in front of them
+         at the moment it becomes relevant. -->
+    {#if benchPrompt || benchRunning || benchResult}
+      <div class="bench-panel">
+        {#if benchRunning}
+          <div class="bench-title">Checking your camera…</div>
+          <div class="bench-sub">Testing {benchStep === 'high' ? '4K' : benchStep === 'standard' ? '1080p' : '720p'}</div>
+        {:else if benchResult}
+          <div class="bench-title">Your phone handles</div>
+          <ul class="bench-list">
+            <li><b>4K</b><span>{benchResult.results.high} fps</span></li>
+            <li><b>1080p</b><span>{benchResult.results.standard} fps</span></li>
+            <li><b>720p</b><span>{benchResult.results.smooth} fps</span></li>
+          </ul>
+          <div class="bench-sub">
+            We've set you to <b>{benchResult.best === 'high' ? '4K' : benchResult.best === 'standard' ? '1080p' : '720p'}</b>.
+            Change it any time in settings.
+          </div>
+          <button class="btn primary sm" on:click={() => { benchResult = null; benchPrompt = false; }}>Got it</button>
+        {:else}
+          <div class="bench-title">Check what your phone can record?</div>
+          <div class="bench-sub">A few seconds. Phones vary a lot, and it's better to find out now than halfway through a clip.</div>
+          <div class="bench-actions">
+            <button class="btn ghost sm" on:click={() => { benchPrompt = false; try { localStorage.setItem('snap_vidbench', '{"skipped":true}'); } catch { /* ignore */ } }}>Skip</button>
+            <button class="btn primary sm" on:click={() => { benchPrompt = false; void runVideoBenchmark(); }}>Check my camera</button>
+          </div>
+        {/if}
+      </div>
+    {/if}
+    {#if videoStruggling && videoMode && !recording}
+      <div class="vid-fallback">
+        <span>Choppy? Your phone's own camera will do better.</span>
+        <button class="btn primary sm" on:click={() => nativeVideoInput?.click()}>🎥 Use phone camera</button>
+      </div>
+    {/if}
     {#if outOfShots && (canAskHost || canBuyShots)}
       <div class="oos-panel">
         <div class="oos-title">That's your roll</div>
@@ -1522,6 +1672,27 @@
   .round { width: 52px; height: 52px; border-radius: 50%; border: none; background: rgba(255,255,255,0.15); color: #fff; font-size: 1.3rem; cursor: pointer; position: relative; }
   .badge { position: absolute; top: -4px; right: -4px; background: var(--accent); color: var(--accent-ink, #111); border-radius: 999px; min-width: 18px; height: 18px; font-size: 0.65rem; font-weight: bold; display: flex; align-items: center; justify-content: center; padding: 0 4px; }
   .badge.error { background: #c0392b; color: #fff; }
+  .bench-panel {
+    position: absolute; left: 50%; bottom: 190px; transform: translateX(-50%); z-index: 8;
+    pointer-events: auto; display: flex; flex-direction: column; align-items: center; gap: 10px;
+    padding: 16px 20px; border-radius: 16px; width: min(340px, 88vw); text-align: center; color: #fff;
+    background: rgba(0,0,0,.78); border: 1px solid rgba(255,255,255,.22); backdrop-filter: blur(6px);
+  }
+  .bench-title { font-size: .95rem; font-weight: 700; }
+  .bench-sub { font-size: .82rem; opacity: .82; line-height: 1.45; }
+  .bench-actions { display: flex; gap: 8px; }
+  .bench-list { list-style: none; margin: 2px 0; padding: 0; width: 100%;
+    display: flex; flex-direction: column; gap: 4px; font-size: .86rem; }
+  .bench-list li { display: flex; justify-content: space-between; padding: 4px 8px;
+    background: rgba(255,255,255,.08); border-radius: 7px; }
+  .bench-list span { font-variant-numeric: tabular-nums; opacity: .8; }
+  .vid-fallback {
+    position: absolute; left: 50%; bottom: 190px; transform: translateX(-50%); z-index: 7;
+    pointer-events: auto; display: flex; flex-direction: column; align-items: center; gap: 9px;
+    padding: 14px 18px; border-radius: 16px; width: min(340px, 88vw); text-align: center;
+    background: rgba(0,0,0,.72); border: 1px solid rgba(255,255,255,.22); backdrop-filter: blur(6px);
+    color: #fff; font-size: .86rem; line-height: 1.4;
+  }
   .oos-panel {
     /* Clears the shutter rather than sitting over it: the controls row is ~110px tall and the
        button overhangs it, so this starts well above the whole cluster. */

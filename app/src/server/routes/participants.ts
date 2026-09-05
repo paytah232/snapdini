@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { eq, or, and, count, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { effectiveMaxPhotos, photosRemaining as remainingFor } from '../allowance';
-import { events, participants, photos } from '../schema';
+import { events, guestFeedback, participants, photos } from '../schema';
 import * as email from '../email';
 import { baseUrl, escapeHtml } from '../lib';
 import { billingEnabled } from '../billing';
@@ -160,6 +160,33 @@ router.get('/me', async (req: Request, res: Response) => {
 });
 
 // ── POST /api/participants/email-my-photos ────────────────────────────────────
+
+// ── POST /api/participants/feedback — how it was to be a guest ────────────────────────────────
+// Asked once, answered or dismissed. A rating alone is fine; the comment is optional, because most
+// people will not write one and demanding it just loses the rating too.
+router.post('/feedback', async (req: Request, res: Response) => {
+  const sessionToken = String(req.body?.sessionToken || '');
+  if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
+  const [me] = await db.select({ id: participants.id, eventId: participants.eventId })
+    .from(participants).where(eq(participants.sessionToken, sessionToken));
+  if (!me) return res.status(403).json({ error: 'Invalid session' });
+
+  // Mark as asked either way, so dismissing is respected and we never prompt twice.
+  await db.update(participants).set({ feedbackAskedAt: Date.now() }).where(eq(participants.id, me.id));
+
+  const dismissed = req.body?.dismissed === true || req.body?.dismissed === 'true';
+  if (dismissed) return res.json({ success: true, recorded: false });
+
+  const raw = Number(req.body?.rating);
+  const rating = Number.isFinite(raw) && raw >= 1 && raw <= 5 ? Math.round(raw) : null;
+  const comment = String(req.body?.comment || '').trim().slice(0, 2000) || null;
+  if (rating === null && !comment) return res.status(400).json({ error: 'Give a rating or a comment' });
+
+  await db.insert(guestFeedback)
+    .values({ id: uuidv4(), eventId: me.eventId, participantId: me.id, rating, comment, createdAt: Date.now() })
+    .onConflictDoNothing();   // one per guest; a double-submit is not two opinions
+  res.json({ success: true, recorded: true });
+});
 
 router.post('/email-my-photos', async (req: Request, res: Response) => {
   const { sessionToken, emailOverride } = req.body;
