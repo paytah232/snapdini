@@ -196,6 +196,42 @@ router.post('/refund/:eventId', async (req: Request, res: Response) => {
   }
 });
 
+// Guest top-ups. These are participant-level payments and were invisible here, so a chargeback or
+// a genuine failure meant going to the Stripe dashboard by hand. Australian Consumer Law does not
+// let you contract out of consumer guarantees, so a refund path has to exist even though the stated
+// position is that change-of-mind top-ups are not refunded.
+router.get('/guest-payments', async (_req: Request, res: Response) => {
+  const rows = await all(
+    `SELECT p.id, p.name, COALESCE(p.upgrade_email, p.email) AS email, p.extra_photos,
+            p.amount_paid_cents, p.stripe_payment_intent, p.requested_more_at,
+            e.join_code, e.name AS event_name
+       FROM participants p JOIN events e ON e.id = p.event_id
+      WHERE p.amount_paid_cents > 0
+      ORDER BY p.joined_at DESC
+      LIMIT 100`);
+  res.json({ payments: rows });
+});
+
+router.post('/refund-guest/:participantId', async (req: Request, res: Response) => {
+  if (!billingEnabled || !stripe) return res.status(400).json({ error: 'Billing is not enabled' });
+  const id = String(req.params.participantId);
+  const p = await get<{ pi: string | null; cents: number; extra: number }>(
+    `SELECT stripe_payment_intent AS pi, amount_paid_cents AS cents, extra_photos AS extra
+       FROM participants WHERE id = ?`, [id]);
+  if (!p) return res.status(404).json({ error: 'Guest not found' });
+  if (!p.cents) return res.status(400).json({ error: 'This guest has not paid for anything' });
+  if (!p.pi) return res.status(400).json({ error: 'No Stripe payment on file — refund manually in the Stripe dashboard' });
+  try {
+    const refund = await stripe.refunds.create({ payment_intent: p.pi });
+    // Take the shots back with the money. Photos they already took are untouched — the roll simply
+    // returns to whatever the event allows.
+    await run(`UPDATE participants SET amount_paid_cents = 0, extra_photos = 0, stripe_payment_intent = NULL WHERE id = ?`, [id]);
+    res.json({ ok: true, refundId: refund.id, amountCents: p.cents, shotsRemoved: p.extra });
+  } catch (e) {
+    res.status(502).json({ error: 'Stripe refund failed: ' + (e as Error).message });
+  }
+});
+
 // Run the retention sweeper on demand (the same job the hourly timer runs) — purges events past
 // their retention window. Useful for ops + lets the test suite exercise purge deterministically.
 router.post('/run-sweep', async (_req: Request, res: Response) => {

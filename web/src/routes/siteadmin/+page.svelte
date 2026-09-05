@@ -112,10 +112,32 @@
     catch (e) { showToast((e as Error).message, true); }
   }
 
+  async function refundGuest(id: string, who: string) {
+
+    if (!confirm(`Refund ${who}? Their purchased shots are removed too; photos already taken stay.`)) return;
+
+    refunding = id;
+
+    try {
+
+      await api(`/api/admin/refund-guest/${id}`, { method: 'POST' });
+
+      guestPayments = guestPayments.filter((g) => g.id !== id);
+
+    } catch (e) { alert(e instanceof Error ? e.message : 'Refund failed'); }
+
+    refunding = '';
+
+  }
+
+
   // ── Referral funnel ──
   let funnel: any = null;
+  let guestPayments: any[] = [];
+  let refunding = '';
   async function loadFunnel() {
     try { funnel = await api<any>('/api/admin/referral-funnel'); } catch { funnel = null; }
+    try { guestPayments = (await api<any>('/api/admin/guest-payments'))?.payments ?? []; } catch { guestPayments = []; }
   }
 
   async function loadPromos() {
@@ -337,6 +359,34 @@
     <section class="panel">
       <!-- Referral funnel. The step that matters is signups → events created: that is exactly
            where paid traffic dies, so it is the comparison worth watching. -->
+      <!-- Guest top-ups. Participant-level payments were invisible here, so a refund meant the Stripe
+           dashboard. Change-of-mind is declined as policy, but a path has to exist for genuine
+           failures — Australian Consumer Law does not allow contracting out of that. -->
+      {#if guestPayments.length}
+        <h2>Guest top-ups</h2>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Guest</th><th>Event</th><th>Shots</th><th>Paid</th><th></th></tr></thead>
+            <tbody>
+              {#each guestPayments as g}
+                <tr>
+                  <td>{g.name}<br /><small class="muted">{g.email || 'no email'}</small></td>
+                  <td>{g.event_name}<br /><small class="muted">{g.join_code}</small></td>
+                  <td>+{g.extra_photos}</td>
+                  <td>{money(g.amount_paid_cents)}</td>
+                  <td>
+                    <button class="btn ghost sm" disabled={refunding === g.id}
+                            on:click={() => refundGuest(g.id, g.name)}>
+                      {refunding === g.id ? 'Refunding…' : 'Refund'}
+                    </button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+
       {#if funnel}
         <h2>Referral funnel</h2>
         <div class="stats">

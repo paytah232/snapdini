@@ -111,4 +111,33 @@ await spec('13-guest-upgrades', async () => {
   await api('POST', '/api/billing/guest-request-more', { body: { sessionToken: lt } });
   const adm2 = (await api('GET', `/api/events/${lev.joinCode}/admin`, { headers: org(lev.organizerCode) })).json || {};
   ok('upgradeRequests counts a real ask', adm2.upgradeRequests === 1, `${adm2.upgradeRequests}`);
+
+  group('Guest payments are visible and refundable to the operator');
+  const admLogin = process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD
+    ? await api('POST', '/api/auth/login', { body: { email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD } })
+    : { status: 0 };
+  if (admLogin.status === 200) {
+    const pev = await createEvent({ revealMode: 'instant', maxPhotos: 12 });
+    const pt = (await join(pev.joinCode, 'Payer')).json?.sessionToken;
+    const ppid = dbq(`SELECT id FROM participants WHERE session_token='${pt}'`);
+    // stand in for a settled webhook
+    dbq(`UPDATE participants SET extra_photos=12, amount_paid_cents=300, upgrade_email='payer@example.com' WHERE id='${ppid}'`);
+    const list = await api('GET', '/api/admin/guest-payments');
+    const mine = (list.json?.payments || []).find((g) => g.id === ppid);
+    ok('a paid guest appears in the operator list', !!mine && Number(mine.amount_paid_cents) === 300,
+       JSON.stringify(mine || (list.json?.payments || []).slice(0, 1)));
+    ok('a guest who never paid does NOT appear',
+       !(list.json?.payments || []).some((g) => Number(g.amount_paid_cents) === 0));
+    // no Stripe intent on file -> refund must refuse clearly rather than half-succeed
+    const noPi = await api('POST', `/api/admin/refund-guest/${ppid}`);
+    ok('refund without a Stripe payment on file is refused with a clear reason',
+       noPi.status === 400 && /stripe dashboard/i.test(noPi.text || ''), `status ${noPi.status}`);
+    ok('and nothing was taken away by the failed attempt',
+       Number(dbq(`SELECT extra_photos FROM participants WHERE id='${ppid}'`)) === 12,
+       dbq(`SELECT extra_photos FROM participants WHERE id='${ppid}'`));
+    ok('refunding an unknown guest is a 404',
+       (await api('POST', '/api/admin/refund-guest/nope')).status === 404);
+  } else {
+    ok('guest payment admin skipped — no admin creds on this env', true);
+  }
 });

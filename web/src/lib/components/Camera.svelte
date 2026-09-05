@@ -167,6 +167,15 @@
     if (token) {
       try {
         const me = await getMe(token);
+        // Returning from Stripe, the guest lands on /join/<code>?topup=1. /me already reflects the
+        // purchase because the webhook credited the participant, so there is nothing to poll — confirm
+        // it and strip the flag so a refresh does not re-announce it.
+        const topupReturn = typeof window !== 'undefined'
+          && new URLSearchParams(window.location.search).get('topup') === '1';
+        if (topupReturn) {
+          showToast('Thanks — more shots added to your roll');
+          window.history.replaceState({}, '', window.location.pathname);
+        }
         sessionToken = token;
         photosRemaining = me.photosRemaining;
         canBuyShots = !!me.canBuyShots;

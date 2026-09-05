@@ -183,3 +183,21 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
       stay invisible to guests). On an event with **no** video add-on, the same upload is **refused**.
       `/siteadmin` then shows it under video overages, tagged as a camera-roll upload.
 - [ ] **Dark mode:** `/siteadmin` promo-code inputs are **not white-on-white** in dark mode.
+
+## 18. Version 1.3 — delete window, guest top-ups (verify these)
+- [ ] **Take a shot back:** shoot a photo, open your own gallery → a **bin with a countdown** sits on
+      that photo. Tap it: the photo goes and the roll goes back up. Wait past 60s → the bin
+      disappears and the shot is permanent. **No delete control on the camera screen.**
+- [ ] **Two shots, two bins:** take two quickly; each carries its **own** countdown, and deleting one
+      leaves the other ticking.
+- [ ] **Out of shots:** spend the roll → a panel offers *Ask the host for more* and *Get 12 more*.
+      Nothing about upgrades appears while shots remain.
+- [ ] **Asking** confirms in place ("✓ Host asked") without leaving the camera, and the count shows
+      on the host's Manage page.
+- [ ] **Buying** opens Stripe (test card `4242 4242 4242 4242`), returns to the camera with a
+      confirmation, and the roll is higher. Refresh: the confirmation does not repeat.
+- [ ] **Host switches** on Manage: turn *buy* off → the Get-more button disappears for guests. Turn
+      *ask* off → the Ask button disappears. Both off → no panel at all.
+- [ ] **Purchased shots survive** the host lowering the event roll.
+- [ ] **Sales close** in the last 15 minutes of an event.
+- [ ] **`/siteadmin` → Guest top-ups** lists paid guests and offers a refund.

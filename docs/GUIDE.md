@@ -247,6 +247,17 @@ plus the galleries producing the most referrals and per-photo view/download enga
   excluded everywhere; restoring returns them to pending.
 - **Retention:** photos + guest data are deleted after the event's retention window; a slim stats-only
   record is kept. Freed custom URLs become available again.
+- **Taking a shot back:** for **60 seconds** after a photo lands, a guest sees a bin on that photo
+  in their own gallery, with a countdown. Deleting it removes the photo and **returns the frame to
+  their roll**. After the window it is permanent — a longer window would turn a limited roll into
+  unlimited retries. `PHOTO_DELETE_WINDOW_SECONDS` tunes it.
+- **Guest top-ups:** a guest who runs out can buy **12 more shots for A$3**, for themselves only.
+  The purchase is *added* to the event's roll, so a host lowering the roll later never removes what
+  a guest paid for. Two independent host switches on Manage control it — *Guests can buy more shots*
+  and *Guests can ask you for more* — and all four combinations are meaningful (take the money but
+  no interruptions; keep control but accept being asked; and so on). Sales close **15 minutes before
+  the event ends**, because shots bought then are worthless. Requests appear on the host's own pages;
+  nothing is pushed at them mid-event. Operators can see and refund guest payments in `/siteadmin`.
 - **Video length:** the video add-on (10s / 30s / 60s / 90s) is what guests are shown and asked to
   stay within, and the in-app recorder stops itself at it. Operationally, though, the server does not
   throw a clip away for running over — a recorder that flushes late, or a guest who filmed the
