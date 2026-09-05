@@ -45,11 +45,12 @@
   // a blink. Short on purpose: the window is what stops "delete and reshoot" becoming an unlimited
   // roll. Mirrors PHOTO_DELETE_WINDOW_SECONDS on the server; the server is the authority.
   const undoWindowMs = 60_000;
-  let lastShot: { id: string; at: number } | null = null;
   let nowTick = Date.now();
   let undoTimer: ReturnType<typeof setInterval> | undefined;
-  $: undoLeft = lastShot ? Math.ceil((lastShot.at + undoWindowMs - nowTick) / 1000) : 0;
-  $: canUndo = !!lastShot && undoLeft > 0;
+  // Eligibility is per PHOTO, from its own takenAt — take three shots quickly and any of the three
+  // can be the bad one, so a single "last shot" control would delete the wrong frame.
+  const canDelete = (p: Photo, now: number) => !!p.isOwn && now - Number(p.takenAt) < undoWindowMs;
+  const secsLeft = (p: Photo, now: number) => Math.ceil((Number(p.takenAt) + undoWindowMs - now) / 1000);
   let videoMode = false;
   let recording = false;
   let recSecs = 0;
@@ -784,7 +785,7 @@
     try {
       const data = (item.blob.size > CHUNK_SIZE || item.uploadId) ? await uploadChunked(item) : await uploadSingle(item);
       item.status = 'done'; item.progress = 100;
-      if (data?.photoId) startUndo(String(data.photoId));
+      nowTick = Date.now();   // a fresh shot is deletable, so wake the window ticker
       void refreshGalleryIfOpen();   // show it straight away if they are watching the gallery
       // Never let the count flicker UP: the per-upload server value lags behind the local
       // optimistic count during a burst, so only ever take the lower of the two.
@@ -825,21 +826,22 @@
   // a grid that silently lacked the shot they just took — it only appeared if they navigated away
   // and back. Refresh in place instead. No-op unless the gallery is the visible screen, so it costs
   // nothing during a burst of captures on the camera screen.
-  function startUndo(id: string) {
-    lastShot = { id, at: Date.now() };
+  // Imperative on purpose: a reactive block that both READ nowTick (via anyDeletable) and WROTE it
+  // is a dependency cycle, which Svelte rejects. Callers start it after photos change; it stops
+  // itself once nothing is inside its window, so the bins vanish rather than offering a delete the
+  // server would refuse.
+  function ensureDeleteTicker() {
+    if (undoTimer) return;
     nowTick = Date.now();
-    clearInterval(undoTimer);
-    // One ticker while a window is open, cleared when it closes — no permanent second-by-second timer.
+    if (!galleryPhotos.some((p) => canDelete(p, nowTick))) return;
     undoTimer = setInterval(() => {
       nowTick = Date.now();
-      if (lastShot && nowTick > lastShot.at + undoWindowMs) { lastShot = null; clearInterval(undoTimer); }
+      if (!galleryPhotos.some((p) => canDelete(p, nowTick))) { clearInterval(undoTimer); undoTimer = undefined; }
     }, 1000);
   }
 
-  async function undoLastShot() {
-    if (!lastShot || !sessionToken) return;
-    const id = lastShot.id;
-    lastShot = null; clearInterval(undoTimer);
+  async function deletePhoto(id: string) {
+    if (!sessionToken) return;
     try {
       const r = await fetch(`/api/photos/${id}`, {
         method: 'DELETE', headers: { 'Content-Type': 'application/json' },
@@ -860,6 +862,7 @@
       galleryRevealed = r.revealed;
       allowDownloads = r.allowDownloads ?? true;
       galleryPhotos = r.photos || [];
+      ensureDeleteTicker();
     } catch { /* a failed refresh must never disturb a gallery that is already rendered */ }
   }
 
@@ -874,6 +877,7 @@
       allowDownloads = r.allowDownloads ?? true;
       // Own photos come back even before reveal; everyone else's stay hidden.
       galleryPhotos = r.photos || [];
+      ensureDeleteTicker();
       if (!r.revealed) {
         revealMsg = r.revealMode === 'manual' ? 'The host will reveal everyone’s photos soon.'
           : r.revealMode === 'at_end' ? 'Everyone’s photos unlock when the event ends.'
@@ -959,13 +963,6 @@
           <div class="evname"><Logo word={false} color={ev?.theme?.accent ?? ''} /> {ev?.name}</div>
         {/if}
         <div class="counter" class:low={photosRemaining <= 5}>{photosRemaining}<small>left</small></div>
-        <!-- Only while the window is open. It removes itself, so a guest is never offered an undo
-             the server would refuse — and never told the limit is negotiable after that. -->
-        {#if canUndo}
-          <button class="undo-chip" on:click={undoLastShot} aria-label="Delete the shot you just took">
-            ↩ Undo <span class="undo-secs">{undoLeft}s</span>
-          </button>
-        {/if}
       </div>
       <div class="rail">
         {#if facing === 'user'}<button class="ctrl" on:click={() => (screenFlash = !screenFlash)} class:active={screenFlash} title="Flash" aria-label="Flash">⚡</button>{/if}
@@ -1097,9 +1094,6 @@
             ⬆ Queue{#if pendingCount}<span class="qbadge" class:error={hasUploadError}>{pendingCount}</span>{/if}
           </button>
         {/if}
-        {#if canUndo}
-          <button class="btn ghost sm" on:click={undoLastShot} aria-label="Delete the shot you just took">↩ Undo {undoLeft}s</button>
-        {/if}
         <button class="btn ghost sm" on:click={backToCamera}>← Camera</button>
       </div>
     </header>
@@ -1118,10 +1112,21 @@
     {#if shownPhotos.length}
       <div class="pgrid">
         {#each shownPhotos as p, i}
-          <button class="pcell" on:click={() => { lbIndex = i; lbOpen = true; }}>
-            {#if p.mediaType === 'video'}<img src={p.thumbUrl} alt="" loading="lazy" on:error={hidePoster} /><span class="play">▶</span>{:else}<img src={p.thumbUrl ?? p.url} alt="" loading="lazy" on:error={(e) => imgFallback(e, p.url)} />{/if}
-            {#if galleryFilter === 'mine'}<span class="snapno">#{shownPhotos.length - i}</span>{/if}
-          </button>
+          <!-- The bin is a SIBLING of the tile, not a child: a <button> inside a <button> is
+               invalid HTML and behaves unpredictably on touch. The wrapper positions it. -->
+          <div class="pcell-wrap">
+            <button class="pcell" on:click={() => { lbIndex = i; lbOpen = true; }}>
+              {#if p.mediaType === 'video'}<img src={p.thumbUrl} alt="" loading="lazy" on:error={hidePoster} /><span class="play">▶</span>{:else}<img src={p.thumbUrl ?? p.url} alt="" loading="lazy" on:error={(e) => imgFallback(e, p.url)} />{/if}
+              {#if galleryFilter === 'mine'}<span class="snapno">#{shownPhotos.length - i}</span>{/if}
+            </button>
+            {#if canDelete(p, nowTick)}
+              <button class="pcell-bin" on:click|stopPropagation={() => deletePhoto(p.id)}
+                      title="Delete this shot — {secsLeft(p, nowTick)}s left"
+                      aria-label="Delete this shot, {secsLeft(p, nowTick)} seconds left">
+                🗑<span class="bin-secs">{secsLeft(p, nowTick)}</span>
+              </button>
+            {/if}
+          </div>
         {/each}
       </div>
     {:else}
@@ -1245,18 +1250,16 @@
   .home-btn { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px;
     background: rgba(0,0,0,0.5); color: #fff; text-decoration: none; font-weight: 700; font-size: 0.8rem;
     padding: 8px 14px; border-radius: 999px; backdrop-filter: blur(4px); }
-  .undo-chip {
-    /* .topbar is pointer-events:none so taps fall through to the gesture layer beneath it — this
-       is the one child that must actually be tappable, so it opts back in. Without this the chip
-       renders perfectly and does nothing, which is exactly how it failed the first browser test. */
-    pointer-events: auto;
-    display: inline-flex; align-items: center; gap: 6px; margin-left: 10px;
-    background: rgba(0,0,0,.55); color: #fff; border: 1px solid rgba(255,255,255,.35);
-    border-radius: 999px; padding: 5px 11px; font-size: .78rem; font-weight: 600;
-    cursor: pointer; backdrop-filter: blur(3px);
+  .pcell-wrap { position: relative; line-height: 0; }
+  .pcell-bin {
+    position: absolute; top: 6px; right: 6px; min-width: 30px; height: 26px; padding: 0 7px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 3px;
+    font-size: .74rem; line-height: 1; border-radius: 999px; cursor: pointer;
+    background: rgba(0,0,0,.6); color: #fff; border: 1px solid rgba(255,255,255,.4);
+    backdrop-filter: blur(3px);
   }
-  .undo-chip:active { transform: scale(.96); }
-  .undo-secs { opacity: .7; font-variant-numeric: tabular-nums; }
+  .pcell-bin:active { transform: scale(.94); }
+  .bin-secs { font-variant-numeric: tabular-nums; opacity: .75; }
   .counter { font-family: var(--font-mono); font-size: 1.5rem; font-weight: bold; color: #fff; text-align: right; line-height: 1; }
   .counter.low { color: var(--danger); } .counter small { display: block; font-size: 0.6rem; opacity: 0.7; text-transform: uppercase; }
   .rail { position: absolute; top: 64px; right: 14px; display: flex; flex-direction: column; gap: 10px; z-index: 6; }
