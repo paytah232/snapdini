@@ -69,7 +69,7 @@
   let aspect = '1:1';
 
   // upload queue
-  interface QueueItem { id: string; blob: Blob; mediaType: 'photo' | 'video'; ext: string; status: 'pending' | 'uploading' | 'done' | 'error'; error?: string; progress?: number; size: number; durationSecs?: number; w?: number; h?: number; retries?: number; uploadId?: string; doneChunks?: number[]; }
+  interface QueueItem { id: string; blob: Blob; mediaType: 'photo' | 'video'; source: 'capture' | 'upload'; ext: string; status: 'pending' | 'uploading' | 'done' | 'error'; error?: string; progress?: number; size: number; durationSecs?: number; w?: number; h?: number; retries?: number; uploadId?: string; doneChunks?: number[]; }
   const MAX_UPLOAD_RETRIES = 5;   // auto-retry a failing upload this many times (with backoff) before asking the user
   let queue: QueueItem[] = [];
   let uploading = false;
@@ -500,7 +500,7 @@
       // Maximum quality — capture at native resolution with JPEG quality 1.0 (no perceptible
       // compression). We don't downscale; big files are fine per product direction.
       const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/jpeg', 1.0));
-      if (blob) enqueue(blob, 'photo', 'jpg', { w: canvas.width, h: canvas.height });
+      if (blob) enqueue(blob, 'photo', 'jpg', 'capture', { w: canvas.width, h: canvas.height });
     } finally {
       if (useFlash) setTorch(false);   // flash off again after the shot
       capturing = false;
@@ -522,7 +522,7 @@
         const secs = recSecs;
         const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || 'video/webm' });
         const ext = (mediaRecorder?.mimeType || '').includes('mp4') ? 'mp4' : 'webm';
-        enqueue(blob, 'video', ext, { durationSecs: secs });
+        enqueue(blob, 'video', ext, 'capture', { durationSecs: secs });
       };
       mediaRecorder.start();
       if (flashArmed && torchSupported && !ev?.noFlash) setTorch(true);   // continuous light for the clip
@@ -574,12 +574,16 @@
     fpsHandle = 0; clearTimeout(fpsCheckTimer);
   }
 
-  function enqueue(blob: Blob, mediaType: 'photo' | 'video', ext: string, extra?: { durationSecs?: number; w?: number; h?: number }) {
+  // `source` decides which video-length rule the SERVER applies. In-app capture auto-stops at the
+  // event's limit, so it is held to it strictly; a clip picked from the camera roll was shot outside
+  // the app (often deliberately, for 4K the browser cannot manage) and cannot be re-trimmed, so the
+  // server keeps it even when it runs over. Defaults to 'capture' — the strict side.
+  function enqueue(blob: Blob, mediaType: 'photo' | 'video', ext: string, source: 'capture' | 'upload' = 'capture', extra?: { durationSecs?: number; w?: number; h?: number }) {
     const id = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
-    queue = [...queue, { id, blob, mediaType, ext, status: 'pending', size: blob.size, ...extra }];
+    queue = [...queue, { id, blob, mediaType, source, ext, status: 'pending', size: blob.size, ...extra }];
     photosRemaining = Math.max(0, photosRemaining - 1);
     // Persist to IndexedDB immediately so the capture survives an outage / reload / closed tab.
-    if (sessionToken && ev) putCapture({ id, joinCode: ev.joinCode, sessionToken, blob, mediaType, ext, createdAt: Date.now() }).catch(() => {});
+    if (sessionToken && ev) putCapture({ id, joinCode: ev.joinCode, sessionToken, blob, mediaType, source, ext, createdAt: Date.now() }).catch(() => {});
     if (saveToDevice) saveToDeviceCopy(blob, ext);
     processQueue();
   }
@@ -626,11 +630,12 @@
       showToast(`That clip is ${Math.round(dur / 60)} min — the most we can take is ${Math.round(videoHardMaxSecs / 60)} min. Trim it and try again.`, true);
       return;
     }
-    if (videoMaxSecs > 0 && dur > videoMaxSecs + 3) {
-      showToast(`That clip is ${Math.round(dur)}s, over this event's ${videoMaxSecs}s — keeping it anyway 💛`);
-    }
+    // Deliberately SILENT when a camera-roll clip runs over the event's limit. The event info
+    // already states "clips up to Ns", which is the nudge to match it; announcing that we keep
+    // longer ones anyway would just teach people the limit is optional. It is allowed quietly —
+    // the guest keeps their moment, and the limit keeps its meaning.
     const ext = (file.name.split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 4) || 'mp4';
-    enqueue(file, 'video', ext, dur ? { durationSecs: Math.round(dur) } : undefined);
+    enqueue(file, 'video', ext, 'upload', dur ? { durationSecs: Math.round(dur) } : undefined);
     showToast('Uploading your video…');
   }
 
@@ -644,7 +649,7 @@
       // Pull each capture's chunk-resume state so a big upload continues where it left off.
       const restored = await Promise.all(fresh.map(async (s) => {
         const p = await getProgress(s.id).catch(() => null);
-        return { id: s.id, blob: s.blob, mediaType: s.mediaType, ext: s.ext, status: 'pending' as const, size: s.blob?.size ?? 0,
+        return { id: s.id, blob: s.blob, mediaType: s.mediaType, source: s.source ?? 'capture', ext: s.ext, status: 'pending' as const, size: s.blob?.size ?? 0,
           uploadId: p?.uploadId, doneChunks: p?.doneChunks };
       }));
       if (restored.length) {
@@ -677,6 +682,7 @@
       const form = new FormData();
       form.append('photo', item.blob, `media.${item.ext}`);
       form.append('sessionToken', sessionToken!);
+      form.append('source', item.source);
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/photos');
       xhr.upload.onprogress = (e) => { if (e.lengthComputable) { item.progress = Math.round((e.loaded / e.total) * 100); queue = queue; } };
@@ -742,7 +748,7 @@
     }
     const complete = () => fetch('/api/photos/complete', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
-      body: JSON.stringify({ sessionToken, uploadId, total, ext: item.ext, mediaType: item.mediaType }),
+      body: JSON.stringify({ sessionToken, uploadId, total, ext: item.ext, mediaType: item.mediaType, source: item.source }),
     });
     let res = await complete();
     if (res.status === 409) {   // server missing some parts → resend them, then retry complete

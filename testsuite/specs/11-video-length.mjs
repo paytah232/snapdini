@@ -10,9 +10,10 @@ import path from 'node:path';
 import { api, createEvent, dbq, group, join, ok, spec } from '../lib/harness.mjs';
 
 const clip = (name) => fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'loadtest', name));
-async function uploadClip(token, file) {
+async function uploadClip(token, file, source) {
   const fd = new FormData();
   fd.append('sessionToken', token);
+  if (source) fd.append('source', source);        // omitted entirely = an old client
   fd.append('photo', new Blob([clip(file)], { type: 'video/mp4' }), file);
   return api('POST', '/api/photos', { body: fd });
 }
@@ -28,11 +29,11 @@ await spec('11-video-length', async () => {
   const tok = (await join(ev.joinCode, 'Videographer')).json?.sessionToken;
   ok('guest joined', !!tok);
 
-  const under = await uploadClip(tok, 'clip_4s.mp4');
+  const under = await uploadClip(tok, 'clip_4s.mp4', 'upload');
   ok('a clip inside the tier uploads', under.status === 200, `status ${under.status} ${under.text?.slice(0, 80)}`);
 
   // The headline change: 20.2s against a 10s tier is double the limit, and is KEPT.
-  const over = await uploadClip(tok, 'clip_20s.mp4');
+  const over = await uploadClip(tok, 'clip_20s.mp4', 'upload');
   ok('a clip well OVER the tier is kept, not rejected', over.status === 200, `status ${over.status} ${over.text?.slice(0, 80)}`);
   const durs = dbq(`SELECT round(duration_ms/1000.0) FROM photos WHERE event_id='${ev.id}' AND media_type='video' ORDER BY duration_ms`).split('\n').filter(Boolean);
   ok('both clips stored with their real durations', durs.length === 2 && Number(durs[1]) >= 20,
@@ -50,11 +51,26 @@ await spec('11-video-length', async () => {
   ok('event has no video entitlement',
      Number(dbq(`SELECT video_seconds FROM events WHERE id='${noVid.id}'`)) === 0);
   const tok2 = (await join(noVid.joinCode, 'Chancer')).json?.sessionToken;
-  const blocked = await uploadClip(tok2, 'clip_4s.mp4');
+  const blocked = await uploadClip(tok2, 'clip_4s.mp4', 'upload');
   ok('video upload is refused outright when video was never bought', blocked.status === 403,
      `status ${blocked.status}`);
   ok('and nothing was stored for it',
      Number(dbq(`SELECT count(*) FROM photos WHERE event_id='${noVid.id}'`)) === 0);
+
+
+  group('An in-app capture that overshoots is kept too, but flagged as a defect');
+  // The recorder stops itself at the limit; if it ever fails to, the guest must not pay for our bug
+  // by losing the clip. Kept — but recorded as source='capture' so it is chaseable, not invisible.
+  const evC = await createEvent({ revealMode: 'instant', videoSeconds: 10 });
+  const tokC = (await join(evC.joinCode, 'Overshooter')).json?.sessionToken;
+  const shot = await uploadClip(tokC, 'clip_20s.mp4', 'capture');
+  ok('an overshooting in-app capture is still kept', shot.status === 200, `status ${shot.status}`);
+  ok('it is recorded as an in-app capture, not a camera-roll upload',
+     dbq(`SELECT source FROM photos WHERE event_id='${evC.id}' AND media_type='video'`) === 'capture',
+     dbq(`SELECT COALESCE(source,'(null)') FROM photos WHERE event_id='${evC.id}'`));
+  ok('camera-roll clips are recorded as uploads',
+     dbq(`SELECT DISTINCT source FROM photos WHERE event_id='${ev.id}' AND media_type='video'`) === 'upload',
+     dbq(`SELECT DISTINCT COALESCE(source,'(null)') FROM photos WHERE event_id='${ev.id}'`));
 
   group('Video overages are reported to the operator');
   const admLogin = process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD
@@ -62,8 +78,12 @@ await spec('11-video-length', async () => {
     : { status: 0 };
   if (admLogin.status === 200) {
     const ov = await api('GET', '/api/admin/overview');
-    ok('overview counts videos over their tier', Number(ov.json?.stats?.videos_over_limit) >= 1,
+    ok('overview counts videos over their tier', Number(ov.json?.stats?.videos_over_limit) >= 2,
        JSON.stringify(ov.json?.stats?.videos_over_limit));
+    ok('in-app overshoots are counted SEPARATELY from camera-roll overages',
+       Number(ov.json?.stats?.capture_overshoots) >= 1
+         && Number(ov.json?.stats?.capture_overshoots) < Number(ov.json?.stats?.videos_over_limit),
+       `capture_overshoots=${ov.json?.stats?.capture_overshoots} of ${ov.json?.stats?.videos_over_limit}`);
     const rows = ov.json?.videoOverages || [];
     const mine = rows.find((r) => r.join_code === ev.joinCode);
     ok('the overage detail names the event and how far over it went',

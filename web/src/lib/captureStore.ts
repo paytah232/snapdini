@@ -15,6 +15,10 @@ export interface StoredCapture {
   sessionToken: string;
   blob: Blob;
   mediaType: 'photo' | 'video';
+  // Persisted so a queued camera-roll clip is still treated as an upload after a reload —
+  // restoring it as a capture would re-impose the strict length rule on exactly the clip that needs
+  // the lenient one. Optional for rows written before this field existed.
+  source?: 'capture' | 'upload';
   ext: string;
   createdAt: number;
 }

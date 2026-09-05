@@ -141,7 +141,7 @@ function gateUpload(p: UploadParticipant, isVideo: boolean): { status: number; e
 // Move a fully-received staged file into the event folder, process it (strip+thumbnail for images,
 // probe+poster for video), insert the photo row, and bump the participant's count. Returns the
 // success payload. Throws an error tagged { status: 400 } for an invalid image (file cleaned first).
-async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo: boolean) {
+async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo: boolean, source: 'capture' | 'upload' = 'capture') {
   const destDir = eventDir(p.eventId);
   fs.mkdirSync(destDir, { recursive: true });
   const baseName = path.basename(stagedPath);                       // <uuid>.ext
@@ -166,8 +166,12 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     const allowed = billingEnabled ? p.videoSeconds : VIDEO_MAX_SECS;
     if (allowed > 0 && typeof dims.durationMs === 'number') {
       const secs = dims.durationMs / 1000;
-      // A grace cap only applies if one is configured; otherwise the hard ceiling is the only limit.
       const cap = Math.min(VIDEO_GRACE_SECS > 0 ? allowed + VIDEO_GRACE_SECS : VIDEO_HARD_MAX_SECS, VIDEO_HARD_MAX_SECS);
+      // The SERVER keeps whatever it is given, up to an absolute ceiling. The UI is what gates
+      // length (the recorder stops itself at the event's limit), and if a capture overshoots anyway
+      // — a 10s limit yielding a 15s file because the recorder flushed late — throwing it away
+      // punishes the guest for our bug. A guest never gets that moment back; we can always fix the
+      // recorder. `source` therefore decides how we REPORT an overage, never whether we keep it.
       if (secs > cap) {
         try { fs.unlinkSync(finalPath); } catch { /* */ }
         const e = new Error(`Video is too long — this server accepts clips up to ${Math.round(cap)}s`) as Error & { status?: number };
@@ -176,7 +180,11 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
       // Over the purchased limit but inside the ceiling: keep it, and leave the evidence. No column
       // needed — photos.duration_ms against events.video_seconds already answers "how far over".
       if (secs > allowed + 3) {
-        console.log(`[video] over-limit clip kept: ${Math.round(secs)}s on a ${allowed}s event (${p.eventId})`);
+        console.log(source === 'capture'
+          // The recorder was supposed to stop at `allowed`. It did not. Kept regardless, but this
+          // one is a bug to chase, not a guest being generous with their own camera.
+          ? `[video] DEFECT: in-app capture overshot — ${Math.round(secs)}s on a ${allowed}s event (${p.eventId}); recorder should have stopped itself`
+          : `[video] over-limit camera-roll clip kept: ${Math.round(secs)}s on a ${allowed}s event (${p.eventId})`);
       }
     }
   }
@@ -188,6 +196,7 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     id: photoId, eventId: p.eventId, participantId: p.id, filename: storedName,
     mediaType: isVideo ? 'video' : 'photo', takenAt: Date.now(), status,
     sizeBytes, width: dims.width ?? null, height: dims.height ?? null, durationMs: dims.durationMs ?? null,
+    source,
   });
   await db.update(participants).set({ photosTaken: p.photosTaken + 1 }).where(eq(participants.id, p.id));
   return { success: true, photoId, status, pendingModeration: status === 'pending', photosRemaining: p.maxPhotos - p.photosTaken - 1 };
@@ -211,7 +220,7 @@ router.post('/', upload.single('photo'), async (req: Request, res: Response) => 
   if (gate) { fs.unlinkSync(req.file.path); return res.status(gate.status).json({ error: gate.error }); }
 
   try {
-    return res.json(await finalizeUpload(participant, req.file.path, isVideo));
+    return res.json(await finalizeUpload(participant, req.file.path, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture'));
   } catch (e) {
     return res.status((e as { status?: number }).status || 500).json({ error: (e as Error).message || 'Upload failed' });
   }
@@ -306,7 +315,7 @@ router.post('/complete', async (req: Request, res: Response) => {
   wipe();   // parts no longer needed
 
   try {
-    return res.json(await finalizeUpload(participant, staged, isVideo));
+    return res.json(await finalizeUpload(participant, staged, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture'));
   } catch (e) {
     return res.status((e as { status?: number }).status || 500).json({ error: (e as Error).message || 'Upload failed' });
   }

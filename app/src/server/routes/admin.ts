@@ -38,12 +38,19 @@ router.get('/overview', async (_req: Request, res: Response) => {
        -- whether the seconds ladder is worth enforcing at all.
        (SELECT count(*) FROM photos p JOIN events e ON e.id = p.event_id
          WHERE p.media_type = 'video' AND e.video_seconds > 0
-           AND p.duration_ms > (e.video_seconds + 3) * 1000)          AS videos_over_limit`,
+           AND p.duration_ms > (e.video_seconds + 3) * 1000)          AS videos_over_limit,
+       -- Split by source, because the two mean opposite things. An over-length clip from the CAMERA
+       -- ROLL is the feature working: a guest shot it outside the app and we kept it. The same
+       -- overage from in-app CAPTURE is a defect — the recorder was supposed to stop itself — and is
+       -- the number to actually chase.
+       (SELECT count(*) FROM photos p JOIN events e ON e.id = p.event_id
+         WHERE p.media_type = 'video' AND e.video_seconds > 0 AND p.source = 'capture'
+           AND p.duration_ms > (e.video_seconds + 3) * 1000)          AS capture_overshoots`,
     [now],
   );
   // The detail behind videos_over_limit: which event, what they paid for, what they actually sent.
   const videoOverages = await all(
-    `SELECT e.join_code, e.name, e.video_seconds AS purchased_secs,
+    `SELECT e.join_code, e.name, e.video_seconds AS purchased_secs, p.source,
             round(p.duration_ms / 1000.0)  AS actual_secs,
             round((p.duration_ms / 1000.0) - e.video_seconds) AS over_by_secs,
             p.taken_at

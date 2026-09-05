@@ -178,6 +178,8 @@ export const photos = pgTable('photos', {
   width: integer('width'),
   height: integer('height'),
   durationMs: integer('duration_ms'),
+  // 'capture' (shot in-app) | 'upload' (camera roll). Null for rows predating the column.
+  source: text('source'),
   // Gallery engagement. Counters, not an events table — at this volume they answer every question
   // we have without unbounded growth.
   viewCount: integer('view_count').notNull().default(0),
