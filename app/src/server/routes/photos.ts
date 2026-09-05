@@ -128,8 +128,17 @@ async function participantForUpload(sessionToken: string): Promise<UploadPartici
 
 // Returns {status,error} to reject the upload, or null if it's allowed right now.
 function gateUpload(p: UploadParticipant, isVideo: boolean): { status: number; error: string } | null {
-  const allowedVideoSecs = billingEnabled ? p.videoSeconds : VIDEO_MAX_SECS;
-  if (isVideo && allowedVideoSecs === 0) return { status: 403, error: 'Video uploads are not enabled for this event' };
+  // Self-host (billing off) is the FULL app — that is the pitch, and the licence. An unset
+  // VIDEO_MAX_SECONDS therefore means "no per-event limit", NOT "video disabled": the old reading
+  // silently refused every video upload on a fresh self-hosted install with no error a self-hoster
+  // could act on. Set VIDEO_MAX_SECONDS to a positive number to cap it. Only a HOSTED deployment
+  // gates video behind the paid add-on.
+  const allowedVideoSecs = billingEnabled
+    ? p.videoSeconds
+    : (VIDEO_MAX_SECS > 0 ? VIDEO_MAX_SECS : Number.POSITIVE_INFINITY);
+  if (isVideo && billingEnabled && allowedVideoSecs === 0) {
+    return { status: 403, error: 'Video uploads are not enabled for this event' };
+  }
   const now = Date.now();
   if (p.startsAt && now < p.startsAt)     return { status: 403, error: "Event hasn't started yet" };
   if (p.isLocked)                         return { status: 403, error: 'Event is locked' };
@@ -163,7 +172,9 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     // Enforce the event's video length limit server-side (defense-in-depth): the in-browser recorder
     // auto-stops at the limit, but a native-camera clip could be any length. Only when we can read a
     // real duration; +3s tolerance for container rounding.
-    const allowed = billingEnabled ? p.videoSeconds : VIDEO_MAX_SECS;
+    const allowed = billingEnabled
+      ? p.videoSeconds
+      : (VIDEO_MAX_SECS > 0 ? VIDEO_MAX_SECS : Number.POSITIVE_INFINITY);
     if (allowed > 0 && typeof dims.durationMs === 'number') {
       const secs = dims.durationMs / 1000;
       const cap = Math.min(VIDEO_GRACE_SECS > 0 ? allowed + VIDEO_GRACE_SECS : VIDEO_HARD_MAX_SECS, VIDEO_HARD_MAX_SECS);
