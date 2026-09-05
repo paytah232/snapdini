@@ -178,4 +178,8 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
       contact / login / signup. Self-hosted (billing off) → **always visible**.
 - [ ] **Turnstile:** contact, signup and login submit cleanly. Verify from **outside the LAN** — the
       widget is blocked by Pi-hole on-network.
+- [ ] **Video over the tier:** on an event with a 10s video add-on, upload a clip from your camera
+      roll that runs ~20s → it should be **accepted** with a friendly note, not refused. On an event
+      with **no** video add-on, the same upload must be **refused**. `/siteadmin` then shows it under
+      videos over their tier.
 - [ ] **Dark mode:** `/siteadmin` promo-code inputs are **not white-on-white** in dark mode.

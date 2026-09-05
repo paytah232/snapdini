@@ -66,6 +66,8 @@ services:
       - API_RATE_LIMIT=${API_RATE_LIMIT:-}
       - EMAIL_RATE_LIMIT=${EMAIL_RATE_LIMIT:-}
       - GUEST_EMAIL_RATE_LIMIT=${GUEST_EMAIL_RATE_LIMIT:-5}
+      - VIDEO_GRACE_SECONDS=${VIDEO_GRACE_SECONDS:-0}
+      - VIDEO_HARD_MAX_SECONDS=${VIDEO_HARD_MAX_SECONDS:-600}
       - GUEST_EMAIL_IP_LIMIT=${GUEST_EMAIL_IP_LIMIT:-200}
       - COUNTER_FLUSH_MS=${COUNTER_FLUSH_MS:-}
       # Present in the prod compose file but previously absent here, which meant the lifecycle

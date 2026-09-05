@@ -31,10 +31,28 @@ router.get('/overview', async (_req: Request, res: Response) => {
        (SELECT count(*) FROM events
          WHERE expires_at > ? AND owner_user_id IS NOT NULL)          AS active_events,
        (SELECT count(*) FROM participants)                   AS participants,
-       (SELECT count(*) FROM photos)                         AS photos`,
+       (SELECT count(*) FROM photos)                         AS photos,
+       (SELECT count(*) FROM photos WHERE media_type = 'video')       AS videos,
+       -- How often guests actually exceed the seconds they paid for. Over-length clips are KEPT
+       -- (see photos.ts), so this is the number that says whether the leniency costs anything and
+       -- whether the seconds ladder is worth enforcing at all.
+       (SELECT count(*) FROM photos p JOIN events e ON e.id = p.event_id
+         WHERE p.media_type = 'video' AND e.video_seconds > 0
+           AND p.duration_ms > (e.video_seconds + 3) * 1000)          AS videos_over_limit`,
     [now],
   );
-  res.json({ stats, now });
+  // The detail behind videos_over_limit: which event, what they paid for, what they actually sent.
+  const videoOverages = await all(
+    `SELECT e.join_code, e.name, e.video_seconds AS purchased_secs,
+            round(p.duration_ms / 1000.0)  AS actual_secs,
+            round((p.duration_ms / 1000.0) - e.video_seconds) AS over_by_secs,
+            p.taken_at
+       FROM photos p JOIN events e ON e.id = p.event_id
+      WHERE p.media_type = 'video' AND e.video_seconds > 0
+        AND p.duration_ms > (e.video_seconds + 3) * 1000
+      ORDER BY p.taken_at DESC
+      LIMIT 20`);
+  res.json({ stats, videoOverages, now });
 });
 
 // ── GET /api/admin/referral-funnel ────────────────────────────────────────────

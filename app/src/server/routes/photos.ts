@@ -19,6 +19,19 @@ import { UPLOADS_DIR, INCOMING_DIR, eventDir, eventRelPath } from '../paths';
 const MAX_PHOTO_MB   = parseInt(process.env.MAX_FILE_SIZE_MB || '64'); // headroom for an 8K still at max quality (q100/4:4:4)
 const MAX_VIDEO_MB   = parseInt(process.env.MAX_VIDEO_SIZE_MB || '8192'); // plans for 90s 8K clips (multi-GB)
 const VIDEO_MAX_SECS = parseInt(process.env.VIDEO_MAX_SECONDS || '0');
+// Video LENGTH policy. The event's purchased seconds are a pricing ladder (10s/30s/60s/90s), not a
+// technical limit, so enforcing them to the second punishes the people who actually paid: a phone
+// clip reading 11.4s against a 10s plan is a container-rounding artefact, not abuse. Worse, a guest
+// filming the speeches on their own camera has no way to trim it at 1am.
+//
+// So an event that HAS bought video accepts over-length clips, and we record how far over. Buying
+// video at all is still required — gateUpload refuses videoSeconds === 0, unchanged, so this is not
+// a route around the fee.
+//   VIDEO_GRACE_SECONDS    > 0 caps how far past the purchased limit we accept (0 = no cap, the
+//                          default, i.e. deliberately open while we gather data on how often it happens)
+//   VIDEO_HARD_MAX_SECONDS absolute ceiling — a storage/abuse guard, never a pricing gate
+const VIDEO_GRACE_SECS    = parseInt(process.env.VIDEO_GRACE_SECONDS || '0');
+const VIDEO_HARD_MAX_SECS = parseInt(process.env.VIDEO_HARD_MAX_SECONDS || '600');
 
 const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v|3gp|mkv)$/i;
 const IMAGE_EXT_RE = /\.(jpe?g|png|webp|gif|heic|heif|bmp)$/i;
@@ -151,9 +164,20 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     // auto-stops at the limit, but a native-camera clip could be any length. Only when we can read a
     // real duration; +3s tolerance for container rounding.
     const allowed = billingEnabled ? p.videoSeconds : VIDEO_MAX_SECS;
-    if (allowed > 0 && typeof dims.durationMs === 'number' && dims.durationMs > (allowed + 3) * 1000) {
-      try { fs.unlinkSync(finalPath); } catch { /* */ }
-      const e = new Error(`Video is too long (max ${allowed}s for this event)`) as Error & { status?: number }; e.status = 413; throw e;
+    if (allowed > 0 && typeof dims.durationMs === 'number') {
+      const secs = dims.durationMs / 1000;
+      // A grace cap only applies if one is configured; otherwise the hard ceiling is the only limit.
+      const cap = Math.min(VIDEO_GRACE_SECS > 0 ? allowed + VIDEO_GRACE_SECS : VIDEO_HARD_MAX_SECS, VIDEO_HARD_MAX_SECS);
+      if (secs > cap) {
+        try { fs.unlinkSync(finalPath); } catch { /* */ }
+        const e = new Error(`Video is too long — this server accepts clips up to ${Math.round(cap)}s`) as Error & { status?: number };
+        e.status = 413; throw e;
+      }
+      // Over the purchased limit but inside the ceiling: keep it, and leave the evidence. No column
+      // needed — photos.duration_ms against events.video_seconds already answers "how far over".
+      if (secs > allowed + 3) {
+        console.log(`[video] over-limit clip kept: ${Math.round(secs)}s on a ${allowed}s event (${p.eventId})`);
+      }
     }
   }
 

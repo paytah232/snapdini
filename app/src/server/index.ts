@@ -200,6 +200,9 @@ app.get('/api/config', (_req, res) => {
   res.json({
     version: pkg.version,
     videoMaxSeconds: parseInt(process.env.VIDEO_MAX_SECONDS || '0'),
+    // Absolute ceiling for an uploaded clip. The event's own videoSeconds is a PRICE tier, not a
+    // technical limit — over-length clips are kept (see photos.ts), so the client must not block on it.
+    videoHardMaxSeconds: parseInt(process.env.VIDEO_HARD_MAX_SECONDS || '600'),
     emailEnabled: email.enabled,
     supportEmail: process.env.SUPPORT_EMAIL || null,
     // Public site key so the frontend can render the Turnstile widget; null = feature off.

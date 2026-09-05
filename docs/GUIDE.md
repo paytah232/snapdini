@@ -247,6 +247,13 @@ plus the galleries producing the most referrals and per-photo view/download enga
   excluded everywhere; restoring returns them to pending.
 - **Retention:** photos + guest data are deleted after the event's retention window; a slim stats-only
   record is kept. Freed custom URLs become available again.
+- **Video length:** an event's video add-on (10s / 30s / 60s / 90s) is a **price tier, not a hard
+  cutoff**. A clip that runs over is still kept — a phone reports 11.4s for a "10 second" recording,
+  and a guest who filmed the speeches on their own camera cannot re-trim it later. Only an absolute
+  server ceiling (`VIDEO_HARD_MAX_SECONDS`, default 10 minutes) refuses a clip, and
+  `VIDEO_GRACE_SECONDS` can tighten that per-deployment. **Buying video at all is still required:**
+  an event with no video add-on refuses video uploads outright. Overages are reported in
+  `/siteadmin` so you can see how often it actually happens.
 - **Retention windows:** free events keep photos for **7 days**. Paid events include **30 days** as
   standard, extendable to **3 months** or **12 months** as a paid add-on. When the window expires the
   photos and guest data are deleted and a slim stats-only record is kept; freed custom URLs become

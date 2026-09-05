@@ -3,6 +3,7 @@
   import { fade } from 'svelte/transition';
   import { getEvent, getMe, joinEvent, getPhotosBySession, type PublicEvent, type Photo } from '$lib/events';
   import { getSession, saveSession, clearSession } from '$lib/session';
+  import { getConfig } from '$lib/api';
   import { applyEventTheme } from '$lib/theme';
   import { showToast } from '$lib/toast';
   import { reportClientError } from '$lib/report';
@@ -39,6 +40,7 @@
   let cameras: { id: string; label: string }[] = [];   // available video inputs (for the picker)
   let deviceId: string | null = null;                   // specific chosen camera (multi-camera systems)
   let videoMaxSecs = 0;
+  let videoHardMaxSecs = 600;   // server's absolute ceiling; the event's own limit is a price tier
   let videoMode = false;
   let recording = false;
   let recSecs = 0;
@@ -129,6 +131,8 @@
     // Video length is now a per-event entitlement (falls back to the global setting when
     // billing is off — the server resolves which to send).
     videoMaxSecs = ev.videoSeconds ?? 0;
+    // The server ceiling, not the event tier — see the upload handler for why they differ.
+    try { videoHardMaxSecs = (await getConfig()).videoHardMaxSeconds ?? 600; } catch { /* keep the default */ }
     // Apply the event's theme straight away so the JOIN screen (button, colours) is themed too —
     // applyEventTheme is contrast-guarded and falls back to the warm default for no-theme events.
     applyEventTheme(ev.theme);
@@ -614,9 +618,16 @@
     if (!file) return;
     if (photosRemaining <= 0) { showToast('No shots left on your roll', true); return; }
     const dur = await readVideoDuration(file);
-    if (videoMaxSecs > 0 && dur > videoMaxSecs + 1) {
-      showToast(`That clip is ${Math.round(dur)}s — this event's limit is ${videoMaxSecs}s. Trim it and try again.`, true);
+    // Only the server's absolute ceiling is a hard stop. The event's own limit is a price tier, and
+    // the server keeps over-length clips (a guest filming the speeches cannot re-trim them at 1am),
+    // so blocking here would refuse an upload the server would happily have accepted — which is
+    // exactly what the old `+1s` check did, while the server allowed `+3s`.
+    if (videoHardMaxSecs > 0 && dur > videoHardMaxSecs) {
+      showToast(`That clip is ${Math.round(dur / 60)} min — the most we can take is ${Math.round(videoHardMaxSecs / 60)} min. Trim it and try again.`, true);
       return;
+    }
+    if (videoMaxSecs > 0 && dur > videoMaxSecs + 3) {
+      showToast(`That clip is ${Math.round(dur)}s, over this event's ${videoMaxSecs}s — keeping it anyway 💛`);
     }
     const ext = (file.name.split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 4) || 'mp4';
     enqueue(file, 'video', ext, dur ? { durationSecs: Math.round(dur) } : undefined);
