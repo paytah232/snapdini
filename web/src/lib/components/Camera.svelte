@@ -101,6 +101,10 @@
 
   $: pendingCount = queue.filter((q) => q.status !== 'done').length;
   $: hasUploadError = queue.some((q) => q.status === 'error');
+  // The Queue button used to linger after everything had uploaded, badge-less and doing nothing —
+  // it stayed as long as the queue ARRAY was non-empty, and completed items are never removed from
+  // it. Show it only while something is still in flight or has failed and needs a retry.
+  $: queueNeedsAttention = queue.some((q) => q.status !== 'done');
   // Compact stats for the queue rows.
   const fmtSize = (b: number) => b <= 0 ? '' : b < 1024 * 1024 ? `${Math.round(b / 1024)} KB` : `${(b / (1024 * 1024)).toFixed(1)} MB`;
   const fmtDur = (s: number) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
@@ -770,6 +774,7 @@
     try {
       const data = (item.blob.size > CHUNK_SIZE || item.uploadId) ? await uploadChunked(item) : await uploadSingle(item);
       item.status = 'done'; item.progress = 100;
+      void refreshGalleryIfOpen();   // show it straight away if they are watching the gallery
       // Never let the count flicker UP: the per-upload server value lags behind the local
       // optimistic count during a burst, so only ever take the lower of the two.
       photosRemaining = Math.min(photosRemaining, data.photosRemaining);
@@ -803,6 +808,20 @@
     photosRemaining = Math.max(0, photosRemaining - 1);
     queue = queue;
     processQueue();
+  }
+
+  // An upload that finishes while the guest is looking at the gallery used to leave them staring at
+  // a grid that silently lacked the shot they just took — it only appeared if they navigated away
+  // and back. Refresh in place instead. No-op unless the gallery is the visible screen, so it costs
+  // nothing during a burst of captures on the camera screen.
+  async function refreshGalleryIfOpen() {
+    if (screen !== 'gallery' || !sessionToken) return;
+    try {
+      const r = await getPhotosBySession(identifier, sessionToken);
+      galleryRevealed = r.revealed;
+      allowDownloads = r.allowDownloads ?? true;
+      galleryPhotos = r.photos || [];
+    } catch { /* a failed refresh must never disturb a gallery that is already rendered */ }
   }
 
   async function openGallery() {
@@ -1027,7 +1046,7 @@
     <header>
       <h2><Logo word={false} color={ev?.theme?.accent ?? ''} /> {ev?.name}</h2>
       <div class="gallery-actions">
-        {#if queue.length}
+        {#if queueNeedsAttention}
           <button class="btn ghost sm queue-btn" on:click={() => (drawerOpen = true)} aria-label="Upload queue{pendingCount ? ` (${pendingCount} uploading)` : ''}">
             ⬆ Queue{#if pendingCount}<span class="qbadge" class:error={hasUploadError}>{pendingCount}</span>{/if}
           </button>
