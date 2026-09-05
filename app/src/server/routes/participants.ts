@@ -118,6 +118,7 @@ router.get('/me', async (req: Request, res: Response) => {
       guestMayRequest:  events.guestMayRequest,
       faceMatching:     events.faceMatchingEnabled,
       faceConsentAt:    participants.faceConsentAt,
+      upgradeEmail:     participants.upgradeEmail,
       eventName:      events.name,
       joinCode:       events.joinCode,
       slug:           events.slug,
@@ -150,6 +151,9 @@ router.get('/me', async (req: Request, res: Response) => {
       canAskHost:      !!p.guestMayRequest,
       faceMatching:    !!p.faceMatching,
       faceEnrolled:    !!p.faceConsentAt,
+      // True when the address we hold arrived with their payment rather than at join — the guest
+      // never typed it here, so it is worth telling them which one their photos are tied to.
+      emailFromPayment: !!p.upgradeEmail && p.email === p.upgradeEmail,
     allowDownloads:  !!p.allowDownloads,
     noFlash:         !!p.noFlash,
   });

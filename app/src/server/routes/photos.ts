@@ -37,6 +37,11 @@ const VIDEO_MAX_SECS = parseInt(process.env.VIDEO_MAX_SECONDS || '0');
 // couple of seconds, whereas a long window turns a 12-shot roll into unlimited retries and the
 // limited roll stops meaning anything. After it closes the frame is permanent.
 const DELETE_WINDOW_MS = parseInt(process.env.PHOTO_DELETE_WINDOW_SECONDS || '60') * 1000;
+// The UI arms a delete on the first tap and commits on the second. Someone who taps at 59s and
+// confirms a few seconds later decided inside the window, so the server tolerates a short grace
+// rather than refusing a choice that was made in time. Small enough that it cannot turn a limited
+// roll into unlimited retries.
+const DELETE_CONFIRM_GRACE_MS = parseInt(process.env.PHOTO_DELETE_CONFIRM_GRACE_SECONDS || '15') * 1000;
 const VIDEO_GRACE_SECS    = parseInt(process.env.VIDEO_GRACE_SECONDS || '0');
 const VIDEO_HARD_MAX_SECS = parseInt(process.env.VIDEO_HARD_MAX_SECONDS || '600');
 
@@ -252,7 +257,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
 
   if (me.isLocked) return res.status(423).json({ error: 'The host has locked this event' });
   if (Date.now() > Number(me.expiresAt)) return res.status(410).json({ error: 'This event has ended' });
-  if (Date.now() - Number(photo.takenAt) > DELETE_WINDOW_MS) {
+  if (Date.now() - Number(photo.takenAt) > DELETE_WINDOW_MS + DELETE_CONFIRM_GRACE_MS) {
     return res.status(410).json({ error: 'Too late to delete this one — it is part of the roll now' });
   }
 

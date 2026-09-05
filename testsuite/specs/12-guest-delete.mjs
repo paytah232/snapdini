@@ -62,4 +62,26 @@ await spec('12-guest-delete', async () => {
     ok('the original is removed from disk', gone, `still present: ${fn2}`);
   }
   void file;
+
+  group('The confirm step gets a short grace past the window');
+  // The UI arms a delete on the first tap and commits on the second. Someone who taps at 59s and
+  // confirms a few seconds later decided IN time, so the server tolerates a small grace — while
+  // still refusing anything well past it, which is what keeps the roll meaningful.
+  const gev = await createEvent({ revealMode: 'instant', maxPhotos: 12 });
+  const gtok = (await join(gev.joinCode, 'Deliberator')).json?.sessionToken;
+  const gpid = dbq(`SELECT id FROM participants WHERE session_token='${gtok}'`);
+
+  await upload(gtok);
+  const justPast = dbq(`SELECT id FROM photos WHERE participant_id='${gpid}' ORDER BY taken_at DESC LIMIT 1`);
+  dbq(`UPDATE photos SET taken_at = taken_at - 65000 WHERE id='${justPast}'`);   // 65s: past 60, inside grace
+  const okLate = await api('DELETE', `/api/photos/${justPast}`, { body: { sessionToken: gtok } });
+  ok('a confirm a few seconds past the window still succeeds', okLate.status === 200, `status ${okLate.status}`);
+
+  await upload(gtok);
+  const wayPast = dbq(`SELECT id FROM photos WHERE participant_id='${gpid}' ORDER BY taken_at DESC LIMIT 1`);
+  dbq(`UPDATE photos SET taken_at = taken_at - 300000 WHERE id='${wayPast}'`);   // 5 minutes: no
+  const refused = await api('DELETE', `/api/photos/${wayPast}`, { body: { sessionToken: gtok } });
+  ok('but well past the window is still refused', refused.status === 410, `status ${refused.status}`);
+  ok('and that photo survives',
+     Number(dbq(`SELECT count(*) FROM photos WHERE id='${wayPast}'`)) === 1);
 });

@@ -61,6 +61,10 @@
   let undoTimer: ReturnType<typeof setInterval> | undefined;
   // Eligibility is per PHOTO, from its own takenAt — take three shots quickly and any of the three
   // can be the bad one, so a single "last shot" control would delete the wrong frame.
+  // Two-step delete: the first tap arms it, the second commits. Once armed, the control STAYS
+  // even if the 60s window lapses mid-decision — the guest decided in time, and yanking the button
+  // out from under a half-made choice is worse than a few seconds of grace.
+  let confirmingDeleteId: string | null = null;
   const canDelete = (p: Photo, now: number) => !!p.isOwn && now - Number(p.takenAt) < undoWindowMs;
   const secsLeft = (p: Photo, now: number) => Math.ceil((Number(p.takenAt) + undoWindowMs - now) / 1000);
   let videoMode = false;
@@ -180,7 +184,12 @@
         const topupReturn = typeof window !== 'undefined'
           && new URLSearchParams(window.location.search).get('topup') === '1';
         if (topupReturn) {
-          showToast('Thanks — more shots added to your roll');
+          // If the address came from the payment, the guest never typed it here — tell them which
+          // one their photos are now tied to, since that is what they will need on another device.
+          const boundEmail = me.emailFromPayment ? me.participant?.email : null;
+          showToast(boundEmail
+            ? `Thanks — more shots added. Your photos are linked to ${boundEmail}`
+            : 'Thanks — more shots added to your roll');
           window.history.replaceState({}, '', window.location.pathname);
         }
         sessionToken = token;
@@ -873,6 +882,7 @@
 
   async function deletePhoto(id: string) {
     if (!sessionToken) return;
+    confirmingDeleteId = null;
     try {
       const r = await fetch(`/api/photos/${id}`, {
         method: 'DELETE', headers: { 'Content-Type': 'application/json' },
@@ -945,6 +955,10 @@
 
   function backToCamera() { screen = 'camera'; startCamera(); }
 </script>
+
+<!-- A tap anywhere else backs out of an armed delete. The bin itself stops propagation, so
+     this only ever sees taps that are NOT the confirm button. -->
+<svelte:window on:click={() => (confirmingDeleteId = null)} />
 
 {#if fatal}
   <div class="center"><div class="msg"><span class="big">😕</span><h2>{fatal}</h2><a class="btn ghost" href="/">← Home</a></div></div>
@@ -1203,11 +1217,16 @@
               {#if p.mediaType === 'video'}<img src={p.thumbUrl} alt="" loading="lazy" on:error={hidePoster} /><span class="play">▶</span>{:else}<img src={p.thumbUrl ?? p.url} alt="" loading="lazy" on:error={(e) => imgFallback(e, p.url)} />{/if}
               {#if galleryFilter === 'mine'}<span class="snapno">#{shownPhotos.length - i}</span>{/if}
             </button>
-            {#if canDelete(p, nowTick)}
-              <button class="pcell-bin" on:click|stopPropagation={() => deletePhoto(p.id)}
-                      title="Delete this shot — {secsLeft(p, nowTick)}s left"
-                      aria-label="Delete this shot, {secsLeft(p, nowTick)} seconds left">
-                🗑<span class="bin-secs">{secsLeft(p, nowTick)}</span>
+            {#if canDelete(p, nowTick) || confirmingDeleteId === p.id}
+              <button class="pcell-bin" class:confirm={confirmingDeleteId === p.id}
+                      on:click|stopPropagation={() => (confirmingDeleteId === p.id ? deletePhoto(p.id) : (confirmingDeleteId = p.id))}
+                      title={confirmingDeleteId === p.id ? 'Tap again to delete' : `Delete this shot — ${secsLeft(p, nowTick)}s left`}
+                      aria-label={confirmingDeleteId === p.id ? 'Tap again to confirm deleting this shot' : `Delete this shot, ${secsLeft(p, nowTick)} seconds left`}>
+                {#if confirmingDeleteId === p.id}
+                  Sure?
+                {:else}
+                  🗑<span class="bin-secs">{secsLeft(p, nowTick)}</span>
+                {/if}
               </button>
             {/if}
           </div>
@@ -1343,6 +1362,10 @@
     backdrop-filter: blur(3px);
   }
   .pcell-bin:active { transform: scale(.94); }
+  .pcell-bin.confirm {
+    background: #c0392b; border-color: #e6795f; font-weight: 700; letter-spacing: .01em;
+    min-width: 52px;
+  }
   .bin-secs { font-variant-numeric: tabular-nums; opacity: .75; }
   .counter { font-family: var(--font-mono); font-size: 1.5rem; font-weight: bold; color: #fff; text-align: right; line-height: 1; }
   .counter.low { color: var(--danger); } .counter small { display: block; font-size: 0.6rem; opacity: 0.7; text-transform: uppercase; }
