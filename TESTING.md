@@ -89,6 +89,8 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
 - [/] **Events table:** narrower/stacked — name + **join code beneath**, **owner/guests/photos stacked**, **status + purge timing** (e.g. "purges ~5d" / "purged …"); Active/All filter, search, pagination, **Manage →** override.
 - [/] **Users / Contact / Client-errors** panels: search, filters, pagination work.
 - [/] **Promo codes:** create → list + Stripe (test) → discount at Checkout.
+- [ ] **Guest feedback** panel lists ratings + comments with the event they came from, and a
+      running average. Guests from purged events show as **anonymised** rather than vanishing.
 
 ## 11. Security spot-checks
 - [/] `/siteadmin` signed out → prompt; non-admin → "admins only"; `GET /api/admin/*` no admin session → **401/403**.
@@ -140,7 +142,9 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
 - Moderation default + enable-later hold, decouple (favourite ≠ approve), reveal/hide override, retention purge (thumbnails, custom audio, slideshows), `/mine` counts, reject-bin, client-error capture, custom-audio validation, **share v2 (all/favourites/selected + slug rename + reveal-gating + zip download)**, **slideshow versioning + download endpoint**, **frame-pack settings gate**, **no-flash persistence**, **restore→pending**, **own-photos-visible-after-reveal**, **11+ paid tier**, **co-hosts (invite/accept/manage-by-identity/owner-only-delete/remove)**, timezones, billing-amount audit.
 - **1.0 additions:** settings `noFlash` round-trip + `noFlash` on the join / `/me` / `/admin` responses; **event slug** set/clear + **too-short 400 / duplicate 409**; **reschedule locked once started** (allowed while upcoming); **share-create no longer auto-claims a slug** (token URL) + default label leads with the event name; **`/qr` returns a logo-baked PNG**; **co-host pending-invite list** (appears / drops off on accept); **10s video tier = $2**; **frame-removal always paid** (branding:false → 402 until bought); **purge frees the event slug + deletes share rows** (via admin `/run-sweep`); `photoIds` capped on moderate/highlights; login rate-limited.
 - Run from `devel/`: `npm test` (typecheck → unit → integration → e2e). Integration suite:
-  **252 passed, 0 failed** in ~37s.
+  **365 passed, 0 failed** in ~40s. `run.mjs` lifts `ADMIN_EMAIL`/`ADMIN_PASSWORD` off the
+  local dev container when they aren't in your environment, so the operator-only assertions run
+  by default instead of silently skipping (they were skipping, and it hid ~22 tests).
 - The integration suite is an orchestrator (`testsuite/run.mjs`) over per-area specs in
   `testsuite/specs/`, run as separate processes in a concurrency pool. Useful flags:
   `--only=<substring>` (one spec — a few seconds), `--jobs=N`, `--serial`, `--list`.
@@ -223,3 +227,17 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
       and `/api/faces/mine` reports you as not enrolled.
 - [ ] **No leakage:** no API response anywhere contains an `embedding`.
 - [ ] **Privacy page** section 6b explains face templates in plain language.
+
+## 20. Version 1.4 — guest feedback (verify these)
+- [ ] **Where it's offered:** a **Leave feedback** button sits next to *Start your own* in the
+      gallery, and on the **"that's your roll"** toast on the camera page. Nowhere else — it should
+      never interrupt someone mid-shoot.
+- [ ] **Optional by design:** a rating alone submits; a comment alone submits; an empty form is
+      refused. Dismissing is accepted and you are **never asked again on that device**.
+- [ ] **One guest, one opinion:** submitting twice does not create a second entry, and the first
+      answer stands.
+- [ ] **You can actually read it:** `/siteadmin` → **Guest feedback** shows what you just left,
+      with the comment and the event name.
+- [ ] **It outlives the event:** feedback is product signal, so the retention purge **detaches** it
+      from the guest instead of deleting it — the rating and comment survive, the person does not.
+      (Before 1.4 it cascaded off `participants` and erased itself ~31 days after every event.)

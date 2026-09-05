@@ -310,7 +310,9 @@ export const photoFaces = pgTable('photo_faces', {
 export const guestFeedback = pgTable('guest_feedback', {
   id: text('id').primaryKey(),
   eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
-  participantId: text('participant_id').notNull().references(() => participants.id, { onDelete: 'cascade' }),
+  // Nullable on purpose: the retention purge detaches feedback from the guest rather than
+  // deleting it, so the rating survives anonymously. See 0035.
+  participantId: text('participant_id').references(() => participants.id, { onDelete: 'set null' }),
   rating: smallint('rating'),
   comment: text('comment'),
   createdAt: ms('created_at').notNull(),

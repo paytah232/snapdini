@@ -134,10 +134,13 @@
   // ── Referral funnel ──
   let funnel: any = null;
   let guestPayments: any[] = [];
+  let guestFeedbackRows: any[] = [];
+  let guestFeedbackAvg: number | null = null;
   let refunding = '';
   async function loadFunnel() {
     try { funnel = await api<any>('/api/admin/referral-funnel'); } catch { funnel = null; }
     try { guestPayments = (await api<any>('/api/admin/guest-payments'))?.payments ?? []; } catch { guestPayments = []; }
+    try { const f = await api<any>('/api/admin/guest-feedback'); guestFeedbackRows = f?.feedback ?? []; guestFeedbackAvg = f?.average ?? null; } catch { guestFeedbackRows = []; }
   }
 
   async function loadPromos() {
@@ -359,6 +362,26 @@
     <section class="panel">
       <!-- Referral funnel. The step that matters is signups → events created: that is exactly
            where paid traffic dies, so it is the comparison worth watching. -->
+      <!-- What guests said about USING it — a different respondent from the host survey. -->
+      {#if guestFeedbackRows.length}
+        <h2>Guest feedback{guestFeedbackAvg ? ` · ${guestFeedbackAvg.toFixed(1)}★ avg` : ''}</h2>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Rating</th><th>Guest</th><th>Event</th><th>Comment</th></tr></thead>
+            <tbody>
+              {#each guestFeedbackRows as g}
+                <tr>
+                  <td>{g.rating ? '★'.repeat(g.rating) : '—'}</td>
+                  <td>{g.guest_name || 'anonymised'}</td>
+                  <td>{g.event_name}<br /><small class="muted">{g.join_code}</small></td>
+                  <td>{g.comment || ''}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+
       <!-- Guest top-ups. Participant-level payments were invisible here, so a refund meant the Stripe
            dashboard. Change-of-mind is declined as policy, but a path has to exist for genuine
            failures — Australian Consumer Law does not allow contracting out of that. -->

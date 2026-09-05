@@ -29,7 +29,7 @@
 //   92-reschedule               also calls run-sweep
 //   91-auth-cooldown-admin      compares /api/admin/overview counts to a live SELECT count(*)
 // All non-`9x-` specs run first in the concurrency pool; the `9x-` ones then run one at a time.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -61,6 +61,25 @@ if (!specs.length) {
   console.error(only ? `No specs match --only=${only}` : `No specs found in ${SPECS_DIR}`);
   process.exit(1);
 }
+
+// Several specs guard their operator-only assertions behind ADMIN_EMAIL/ADMIN_PASSWORD and skip
+// when they're absent. Skipping quietly is worse than failing: the operator endpoints looked
+// covered while nothing ran. If the vars aren't set, lift them off the container under test so
+// those branches execute by default. Local dev container only — never a remote or prod target.
+function adoptAdminCreds() {
+  if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) return 'env';
+  if (!/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(BASE)) return 'skipped (non-local target)';
+  const container = process.env.TEST_APP_CONTAINER || 'snapdini-dev-app';
+  try {
+    const read = (k) => spawnSync('docker', ['exec', container, 'printenv', k], { encoding: 'utf8' }).stdout.trim();
+    const email = read('ADMIN_EMAIL'), password = read('ADMIN_PASSWORD');
+    if (!email || !password) return `unavailable (${container} has no admin creds)`;
+    process.env.ADMIN_EMAIL = email; process.env.ADMIN_PASSWORD = password;
+    return `adopted from ${container}`;
+  } catch { return 'unavailable (docker not reachable)'; }
+}
+const adminCredSource = adoptAdminCreds();
+console.log(`# operator credentials: ${adminCredSource}`);
 
 let pass = 0, fail = 0;
 const fails = [];

@@ -43,7 +43,7 @@
   <p>We use your information solely to provide and operate Snapdini: creating and running your events, storing and revealing photos, sending the transactional emails you've asked for (account verification, magic-link sign-in, and gallery/photo links), processing payments, and keeping the service secure and reliable. We do not use your data for advertising or profiling.</p>
 
   <h2>4. Photos &amp; videos — storage &amp; deletion</h2>
-  <p>Your event's photos and videos are stored only to provide the service. They are <strong>automatically deleted after your event's retention period</strong> (the default window, extendable on paid plans). After deletion we keep only a small summary record of the event (its settings and basic stats such as photo and participant counts) for your history and our records — the media itself is gone.</p>
+  <p>Your event's photos and videos are stored only to provide the service. They are <strong>automatically deleted after your event's retention period</strong> (the default window, extendable on paid plans). After deletion we keep only a small summary record of the event (its settings and basic stats such as photo and participant counts) for your history and our records — the media itself is gone. If a guest left us feedback about the app, we keep their rating and comment, but it is <strong>detached from them at the same moment</strong> — it survives as an anonymous comment about Snapdini that is no longer linked to any guest, name or email.</p>
   <p>You and your guests own your content. Please keep your own copies of anything important; once the retention period passes, deleted media cannot be recovered.</p>
 
   <h2>5. Emails &amp; how long we keep them</h2>

@@ -232,6 +232,22 @@ router.post('/refund-guest/:participantId', async (req: Request, res: Response) 
   }
 });
 
+// Guest feedback. Collecting it without a way to read it is just a table that fills up, so this
+// exists for the same reason the collection does.
+router.get('/guest-feedback', async (_req: Request, res: Response) => {
+  const rows = await all(
+    `SELECT gf.id, gf.rating, gf.comment, gf.created_at,
+            p.name AS guest_name, e.join_code, e.name AS event_name
+       FROM guest_feedback gf
+       LEFT JOIN participants p ON p.id = gf.participant_id
+       JOIN events e            ON e.id = gf.event_id
+      ORDER BY gf.created_at DESC
+      LIMIT 100`);
+  const stats = await get<{ n: number; avg: number | null }>(
+    `SELECT count(*) AS n, avg(rating)::float AS avg FROM guest_feedback WHERE rating IS NOT NULL`);
+  res.json({ feedback: rows, count: Number(stats?.n || 0), average: stats?.avg ?? null });
+});
+
 // Run the retention sweeper on demand (the same job the hourly timer runs) — purges events past
 // their retention window. Useful for ops + lets the test suite exercise purge deterministically.
 router.post('/run-sweep', async (_req: Request, res: Response) => {
