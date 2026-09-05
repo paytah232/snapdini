@@ -6,6 +6,7 @@ import { ZipArchive } from 'archiver';
 import { v4 as uuidv4 } from 'uuid';
 import { and, asc, count, desc, eq, inArray, ne, or } from 'drizzle-orm';
 import { db } from '../db';
+import { effectiveMaxPhotos, hasShotsLeft, photosRemaining as remainingFor } from '../allowance';
 import { events, participants, photos } from '../schema';
 import { stripImageMetadata, makeThumbnail, makeVideoPoster, thumbName } from '../images';
 import { probeVideoMeta } from '../slideshow';
@@ -117,13 +118,14 @@ function photoRow(p: PhotoRowInput, myParticipantId: string | null) {
 // ── Shared upload machinery (used by the single-shot POST / and the chunked /complete) ─────────
 
 type UploadParticipant = {
-  id: string; photosTaken: number; maxPhotos: number; isLocked: boolean;
+  id: string; photosTaken: number; maxPhotos: number; extraPhotos: number; isLocked: boolean;
   startsAt: number; expiresAt: number; eventId: string; moderationEnabled: boolean; videoSeconds: number;
 };
 
 async function participantForUpload(sessionToken: string): Promise<UploadParticipant | null> {
   const [p] = await db.select({
     id: participants.id, photosTaken: participants.photosTaken, maxPhotos: events.maxPhotos,
+    extraPhotos: participants.extraPhotos,
     isLocked: events.isLocked, startsAt: events.startsAt, expiresAt: events.expiresAt,
     eventId: events.id, moderationEnabled: events.moderationEnabled, videoSeconds: events.videoSeconds,
   }).from(participants).innerJoin(events, eq(events.id, participants.eventId))
@@ -148,7 +150,7 @@ function gateUpload(p: UploadParticipant, isVideo: boolean): { status: number; e
   if (p.startsAt && now < p.startsAt)     return { status: 403, error: "Event hasn't started yet" };
   if (p.isLocked)                         return { status: 403, error: 'Event is locked' };
   if (now > p.expiresAt)                  return { status: 410, error: 'Event has ended' };
-  if (p.photosTaken >= p.maxPhotos)       return { status: 403, error: 'No shots remaining' };
+  if (!hasShotsLeft(p))                   return { status: 403, error: 'No shots remaining' };
   return null;
 }
 
@@ -215,7 +217,7 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     source,
   });
   await db.update(participants).set({ photosTaken: p.photosTaken + 1 }).where(eq(participants.id, p.id));
-  return { success: true, photoId, status, pendingModeration: status === 'pending', photosRemaining: p.maxPhotos - p.photosTaken - 1 };
+  return { success: true, photoId, status, pendingModeration: status === 'pending', photosRemaining: Math.max(0, effectiveMaxPhotos(p) - p.photosTaken - 1) };
 }
 
 // ── POST /api/photos — single-shot upload (photos + videos under the chunk threshold) ──────────
@@ -229,7 +231,8 @@ router.delete('/:id', async (req: Request, res: Response) => {
 
   const [me] = await db
     .select({ id: participants.id, eventId: participants.eventId, photosTaken: participants.photosTaken,
-              isLocked: events.isLocked, expiresAt: events.expiresAt, maxPhotos: events.maxPhotos })
+              isLocked: events.isLocked, expiresAt: events.expiresAt, maxPhotos: events.maxPhotos,
+              extraPhotos: participants.extraPhotos })
     .from(participants)
     .innerJoin(events, eq(events.id, participants.eventId))
     .where(eq(participants.sessionToken, sessionToken));
@@ -257,7 +260,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
     try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch { /* already gone is fine */ }
   }
 
-  res.json({ success: true, photosRemaining: Math.max(0, Number(me.maxPhotos) - remaining) });
+  res.json({ success: true, photosRemaining: remainingFor({ ...me, photosTaken: remaining }) });
 });
 
 router.post('/', upload.single('photo'), async (req: Request, res: Response) => {

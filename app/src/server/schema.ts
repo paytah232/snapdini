@@ -70,6 +70,11 @@ export const events = pgTable('events', {
   slug: text('slug'),
   organizerCode: text('organizer_code').notNull(),
   maxPhotos: integer('max_photos').notNull().default(24),
+  // What guests may buy for themselves. Shots default ON (more shots are invisible to everyone
+  // else); video and frames default OFF, because both change what appears in the host's gallery.
+  guestMayBuyShots: boolean('guest_may_buy_shots').notNull().default(true),
+  guestMayBuyVideo: boolean('guest_may_buy_video').notNull().default(false),
+  guestMayBuyFrames: boolean('guest_may_buy_frames').notNull().default(false),
   revealMode: text('reveal_mode').notNull().default('instant'),
   revealDelayHours: integer('reveal_delay_hours').notNull().default(0),
   moderationEnabled: boolean('moderation_enabled').notNull().default(false),
@@ -158,6 +163,13 @@ export const participants = pgTable('participants', {
   email: text('email'),
   sessionToken: text('session_token').notNull().unique(),
   photosTaken: integer('photos_taken').notNull().default(0),
+  // Bought by the guest for THEMSELVES, on top of the event's roll — never a replacement, so a
+  // host lowering the event roll cannot remove something a guest paid for.
+  extraPhotos: integer('extra_photos').notNull().default(0),
+  upgradeEmail: text('upgrade_email'),
+  amountPaidCents: integer('amount_paid_cents').notNull().default(0),
+  stripePaymentIntent: text('stripe_payment_intent'),
+  requestedMoreAt: ms('requested_more_at'),
   joinedAt: ms('joined_at').notNull(),
 }, (t) => ({
   eventIdx: index('idx_participants_event').on(t.eventId),

@@ -399,6 +399,9 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
     isLocked:       !!event.isLocked,
     isRevealed:     isRevealed(event),
     allowDownloads: !!event.allowDownloads,
+    guestMayBuyShots: !!event.guestMayBuyShots,
+    guestMayBuyVideo: !!event.guestMayBuyVideo,
+    guestMayBuyFrames: !!event.guestMayBuyFrames,
     noFlash:        !!event.noFlash,
     theme:          event.theme ? JSON.parse(event.theme) : null,
     participantCount,
@@ -807,7 +810,9 @@ router.post('/:joinCode/email-gallery', requireOrganizer, async (req: Request, r
 router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Response) => {
   const ev = req.event!;
   const { name, blurb, startDate, startTime, revealMode,
-          revealDelayHours, moderationEnabled, allowDownloads, noFlash, timezone, ratingMode, slug } = req.body as {
+          revealDelayHours, moderationEnabled, allowDownloads, noFlash, timezone, ratingMode, slug,
+                  guestMayBuyShots, guestMayBuyVideo, guestMayBuyFrames } = req.body as {
+              guestMayBuyShots?: boolean; guestMayBuyVideo?: boolean; guestMayBuyFrames?: boolean;
     name?: string; blurb?: string; startDate?: string; startTime?: string;
     revealMode?: string; revealDelayHours?: number | string; moderationEnabled?: boolean;
     allowDownloads?: boolean; noFlash?: boolean; timezone?: string; ratingMode?: string; slug?: string;
@@ -921,7 +926,12 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
     ...clearedPurgedAt,
     name: newName, blurb: newBlurb, startsAt, expiresAt, revealMode: mode,
     revealDelayHours: revealDelay, moderationEnabled: moderation, allowDownloads: allowDl,
-    noFlash: noFlashV, timezone: tz, slug: newSlug, aspectRatios: aspects, ratingMode: rMode, purgeAt,
+    noFlash: noFlashV,
+    // Only written when the key is present: a settings save from an older client, or one that only
+    // touches the name, must not silently switch guest top-ups off.
+    ...(typeof guestMayBuyShots  === 'boolean' ? { guestMayBuyShots }  : {}),
+    ...(typeof guestMayBuyVideo  === 'boolean' ? { guestMayBuyVideo }  : {}),
+    ...(typeof guestMayBuyFrames === 'boolean' ? { guestMayBuyFrames } : {}), timezone: tz, slug: newSlug, aspectRatios: aspects, ratingMode: rMode, purgeAt,
   }).where(eq(events.id, ev.id));
 
   res.json({

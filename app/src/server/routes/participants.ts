@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { eq, or, and, count, sql } from 'drizzle-orm';
 import { db } from '../db';
+import { effectiveMaxPhotos, photosRemaining as remainingFor } from '../allowance';
 import { events, participants, photos } from '../schema';
 import * as email from '../email';
 import { baseUrl, escapeHtml } from '../lib';
@@ -50,7 +51,7 @@ router.post('/', async (req: Request, res: Response) => {
         participant:     { id: existing.id, name: newName, photosTaken: existing.photosTaken },
         sessionToken,
         joinCode:        event.joinCode,
-        photosRemaining: Math.max(0, event.maxPhotos - existing.photosTaken),
+        photosRemaining: remainingFor({ maxPhotos: event.maxPhotos, extraPhotos: existing.extraPhotos, photosTaken: existing.photosTaken }),
         eventName:       event.name,
         noFlash:         !!event.noFlash,
         recovered:       true,
@@ -85,7 +86,7 @@ router.post('/', async (req: Request, res: Response) => {
     participant:     { id: participant.id, name: participant.name, photosTaken: 0 },
     sessionToken,
     joinCode:        event.joinCode,
-    photosRemaining: event.maxPhotos,
+    photosRemaining: remainingFor({ maxPhotos: event.maxPhotos, photosTaken: 0 }),
     eventName:       event.name,
     noFlash:         !!event.noFlash,
   });
@@ -104,6 +105,8 @@ router.get('/me', async (req: Request, res: Response) => {
       email:          participants.email,
       photosTaken:    participants.photosTaken,
       maxPhotos:      events.maxPhotos,
+      extraPhotos:    participants.extraPhotos,
+      guestMayBuyShots: events.guestMayBuyShots,
       eventName:      events.name,
       joinCode:       events.joinCode,
       slug:           events.slug,
@@ -123,14 +126,16 @@ router.get('/me', async (req: Request, res: Response) => {
 
   res.json({
     participant:     { id: p.id, name: p.name, photosTaken: p.photosTaken, email: p.email },
-    photosRemaining: Math.max(0, p.maxPhotos - p.photosTaken),
+    photosRemaining: remainingFor(p),
     eventName:       p.eventName,
     joinCode:        p.joinCode,
     slug:            p.slug || null,
     startsAt:        p.startsAt,
     expiresAt:       p.expiresAt,
     isLocked:        !!p.isLocked,
-    maxPhotos:       p.maxPhotos,
+    maxPhotos:       effectiveMaxPhotos(p),
+      extraPhotos:     p.extraPhotos,
+      canBuyShots:     !!p.guestMayBuyShots,
     allowDownloads:  !!p.allowDownloads,
     noFlash:         !!p.noFlash,
   });

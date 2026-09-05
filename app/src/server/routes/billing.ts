@@ -2,7 +2,8 @@ import { Router, type Request, type Response } from 'express';
 import { eq, and, or } from 'drizzle-orm';
 import { billingEnabled, stripe, CURRENCY, publicBillingConfig, quote, brandingRemovable, BRANDING_REMOVAL_CENTS } from '../billing';
 import { db } from '../db';
-import { events } from '../schema';
+import { GUEST_SHOT_PACK, GUEST_SHOT_PACK_CENTS, GUEST_UPGRADE_CUTOFF_MS, effectiveMaxPhotos } from '../allowance';
+import { events, participants } from '../schema';
 import { sendWelcome } from '../lifecycle';
 
 const router = Router();
@@ -58,6 +59,74 @@ router.get('/session/:id', async (req: Request, res: Response) => {
 // Body: { joinCode, organizerCode }. Authorized by the event's organizer code. Builds
 // the line items dynamically from the event's entitlement (no pre-created Stripe products),
 // then returns the hosted-checkout URL to redirect to.
+// ── Guest self-upgrade ────────────────────────────────────────────────────────────────────────
+// A guest who has run out may top up their OWN roll, if the host allows it. Flat product, no
+// ladder: someone standing at a party with an empty roll should not be handed a pricing decision.
+router.post('/guest-upgrade', async (req: Request, res: Response) => {
+  if (!stripe) return res.status(503).json({ error: 'Payments are not enabled on this server' });
+  const sessionToken = String(req.body?.sessionToken || '');
+  if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
+
+  const [p] = await db.select({
+      id: participants.id, name: participants.name, email: participants.email,
+      extraPhotos: participants.extraPhotos, photosTaken: participants.photosTaken,
+      eventId: events.id, joinCode: events.joinCode, eventName: events.name,
+      maxPhotos: events.maxPhotos, expiresAt: events.expiresAt, isLocked: events.isLocked,
+      mayBuy: events.guestMayBuyShots,
+    }).from(participants).innerJoin(events, eq(events.id, participants.eventId))
+    .where(eq(participants.sessionToken, sessionToken));
+  if (!p) return res.status(403).json({ error: 'Invalid session' });
+  if (!p.mayBuy) return res.status(403).json({ error: 'The host has turned off guest top-ups for this event' });
+  if (p.isLocked) return res.status(423).json({ error: 'The host has locked this event' });
+
+  // Shots bought minutes before the camera closes are worthless and come back as a refund request.
+  const msLeft = Number(p.expiresAt) - Date.now();
+  if (msLeft <= 0) return res.status(410).json({ error: 'This event has ended' });
+  if (msLeft < GUEST_UPGRADE_CUTOFF_MS) {
+    return res.status(409).json({ error: 'This event is nearly over, so top-ups are closed' });
+  }
+
+  const base = BASE_URL;
+  const session = await stripe.checkout.sessions.create({
+    mode: 'payment',
+    // Stripe collects and verifies the email and sends the receipt; the webhook binds it, unless
+    // the guest already gave us one when they joined — theirs wins, because that is the address
+    // they will type to recover this session on another device.
+    customer_email: p.email || undefined,
+    line_items: [{
+      quantity: 1,
+      price_data: {
+        currency: CURRENCY,
+        unit_amount: GUEST_SHOT_PACK_CENTS,
+        product_data: { name: `${GUEST_SHOT_PACK} more shots — ${p.eventName}` },
+      },
+    }],
+    metadata: {
+      kind: 'guest_upgrade',            // the webhook branches on this; without it the money would
+      participantId: p.id,              // land on the HOST's event total and corrupt revenue reporting
+      eventId: p.eventId,
+      shots: String(GUEST_SHOT_PACK),
+    },
+    success_url: `${base}/join/${p.joinCode}?topup=1`,
+    cancel_url: `${base}/join/${p.joinCode}`,
+  });
+  res.json({ url: session.url, shots: GUEST_SHOT_PACK, amountCents: GUEST_SHOT_PACK_CENTS });
+});
+
+// A guest asking the host for more, rather than paying. Free, and the only option when the host has
+// switched top-ups off. One timestamp per guest — a counter just invites mashing the button.
+router.post('/guest-request-more', async (req: Request, res: Response) => {
+  const sessionToken = String(req.body?.sessionToken || '');
+  if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
+  const [p] = await db.select({ id: participants.id, requestedMoreAt: participants.requestedMoreAt })
+    .from(participants).where(eq(participants.sessionToken, sessionToken));
+  if (!p) return res.status(403).json({ error: 'Invalid session' });
+  if (!p.requestedMoreAt) {
+    await db.update(participants).set({ requestedMoreAt: Date.now() }).where(eq(participants.id, p.id));
+  }
+  res.json({ success: true });
+});
+
 router.post('/checkout', async (req: Request, res: Response) => {
   if (!billingEnabled || !stripe) return res.status(400).json({ error: 'Billing is not enabled' });
 
@@ -214,6 +283,35 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
     // Only grant entitlement once the session is actually settled (paid, or a genuine $0
     // comp via a 100%-off promo we created). Never on an unpaid/incomplete session.
     const settled = session.payment_status === 'paid' || session.payment_status === 'no_payment_required';
+    // A guest topping up their OWN roll. This MUST branch before the event handling below: that path
+    // keys purely on eventId and would credit the guest's A$3 to the HOST's event total, silently
+    // corrupting revenue reporting and the upgrade-difference maths.
+    if (settled && m.kind === 'guest_upgrade' && m.participantId) {
+      const shots = parseInt(m.shots, 10) || 0;
+      const paidNow = typeof session.amount_total === 'number' ? session.amount_total : 0;
+      const [cur] = await db.select({
+          extraPhotos: participants.extraPhotos,
+          amountPaidCents: participants.amountPaidCents,
+          stripePaymentIntent: participants.stripePaymentIntent,
+          email: participants.email,
+        }).from(participants).where(eq(participants.id, m.participantId));
+      if (!cur) return res.json({ received: true });
+      // Stripe retries webhooks; without this a redelivery grants the shots twice.
+      if (paymentIntent && cur.stripePaymentIntent === paymentIntent) return res.json({ received: true });
+      // The guest's OWN address wins — it is what they will type to recover this session on another
+      // device, so overwriting it with the card's billing email would strand their paid roll.
+      const stripeEmail = (session as { customer_details?: { email?: string | null } }).customer_details?.email || null;
+      await db.update(participants).set({
+        extraPhotos: (cur.extraPhotos || 0) + shots,
+        amountPaidCents: (cur.amountPaidCents || 0) + paidNow,
+        stripePaymentIntent: paymentIntent,
+        upgradeEmail: stripeEmail,
+        email: cur.email || stripeEmail,
+      }).where(eq(participants.id, m.participantId));
+      console.log(`[billing] guest top-up: +${shots} shots to participant ${m.participantId} (${paidNow}c)`);
+      return res.json({ received: true });
+    }
+
     if (eventId && settled) {
       // Record the ACTUAL amount Stripe charged (amount_total, after any promo/discount) — NOT
       // the pre-discount quote in metadata. Trusting metadata would credit a $0 promo checkout as
