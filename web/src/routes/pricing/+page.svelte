@@ -72,7 +72,7 @@
   <div class="tiers">
     {#each guestTiers as t}
       <div class="tier" class:highlight={t.highlight}>
-        {#if t.highlight}<div class="badge">Most popular</div>{/if}
+        {#if t.badge}<div class="badge" class:soft={!t.highlight}>{t.badge}</div>{/if}
         <div class="tier-guests">{t.guests}</div>
         <div class="tier-price">{t.price}</div>
         <div class="tier-note">{t.note}</div>
@@ -151,6 +151,9 @@
   .tier { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 22px 16px; text-align: center;
     display: flex; flex-direction: column; gap: 8px; position: relative; }
   .tier.highlight { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  /* A non-highlighted card still earns a ribbon (Free forever, Best value) — quieter, so the one
+     tier we are actually steering people to keeps the emphasis. */
+  .badge.soft { background: var(--surface-2, #23201a); color: var(--text); border: 1px solid var(--border); }
   .badge { position: absolute; top: -10px; left: 50%; transform: translateX(-50%); background: var(--accent); color: var(--accent-ink,#111);
     font-size: .64rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
   .tier-guests { font-size: .9rem; font-weight: 700; }
