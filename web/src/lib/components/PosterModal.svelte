@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, createEventDispatcher } from 'svelte';
+  import { onMount, onDestroy, createEventDispatcher, tick } from 'svelte';
   import { modalFocus } from '$lib/ui';
   import { showToast } from '$lib/toast';
   import { savePoster, type EventTheme } from '$lib/events';
@@ -100,6 +100,79 @@
   // Keep the default text colours readable as the background changes — until the organizer edits a
   // colour (colorsLocked). The void refs make Svelte re-run this when bgMode/cBg/theme change.
   $: if (!colorsLocked) { void bgMode; void cBg; void theme; ({ cHeadline, cMessage, cSteps, cCode, cFooter } = themeDefaults()); }
+  // ── Undo / redo ───────────────────────────────────────────────────────────
+  // The editor writes straight to the live design and auto-saves, so a mis-drag or a colour picked
+  // by accident is immediately real with nothing to step back to. cfg is already the complete
+  // serialisable state, so snapshots are cheap and exact.
+  //
+  // Granularity is the point: a drag emits a change per frame, and typing one per keystroke, so
+  // both are collapsed into ONE step — a drag snapshots at pointerdown, everything else coalesces
+  // over a short idle window. Undoing then feels like undoing an action rather than a frame.
+  const UNDO_LIMIT = 40;
+  let undoStack: string[] = [];
+  let redoStack: string[] = [];
+  let prevCfg = '';
+  let applyingHistory = false;
+  let burstBefore: string | null = null;
+  let burstTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function pushUndo(snap: string) {
+    if (!snap || snap === undoStack[undoStack.length - 1]) return;
+    undoStack = [...undoStack, snap].slice(-UNDO_LIMIT);
+    redoStack = [];                       // a new edit forks history
+  }
+  /** Close the current coalescing window immediately — used at drag start so the drag is one step. */
+  function commitBurst() {
+    clearTimeout(burstTimer);
+    if (burstBefore !== null) { pushUndo(burstBefore); burstBefore = null; }
+  }
+  function applyCfg(c: Record<string, any>) {
+    headline = c.headline; message = c.message; stepsText = c.stepsText;
+    bgMode = c.bgMode; cBg = c.cBg; codeDisplay = c.codeDisplay; showFooterUrl = c.showFooterUrl;
+    layout = cloneLayout(c.layout);
+    colorsLocked = c.colorsLocked;
+    cHeadline = c.cHeadline; cMessage = c.cMessage; cSteps = c.cSteps; cCode = c.cCode; cFooter = c.cFooter;
+  }
+  async function step(from: string[], to: string[], setFrom: (v: string[]) => void, setTo: (v: string[]) => void) {
+    if (!from.length) return;
+    commitBurst();
+    const snap = from[from.length - 1];
+    setFrom(from.slice(0, -1));
+    setTo([...to, JSON.stringify(cfg)].slice(-UNDO_LIMIT));
+    applyingHistory = true;
+    applyCfg(JSON.parse(snap));
+    await tick();
+    bounds = measureBounds();
+    scheduleRedraw();
+    prevCfg = JSON.stringify(cfg);
+    applyingHistory = false;
+    persist();
+  }
+  const undo = () => step(undoStack, redoStack, (v) => (undoStack = v), (v) => (redoStack = v));
+  const redo = () => step(redoStack, undoStack, (v) => (redoStack = v), (v) => (undoStack = v));
+
+  // Watch the design and open a coalescing window on the first change of a burst.
+  $: {
+    const cur = JSON.stringify(cfg);
+    if (!applyingHistory && prevCfg && cur !== prevCfg) {
+      if (dragKey) {
+        // pointerdown already snapshotted; a drag must not add a step per frame
+      } else {
+        if (burstBefore === null) burstBefore = prevCfg;
+        clearTimeout(burstTimer);
+        burstTimer = setTimeout(() => { if (burstBefore !== null) { pushUndo(burstBefore); burstBefore = null; } }, 450);
+      }
+    }
+    prevCfg = cur;
+  }
+
+  function onKeydown(e: KeyboardEvent) {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const k = e.key.toLowerCase();
+    if (k === 'z' && !e.shiftKey) { e.preventDefault(); void undo(); }
+    else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); void redo(); }
+  }
+
   // Auto-save the design to the DB (debounced) so it persists across devices.
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   function persist() {
@@ -312,6 +385,9 @@
   $: bounds = (layout, headline, message, stepsText, codeDisplay, showFooterUrl, mounted, measureBounds());
 
   function startDrag(key: ElKey, mode: 'move' | 'resize', e: PointerEvent) {
+    // Before anything moves, so the whole drag undoes as one action.
+    commitBurst();
+    pushUndo(JSON.stringify(cfg));
     e.preventDefault(); e.stopPropagation();
     dragKey = key;
     selectedKey = key;
@@ -429,6 +505,8 @@
 </script>
 
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
+<svelte:window on:keydown={onKeydown} />
+
 <div class="back" on:click|self={() => dispatch('close')} role="dialog" aria-modal="true" aria-label="Event poster">
   <div class="sheet" class:fs={fsEdit} tabindex="-1" use:modalFocus>
     <div class="head"><span>{fsEdit ? 'Arrange layout' : 'Event poster'}</span>
@@ -487,6 +565,14 @@
         <div class="bg-row">
           <button class="seg" on:click={() => (fsEdit = true)}>⛶ Full-screen arrange</button>
           <button class="seg" on:click={resetLayout}>↺ Reset layout</button>
+        </div>
+        <!-- Undo covers everything in the design, not just the layout — Reset layout only puts the
+             boxes back. Ctrl/⌘+Z works too. -->
+        <div class="bg-row">
+          <button class="seg" on:click={undo} disabled={!undoStack.length}
+                  title="Undo the last change (Ctrl/⌘+Z)">↶ Undo</button>
+          <button class="seg" on:click={redo} disabled={!redoStack.length}
+                  title="Redo (Ctrl/⌘+Shift+Z)">↷ Redo</button>
         </div>
       </div>
 

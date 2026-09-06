@@ -356,6 +356,8 @@
   $: guestBuyOn = (ev as unknown as { guestMayBuyShots?: boolean } | null)?.guestMayBuyShots !== false;
 
   $: guestAskOn = (ev as unknown as { guestMayRequest?: boolean } | null)?.guestMayRequest !== false;
+  // The server has always counted these; nothing rendered it, so guests could ask into a void.
+  $: guestRequests = Number((ev as unknown as { upgradeRequests?: number } | null)?.upgradeRequests ?? 0);
   // Face matching defaults OFF and stays off unless a host deliberately turns it on.
   $: faceOn = (ev as unknown as { faceMatchingEnabled?: boolean } | null)?.faceMatchingEnabled === true;
   // With no MACHINE_LEARNING_URL on the server there is nothing behind this switch, so the host is
@@ -825,7 +827,11 @@
         <button class="btn ghost sm grow" on:click={() => copy(joinUrl, 'Join link copied!')}>Copy join link</button>
         <button class="btn ghost sm grow" on:click={downloadQr}>Save QR</button>
       </div>
-      <button class="btn primary sm full mt" on:click={() => (posterOpen = true)} disabled={!qrCode}>🎩 Create poster</button>
+      <!-- "Create" is wrong once one exists — the button reopens a saved design, it does not start
+           a new one, and the label was the only thing telling you whether you had saved anything. -->
+      <button class="btn primary sm full mt" on:click={() => (posterOpen = true)} disabled={!qrCode}>
+        {ev?.posterConfig ? '🎩 Manage poster' : '🎩 Create poster'}
+      </button>
       <button class="btn ghost sm full mt" on:click={() => copy(galleryUrl, 'Gallery link copied!')}>🖼 Copy gallery-only link</button>
 
       {#if ev.emailEnabled}
@@ -880,8 +886,17 @@
 
         <div class="toggle-row">
           <div>
-            <div class="t-label">Guests can ask you for more</div>
-            <div class="t-sub">Shows on your dashboard. Turn off if you'd rather not be asked mid-event.</div>
+            <!-- "more" on its own said nothing — more of what? It is shots, and the ask is a
+                 signal rather than an automatic grant, so the copy has to say both. -->
+            <div class="t-label">Guests can ask you for more shots</div>
+            <div class="t-sub">
+              A guest who runs out can send you a request — it costs them nothing and grants nothing
+              on its own. You'll see how many have asked, and you decide by raising
+              <b>Shots per guest</b> in Settings, which lifts the roll for everyone.
+              {#if guestRequests > 0}
+                <strong class="req-flag">{guestRequests} {guestRequests === 1 ? 'guest has' : 'guests have'} asked so far.</strong>
+              {/if}
+            </div>
           </div>
           <label class="switch">
             <input type="checkbox" checked={guestAskOn}
@@ -1147,6 +1162,14 @@
             {#if sModeration && pendingPhotos.length}<strong class="pending-flag">{pendingPhotos.length} pending approval</strong> · {/if}
             {sModeration ? 'Approve, reject, favourite and rate' : 'Favourite, rate and reject'} — in a focused full-screen view.
           </p>
+          <!-- Hosts assume the gallery link is all-or-nothing and hand out the lot. Curation plus
+               share links means it never has to be, and this card is where they would find out. -->
+          <p class="hint review-why">
+            You don't have to share everything. Star the ones worth keeping, then create a
+            <strong>share link</strong> for just those — favourites only, or a hand-picked set.
+            Make as many as you like: one for the family, one for work, one for the group chat.
+            Each link is separate, so you can revoke one without touching the others.
+          </p>
         </div>
         <div class="review-arrow">→</div>
       </a>
@@ -1357,6 +1380,7 @@
   .review-icon { font-size: 1.5rem; line-height: 1; }
   .review-text { flex: 1; }
   .review-text .hint { margin: 0; }
+  .review-why { margin-top: 6px; opacity: .95; }
   .review-arrow { font-size: 1.3rem; color: var(--text-muted); }
   .pending-flag { color: var(--accent); }
 
@@ -1442,6 +1466,7 @@
   input[type='file'] { padding: 8px; background: var(--surface-2); border: 1px solid var(--border);
     border-radius: var(--radius-sm); color: var(--text); font: inherit; }
 
+  .req-flag { display: block; margin-top: 4px; color: var(--accent, #f0b429); }
   .aspect-options { display: flex; flex-wrap: wrap; gap: 8px; }
   .shape-notice { margin: 8px 0 0; font-size: .82rem; color: var(--accent, #f0b429); }
   .aspect-opt { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; font-size: 0.82rem;

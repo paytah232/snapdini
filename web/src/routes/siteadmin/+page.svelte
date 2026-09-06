@@ -18,6 +18,15 @@
   let usrLoading = false;
   let usrDebounce: ReturnType<typeof setTimeout> | undefined;
 
+  async function loadEvents(kind: 'real' | 'demo') {
+    evKind = kind; evPage = 1;
+    try {
+      const r = await api<{ events: any[]; counts: { real: number; demo: number } }>(`/api/admin/events?kind=${kind}`);
+      events = r.events ?? [];
+      evCounts = r.counts ?? evCounts;
+    } catch { /* keep the last good list */ }
+  }
+
   async function loadUsers() {
     usrLoading = true;
     try {
@@ -100,6 +109,10 @@
   let evQuery = '', usrQuery = '', msgQuery = '';
   let evPage = 1, usrPage = 1, msgPage = 1;
   // Hide "finished" rows by default to keep the page clean: ended/purged events, handled messages.
+  // Three tabs, not two. Demo rolls are the majority of rows on a live instance and none of them
+  // are anybody's event, so "All" means all REAL events and demos get their own tab.
+  let evKind: 'real' | 'demo' = 'real';
+  let evCounts = { real: 0, demo: 0 };
   let evShowInactive = false, msgShowDone = false;
   const now = Date.now();
   const match = (hay: (string | number | null | undefined)[], q: string) =>
@@ -108,7 +121,8 @@
   const paginate = <T,>(list: T[], page: number) => list.slice((page - 1) * PAGE, page * PAGE);
   const pageCount = (n: number) => Math.max(1, Math.ceil(n / PAGE));
 
-  $: evFiltered = events.filter((e) => match([e.name, e.slug, e.join_code, e.owner], evQuery) && (evShowInactive || eventActive(e)));
+  $: evFiltered = events.filter((e) => match([e.name, e.slug, e.join_code, e.owner], evQuery)
+    && (evKind === 'demo' || evShowInactive || eventActive(e)));
   $: msgFiltered = contactMsgs.filter((m) => match([m.name, m.email, m.message], msgQuery) && (msgShowDone || !m.handled));
   // Reset to page 1 whenever a query or filter changes (and clamp if a page goes out of range).
   $: { void evQuery; void evShowInactive; evPage = 1; }
@@ -245,11 +259,12 @@
       if (!user?.isAdmin) { loading = false; return; }
       const [ov, ev, us] = await Promise.all([
         api<{ stats: Record<string, number> }>('/api/admin/overview'),
-        api<{ events: any[] }>('/api/admin/events'),
+        api<{ events: any[]; counts: { real: number; demo: number } }>(`/api/admin/events?kind=${evKind}`),
         api<{ users: any[]; total: number }>('/api/admin/users?limit=' + PAGE),
       ]);
       stats = ov.stats;
       events = ev.events;
+      evCounts = ev.counts ?? { real: events.length, demo: 0 };
       users = us.users;
       usrTotal = us.total ?? us.users.length;
       await loadPromos();
@@ -353,8 +368,13 @@
       <div class="toolbar">
         <input class="search" placeholder="Search events — name, code, owner…" bind:value={evQuery} />
         <div class="seg">
-          <button class="seg-btn" class:on={!evShowInactive} on:click={() => (evShowInactive = false)}>Active <small>({activeEventCount})</small></button>
-          <button class="seg-btn" class:on={evShowInactive} on:click={() => (evShowInactive = true)}>All <small>({events.length})</small></button>
+          <button class="seg-btn" class:on={evKind === 'real' && !evShowInactive}
+                  on:click={() => { evShowInactive = false; if (evKind !== 'real') loadEvents('real'); }}>Active <small>({activeEventCount})</small></button>
+          <button class="seg-btn" class:on={evKind === 'real' && evShowInactive}
+                  on:click={() => { evShowInactive = true; if (evKind !== 'real') loadEvents('real'); }}>All <small>({evCounts.real})</small></button>
+          <!-- Demo rolls are nobody's event, so they get their own tab rather than padding "All". -->
+          <button class="seg-btn" class:on={evKind === 'demo'}
+                  on:click={() => loadEvents('demo')}>Demos <small>({evCounts.demo})</small></button>
         </div>
       </div>
       <div class="table-scroll">
@@ -390,7 +410,7 @@
                 </td>
               </tr>
             {/each}
-            {#if !evFiltered.length}<tr><td colspan="6" class="muted">{events.length ? (evShowInactive ? 'No matches.' : 'No active events — switch to “All”.') : 'No events yet.'}</td></tr>{/if}
+            {#if !evFiltered.length}<tr><td colspan="6" class="muted">{events.length ? (evKind === 'demo' || evShowInactive ? 'No matches.' : 'No active events — switch to “All”.') : (evKind === 'demo' ? 'No demo rolls.' : 'No events yet.')}</td></tr>{/if}
           </tbody>
         </table>
       </div>

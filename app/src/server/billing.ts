@@ -51,7 +51,10 @@ export const FRAME_PACK_CENTS = 500;    // $5
 // paid — even for ≤10-guest free events — UNLESS the event has already spent over $50, then free.
 // Removing the Snapdini intro/outro frames is ALWAYS a paid add-on on hosted plans, regardless of
 // event size or how much has been spent. Self-host (billing off) gets it free like everything else.
-export const BRANDING_REMOVAL_CENTS = 100;            // $1
+// $5. At $1 this was barely worth processing: Stripe AU on an international card is ~3.5% + $0.30,
+// which on a dollar is ~33% of the sale. At $5 the fee is under 10%, and it sits level with the
+// frame pack rather than reading as an afterthought.
+export const BRANDING_REMOVAL_CENTS = 500;            // $5
 export function brandingRemovable(ev: { brandingRemovalPaid?: boolean | null }): boolean {
   if (!billingEnabled) return true;            // self-host: everything is free (no payment rail)
   return !!ev.brandingRemovalPaid;             // hosted: only once the add-on has been bought

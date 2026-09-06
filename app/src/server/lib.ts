@@ -47,3 +47,7 @@ export const RESCHEDULE_WINDOW_MS = 183 * 24 * 60 * 60 * 1000;   // ~6 months
 // cutoff and the reschedule cutoff are the same instant, so an hourly sweep can delete the event on
 // the very last day the organizer is still entitled to move it.
 export const RESCHEDULE_RETENTION_GRACE_MS = 24 * 60 * 60 * 1000;   // one day
+
+/** Marks the public "see what it looks like" demo events. A demo is an event with this name and
+ *  NO owner — there is no is_demo column, so anything filtering demos derives it from those two. */
+export const DEMO_NAME = 'Demo Roll 🎞️';

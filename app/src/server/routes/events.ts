@@ -11,7 +11,7 @@ import { faceMatchingAvailable } from '../faces';
 import * as email from '../email';
 import * as auth from '../auth';
 import * as cleanup from '../cleanup';
-import { isRevealed, baseUrl, escapeHtml, RESCHEDULE_WINDOW_MS } from '../lib';
+import { DEMO_NAME, RESCHEDULE_WINDOW_MS, baseUrl, escapeHtml, isRevealed } from '../lib';
 import { referrerFromCookie, isSelfReferral } from '../referrals';
 import { startSlideshow, slideshowInfo, toggleSlideshowFavourite, deleteSlideshow, slideshowFile, streamSlideshow1080 } from '../slideshow';
 import { billingEnabled, quote, FREE_ALL_GUESTS, brandingRemovable, RETENTION_PAID_DAYS } from '../billing';
@@ -23,7 +23,7 @@ const router = Router();
 // Photos + event are auto-deleted this many days after the event ends (retention).
 // Plan-scaled windows arrive with billing; this is the self-host/free default.
 const RETENTION_DAYS = parseInt(process.env.RETENTION_DAYS || '7');
-const DEMO_NAME = 'Demo Roll 🎞️'; // marks the public "see what it looks like" demo events
+// DEMO_NAME lives in ../lib so the admin listing can filter on the same definition.
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Global video length (self-host / billing-off default; per-event entitlement when billing on).
 const GLOBAL_VIDEO_SECONDS = parseInt(process.env.VIDEO_MAX_SECONDS || '0');

@@ -289,13 +289,15 @@
 {:else if ev}
   <!-- ── Header ── -->
   <header class="hd">
-    <a class="back" href={backHref()}>← Manage</a>
+    <div class="hd-side"><a class="back" href={backHref()}>← Manage</a></div>
     <div class="hd-name" title={ev.name}>{ev.name}</div>
-    <div class="vtoggle">
-      <button class="vbtn" class:active={view === 'cards'} on:click={() => (view = 'cards')}>Cards</button>
-      <button class="vbtn" class:active={view === 'single'} on:click={() => (view = 'single')} disabled={!filtered.length}>Single</button>
+    <div class="hd-side right">
+      <div class="vtoggle">
+        <button class="vbtn" class:active={view === 'cards'} on:click={() => (view = 'cards')}>Cards</button>
+        <button class="vbtn" class:active={view === 'single'} on:click={() => (view = 'single')} disabled={!filtered.length}>Single</button>
+      </div>
+      <button class="ss-btn" class:active={view === 'slideshow'} on:click={() => (view = view === 'slideshow' ? 'cards' : 'slideshow')}>🎬 Slideshow</button>
     </div>
-    <button class="ss-btn" class:active={view === 'slideshow'} on:click={() => (view = view === 'slideshow' ? 'cards' : 'slideshow')}>🎬 Slideshow</button>
   </header>
 
   <!-- ── Filter tabs + actions (hidden in the slideshow view) ── -->
@@ -440,11 +442,22 @@
 <style>
   .state { text-align: center; padding: 60px 16px; color: var(--text-muted); }
 
-  .hd { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 12px;
+  /* Grid, not flex. As a flex row the title had flex:1 between a narrow back link and a wide
+     button group, so it centred in the LEFTOVER space and sat visibly left of true centre. Equal
+     1fr side tracks put the middle column in the actual middle of the bar regardless of what the
+     sides contain. */
+  .hd { position: sticky; top: 0; z-index: 10; display: grid; align-items: center; gap: 12px;
+    grid-template-columns: 1fr auto 1fr;
     padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  .hd-side { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .hd-side.right { justify-content: flex-end; }
   .back { text-decoration: none; color: var(--text); font-weight: 700; font-size: 0.85rem; white-space: nowrap; }
   .back:hover { color: var(--accent); }
-  .hd-name { flex: 1; font-weight: 800; font-size: 0.95rem; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hd-name { font-weight: 800; font-size: 0.95rem; text-align: center; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  /* On a narrow screen the sides need every pixel, so the name steps out rather than squeezing
+     the controls it sits between. */
+  @media (max-width: 560px) { .hd { grid-template-columns: auto 1fr; } .hd-name { display: none; } }
   .vtoggle { display: flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; flex-shrink: 0; }
   .vbtn { background: transparent; color: var(--text-muted); border: none; padding: 8px 12px; min-height: 40px; font: inherit; font-size: 0.8rem; font-weight: 700; cursor: pointer; }
   .vbtn.active { background: var(--accent); color: var(--accent-ink, #111); }

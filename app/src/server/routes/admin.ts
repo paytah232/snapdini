@@ -5,6 +5,7 @@ import { get, all, run } from '../db';
 import { billingEnabled, stripe, CURRENCY } from '../billing';
 import { sweep } from '../cleanup';
 import { UPLOADS_DIR } from '../paths';
+import { DEMO_NAME } from '../lib';
 
 // ── Site-admin API ────────────────────────────────────────────────────────────
 // Every route is gated by requireAdmin (signed-in user with the is_admin flag).
@@ -117,11 +118,23 @@ router.get('/referral-funnel', async (_req: Request, res: Response) => {
 });
 
 // Recent events (newest first).
-router.get('/events', async (_req: Request, res: Response) => {
+// Events. `kind` exists because demo rolls are the majority of rows on a live instance and none of
+// them are anybody's event — leaving them in "All" buries the real ones. There is no is_demo
+// column: a demo is the demo name with NO owner, so it is derived here from the same definition
+// the public event route uses.
+router.get('/events', async (req: Request, res: Response) => {
+  const kind = String(req.query.kind || 'real');   // real | demo | all
+  const demoExpr = '(e.owner_user_id IS NULL AND e.name = ?)';
+  const params: unknown[] = [DEMO_NAME];
+  let where = ' WHERE 1=1';
+  if (kind === 'real') { where += ` AND NOT ${demoExpr}`; params.push(DEMO_NAME); }
+  if (kind === 'demo') { where += ` AND ${demoExpr}`;     params.push(DEMO_NAME); }
+
   // Counts come from pre-aggregated subqueries joined on event_id (one grouped index scan each)
   // rather than a correlated count per row.
   const events = await all(
     `SELECT e.id, e.join_code, e.slug, e.name, e.guest_cap, e.video_seconds, e.paid,
+            ${demoExpr} AS is_demo,
             e.amount_paid_cents, e.refunded_at,
             e.organizer_code, e.purged_at, e.purge_at, e.expires_at, e.created_at,
             COALESCE(pc.n, 0) AS participants,
@@ -130,11 +143,17 @@ router.get('/events', async (_req: Request, res: Response) => {
        FROM events e
        LEFT JOIN users u ON u.id = e.owner_user_id
        LEFT JOIN (SELECT event_id, count(*) AS n FROM participants GROUP BY event_id) pc ON pc.event_id = e.id
-       LEFT JOIN (SELECT event_id, count(*) AS n FROM photos GROUP BY event_id) phc ON phc.event_id = e.id
-      ORDER BY e.created_at DESC
-      LIMIT 200`,
-  );
-  res.json({ events });
+       LEFT JOIN (SELECT event_id, count(*) AS n FROM photos GROUP BY event_id) phc ON phc.event_id = e.id`
+    + where +
+    ` ORDER BY e.created_at DESC
+      LIMIT 200`, params);
+
+  // Tab counts, so the page can label them without fetching every row.
+  const tallies = await get<{ real: number; demo: number }>(
+    `SELECT count(*) FILTER (WHERE NOT ${demoExpr}) AS real,
+            count(*) FILTER (WHERE ${demoExpr})     AS demo
+       FROM events e`, [DEMO_NAME, DEMO_NAME]);
+  res.json({ events, counts: { real: Number(tallies?.real || 0), demo: Number(tallies?.demo || 0) } });
 });
 
 // Users, paginated and filterable. `status` and `has` exist because "who signed up but never

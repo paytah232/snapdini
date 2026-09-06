@@ -193,9 +193,9 @@
           <div class="bo-row">
             <div class="bo-text">
               <b>Remove the Snapdini intro &amp; outro frames</b>
-              <span class="bo-sub">A one-off <b>{money(st.brandingPriceCents ?? 100)}</b> add-on for this event — unlock once and every render skips the intro &amp; outro.</span>
+              <span class="bo-sub">A one-off <b>{money(st.brandingPriceCents ?? 500)}</b> add-on for this event — unlock once and every render skips the intro &amp; outro.</span>
             </div>
-            <button class="btn primary sm" on:click={buyBranding} disabled={brandingBusy}>{brandingBusy ? 'Starting…' : `Unlock · ${money(st.brandingPriceCents ?? 100)}`}</button>
+            <button class="btn primary sm" on:click={buyBranding} disabled={brandingBusy}>{brandingBusy ? 'Starting…' : `Unlock · ${money(st.brandingPriceCents ?? 500)}`}</button>
           </div>
         {/if}
       </div>
