@@ -84,6 +84,13 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
 - [/] **No mid-video freeze** with video clips included; the logo chip is the **same gold** as the site.
 - [/] **Recent slideshows** list: play / **⬇ download** / **★ favourite-to-keep** / **🗑 delete**. *(non-favourites auto-purge after ~a day; favourites kept to retention)*
 
+## Manager links (the URL shape that actually works)
+The manage page is `/admin/<joinCode>?code=<organizerCode>` — the path segment is the **join code**,
+and the organizer code rides in `?code=`. Passing the organizer code as the path segment looks right
+and renders a page, but the event lookup 404s and you are dropped at the "enter your code" prompt.
+Once used, the code is cached per-event in localStorage, so later visits to `/admin/<joinCode>` work
+on their own.
+
 ## 10. Site admin
 - [/] Sign in as admin → **🎩 Admin** → `/siteadmin` (distinct styling, back-to-events).
 - [/] **Events table:** narrower/stacked — name + **join code beneath**, **owner/guests/photos stacked**, **status + purge timing** (e.g. "purges ~5d" / "purged …"); Active/All filter, search, pagination, **Manage →** override.

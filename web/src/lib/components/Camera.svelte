@@ -364,6 +364,10 @@
   let benchStep: VidQuality | null = null;
   let benchResult: { results: Record<string, number>; best: VidQuality } | null = null;
   let benchPrompt = false;
+  let benchStored = false;
+  // How long a camera measurement is trusted before we offer to take it again. Long enough not to
+  // nag between events, short enough to catch a new phone or a browser that changed its encoder.
+  const BENCH_TTL_MS = 30 * 24 * 3600 * 1000;
   // Guest feedback lives in GuestFeedback.svelte, shared with the gallery page. The flag is seeded
   // from /me so answering on either surface stops the ask on both.
   let feedbackDone = false;
@@ -475,7 +479,18 @@
     // First time on video for this device: offer the capability check before they shoot anything
     // they cannot re-take. Cached, so it is asked once and never again.
     if (v) {
-      try { if (!localStorage.getItem('snap_vidbench')) benchPrompt = true; } catch { /* ignore */ }
+      // Offer it when we have never measured this device, or when what we measured has gone stale.
+      // A skip is respected for the same window rather than forever.
+      try {
+        const raw = localStorage.getItem('snap_vidbench');
+        benchStored = !!raw;
+        let stale = true;
+        if (raw) {
+          const at = Number(JSON.parse(raw)?.at || 0);
+          stale = !at || Date.now() - at > BENCH_TTL_MS;
+        }
+        if (stale) benchPrompt = true;
+      } catch { /* ignore */ }
     }
     videoMode = v;
     // In phone mode, switching to video means "open the phone's camera" — that is the whole point
@@ -1320,6 +1335,12 @@
                   <option value="smooth">Smooth — 720p (older phones)</option>
                     <option value="phone">My phone's camera — best quality, opens your camera app</option>
                 </select>
+                <!-- The benchmark used to exist ONLY as a one-time prompt keyed on a localStorage
+                     flag, so once it had been run or skipped there was no way back to it on any
+                     event, ever. It measures the device, so re-running is the useful thing. -->
+                <button class="sm-link" on:click={() => { settingsOpen = false; benchResult = null; void runVideoBenchmark(); }}>
+                  {benchStored ? 'Re-check my camera' : 'Check my camera'}
+                </button>
               </div>
               <div class="sm-row col">
                 <span class="sm-labelwrap">
@@ -1441,7 +1462,7 @@
           <div class="bench-title">Check what your phone can record?</div>
           <div class="bench-sub">A few seconds. Phones vary a lot, and it's better to find out now than halfway through a clip.</div>
           <div class="bench-actions">
-            <button class="btn ghost sm" on:click={() => { benchPrompt = false; try { localStorage.setItem('snap_vidbench', '{"skipped":true}'); } catch { /* ignore */ } }}>Skip</button>
+            <button class="btn ghost sm" on:click={() => { benchPrompt = false; try { localStorage.setItem('snap_vidbench', JSON.stringify({ skipped: true, at: Date.now() })); } catch { /* ignore */ } }}>Skip</button>
             <button class="btn primary sm" on:click={() => { benchPrompt = false; void runVideoBenchmark(); }}>Check my camera</button>
           </div>
         {/if}
@@ -1780,6 +1801,10 @@
   }
   .full-gallery:hover { border-color: var(--accent); }
   .oos-fb { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border, #3a3630); }
+  .sm-link {
+    background: none; border: none; cursor: pointer; padding: 6px 0 0; text-align: left;
+    color: var(--accent, #f0b429); font-size: .82rem; text-decoration: underline;
+  }
   .fb-trigger {
     background: none; border: none; cursor: pointer; font-size: .85rem; padding: 2px 4px;
     color: var(--text-muted, #a39b8c); text-decoration: underline;
