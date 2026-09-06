@@ -9,6 +9,7 @@ import { BASE, api, createEvent, dbq, group, join, ok, org, spec, upload } from 
 
 const FACE_A = path.join(import.meta.dirname, '..', '..', 'loadtest', 'face_a.jpg');
 const FACE_B = path.join(import.meta.dirname, '..', '..', 'loadtest', 'face_b.jpg');
+const FACE_A_PHONE = path.join(import.meta.dirname, '..', '..', 'loadtest', 'face_a_phone.jpg');
 const haveFaces = fs.existsSync(FACE_A) && fs.existsSync(FACE_B);
 
 async function mlUp() {
@@ -91,6 +92,23 @@ await spec('14-face-matching', async () => {
 
     const res = await enrol(tok, FACE_A);
     ok('enrolling with consent succeeds', res.status === 200, `status ${res.status} ${res.text?.slice(0, 90)}`);
+
+    // A REAL phone selfie is portrait-by-EXIF, and the ML service ignores EXIF entirely — it scored
+    // a pixel-rotated copy and an orientation=6 copy identically. Unstraightened, that costs enough
+    // detection score to be rejected outright ("we couldn't find a face"), and any embedding that
+    // does survive is of a sideways face and matches nothing upright. This is the case that failed
+    // on a real handset, so it is pinned with a real EXIF-rotated fixture.
+    if (fs.existsSync(FACE_A_PHONE)) {
+      const pt = (await join(ev.joinCode, 'Phone Selfie')).json?.sessionToken;
+      const rot = await enrol(pt, FACE_A_PHONE);
+      ok('an EXIF-rotated phone selfie enrols instead of 422-ing',
+         rot.status === 200, `status ${rot.status} ${rot.text?.slice(0, 90)}`);
+      ok('and it still finds the photos that face is in',
+         Number(rot.json?.matched || 0) > 0, JSON.stringify(rot.json));
+      await api('DELETE', '/api/faces/enrol', { body: { sessionToken: pt } });
+    } else {
+      ok('rotated-selfie check skipped — fixture absent', true);
+    }
     ok('it reports what it scanned and matched',
        typeof res.json?.matched === 'number' && typeof res.json?.scanned === 'number', JSON.stringify(res.json));
 

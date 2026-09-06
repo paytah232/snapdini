@@ -122,12 +122,12 @@
   // Gallery filter — when the host reveals everyone's shots, default to the guest's own ('mine')
   // but let them switch to All / Others. Photos already arrive newest-first from the server.
   // 'me' = photos face matching says this guest appears in; only offered once they have enrolled.
-  let galleryFilter: 'mine' | 'all' | 'others' = 'mine';
+  // This screen is the guest's OWN roll and nothing else. Browsing everyone's photos is what the
+  // shared gallery is for, and having both was two half-galleries instead of one of each.
+  // othersCount survives because it answers "is there anything over there worth linking to".
   $: ownCount = galleryPhotos.filter((p) => p.isOwn).length;
   $: othersCount = galleryPhotos.length - ownCount;
-  $: shownPhotos = galleryFilter === 'all' ? galleryPhotos
-    : galleryFilter === 'mine' ? galleryPhotos.filter((p) => p.isOwn)
-    : galleryPhotos.filter((p) => !p.isOwn);
+  $: shownPhotos = galleryPhotos.filter((p) => p.isOwn);
   let revealMsg = '';
   let lbOpen = false;
   let lbIndex = 0;
@@ -1168,7 +1168,6 @@
 
   async function openGallery() {
     screen = 'gallery';
-    galleryFilter = 'mine';   // default to the guest's own shots each visit
     stopCamera();   // free the camera while browsing the gallery — saves battery, drops the "in use" indicator
     applyEventTheme(ev?.theme);
     try {
@@ -1506,20 +1505,6 @@
         <span aria-hidden="true">🔒</span>
         <span>{revealMsg}{#if galleryPhotos.length} Only you can see your own shots until then.{/if}</span>
       </div>
-    {:else if othersCount > 0}
-      <div class="gfilter" role="tablist" aria-label="Filter photos">
-        <button class="gchip" class:on={galleryFilter === 'mine'} on:click={() => (galleryFilter = 'mine')}>Mine <span class="n">{ownCount}</span></button>
-        <button class="gchip" class:on={galleryFilter === 'all'} on:click={() => (galleryFilter = 'all')}>All <span class="n">{galleryPhotos.length}</span></button>
-        <button class="gchip" class:on={galleryFilter === 'others'} on:click={() => (galleryFilter = 'others')}>Others <span class="n">{othersCount}</span></button>
-      </div>
-    {/if}
-    <!-- The shared gallery is the whole event's photos, and it is where "find the photos I'm in"
-         belongs. There is no automatic redirect to it when an event ends, so this link is the only
-         way most guests would ever discover that page exists. -->
-    {#if galleryRevealed && othersCount > 0 && ev?.joinCode}
-      <a class="full-gallery" href="/gallery/{ev.joinCode}">
-        🖼 Open the full event gallery{#if faceMatching} — find the photos you're in{/if} →
-      </a>
     {/if}
     {#if shownPhotos.length}
       <div class="pgrid">
@@ -1529,7 +1514,7 @@
           <div class="pcell-wrap">
             <button class="pcell" on:click={() => { lbIndex = i; lbOpen = true; }}>
               {#if p.mediaType === 'video'}<img src={p.thumbUrl} alt="" loading="lazy" on:error={hidePoster} /><span class="play">▶</span>{:else}<img src={p.thumbUrl ?? p.url} alt="" loading="lazy" on:error={(e) => imgFallback(e, p.url)} />{/if}
-              {#if galleryFilter === 'mine'}<span class="snapno">#{shownPhotos.length - i}</span>{/if}
+              <span class="snapno">#{shownPhotos.length - i}</span>
             </button>
             {#if canDelete(p, nowTick) || confirmingDeleteId === p.id}
               <button class="pcell-bin" class:confirm={confirmingDeleteId === p.id}
@@ -1549,8 +1534,18 @@
     {:else}
       <div class="empty">
         <span class="big">{galleryRevealed ? '📷' : '🔒'}</span>
-        <p class="muted">{galleryRevealed ? (galleryFilter === 'mine' ? 'You haven’t taken any yet — switch to All.' : 'Nothing here yet.') : 'You haven’t taken any photos yet.'}</p>
+        <p class="muted">You haven’t taken any photos yet.</p>
       </div>
+    {/if}
+    <!-- Below the roll on purpose: this is the "what next", read after a guest has looked at their
+         own shots. Gated on the gallery actually being OPEN — instant reveal, or a host who
+         revealed early — and on somebody else having shot something, because a link to a gallery
+         holding only your own photos is a round trip to nowhere. Once an event ENDS revealed the
+         load-time redirect gets there first, so this is the during-the-event route. -->
+    {#if galleryRevealed && othersCount > 0 && ev?.joinCode}
+      <a class="full-gallery" href="/gallery/{ev.joinCode}">
+        🖼 See everyone's photos{#if faceMatching} — and find the ones you're in{/if} →
+      </a>
     {/if}
     <!-- The same offer, in the gallery: this is where a guest lands after a failed upload, and
          telling them they are out of shots without showing the way forward is a dead end. -->
@@ -1901,11 +1896,6 @@
     background: color-mix(in srgb, var(--accent) 14%, var(--surface)); border: 1px solid var(--border);
     border-radius: var(--radius-sm); color: var(--text); font-size: 0.85rem; }
   .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 64px 24px; text-align: center; }
-  .gfilter { display: flex; gap: 8px; padding: 10px 12px; flex-wrap: wrap; }
-  .gchip { display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 0.8rem; font-weight: 700;
-    padding: 6px 13px; border-radius: 999px; cursor: pointer; background: var(--surface); border: 1px solid var(--border); color: var(--text-muted); }
-  .gchip.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); }
-  .gchip .n { font-size: 0.7rem; opacity: 0.75; }
   .pgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; padding: 3px; }
   .pcell { position: relative; aspect-ratio: 1; border: none; padding: 0; cursor: pointer; background: var(--surface-2); }
   .pcell img { width: 100%; height: 100%; object-fit: cover; display: block; }

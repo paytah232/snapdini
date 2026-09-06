@@ -238,6 +238,11 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
       filter appears on the shared gallery showing exactly those photos, and the lightbox pages
       through the filtered set, not the full one.
 - [ ] **It discriminates:** a photo of somebody else is NOT matched to you.
+- [ ] **A phone selfie works:** enrol using a photo taken in **portrait on a handset** (these carry
+      an EXIF rotation the ML service ignores). If it is rejected, `docker logs snapdini-dev-app |
+      grep '\[faces\] selfie rejected'` now prints the format, dimensions, EXIF orientation and the
+      best score seen at a low probe floor — that line says whether the floor, the format or the
+      photo itself is at fault.
 - [ ] **Withdrawal:** "Stop and delete" removes the template and every match; the Me chip disappears
       and `/api/faces/mine` reports you as not enrolled.
 - [ ] **No leakage:** no API response anywhere contains an `embedding`.
