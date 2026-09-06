@@ -48,6 +48,17 @@
   let allPhotos: Photo[] = [];   // approved photos — gates the Review & Curate link card
   let pendingPhotos: Photo[] = []; // status === 'pending'
   let posterOpen = false;
+  // Participants list: searchable and capped, because a big event puts every guest in this card.
+  const PART_PAGE = 25;
+  let partQuery = '';
+  let partLimit = PART_PAGE;
+  $: partAll = (ev?.participants ?? []) as Array<{ id: string; name: string; email: string | null; photosTaken: number; joinedAt: number }>;
+  $: partTotal = partAll.length;
+  $: partFiltered = partQuery.trim()
+    ? partAll.filter((p) => `${p.name ?? ''} ${p.email ?? ''}`.toLowerCase().includes(partQuery.trim().toLowerCase()))
+    : partAll;
+  $: { void partQuery; partLimit = PART_PAGE; }   // a new search starts from the top
+  $: partShown = partFiltered.slice(0, partLimit);
 
   // settings form
   let sName = '';
@@ -1231,21 +1242,42 @@
 
     <!-- Participants -->
     <div class="card">
-      <div class="card-title">Participants</div>
+      <div class="card-title">Participants {#if partTotal}<span class="p-count">{partTotal}</span>{/if}</div>
       {#if ev.participants && ev.participants.length}
+        <!-- A 150-guest event rendered 150 rows into this card. Search plus a page at a time keeps
+             it a card rather than a wall, and search is what you actually want at that size. -->
+        {#if partTotal > PART_PAGE}
+          <input class="p-search" placeholder="Search guests — name or email…" bind:value={partQuery} />
+        {/if}
         <div class="participant-list">
-          {#each ev.participants as p (p.id)}
+          {#each partShown as p (p.id)}
             <div class="participant-row">
               <div class="avatar">{(p.name?.[0] || '?').toUpperCase()}</div>
               <div class="p-info">
                 <div class="p-name">{p.name}</div>
                 <div class="p-email">{#if p.email}{p.email}{:else}<span class="muted">no email</span>{/if}</div>
-                <div class="p-meta">{p.photosTaken || 0} photos · joined {fmtTime(p.joinedAt)}</div>
+                <div class="p-meta">
+                  {#if p.photosTaken}
+                    <!-- Straight to just this guest's photos, rather than hunting through the lot. -->
+                    <a class="p-shots" href="/admin/{code}/review?who={p.id}#{orgCode}">{p.photosTaken} photos</a>
+                  {:else}
+                    no photos
+                  {/if}
+                  · joined {fmtTime(p.joinedAt)}
+                </div>
               </div>
               <button class="btn ghost sm p-del" on:click={() => removeParticipant(p)} title="Remove this participant">Remove</button>
             </div>
           {/each}
+          {#if !partShown.length}
+            <div class="muted small">No guests match “{partQuery}”.</div>
+          {/if}
         </div>
+        {#if partFiltered.length > partShown.length}
+          <button class="btn ghost sm full mt" on:click={() => (partLimit += PART_PAGE)}>
+            Show more — {partShown.length} of {partFiltered.length}
+          </button>
+        {/if}
       {:else}
         <div class="muted small">No participants yet</div>
       {/if}
@@ -1497,6 +1529,10 @@
 
   /* Participants */
   .participant-list { display: flex; flex-direction: column; gap: 10px; }
+  .p-count { font-weight: 600; opacity: .6; font-size: .85em; }
+  .p-search { width: 100%; margin: 0 0 10px; }
+  .p-shots { color: var(--accent); text-decoration: none; font-weight: 600; }
+  .p-shots:hover { text-decoration: underline; }
   .participant-row { display: flex; gap: 12px; align-items: center; }
   .participant-row .p-info { flex: 1; min-width: 0; }
   .p-del { flex: none; }

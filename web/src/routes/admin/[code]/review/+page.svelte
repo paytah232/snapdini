@@ -115,11 +115,23 @@
   $: moderationOn = !!(ev && ev.moderationEnabled);
   $: showPendingTab = moderationOn && pendingCount > 0;
 
+  // Optional shooter filter, arrived at from the Participants card on the manage page (?who=<id>).
+  // A host looking for "the ones Nan took" was otherwise scrolling the whole event.
+  let who = $page.url.searchParams.get('who') ?? '';
+  $: whoName = who ? (photos.find((p) => p.participantId === who)?.participantName ?? '') : '';
+  function clearWho() {
+    who = '';
+    const u = new URL(window.location.href);
+    u.searchParams.delete('who');
+    history.replaceState({}, '', u.pathname + u.search + u.hash);
+  }
+
+  $: byWho = who ? photos.filter((p) => p.participantId === who) : photos;
   $: filtered = (() => {
-    if (tab === 'pending') return photos.filter((p) => p.status === 'pending');
-    if (tab === 'rejected') return photos.filter((p) => p.status === 'rejected');
-    if (tab === 'favourites') return photos.filter((p) => p.rating >= 5 && p.status !== 'rejected');
-    return photos.filter((p) => p.status !== 'rejected');   // "All" = everything not binned
+    if (tab === 'pending') return byWho.filter((p) => p.status === 'pending');
+    if (tab === 'rejected') return byWho.filter((p) => p.status === 'rejected');
+    if (tab === 'favourites') return byWho.filter((p) => p.rating >= 5 && p.status !== 'rejected');
+    return byWho.filter((p) => p.status !== 'rejected');   // "All" = everything not binned
   })();
 
   $: if (filtered.length && singleIndex > filtered.length - 1) singleIndex = filtered.length - 1;
@@ -311,6 +323,11 @@
     {#if rejectedCount > 0}
       <button class="tab" class:active={tab === 'rejected'} on:click={() => setTab('rejected')}>🗑 Rejected ({rejectedCount})</button>
     {/if}
+    {#if who}
+      <button class="tab who-chip" on:click={clearWho} title="Show everyone's photos again">
+        👤 {whoName || 'this guest'} ✕
+      </button>
+    {/if}
     <span class="tab-spacer"></span>
     {#if tab === 'all' || tab === 'favourites'}
       <button class="tab ghost-tab" on:click={shareGallery} disabled={busy} title="Share what's shown">📤 Share {tab === 'favourites' ? 'favourites' : 'gallery'}</button>
@@ -472,6 +489,7 @@
   .tab.active { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); }
   .tab:disabled { opacity: 0.5; cursor: default; }
   .ghost-tab { background: transparent; }
+  .who-chip { background: var(--accent); color: var(--accent-ink, #111); font-weight: 700; }
   .tab-spacer { flex: 1; }
 
   .selbar { display: flex; align-items: center; gap: 8px; padding: 8px 16px; max-width: 980px; margin: 0 auto 14px; flex-wrap: wrap;
