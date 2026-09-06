@@ -19,7 +19,12 @@ export const addOns: AddOn[] = [
   { ic: '⏱️', name: 'Longer event window', detail: 'Up to 48h free → 72h (+A$2), 1 week (+A$5), 1 month (+A$10) or 3 months (+A$25).' },
   { ic: '📦', name: 'Photos kept a month', detail: 'Paid events include a full month (31 days). Extend to 3 months (+A$8), 6 months (+A$12) or a full year (+A$20). Free events keep photos 7 days.' },
   { ic: '🎬', name: 'Video clips', detail: 'Let guests capture short video clips alongside photos (from +A$2).' },
-  { ic: '🖼️', name: 'Remove Snapdini branding', detail: 'Clean photo frames and slideshow without the Snapdini mark (paid add-on).' },
+  // This used to read "Clean photo frames and slideshow without the Snapdini mark", which made it
+  // sound like the photos themselves are watermarked. They are not — every photo and video is
+  // delivered clean on every tier, free included. The only Snapdini branding anywhere is the intro
+  // and outro card on a generated slideshow, and this add-on removes those two cards.
+  { ic: '🎞️', name: 'Slideshow without our intro & outro', detail: 'Your photos are never watermarked — on any plan. The only Snapdini branding is the short intro and outro card on a generated slideshow; this removes them (+A$5).' },
+  { ic: '🖼️', name: 'Extra photo shapes', detail: 'Square is standard. Add portrait and landscape shapes for guests to shoot in (+A$5, free on events up to 10 guests).' },
 ];
 
 export const pricingFaqs: Faq[] = [

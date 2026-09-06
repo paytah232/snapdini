@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
-  import { goto } from '$app/navigation';
+  import { goto, replaceState } from '$app/navigation';
   import { getConfig, getMe, api } from '$lib/api';
   import { firePurchaseConversion, fireLeadConversion } from '$lib/conversions';
   import {
@@ -204,7 +204,10 @@
       }
     }
     // Strip the marker so a refresh doesn't re-show it (keep the #organizer hash).
-    if (sp.has('paid') || sp.has('upgraded') || sp.has('created') || sp.has('session_id')) history.replaceState(null, '', location.pathname + location.hash);
+    // SvelteKit's replaceState. A raw history call leaves the router's bookkeeping stale, and the
+    // symptom shows up somewhere else entirely: Back from another page changed the URL to this one
+    // without ever rendering it.
+    if (sp.has('paid') || sp.has('upgraded') || sp.has('created') || sp.has('session_id')) replaceState(location.pathname + location.hash, {});
     // Resolve identity first (and independently) so the Site-admin / My-events bar appears
     // promptly even if config is slow — and on every event, not just the viewer's own.
     try { const me = await getMe(); viewerLoggedIn = !!me.user; viewerIsAdmin = !!me.user?.isAdmin; } catch { /* anon organizer */ }
@@ -226,7 +229,9 @@
       await tryLoad();
       // Once authenticated the organizer code is cached in localStorage (saveAdminCode), so we
       // can scrub it (and any ?paid/#hash) from the address bar — no more long code on screen.
-      if (authed) history.replaceState(null, '', location.pathname);
+      // The organizer code is a bearer credential, so it does not stay in the address bar — but
+      // via SvelteKit, for the same reason as above.
+      if (authed) replaceState(location.pathname, {});
     }
     booting = false;
     refreshTimer = setInterval(refresh, 30_000);

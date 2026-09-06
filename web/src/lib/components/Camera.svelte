@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { goto } from '$app/navigation';
+  import { goto, replaceState } from '$app/navigation';
   import { fade } from 'svelte/transition';
   import { getEvent, getMe, joinEvent, getPhotosBySession, type PublicEvent, type Photo } from '$lib/events';
   import { getSession, saveSession, clearSession } from '$lib/session';
@@ -211,7 +211,9 @@
           showToast(boundEmail
             ? `Thanks — more shots added. Your photos are linked to ${boundEmail}`
             : 'Thanks — more shots added to your roll');
-          window.history.replaceState({}, '', window.location.pathname);
+          // SvelteKit's replaceState, not the raw History API — a raw call desyncs the router
+          // and the next Back leaves the URL and the page disagreeing.
+          replaceState(window.location.pathname, {});
         }
         sessionToken = token;
         serverRemaining = me.photosRemaining;
@@ -1427,7 +1429,13 @@
       {:else}
         <button class="shutter photo" on:click={capturePhoto} disabled={photosRemaining <= 0 || !!cameraError} aria-label="Take photo"><span class="core"></span></button>
       {/if}
-      <button class="round" on:click={flip} title="Flip camera" aria-label="Flip camera" disabled={recording}>🔄</button>
+      <!-- Hidden, not just disabled, while recording: the stream cannot be swapped mid-clip, so a
+           greyed-out button is only there to be tried and to look broken. -->
+      {#if !recording}
+        <button class="round" on:click={flip} title="Flip camera" aria-label="Flip camera">🔄</button>
+      {:else}
+        <span class="round-spacer" aria-hidden="true"></span>
+      {/if}
     </div>
     <!-- Nothing about upgrades exists until the roll is actually spent: no upsell furniture during
          the event. Each path shows only if the host allows it, so a guest is never offered a button
@@ -1771,7 +1779,10 @@
   .grid { position: absolute; inset: 0; pointer-events: none; } .grid span { position: absolute; background: rgba(255,255,255,0.2); }
   .grid span:nth-child(1) { left: 33.3%; top: 0; bottom: 0; width: 1px; } .grid span:nth-child(2) { left: 66.6%; top: 0; bottom: 0; width: 1px; }
   .grid span:nth-child(3) { top: 33.3%; left: 0; right: 0; height: 1px; } .grid span:nth-child(4) { top: 66.6%; left: 0; right: 0; height: 1px; }
-  .rec { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); color: #fff; background: rgba(0,0,0,0.5); padding: 4px 12px; border-radius: 999px; font-family: var(--font-mono); }
+  /* Clear of the topbar — at top:16px a long event name sat straight over the timer. */
+  .rec { position: absolute; top: 64px; left: 50%; transform: translateX(-50%); z-index: 7; color: #fff; background: rgba(0,0,0,0.5); padding: 4px 12px; border-radius: 999px; font-family: var(--font-mono); }
+  /* Keeps the shutter row from reflowing when the flip button is hidden mid-recording. */
+  .round-spacer { display: inline-block; width: 44px; height: 44px; }
   .modes { position: absolute; bottom: 108px; left: 50%; transform: translateX(-50%); display: flex; background: rgba(0,0,0,0.5); border-radius: 999px; padding: 3px; z-index: 10; }
   .modes button { padding: 5px 14px; border-radius: 999px; border: none; background: transparent; color: rgba(255,255,255,0.6); font-size: 0.78rem; font-weight: 600; cursor: pointer; -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; user-select: none; outline: none; }
   .modes button.on { background: #fff; color: #111; }

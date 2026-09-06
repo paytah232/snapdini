@@ -195,20 +195,28 @@
     {/if}
     {#if revealed && allowDownloads && photos.length}
       <button class="btn ghost" on:click={toggleSelecting}>{selecting ? 'Cancel' : 'Select'}</button>
-      {#if selecting}
-        <!-- Ticking 200 photos by hand to grab "most of them" is not a workflow. Select all, then
-             untick the few you don't want. Operates on what is SHOWN, so it respects the Me filter
-             and the highlights toggle rather than silently grabbing hidden photos too. -->
-        <button class="btn ghost" on:click={toggleSelectAll}>
-          {allShownSelected ? 'Clear' : `Select all${shownPhotos.length ? ` (${shownPhotos.length})` : ''}`}
-        </button>
-        <button class="btn primary" on:click={downloadSelected} disabled={!selected.size}>⬇ Download{selected.size ? ` ${selected.size}` : ''}</button>
-      {:else}
+      {#if !selecting}
         <button class="btn ghost" on:click={downloadAll}>⬇ Download all</button>
       {/if}
     {/if}
   </div>
 </nav>
+
+{#if selecting}
+  <!-- Its own bar rather than more buttons in the nav: on a phone the nav is a fixed 62px and the
+       extra controls wrapped straight out of view. This also has room to say how many are picked. -->
+  <div class="selbar">
+    <span class="selcount">{selected.size} selected</span>
+    <div class="selactions">
+      <button class="btn ghost" on:click={toggleSelectAll}>
+        {allShownSelected ? 'Clear' : `Select all${shownPhotos.length ? ` (${shownPhotos.length})` : ''}`}
+      </button>
+      <button class="btn primary" on:click={downloadSelected} disabled={!selected.size}>
+        ⬇ Download{selected.size ? ` ${selected.size}` : ''}
+      </button>
+    </div>
+  </div>
+{/if}
 
 {#if event?.theme?.headerImage}
   <!-- Event image as a full-bleed hero background (cover) with the title over a gradient — scales
@@ -308,6 +316,19 @@
   }
   .gchip.on { border-color: var(--accent); background: var(--accent); color: var(--accent-ink, #111); }
   .gchip .n { opacity: .7; font-variant-numeric: tabular-nums; }
+  .selbar {
+    position: sticky; top: 62px; z-index: 49; display: flex; align-items: center;
+    justify-content: space-between; gap: 10px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(10px);
+  }
+  .selcount { font-size: .85rem; font-weight: 700; color: var(--text-muted); }
+  .selactions { display: flex; gap: 8px; flex-wrap: wrap; }
+  @media (max-width: 480px) {
+    .selbar { justify-content: stretch; }
+    .selactions { flex: 1; }
+    .selactions .btn { flex: 1; }
+  }
   .brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 800; text-decoration: none; color: var(--text); }
   .nav-right { display: flex; gap: 8px; flex-wrap: wrap; }
   .btn { display: inline-block; font-weight: 700; border-radius: var(--radius-sm); padding: 7px 14px; font-size: .82rem;

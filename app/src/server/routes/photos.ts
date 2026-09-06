@@ -437,9 +437,12 @@ export function zipPhotosToResponse(
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', `attachment; filename="${evName}.zip"`);
 
-  // zlib level 9 + max memLevel = the highest ratio standard zip (DEFLATE) offers. Note: JPEG/MP4
-  // are already compressed, so the zip mainly bundles rather than shrinks them — that's expected.
-  const archive = new ZipArchive({ zlib: { level: 9, memLevel: 9 } });
+  // STORE, not DEFLATE. Everything in here is JPEG, MP4 or WebP — already compressed — so deflate
+  // has nothing to find. Measured on 60 real photos (50.28 MB): level 9 saved 0.10% and took
+  // 6.8s; store took 0.32s. That is 21x the CPU to save 51 KB, spent while the host waits for the
+  // download to start and a core is pinned. On a 400-photo event it is nearer a minute for a few
+  // hundred KB. Bundling is the job here; compressing is not.
+  const archive = new ZipArchive({ store: true });
   archive.on('error', (err: Error) => { console.error('[zip] failed:', err); res.destroy(); });
   archive.pipe(res);
 

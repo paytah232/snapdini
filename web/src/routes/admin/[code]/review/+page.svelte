@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
+  import { replaceState, pushState } from '$app/navigation';
   import { goto } from '$app/navigation';
   import {
     getAdmin, getPhotosByOrganizer, ratePhoto, moderate, setHighlights, createShare, mediaMeta,
@@ -87,7 +88,18 @@
           } catch { /* conversion is best-effort */ }
         }
       }
-      if (location.hash || location.search) history.replaceState(null, '', location.pathname);
+      // Get the organizer code out of the address bar — it is a bearer credential — but keep the
+      // rest of the query. This used to drop the whole search string with a RAW history call, which
+      // did two bad things: it threw away ?who= (the view filter a host had just clicked through
+      // to), and it desynced SvelteKit's history so a later Back changed the URL without changing
+      // the page. SvelteKit's replaceState keeps the router's bookkeeping intact.
+      {
+        const u = new URL(location.href);
+        u.hash = '';
+        u.searchParams.delete('code');
+        const clean = u.pathname + (u.searchParams.toString() ? `?${u.searchParams}` : '');
+        if (clean !== location.pathname + location.search + location.hash) replaceState(clean, {});
+      }
       document.title = `${ev.name} — Review — Snapdini`;
       applyEventTheme(ev.theme);
       await loadPhotos();
@@ -117,16 +129,46 @@
 
   // Optional shooter filter, arrived at from the Participants card on the manage page (?who=<id>).
   // A host looking for "the ones Nan took" was otherwise scrolling the whole event.
-  let who = $page.url.searchParams.get('who') ?? '';
-  $: whoName = who ? (photos.find((p) => p.participantId === who)?.participantName ?? '') : '';
-  function clearWho() {
-    who = '';
+  // A set, because "show me what Nan and Grandad shot" is a normal thing to want and picking one
+  // guest at a time makes you do the comparison in your head. Carried in the URL as a comma list
+  // so a filtered view is still a link you can send someone.
+  let whoSet = new Set(($page.url.searchParams.get('who') ?? '').split(',').filter(Boolean));
+  $: whoNames = [...whoSet]
+    .map((id) => photos.find((p) => p.participantId === id)?.participantName)
+    .filter(Boolean) as string[];
+  // SvelteKit's replaceState, NOT the raw History API. Calling history.replaceState directly
+  // bypasses SvelteKit's history bookkeeping, and the next Back press then changed the URL without
+  // changing the page — you ended up on /admin/<code> still looking at the review screen.
+  function syncWho() {
+    whoSet = new Set(whoSet);                 // tell Svelte the set changed
     const u = new URL(window.location.href);
-    u.searchParams.delete('who');
-    history.replaceState({}, '', u.pathname + u.search + u.hash);
+    const list = [...whoSet].join(',');
+    if (list) u.searchParams.set('who', list); else u.searchParams.delete('who');
+    replaceState(u.pathname + u.search + u.hash, {});
   }
+  function toggleWho(id: string) {
+    whoSet.has(id) ? whoSet.delete(id) : whoSet.add(id);
+    syncWho();
+  }
+  function clearWho() { whoSet.clear(); syncWho(); }
 
-  $: byWho = who ? photos.filter((p) => p.participantId === who) : photos;
+  // A <details> stays open until its summary is clicked again, which is a trap on a menu — you
+  // click away expecting it gone and it follows you down the page. Close on any press outside it,
+  // and on Escape.
+  let whoMenuEl: HTMLDetailsElement;
+  let whoOpen = false;
+  const closeWhoOnOutside = (e: Event) => {
+    if (whoOpen && whoMenuEl && !whoMenuEl.contains(e.target as Node)) whoOpen = false;
+  };
+
+
+  // Built from the photos themselves, so it only ever lists guests who actually shot something —
+  // picking a name that yields an empty screen is not a useful option.
+  $: shooters = [...new Map(photos.map((p) => [p.participantId, p.participantName])).entries()]
+    .map(([id, name]) => ({ id, name: name || 'Unknown', n: photos.filter((x) => x.participantId === id).length }))
+    .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name));
+
+  $: byWho = whoSet.size ? photos.filter((p) => whoSet.has(p.participantId)) : photos;
   $: filtered = (() => {
     if (tab === 'pending') return byWho.filter((p) => p.status === 'pending');
     if (tab === 'rejected') return byWho.filter((p) => p.status === 'rejected');
@@ -278,13 +320,20 @@
   function shareOne(photo: Photo) { openShare('selected', [photo.id]); }
 
   // ── View / navigation ────────────────────────────────────────────────────────
-  function openSingle(i: number) { singleIndex = i; view = 'single'; history.pushState({ sv: true }, ''); }
-  function closeSingle() { if (history.state?.sv) history.back(); else view = 'cards'; }
+  // SvelteKit's shallow-routing pushState, not the raw History API. A raw pushState creates a
+  // history entry the router has no record of; popping it left the URL on /admin/<code> while the
+  // review screen stayed on screen. $page.state is how SvelteKit tracks the same idea.
+  function openSingle(i: number) { singleIndex = i; view = 'single'; pushState('', { sv: true }); }
+  function closeSingle() { if ($page.state.sv) history.back(); else view = 'cards'; }
+  // Back out of the single view: SvelteKit clears the state, so mirror it back into the view.
+  $: if (view === 'single' && !$page.state.sv) view = 'cards';
   function onPopState() { if (view === 'single') view = 'cards'; }
   function prev() { if (filtered.length) singleIndex = (singleIndex - 1 + filtered.length) % filtered.length; }
   function next() { if (filtered.length) singleIndex = (singleIndex + 1) % filtered.length; }
   let fsOpen = false;   // full-screen view of the current photo/video (works on desktop + mobile)
   function onKeydown(e: KeyboardEvent) {
+    // Escape closes the guest filter wherever you are — it is a menu, not part of the photo view.
+    if (e.key === 'Escape' && whoOpen) { whoOpen = false; return; }
     if (view !== 'single') return;
     if (e.key === 'Escape' && fsOpen) { fsOpen = false; return; }
     if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
@@ -294,7 +343,8 @@
 </script>
 
 <svelte:head><title>Review — Snapdini</title></svelte:head>
-<svelte:window on:keydown={onKeydown} on:popstate={onPopState} on:click={resetRejectConfirm} />
+<svelte:window on:keydown={onKeydown} on:popstate={onPopState} on:click={resetRejectConfirm}
+               on:pointerdown={closeWhoOnOutside} />
 
 {#if booting}
   <div class="state">Loading…</div>
@@ -323,10 +373,25 @@
     {#if rejectedCount > 0}
       <button class="tab" class:active={tab === 'rejected'} on:click={() => setTab('rejected')}>🗑 Rejected ({rejectedCount})</button>
     {/if}
-    {#if who}
-      <button class="tab who-chip" on:click={clearWho} title="Show everyone's photos again">
-        👤 {whoName || 'this guest'} ✕
-      </button>
+    {#if shooters.length > 1}
+      <!-- Checkbox list rather than a <select>: multiple guests at once, and you can see who is on
+           without opening anything. Arriving from the Participants card pre-ticks one. -->
+      <details class="who-menu" bind:this={whoMenuEl} bind:open={whoOpen}>
+        <summary class="tab" class:on={whoSet.size > 0}>
+          👤 {whoSet.size === 0 ? 'Everyone' : whoSet.size === 1 ? (whoNames[0] ?? '1 guest') : `${whoSet.size} guests`}
+        </summary>
+        <div class="who-pop">
+          {#each shooters as sh}
+            <label class="who-opt">
+              <input type="checkbox" checked={whoSet.has(sh.id)} on:change={() => toggleWho(sh.id)} />
+              <span class="who-nm">{sh.name}</span><span class="who-n">{sh.n}</span>
+            </label>
+          {/each}
+          {#if whoSet.size}
+            <button class="who-clear" on:click={clearWho}>Show everyone</button>
+          {/if}
+        </div>
+      </details>
     {/if}
     <span class="tab-spacer"></span>
     {#if tab === 'all' || tab === 'favourites'}
@@ -489,7 +554,20 @@
   .tab.active { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); }
   .tab:disabled { opacity: 0.5; cursor: default; }
   .ghost-tab { background: transparent; }
-  .who-chip { background: var(--accent); color: var(--accent-ink, #111); font-weight: 700; }
+  .who-menu { position: relative; }
+  .who-menu > summary { list-style: none; cursor: pointer; user-select: none; }
+  .who-menu > summary::-webkit-details-marker { display: none; }
+  .who-menu > summary.on { background: var(--accent); color: var(--accent-ink, #111); }
+  .who-pop {
+    position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; min-width: 220px;
+    max-height: 320px; overflow-y: auto; padding: 8px; border-radius: var(--radius-sm);
+    background: var(--surface); border: 1px solid var(--border); box-shadow: 0 10px 30px rgba(0,0,0,.35);
+  }
+  .who-opt { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 8px; cursor: pointer; font-size: .85rem; }
+  .who-opt:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .who-nm { flex: 1; }
+  .who-n { opacity: .6; font-variant-numeric: tabular-nums; }
+  .who-clear { width: 100%; margin-top: 6px; padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--text); font: inherit; font-size: .82rem; cursor: pointer; }
   .tab-spacer { flex: 1; }
 
   .selbar { display: flex; align-items: center; gap: 8px; padding: 8px 16px; max-width: 980px; margin: 0 auto 14px; flex-wrap: wrap;
