@@ -76,13 +76,20 @@
         <div class="tier-guests">{t.guests}</div>
         <div class="tier-price">{t.price}</div>
         <div class="tier-note">{t.note}</div>
-        <a class="btn {t.highlight ? 'primary' : 'ghost'}" href={loggedIn ? '/app' : '/signup'}>
-          {t.price === 'Free' ? 'Start free' : 'Choose'}
+        <a class="btn {t.highlight ? 'primary' : 'ghost'}"
+           href={t.cta ? t.cta.href : (loggedIn ? '/app' : '/signup')}>
+          {t.cta ? t.cta.label : t.price === 'Free' ? 'Start free' : 'Choose'}
         </a>
       </div>
     {/each}
   </div>
-  <p class="fine">Prices in AUD, charged once per event. The exact total is always shown before you pay.</p>
+  <p class="fine">
+    Prices in AUD, charged once per event. The exact total is always shown before you pay.
+    <!-- Above 400 is a capacity question before it is a billing one — how many guests shooting at
+         once, over what venue wifi, against what the server and its upstream can take. Worth a
+         conversation rather than a sixth card that wraps to its own row. -->
+    <a class="fine-cta" href="/contact">More than 400 guests? Talk to us →</a>
+  </p>
 </section>
 
 <section class="band">
@@ -153,6 +160,13 @@
   .tier.highlight { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   /* A non-highlighted card still earns a ribbon (Free forever, Best value) — quieter, so the one
      tier we are actually steering people to keeps the emphasis. */
+  .fine-cta {
+    display: inline-block; margin-left: 6px; padding: 3px 10px; border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    color: var(--accent); font-weight: 700; text-decoration: none; white-space: nowrap;
+  }
+  .fine-cta:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
   .badge.soft { background: var(--surface-2, #23201a); color: var(--text); border: 1px solid var(--border); }
   .badge { position: absolute; top: -10px; left: 50%; transform: translateX(-50%); background: var(--accent); color: var(--accent-ink,#111);
     font-size: .64rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; padding: 3px 10px; border-radius: 999px; white-space: nowrap; }

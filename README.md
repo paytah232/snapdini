@@ -40,6 +40,8 @@ mkdir snapdini && cd snapdini
 curl -O https://raw.githubusercontent.com/paytah232/snapdini/main/app/docker-compose.yml
 mkdir nginx && curl -o nginx/default.conf https://raw.githubusercontent.com/paytah232/snapdini/main/app/nginx/default.conf
 curl -o .env https://raw.githubusercontent.com/paytah232/snapdini/main/app/.env.example
+# the upgrade helper — it checks the traps that `pull && up -d` alone will not
+curl -o upgrade.sh https://raw.githubusercontent.com/paytah232/snapdini/main/app/scripts/upgrade.sh && chmod +x upgrade.sh
 
 # edit .env — at minimum set BASE_URL (your public https URL) + POSTGRES_PASSWORD
 docker compose pull
@@ -51,7 +53,7 @@ Snapdini is now on `HTTP_PORT` (default `8080`) — put your own TLS / reverse p
 - **Fully free, no limits, when self-hosted.** Billing, email, the admin panel and analytics stay
   **off until you add their keys** (`STRIPE_*`, `MAILGUN_*`, `ADMIN_*`, `GTAG_ID` in `.env` — all
   optional; no `GTAG_ID` ⇒ zero third-party tracking). `.env.example` documents every setting.
-- **Upgrades**: run `./scripts/upgrade.sh [version]`, or see **[UPGRADING.md](UPGRADING.md)**.
+- **Upgrades**: run `./upgrade.sh [version]`, or see **[UPGRADING.md](UPGRADING.md)**.
   DB migrations apply on boot, but `pull && up -d` alone is not always enough — a release can add
   settings that must go in **both** `.env` and `docker-compose.yml` (compose passes env explicitly,
   so a variable missing from it is silently ignored), and it never updates your `docker-compose.yml`

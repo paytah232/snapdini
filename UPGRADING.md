@@ -8,7 +8,7 @@ The quickest safe route:
 
 ```bash
 cd /path/to/your/snapdini            # the directory holding your .env and docker-compose.yml
-./scripts/upgrade.sh 1.1.1           # or omit the version for :latest
+./upgrade.sh 1.4.0                   # or omit the version for :latest
 ```
 
 The script checks the three traps, backs up `.env` and the database, upgrades, and verifies the

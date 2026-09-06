@@ -4,20 +4,26 @@
 
 /** `badge` is the ribbon on the card. `highlight` is the visual emphasis — the two are separate
  *  because the tier worth emphasising is not always the one carrying a claim. */
-export type GuestTier = { guests: string; price: string; highlight?: boolean; badge?: string; note: string };
+export type GuestTier = {
+  guests: string; price: string; highlight?: boolean; badge?: string; note: string;
+  /** Overrides the default sign-up button — used by the tier that is a conversation, not a purchase. */
+  cta?: { label: string; href: string };
+};
 export type AddOn = { ic: string; name: string; detail: string };
 export type Faq = { q: string; a: string };
 
 // "Most popular" was on the free tier, which was both untrue and self-defeating — it pointed
 // people at the option that earns nothing. 60 guests is what actually sells (3 of the first 4 paid
-// events), and 400 is genuinely the cheapest per head at ~A$0.15/guest against A$0.25 at 60, so it
-// earns "Best value" honestly rather than as a label we picked.
+// events), and 400 is genuinely the cheapest per head (~A$0.15/guest against A$0.25 at 60), so it
+// earns "Best value" honestly rather than as a label we picked. The per-guest figure stays out of
+// the card copy: it invites the reader to do the sum on every other tier, and 60 — the one they
+// are most likely to buy — is the worst of them.
 export const guestTiers: GuestTier[] = [
   { guests: 'Up to 10 guests', price: 'Free', badge: 'Free forever', note: 'Every feature included — no card needed' },
   { guests: 'Up to 25 guests', price: 'A$5', note: 'One-off, per event' },
   { guests: 'Up to 60 guests', price: 'A$15', highlight: true, badge: 'Most popular', note: 'One-off, per event' },
   { guests: 'Up to 150 guests', price: 'A$29', note: 'One-off, per event' },
-  { guests: 'Up to 400 guests', price: 'A$59', badge: 'Best value', note: 'One-off — works out about A$0.15 a guest' },
+  { guests: 'Up to 400 guests', price: 'A$59', badge: 'Best value', note: 'One-off, per event' },
 ];
 
 export const addOns: AddOn[] = [
