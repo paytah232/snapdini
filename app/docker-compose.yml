@@ -67,10 +67,18 @@ services:
       - GUEST_EMAIL_RATE_LIMIT=${GUEST_EMAIL_RATE_LIMIT:-5}
       - PHOTO_DELETE_WINDOW_SECONDS=${PHOTO_DELETE_WINDOW_SECONDS:-60}
       - PHOTO_DELETE_CONFIRM_GRACE_SECONDS=${PHOTO_DELETE_CONFIRM_GRACE_SECONDS:-15}
+      # Thumbnail workers. Defaults to CPUs-1; lower it on a small VPS sharing a box.
+      - IMAGE_CONCURRENCY=${IMAGE_CONCURRENCY:-}
+      # Where slideshow music is read from. Override to mount your own tracks.
+      - MUSIC_DIR=${MUSIC_DIR:-/app/assets/music}
       - MACHINE_LEARNING_URL=${MACHINE_LEARNING_URL:-}
       - FACE_MATCH_THRESHOLD=${FACE_MATCH_THRESHOLD:-0.42}
       - FACE_MIN_SCORE=${FACE_MIN_SCORE:-0.7}
       - FACE_TIMEOUT_MS=${FACE_TIMEOUT_MS:-20000}
+      # Enrolment is judged separately from gallery matching: one cooperative face filling the
+      # frame is an easier problem than a candid face in a crowd, and judging it at the crowd
+      # threshold rejects perfectly good selfies.
+      - FACE_SELFIE_MIN_SCORE=${FACE_SELFIE_MIN_SCORE:-0.5}
       - GUEST_SHOT_PACK=${GUEST_SHOT_PACK:-12}
       - GUEST_SHOT_PACK_CENTS=${GUEST_SHOT_PACK_CENTS:-300}
       - GUEST_UPGRADE_CUTOFF_MINUTES=${GUEST_UPGRADE_CUTOFF_MINUTES:-15}

@@ -253,7 +253,8 @@ plus the galleries producing the most referrals and per-photo view/download enga
   per event, and the **guest** to consent explicitly. Only an enrolled guest's own face template is
   stored; every other face is compared and discarded inside the request, and what persists is a
   photo↔guest link, not biometric data. Withdrawing deletes the template and every match.
-  **Read `docs/PIA-face-matching.md` before enabling this on a hosted deployment** — a face template
+  Shipped **off** and off in the hosted service; it is supported as a **self-host** feature
+  (see the README section). **Read `docs/PIA-face-matching.md` before enabling this on a hosted deployment** — a face template
   is sensitive information under the Privacy Act and this is not a feature to switch on casually.
 - **Taking a shot back:** for **60 seconds** after a photo lands, a guest sees a bin on that photo
   in their own gallery, with a countdown. Deleting it removes the photo and **returns the frame to

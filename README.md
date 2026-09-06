@@ -56,6 +56,39 @@ Snapdini is now on `HTTP_PORT` (default `8080`) — put your own TLS / reverse p
   settings that must go in **both** `.env` and `docker-compose.yml` (compose passes env explicitly,
   so a variable missing from it is silently ignored), and it never updates your `docker-compose.yml`
   or `nginx/default.conf`.
+### Optional: "find the photos I'm in" (self-host only)
+
+Guests can upload a selfie and pull out just the photos they appear in. It is **off in the hosted
+service and shipped off by default**, because face templates are biometric data and the compliance
+picture varies by jurisdiction — but if you run your own instance for your own events, it is a
+genuinely good feature and it is fully built.
+
+Point `MACHINE_LEARNING_URL` at an [Immich machine-learning](https://github.com/immich-app/immich)
+container. It talks over plain HTTP with image bytes in the request, so **the ML container needs no
+access to your photo storage** — no shared volume, no bind mount. It can live on the same box or a
+different one.
+
+```yaml
+  machine-learning:                       # add to your docker-compose.yml
+    image: ghcr.io/immich-app/immich-machine-learning:release
+    volumes: [ model-cache:/cache ]       # models only — never your photos
+    restart: unless-stopped
+```
+```bash
+MACHINE_LEARNING_URL=http://machine-learning:3003
+```
+
+With it unset the feature does not exist: no host toggle, no guest control, no privacy-policy
+section, and the endpoints return 503. With it set, it is still **off per event** until a host turns
+it on, and then **off per guest** until that guest ticks an unticked consent box. A guest's selfie is
+deleted in the same request that creates their template; every other face in a photo is compared and
+discarded in memory. "Stop and delete" removes the template and every match it produced, and keeps
+working even if you later switch the ML container off.
+
+**Read [docs/PIA-face-matching.md](docs/PIA-face-matching.md) before turning this on for anyone
+other than yourself** — it sets out what is collected, the third-party-collection problem (you
+process the faces of guests who never consented, in order to find the one who did), and minors.
+
 - **Pin a version** with `IMAGE_TAG` in `.env` (e.g. `IMAGE_TAG=1.0.2`; default `latest`). Point at
   your own registry with `IMAGE_PREFIX`.
 

@@ -142,7 +142,7 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
 - Moderation default + enable-later hold, decouple (favourite ≠ approve), reveal/hide override, retention purge (thumbnails, custom audio, slideshows), `/mine` counts, reject-bin, client-error capture, custom-audio validation, **share v2 (all/favourites/selected + slug rename + reveal-gating + zip download)**, **slideshow versioning + download endpoint**, **frame-pack settings gate**, **no-flash persistence**, **restore→pending**, **own-photos-visible-after-reveal**, **11+ paid tier**, **co-hosts (invite/accept/manage-by-identity/owner-only-delete/remove)**, timezones, billing-amount audit.
 - **1.0 additions:** settings `noFlash` round-trip + `noFlash` on the join / `/me` / `/admin` responses; **event slug** set/clear + **too-short 400 / duplicate 409**; **reschedule locked once started** (allowed while upcoming); **share-create no longer auto-claims a slug** (token URL) + default label leads with the event name; **`/qr` returns a logo-baked PNG**; **co-host pending-invite list** (appears / drops off on accept); **10s video tier = $2**; **frame-removal always paid** (branding:false → 402 until bought); **purge frees the event slug + deletes share rows** (via admin `/run-sweep`); `photoIds` capped on moderate/highlights; login rate-limited.
 - Run from `devel/`: `npm test` (typecheck → unit → integration → e2e). Integration suite:
-  **365 passed, 0 failed** in ~40s. `run.mjs` lifts `ADMIN_EMAIL`/`ADMIN_PASSWORD` off the
+  **386 integration + 31 unit passed, 0 failed** (integration ~40s). `run.mjs` lifts `ADMIN_EMAIL`/`ADMIN_PASSWORD` off the
   local dev container when they aren't in your environment, so the operator-only assertions run
   by default instead of silently skipping (they were skipping, and it hid ~22 tests).
 - The integration suite is an orchestrator (`testsuite/run.mjs`) over per-area specs in
@@ -220,9 +220,13 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
       `/api/faces/enrol` and `/api/faces/mine` return 503, and the privacy policy's face section is
       not rendered. `DELETE /api/faces/enrol` deliberately still works, so anyone who enrolled
       while it was on can always withdraw.
-- [ ] **This is how it ships.** 1.4 is built but NOT enabled in production pending legal review
-      (`docs/PIA-face-matching.md`, open items 6.1 and 6.2). Leave `MACHINE_LEARNING_URL` unset on
-      prod; devel is the only place it is on.
+- [ ] **This is how it ships.** Face matching stays **off in production** — face templates are
+      biometric data and the compliance picture varies by jurisdiction (`docs/PIA-face-matching.md`,
+      open items 6.1 and 6.2). It is fully built and supported as a **self-host** feature: a
+      self-hoster running their own events points `MACHINE_LEARNING_URL` at an Immich ML container
+      and gets it. Leave it unset on prod; devel is the only place it is on.
+- [ ] **Self-host story reads correctly:** README's *"find the photos I'm in"* section explains the
+      ML container needs no access to photo storage, and that the feature ships off.
 - [ ] **Host gate:** with the host switch OFF, a guest sees no "Find photos of me" control and the
       endpoint refuses with 403.
 - [ ] **Consent gate:** the checkbox is **never pre-ticked**; the selfie button stays disabled until
