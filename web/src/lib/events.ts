@@ -2,7 +2,10 @@ import { api, postJson } from './api';
 
 export interface Photo {
   id: string;
-  url: string;            // full-quality original (lightbox + download)
+  url: string;            // full-quality original (downloads, and the fallback for playback)
+  /** Phone-decodable H.264 copy, present once built. Play THIS; download `url`. The original is
+   *  often VP8/WebM, which phones software-decode (stutter) and Safari may refuse outright. */
+  playUrl?: string;
   thumbUrl?: string;      // small fast thumbnail (grids); falls back to url if absent
   takenAt: number;
   participantName: string;
@@ -75,11 +78,19 @@ export const getQr = (id: string) => api<{ qrCode: string; joinUrl: string }>(`/
 export const getAdmin = (code: string, organizerCode: string) =>
   api<AdminEvent>(`/api/events/${code}/admin`, { headers: org(organizerCode) });
 
-export interface SlideshowVersion { id: string; url: string; favourite: boolean; label: string; resolution: string; createdAt: number; }
+export interface SlideshowVersion {
+  id: string;
+  url: string;            // full-quality render — this is what downloads
+  /** 1080p H.264 copy for in-browser preview; absent on 1080p renders and until the transcode ends. */
+  playUrl?: string;
+  favourite: boolean; label: string; resolution: string; createdAt: number;
+}
 // Friendly-named download (server sets <event>-<date>-snapdini.mp4); res='1080p' live-transcodes a 4K render.
 export const slideshowDownloadUrl = (code: string, id: string, res?: '1080p') =>
   `/api/events/${code}/slideshow/${id}/download${res ? `?res=${res}` : ''}`;
 export interface SlideshowStatus {
+  /** 1080p preview copy of the current render, when one has been built. */
+  playUrl?: string;
   status: 'idle' | 'running' | 'done' | 'error';
   url?: string; error?: string; truncated?: boolean;
   progress?: number; phase?: 'collecting' | 'encoding';

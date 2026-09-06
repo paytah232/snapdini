@@ -263,7 +263,9 @@
 
     {#if st?.status === 'done' && st.url}
       <!-- svelte-ignore a11y-media-has-caption -->
-      <video class="preview" src={st.url} controls playsinline></video>
+      <!-- Preview streams the 1080p copy when it exists; the download button below still hands
+           over the full-quality render. -->
+      <video class="preview" src={st.playUrl ?? st.url} controls playsinline></video>
       {#if st.truncated}<p class="hint">⚠ Used the first {st.maxImages ?? 60} photos to keep it quick.</p>{/if}
     {:else if st?.status === 'error'}
       <p class="err">{st.error || 'Generation failed.'}</p>
@@ -276,7 +278,7 @@
         {#each st.recent as s (s.id)}
           <div class="ritem">
             <!-- svelte-ignore a11y-media-has-caption -->
-            <video class="rthumb" src={s.url} muted preload="metadata" playsinline></video>
+            <video class="rthumb" src={s.playUrl ?? s.url} muted preload="metadata" playsinline></video>
             <div class="rinfo">
               <div class="rlabel">{s.label}{#if s.resolution} · {s.resolution === '4k' ? '4K' : s.resolution}{/if}</div>
               <div class="rwhen">{fmtAgo(s.createdAt)}{#if s.favourite} · ★ kept{/if}</div>

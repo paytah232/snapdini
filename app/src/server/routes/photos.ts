@@ -9,7 +9,7 @@ import { db } from '../db';
 import { effectiveMaxPhotos, hasShotsLeft, photosRemaining as remainingFor } from '../allowance';
 import { matchNewPhoto } from './faces';
 import { events, participants, photos } from '../schema';
-import { stripImageMetadata, makeThumbnail, makeVideoPoster, thumbName } from '../images';
+import { stripImageMetadata, makeThumbnail, makeVideoPoster, makePlaybackProxy, thumbName, playName } from '../images';
 import { probeVideoMeta } from '../slideshow';
 import { isRevealed } from '../lib';
 import { eventByIdentifier } from './events';
@@ -104,8 +104,12 @@ type PhotoRowInput = {
 function photoRow(p: PhotoRowInput, myParticipantId: string | null) {
   return {
     id:              p.id,
-    url:             `/uploads/${p.filename}`,                       // full-quality original (download + lightbox)
+    url:             `/uploads/${p.filename}`,                       // full-quality original (download)
     thumbUrl:        `/uploads/${thumbName(p.filename)}`,            // fast grid thumbnail (photo or video poster)
+    // A phone-decodable H.264 copy, when one has been built. The original stays the download; this
+    // is only what a <video> element plays, because the original may be VP8/WebM that phones
+    // software-decode (stutter) and Safari may refuse entirely.
+    ...(p.mediaType === 'video' && hasPlayable(p.filename) ? { playUrl: `/uploads/${playName(p.filename)}` } : {}),
     takenAt:         p.takenAt,
     participantName: p.participantName,
     participantId:   p.participantId,
@@ -182,6 +186,9 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
   } else {
     dims = await probeVideoMeta(finalPath).catch(() => ({}));
     await makeVideoPoster(finalPath).catch(() => false);
+    // Deliberately NOT awaited: a 30s clip takes ~15s to transcode and the guest is standing at a
+    // party. The gallery falls back to the original until the proxy lands.
+    void makePlaybackProxy(finalPath).catch(() => false);
     // Enforce the event's video length limit server-side (defense-in-depth): the in-browser recorder
     // auto-stops at the limit, but a native-camera clip could be any length. Only when we can read a
     // real duration; +3s tolerance for container rounding.
@@ -235,6 +242,13 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
 // ── DELETE /api/photos/:id — a guest takes back their own shot, inside the window ─────────────
 // Distinct statuses on purpose: the client shows a different thing for "not yours" than for
 // "too late", and a single 403 for both would make the countdown UI impossible to get right.
+// Does a phone-decodable copy exist yet? Only ever called for video rows (the caller
+// short-circuits on mediaType), and a gallery holds few of those, so one stat each is cheaper than
+// carrying a column that can fall out of step with the filesystem.
+const hasPlayable = (filename: string): boolean => {
+  try { return fs.existsSync(path.join(UPLOADS_DIR, playName(filename))); } catch { return false; }
+};
+
 router.delete('/:id', async (req: Request, res: Response) => {
   const sessionToken = String(req.body?.sessionToken || req.query?.sessionToken || '');
   if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
@@ -266,7 +280,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
   await db.delete(photos).where(eq(photos.id, photo.id));
   const remaining = Math.max(0, Number(me.photosTaken) - 1);
   await db.update(participants).set({ photosTaken: remaining }).where(eq(participants.id, me.id));
-  for (const f of [photo.filename, photo.filename.replace(/\.[^.]+$/, '_thumb.webp')]) {
+  for (const f of [photo.filename, photo.filename.replace(/\.[^.]+$/, '_thumb.webp'), playName(photo.filename)]) {
     try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch { /* already gone is fine */ }
   }
 

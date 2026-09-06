@@ -9,6 +9,7 @@ const NCPU = Math.max(2, os.cpus().length);   // use the box's cores for filteri
 import { and, asc, desc, eq, lt } from 'drizzle-orm';
 import { all, db } from './db';
 import { slideshows } from './schema';
+import { makePlaybackProxy, playName } from './images';
 import { UPLOADS_DIR, eventDir, eventRelPath } from './paths';
 import { brandingRemovable as billingBrandingRemovable, BRANDING_REMOVAL_CENTS, billingEnabled as BILLING_ON } from './billing';
 
@@ -235,7 +236,16 @@ export async function slideshowInfo(eventId: string) {
       `SELECT branding_removal_paid FROM events WHERE id = ?`, [eventId]);
     brandingRemovable = billingBrandingRemovable({ brandingRemovalPaid: r[0]?.branding_removal_paid });
   } catch { /* default false */ }
-  return { ...job, music: listMusic(), photoCount, favouriteCount, videoCount, hasCustomAudio, maxImages: MAX_IMAGES, secondsPerDefault: D_DEFAULT, recent, qualities, resolutions,
+  // Resolved at SERVE time, not when the render finished: the 1080p copy is transcoded in the
+  // background, so it appears a little after the render itself does.
+  const jobPlay = (() => {
+    if (!job.url?.startsWith('/uploads/')) return undefined;
+    const rel = job.url.slice('/uploads/'.length);
+    const play = playName(rel);
+    try { return fs.existsSync(path.join(UPLOADS_DIR, play)) ? `/uploads/${play}` : undefined; }
+    catch { return undefined; }
+  })();
+  return { ...job, playUrl: jobPlay, music: listMusic(), photoCount, favouriteCount, videoCount, hasCustomAudio, maxImages: MAX_IMAGES, secondsPerDefault: D_DEFAULT, recent, qualities, resolutions,
     brandingRemovable, brandingPriceCents: BRANDING_REMOVAL_CENTS, billingEnabled: BILLING_ON };
 }
 
@@ -257,6 +267,13 @@ export function startSlideshow(eventId: string, opts: Opts): Job {
       // Record this render so it shows in the "recent slideshows" list (versioned, not overwritten).
       try { await db.insert(slideshows).values({ id, eventId, filename: eventRelPath(eventId, `slideshow-${id}.mp4`), label: slideshowLabel(opts), resolution: (opts.resolution === '1080p' ? '1080p' : '4k'), createdAt: Date.now() }); } catch { /* best-effort */ }
       jobs.set(eventId, { status: 'done', url: r.url, truncated: r.truncated, progress: 100 });
+      // A 4K render is what you want to keep and download; it is not what a phone should be asked
+      // to stream in a preview. Build a 1080p H.264 copy alongside it, in the background so the
+      // host is not kept waiting on the render they already have. 1080p renders need nothing.
+      if (opts.resolution !== '1080p') {
+        void makePlaybackProxy(path.join(UPLOADS_DIR, eventRelPath(eventId, `slideshow-${id}.mp4`)))
+          .catch(() => false);
+      }
     })
     .catch((e) => jobs.set(eventId, { status: 'error', error: String(e?.message || e) }));
   return job;
@@ -266,7 +283,15 @@ export function startSlideshow(eventId: string, opts: Opts): Job {
 export async function listSlideshows(eventId: string) {
   try {
     const rows = await db.select().from(slideshows).where(eq(slideshows.eventId, eventId)).orderBy(desc(slideshows.createdAt));
-    return rows.map((s) => ({ id: s.id, url: `/uploads/${s.filename}`, favourite: !!s.favourite, label: s.label || 'Slideshow', resolution: s.resolution || '4k', createdAt: s.createdAt }));
+    return rows.map((s) => {
+      // playUrl is the lighter copy for the in-browser preview; url stays the full-quality
+      // download. Only present once the transcode has finished.
+      const play = playName(s.filename);
+      const hasPlay = (() => { try { return fs.existsSync(path.join(UPLOADS_DIR, play)); } catch { return false; } })();
+      return { id: s.id, url: `/uploads/${s.filename}`, ...(hasPlay ? { playUrl: `/uploads/${play}` } : {}),
+               favourite: !!s.favourite, label: s.label || 'Slideshow',
+               resolution: s.resolution || '4k', createdAt: s.createdAt };
+    });
   } catch { return []; }
 }
 
@@ -281,6 +306,7 @@ export async function deleteSlideshow(eventId: string, id: string): Promise<bool
   const [row] = await db.select().from(slideshows).where(and(eq(slideshows.id, id), eq(slideshows.eventId, eventId)));
   if (!row) return false;
   try { fs.unlinkSync(path.join(UPLOADS_DIR, row.filename)); } catch { /* already gone */ }
+  try { fs.unlinkSync(path.join(UPLOADS_DIR, playName(row.filename))); } catch { /* none built */ }
   await db.delete(slideshows).where(eq(slideshows.id, id));
   return true;
 }
@@ -316,6 +342,7 @@ export async function purgeOldSlideshows(): Promise<number> {
       .where(and(eq(slideshows.favourite, false), lt(slideshows.createdAt, Date.now() - SLIDESHOW_TTL_MS)));
     for (const s of stale) {
       try { fs.unlinkSync(path.join(UPLOADS_DIR, s.filename)); } catch { /* gone */ }
+      try { fs.unlinkSync(path.join(UPLOADS_DIR, playName(s.filename))); } catch { /* none built */ }
       await db.delete(slideshows).where(eq(slideshows.id, s.id));
       removed++;
     }

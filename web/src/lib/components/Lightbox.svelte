@@ -31,7 +31,9 @@
   {#if photo}
     {#if photo.mediaType === 'video'}
       <!-- svelte-ignore a11y-media-has-caption -->
-      <video src={photo.url} controls autoplay playsinline></video>
+      <!-- playUrl when it exists: the original may be VP8/WebM, which stutters on phones and does
+           not play at all in Safari. Downloads still take the original. -->
+      <video src={photo.playUrl ?? photo.url} controls autoplay playsinline></video>
     {:else}
       <img src={photo.url} alt="Photo by {photo.participantName}" decoding="async" />
     {/if}

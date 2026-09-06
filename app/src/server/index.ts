@@ -10,8 +10,8 @@ import { requireTurnstile, turnstileSiteKey, turnstileEnabled } from './turnstil
 import { v4 as uuidv4 } from 'uuid';
 import { and, eq, or } from 'drizzle-orm';
 import { db, init } from './db';
-import { events } from './schema';
-import { stripImageMetadata, backfillThumbnails } from './images';
+import { events, photos } from './schema';
+import { stripImageMetadata, backfillThumbnails, backfillPlaybackProxies } from './images';
 import { start as startCleanup } from './cleanup';
 import { startLifecycle } from './lifecycle';
 import { startOps } from './ops-notify';
@@ -342,6 +342,18 @@ init()
     // thumbnails (which now scans the event subfolders too). Both best-effort, off the request path.
     migrateUploadsToPerEvent()
       .catch((e) => console.error('[migrate] failed:', (e as Error).message))
-      .finally(() => { backfillThumbnails(UPLOADS_DIR).catch(() => {}); });
+      .finally(() => {
+        backfillThumbnails(UPLOADS_DIR)
+          .catch(() => {})
+          // After thumbnails, never alongside them — both are ffmpeg/sharp bound. Driven from the
+          // photos table so it only ever touches guest uploads, not slideshow renders.
+          .finally(async () => {
+            try {
+              const vids = await db.select({ filename: photos.filename })
+                .from(photos).where(eq(photos.mediaType, 'video'));
+              await backfillPlaybackProxies(UPLOADS_DIR, vids.map((v) => v.filename));
+            } catch { /* best effort */ }
+          });
+      });
   })
   .catch((err) => { console.error('Failed to initialize database:', err); process.exit(1); });

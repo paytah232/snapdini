@@ -662,7 +662,25 @@
   function toggleRecord() {
     if (!stream) return;
     if (!recording) {
-      const types = ['video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4', ''];
+      // Codec order matters more than any quality setting here, and it was backwards. VP8 was
+      // preferred first, which is the one format phones cannot decode in hardware — a 4K VP8 clip
+      // is decoded on the CPU and stutters on playback even though the recording is perfect (it
+      // plays fine on a laptop, which is what makes it look like a recording fault). Worse, Safari
+      // will not reliably play VP8/WebM at all, so iPhone guests could be unable to watch a clip
+      // that recorded without error.
+      //
+      // H.264 in MP4 has a hardware decoder on essentially every phone made in the last decade and
+      // plays everywhere including iOS. VP9 is the next best — hardware decode on most modern
+      // Android. VP8 stays last, as the fallback it should always have been.
+      const types = [
+        'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+        'video/mp4;codecs=avc1',
+        'video/mp4',
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm',
+        '',
+      ];
       const mime = types.find((m) => m === '' || MediaRecorder.isTypeSupported(m));
       chunks = [];
       // Bitrate matched to the live stream (matchRecBitrate); crisp without overwhelming the encoder.

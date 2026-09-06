@@ -5,7 +5,7 @@ import { db } from './db';
 import { RESCHEDULE_WINDOW_MS, RESCHEDULE_RETENTION_GRACE_MS } from './lib';
 import { events, photos, participants, clientErrors, slideshows, shares } from './schema';
 import { UPLOADS_DIR, uploadDiskPath, eventDir, INCOMING_DIR } from './paths';
-import { thumbName } from './images';
+import { playName, thumbName } from './images';
 import { purgeOldSlideshows } from './slideshow';
 
 const SWEEP_MS = 60 * 60 * 1000; // hourly
@@ -20,6 +20,7 @@ export function unlinkUpload(filename?: string | null): void {
   if (!filename) return;
   safeUnlink(path.join(UPLOADS_DIR, filename));
   safeUnlink(path.join(UPLOADS_DIR, thumbName(filename))); // <name>_thumb.webp (no-op for videos)
+  safeUnlink(path.join(UPLOADS_DIR, playName(filename)));  // <name>_play.mp4 (no-op for photos)
 }
 
 // Delete every file owned by an event (photos + theme header image) from disk.
