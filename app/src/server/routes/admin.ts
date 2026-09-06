@@ -13,6 +13,26 @@ import { UPLOADS_DIR } from '../paths';
 const router = Router();
 router.use(requireAdmin);
 
+
+// ── Listing helpers ───────────────────────────────────────────────────────────
+// These lists were fixed LIMITs with the page filtering whatever happened to arrive. That works
+// until the table outgrows the cap, at which point rows stop existing as far as the operator is
+// concerned — silently, which is the bad part. Every list below takes paging + a search term and
+// returns a total, so the page can always say "showing 50 of 4,312" rather than quietly lying.
+const MAX_PAGE = 200;
+type Listing = { limit: number; offset: number; q: string };
+const listing = (req: Request, def = 50): Listing => ({
+  limit:  Math.min(MAX_PAGE, Math.max(1, Number(req.query.limit) || def)),
+  offset: Math.max(0, Number(req.query.offset) || 0),
+  q:      String(req.query.q || '').trim().slice(0, 120),
+});
+/** A case-insensitive LIKE across several columns, as a (sql, params) fragment. */
+const searchClause = (q: string, cols: string[]): { sql: string; params: string[] } =>
+  !q ? { sql: '', params: [] }
+     : { sql: ' AND (' + cols.map((c) => `${c} ILIKE ?`).join(' OR ') + ')', params: cols.map(() => `%${q}%`) };
+const countOf = async (sql: string, params: unknown[]): Promise<number> =>
+  Number((await get<{ n: number }>(`SELECT count(*) AS n FROM (${sql}) t`, params))?.n || 0);
+
 // Instance overview — headline counts for the dashboard.
 router.get('/overview', async (_req: Request, res: Response) => {
   const now = Date.now();
@@ -117,17 +137,34 @@ router.get('/events', async (_req: Request, res: Response) => {
   res.json({ events });
 });
 
-// Recent users (newest first).
-router.get('/users', async (_req: Request, res: Response) => {
-  const users = await all(
+// Users, paginated and filterable. `status` and `has` exist because "who signed up but never
+// verified" and "who verified but never ran an event" are the two questions this list is actually
+// for — the funnel drop-offs — and scrolling for them stops working almost immediately.
+router.get('/users', async (req: Request, res: Response) => {
+  const { limit, offset, q } = listing(req, 50);
+  const status = String(req.query.status || 'all');   // all | verified | unverified | admin
+  const has    = String(req.query.has || 'all');      // all | events | none
+
+  let where = ' WHERE 1=1';
+  const params: unknown[] = [];
+  const search = searchClause(q, ['u.email', 'COALESCE(u.display_name, \'\')']);
+  where += search.sql; params.push(...search.params);
+  if (status === 'verified')   where += ' AND u.email_verified_at IS NOT NULL';
+  if (status === 'unverified') where += ' AND u.email_verified_at IS NULL';
+  if (status === 'admin')      where += ' AND u.is_admin = true';
+  if (has === 'events') where += ' AND COALESCE(ec.n, 0) > 0';
+  if (has === 'none')   where += ' AND COALESCE(ec.n, 0) = 0';
+
+  const base =
     `SELECT u.id, u.email, u.display_name, u.plan, u.is_admin, u.email_verified_at, u.created_at,
             COALESCE(ec.n, 0) AS events
        FROM users u
-       LEFT JOIN (SELECT owner_user_id, count(*) AS n FROM events WHERE owner_user_id IS NOT NULL GROUP BY owner_user_id) ec ON ec.owner_user_id = u.id
-      ORDER BY u.created_at DESC
-      LIMIT 500`,
-  );
-  res.json({ users });
+       LEFT JOIN (SELECT owner_user_id, count(*) AS n FROM events WHERE owner_user_id IS NOT NULL GROUP BY owner_user_id) ec
+              ON ec.owner_user_id = u.id` + where;
+
+  const total = await countOf(base, params);
+  const users = await all(`${base} ORDER BY u.created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  res.json({ users, total, limit, offset });
 });
 
 // Contact-form messages (DB-backed mailbox). Unhandled first, newest first.
@@ -164,16 +201,28 @@ router.post('/client-errors/:id/handled', async (req: Request, res: Response) =>
 });
 
 // Post-event survey responses (newest first), with the event they belong to.
-router.get('/survey-responses', async (_req: Request, res: Response) => {
-  const responses = await all(
+router.get('/survey-responses', async (req: Request, res: Response) => {
+  const { limit, offset, q } = listing(req, 50);
+  let where = ' WHERE 1=1';
+  const params: unknown[] = [];
+  const search = searchClause(q, ['COALESCE(s.comments, \'\')', 'e.name', 'e.join_code']);
+  where += search.sql; params.push(...search.params);
+  // The two filters worth having: the ones we may quote, and the ones that need a reply.
+  const filter = String(req.query.filter || 'all');   // all | testimonial | promoter | detractor
+  if (filter === 'testimonial') where += ' AND s.testimonial_ok = true';
+  if (filter === 'promoter')    where += ' AND s.nps >= 9';
+  if (filter === 'detractor')   where += ' AND s.nps IS NOT NULL AND s.nps <= 6';
+
+  const base =
     `SELECT s.id, s.overall, s.setup, s.guest_experience AS "guestExperience", s.value, s.nps,
             s.comments, s.contact_opt_in AS "contactOptIn",
             s.testimonial_ok AS "testimonialOk", s.testimonial_name AS "testimonialName",
             s.published_at AS "publishedAt", s.created_at,
             e.name AS "eventName", e.join_code AS "joinCode"
-       FROM survey_responses s JOIN events e ON e.id = s.event_id
-      ORDER BY s.created_at DESC LIMIT 200`);
-  res.json({ responses });
+       FROM survey_responses s JOIN events e ON e.id = s.event_id` + where;
+  const total = await countOf(base, params);
+  const responses = await all(`${base} ORDER BY s.created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  res.json({ responses, total, limit, offset });
 });
 
 // One-click FULL refund of an event's payment via Stripe, then lock the event (a full refund is a
@@ -260,12 +309,19 @@ router.post('/run-sweep', async (_req: Request, res: Response) => {
 // at Checkout). Stripe enforces redemption limits + expiry; allow_promotion_codes is already
 // set on the checkout session. Only available when billing is enabled.
 
-router.get('/promos', async (_req: Request, res: Response) => {
+router.get('/promos', async (req: Request, res: Response) => {
   if (!billingEnabled || !stripe) return res.json({ billingEnabled: false, promos: [] });
+  const state = String(req.query.state || 'all');   // all | active | used | expired | off
   const list = await stripe.promotionCodes.list({ limit: 100, expand: ['data.promotion.coupon'] });
   const promos = list.data.map((p) => {
     const coupon = (p.promotion as { coupon?: { percent_off?: number | null; amount_off?: number | null; currency?: string | null } })?.coupon;
+    // "Active" in Stripe only means the switch is on — a code can be switched on, fully redeemed
+    // and long expired all at once, which is exactly the code you no longer want in the list.
+    const expired  = !!p.expires_at && p.expires_at * 1000 < Date.now();
+    const usedUp   = p.max_redemptions != null && p.times_redeemed >= p.max_redemptions;
+    const state    = !p.active || expired || usedUp ? (usedUp ? 'used' : expired ? 'expired' : 'off') : 'active';
     return {
+      state,
       id: p.id,
       code: p.code,
       active: p.active,
@@ -278,7 +334,8 @@ router.get('/promos', async (_req: Request, res: Response) => {
       created: p.created * 1000,
     };
   });
-  res.json({ billingEnabled: true, promos });
+  const shown = state === 'all' ? promos : promos.filter((p) => p.state === state);
+  res.json({ billingEnabled: true, promos: shown, total: promos.length });
 });
 
 router.post('/promos', async (req: Request, res: Response) => {
@@ -321,7 +378,7 @@ router.post('/promos/:id/deactivate', async (req: Request, res: Response) => {
 // ── Revenue & spend history ───────────────────────────────────────────────────
 // All money is events.amount_paid_cents (cumulative real $ per event, incl. upgrades + the branding
 // add-on). Time basis = the event's created_at (there's no separate per-payment timestamp). Read-only.
-router.get('/revenue', async (_req: Request, res: Response) => {
+router.get('/revenue', async (req: Request, res: Response) => {
   if (!billingEnabled) return res.json({ billingEnabled: false, currency: CURRENCY, totals: { all: 0, d30: 0, d7: 0 }, users: [] });
   const now = Date.now();
   const d30 = now - 30 * 24 * 3600 * 1000;
@@ -333,29 +390,46 @@ router.get('/revenue', async (_req: Request, res: Response) => {
             COALESCE(SUM(CASE WHEN created_at >= ? THEN amount_paid_cents ELSE 0 END),0) AS d7_cents
        FROM events WHERE amount_paid_cents > 0`, [d30, d7]);
 
-  const rows = await all<{ eventid: string; name: string; cents: number; createdat: number; branding: boolean; userid: string | null; email: string | null; displayname: string | null }>(
-    `SELECT e.id AS eventId, e.name AS name, e.amount_paid_cents AS cents, e.created_at AS createdAt,
-            e.branding_removal_paid AS branding, u.id AS userId, u.email AS email, u.display_name AS displayName
+  // Group in SQL and page the GROUPS. This previously selected every paid event ever, with no
+  // limit, and grouped them in memory — fine at two customers, not a thing to leave in place.
+  const { limit, offset, q } = listing(req, 50);
+  const search = searchClause(q, ['COALESCE(u.email, \'\')', 'COALESCE(u.display_name, \'\')', 'e.name']);
+  const groupBase =
+    `SELECT COALESCE(u.id, '(none)') AS key, MIN(u.id) AS userid,
+            COALESCE(MIN(u.email), '(no account)') AS email, MIN(u.display_name) AS displayname,
+            SUM(e.amount_paid_cents) AS totalcents
        FROM events e LEFT JOIN users u ON u.id = e.owner_user_id
-      WHERE e.amount_paid_cents > 0
-      ORDER BY e.created_at DESC`);
+      WHERE e.amount_paid_cents > 0${search.sql}
+      GROUP BY COALESCE(u.id, '(none)')`;
+  const totalCustomers = await countOf(groupBase, search.params);
+  const groups = await all<{ key: string; userid: string | null; email: string; displayname: string | null; totalcents: number }>(
+    `${groupBase} ORDER BY totalcents DESC LIMIT ? OFFSET ?`, [...search.params, limit, offset]);
 
-  // Group per owner (null owner → "(no account)").
+  // Only the events belonging to the customers on THIS page.
+  const keys = groups.map((g) => g.key);
+  const rows = keys.length
+    ? await all<{ eventid: string; name: string; cents: number; createdat: number; branding: boolean; key: string }>(
+        `SELECT e.id AS eventId, e.name AS name, e.amount_paid_cents AS cents, e.created_at AS createdAt,
+                e.branding_removal_paid AS branding, COALESCE(e.owner_user_id, '(none)') AS key
+           FROM events e
+          WHERE e.amount_paid_cents > 0 AND COALESCE(e.owner_user_id, '(none)') IN (${keys.map(() => '?').join(',')})
+          ORDER BY e.created_at DESC`, keys)
+    : [];
+
   const map = new Map<string, { userId: string | null; email: string; displayName: string | null; totalCents: number; events: { id: string; name: string; cents: number; createdAt: number; branding: boolean }[] }>();
-  for (const r of rows) {
-    const key = r.userid || '(none)';
-    let g = map.get(key);
-    if (!g) { g = { userId: r.userid, email: r.email || '(no account)', displayName: r.displayname, totalCents: 0, events: [] }; map.set(key, g); }
-    g.totalCents += r.cents;
-    g.events.push({ id: r.eventid, name: r.name, cents: r.cents, createdAt: r.createdat, branding: !!r.branding });
+  for (const g of groups) {
+    map.set(g.key, { userId: g.userid, email: g.email, displayName: g.displayname, totalCents: Number(g.totalcents), events: [] });
   }
-  const users = [...map.values()].sort((a, b) => b.totalCents - a.totalCents);
+  for (const r of rows) {
+    map.get(r.key)?.events.push({ id: r.eventid, name: r.name, cents: r.cents, createdAt: r.createdat, branding: !!r.branding });
+  }
+  const users = [...map.values()];
 
   res.json({
     billingEnabled: true,
     currency: CURRENCY,
     totals: { all: totals?.all_cents || 0, d30: totals?.d30_cents || 0, d7: totals?.d7_cents || 0 },
-    users,
+    users, total: totalCustomers, limit, offset,
   });
 });
 

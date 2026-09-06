@@ -9,20 +9,61 @@
   let stats: Record<string, number> | null = null;
   let events: any[] = [];
   let users: any[] = [];
+  // Users are the one list certain to outgrow any fixed cap, so this panel asks the SERVER for a
+  // page rather than filtering whatever arrived. The two status filters are the funnel questions
+  // this list exists to answer: who never verified, and who verified but never ran an event.
+  let usrTotal = 0;
+  let usrStatus: 'all' | 'verified' | 'unverified' | 'admin' = 'all';
+  let usrHas: 'all' | 'events' | 'none' = 'all';
+  let usrLoading = false;
+  let usrDebounce: ReturnType<typeof setTimeout> | undefined;
+
+  async function loadUsers() {
+    usrLoading = true;
+    try {
+      const p = new URLSearchParams({
+        limit: String(PAGE), offset: String((usrPage - 1) * PAGE),
+        q: usrQuery.trim(), status: usrStatus, has: usrHas,
+      });
+      const r = await api<{ users: any[]; total: number }>(`/api/admin/users?${p}`);
+      users = r.users ?? [];
+      usrTotal = r.total ?? 0;
+    } catch { /* leave the last good page on screen */ }
+    usrLoading = false;
+  }
+  // Typing hits the database, so debounce it; changing a filter or page does not need to wait.
+  function onUsrQuery() {
+    clearTimeout(usrDebounce);
+    usrDebounce = setTimeout(() => { usrPage = 1; loadUsers(); }, 250);
+  }
+  function setUsrFilter() { usrPage = 1; loadUsers(); }
+  function usrGo(delta: number) {
+    const last = Math.max(1, Math.ceil(usrTotal / PAGE));
+    usrPage = Math.min(last, Math.max(1, usrPage + delta));
+    loadUsers();
+  }
   let error = '';
 
   // ── Revenue ──
   type RevUser = { userId: string | null; email: string; displayName: string | null; totalCents: number; events: { id: string; name: string; cents: number; createdAt: number; branding: boolean }[] };
-  let revenue: { billingEnabled: boolean; currency: string; totals: { all: number; d30: number; d7: number }; users: RevUser[] } | null = null;
+  let revenue: { billingEnabled: boolean; currency: string; totals: { all: number; d30: number; d7: number }; users: RevUser[]; total?: number } | null = null;
   let openUser: string | null = null;
   const money = (cents: number, cur = revenue?.currency || 'AUD') =>
     new Intl.NumberFormat(undefined, { style: 'currency', currency: (cur || 'AUD').toUpperCase() }).format((cents || 0) / 100);
   const rowKey = (u: RevUser) => u.userId || u.email;
-  async function loadRevenue() { try { revenue = await api('/api/admin/revenue'); } catch { /* ignore */ } }
+  // Server groups and pages the customers now; this asks for the top page by spend.
+  async function loadRevenue() { try { revenue = await api(`/api/admin/revenue?limit=${PAGE}`); } catch { /* ignore */ } }
 
   // ── Survey responses ──
   let surveys: any[] = [];
-  async function loadSurvey() { try { const r = await api<{ responses: any[] }>('/api/admin/survey-responses'); surveys = r.responses; } catch { /* ignore */ } }
+  let surveyTotal = 0;
+  let surveyFilter: 'all' | 'testimonial' | 'promoter' | 'detractor' = 'all';
+  async function loadSurvey() {
+    try {
+      const r = await api<{ responses: any[]; total: number }>(`/api/admin/survey-responses?filter=${surveyFilter}&limit=${PAGE}`);
+      surveys = r.responses; surveyTotal = r.total ?? r.responses.length;
+    } catch { /* ignore */ }
+  }
   const parseComments = (c: string | null): [string, string][] => { try { return c ? Object.entries(JSON.parse(c)) : []; } catch { return []; } };
 
   // ── One-click refund (full refund + lock; a cancellation) ──
@@ -43,6 +84,10 @@
   // ── Promo codes ──
   let promoBilling = false;
   let promos: any[] = [];
+  let promoTotal = 0;
+  // Stripe's own "active" only reports the switch. A code can be switched on, fully redeemed and
+  // expired at once, so the server derives a real state and this filters on that.
+  let promoState: 'all' | 'active' | 'used' | 'expired' | 'off' = 'all';
   let pCode = '';
   let pType: 'percent' | 'amount' = 'percent';
   let pValue: number | '' = '';
@@ -64,14 +109,11 @@
   const pageCount = (n: number) => Math.max(1, Math.ceil(n / PAGE));
 
   $: evFiltered = events.filter((e) => match([e.name, e.slug, e.join_code, e.owner], evQuery) && (evShowInactive || eventActive(e)));
-  $: usrFiltered = users.filter((u) => match([u.email, u.display_name], usrQuery));
   $: msgFiltered = contactMsgs.filter((m) => match([m.name, m.email, m.message], msgQuery) && (msgShowDone || !m.handled));
   // Reset to page 1 whenever a query or filter changes (and clamp if a page goes out of range).
   $: { void evQuery; void evShowInactive; evPage = 1; }
-  $: { void usrQuery; usrPage = 1; }
   $: { void msgQuery; void msgShowDone; msgPage = 1; }
   $: evPaged = paginate(evFiltered, Math.min(evPage, pageCount(evFiltered.length)));
-  $: usrPaged = paginate(usrFiltered, Math.min(usrPage, pageCount(usrFiltered.length)));
   $: msgPaged = paginate(msgFiltered, Math.min(msgPage, pageCount(msgFiltered.length)));
   $: activeEventCount = events.filter(eventActive).length;
 
@@ -145,9 +187,10 @@
 
   async function loadPromos() {
     try {
-      const r = await api<{ billingEnabled: boolean; promos: any[] }>('/api/admin/promos');
+      const r = await api<{ billingEnabled: boolean; promos: any[]; total: number }>(`/api/admin/promos?state=${promoState}`);
       promoBilling = r.billingEnabled;
       promos = r.promos;
+      promoTotal = r.total ?? r.promos.length;
     } catch { /* ignore */ }
   }
 
@@ -203,11 +246,12 @@
       const [ov, ev, us] = await Promise.all([
         api<{ stats: Record<string, number> }>('/api/admin/overview'),
         api<{ events: any[] }>('/api/admin/events'),
-        api<{ users: any[] }>('/api/admin/users'),
+        api<{ users: any[]; total: number }>('/api/admin/users?limit=' + PAGE),
       ]);
       stats = ov.stats;
       events = ev.events;
       users = us.users;
+      usrTotal = us.total ?? us.users.length;
       await loadPromos();
       await loadContact();
       await loadClientErrors();
@@ -440,7 +484,16 @@
         {/if}
       {/if}
 
-      <h2>Promo codes <span class="count">{promos.length}</span></h2>
+      <h2>Promo codes <span class="count">{promoState === 'all' ? promoTotal : `${promos.length} / ${promoTotal}`}</span></h2>
+      <div class="filterbar">
+        <select bind:value={promoState} on:change={loadPromos} aria-label="Filter promo codes">
+          <option value="all">All codes</option>
+          <option value="active">Usable now</option>
+          <option value="used">Fully redeemed</option>
+          <option value="expired">Expired</option>
+          <option value="off">Switched off</option>
+        </select>
+      </div>
       {#if !promoBilling}
         <p class="muted">Billing isn't enabled on this instance, so promo codes are off.</p>
       {:else}
@@ -471,7 +524,7 @@
                   <td>{#if p.active}<button class="link-btn" on:click={() => deactivatePromo(p.id)}>deactivate</button>{/if}</td>
                 </tr>
               {/each}
-              {#if !promos.length}<tr><td colspan="7" class="muted">No promo codes yet.</td></tr>{/if}
+              {#if !promos.length}<tr><td colspan="7" class="muted">{promoState === 'all' ? 'No promo codes yet.' : 'None in this state.'}</td></tr>{/if}
             </tbody>
           </table>
         </div>
@@ -555,7 +608,15 @@
     </section>
 
     <section class="panel">
-      <h2>Survey responses <span class="count">{surveys.length}</span></h2>
+      <h2>Survey responses <span class="count">{surveyFilter === 'all' ? surveyTotal : `${surveys.length} / ${surveyTotal}`}</span></h2>
+      <div class="filterbar">
+        <select bind:value={surveyFilter} on:change={loadSurvey} aria-label="Filter survey responses">
+          <option value="all">All responses</option>
+          <option value="testimonial">Cleared to quote</option>
+          <option value="promoter">Promoters (NPS 9+)</option>
+          <option value="detractor">Detractors (NPS ≤6)</option>
+        </select>
+      </div>
       {#if !surveys.length}
         <p class="muted">No responses yet.</p>
       {:else}
@@ -583,13 +644,27 @@
     </section>
 
     <section class="panel">
-      <h2>Users <span class="count">{usrFiltered.length}</span></h2>
-      <input class="search" placeholder="Search users — email or name…" bind:value={usrQuery} />
+      <h2>Users <span class="count">{usrTotal}</span></h2>
+      <div class="filterbar">
+        <input class="search" placeholder="Search users — email or name…"
+               bind:value={usrQuery} on:input={onUsrQuery} />
+        <select bind:value={usrStatus} on:change={setUsrFilter} aria-label="Filter by account status">
+          <option value="all">Any status</option>
+          <option value="verified">Verified</option>
+          <option value="unverified">Never verified</option>
+          <option value="admin">Admins</option>
+        </select>
+        <select bind:value={usrHas} on:change={setUsrFilter} aria-label="Filter by events created">
+          <option value="all">Any activity</option>
+          <option value="events">Has created an event</option>
+          <option value="none">Never created one</option>
+        </select>
+      </div>
       <div class="table-scroll">
         <table>
           <thead><tr><th>Email</th><th>Name</th><th>Events</th><th>Verified</th><th>Admin</th><th>Joined</th></tr></thead>
           <tbody>
-            {#each usrPaged as u}
+            {#each users as u}
               <tr>
                 <td>{u.email}</td>
                 <td class="muted">{u.display_name || '—'}</td>
@@ -599,15 +674,17 @@
                 <td class="muted">{fmtDate(u.created_at)}</td>
               </tr>
             {/each}
-            {#if !usrFiltered.length}<tr><td colspan="6" class="muted">{users.length ? 'No matches.' : 'No users yet.'}</td></tr>{/if}
+            {#if !users.length}<tr><td colspan="6" class="muted">{usrLoading ? 'Loading…' : (usrQuery || usrStatus !== 'all' || usrHas !== 'all' ? 'No matches.' : 'No users yet.')}</td></tr>{/if}
           </tbody>
         </table>
       </div>
-      {#if pageCount(usrFiltered.length) > 1}
+      {#if usrTotal > PAGE}
         <div class="pager">
-          <button class="pg" on:click={() => (usrPage = Math.max(1, usrPage - 1))} disabled={usrPage <= 1}>‹ Prev</button>
-          <span>Page {Math.min(usrPage, pageCount(usrFiltered.length))} / {pageCount(usrFiltered.length)}</span>
-          <button class="pg" on:click={() => (usrPage = Math.min(pageCount(usrFiltered.length), usrPage + 1))} disabled={usrPage >= pageCount(usrFiltered.length)}>Next ›</button>
+          <button class="pg" on:click={() => usrGo(-1)} disabled={usrPage <= 1 || usrLoading}>‹ Prev</button>
+          <!-- Says what is on screen against the real total, so a growing table can never quietly
+               stop showing rows the way a fixed LIMIT did. -->
+          <span>{(usrPage - 1) * PAGE + 1}–{Math.min(usrPage * PAGE, usrTotal)} of {usrTotal}</span>
+          <button class="pg" on:click={() => usrGo(1)} disabled={usrPage * PAGE >= usrTotal || usrLoading}>Next ›</button>
         </div>
       {/if}
     </section>
@@ -675,6 +752,12 @@
   .seg-btn { background: transparent; border: none; padding: 8px 14px; font: inherit; font-size: 0.82rem; font-weight: 700; color: var(--text-muted); cursor: pointer; }
   .seg-btn.on { background: var(--accent); color: var(--accent-ink, #111); }
   .seg-btn small { font-weight: 600; opacity: 0.8; }
+  .filterbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .filterbar .search { flex: 1 1 220px; margin-bottom: 0; }
+  .filterbar select {
+    padding: 8px 10px; border-radius: 9px; font: inherit;
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  }
   .pager { display: flex; align-items: center; gap: 14px; justify-content: center; margin-top: 12px; font-size: 0.82rem; color: var(--text-muted); }
   .pg { background: none; border: 1px solid var(--border, #ddd); color: var(--text); border-radius: 9px; padding: 6px 12px; font-size: 0.82rem; cursor: pointer; }
   .pg:hover:not(:disabled) { border-color: var(--accent); }
