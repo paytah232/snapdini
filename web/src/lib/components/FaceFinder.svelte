@@ -102,6 +102,9 @@
 {/if}
 
 <style>
+  /* The CTA is a bare button in normal flow, so without this it sits flush against whatever
+     follows it — on the gallery that is the photo grid. */
+  .ff-cta { display: block; margin: 4px auto 22px; }
   .ff-cta, .ff-go {
     border-radius: 999px; padding: 8px 14px; font-size: .85rem; font-weight: 600; cursor: pointer;
     background: var(--surface-2, #1e1b14); color: var(--text, #f2ece0); border: 1px solid var(--border, #3a3630);
@@ -109,10 +112,10 @@
   .ff-go { background: var(--accent, #f0b429); color: var(--accent-ink, #111); border-color: transparent; }
   .ff-cta:disabled, .ff-go:disabled { opacity: .5; cursor: default; }
   .ff-link { background: none; border: none; color: var(--text-muted, #a39b8c); font-size: .82rem; cursor: pointer; text-decoration: underline; }
-  .ff-row { display: flex; align-items: center; gap: 12px; justify-content: center; margin: 10px 0; }
+  .ff-row { display: flex; align-items: center; gap: 12px; justify-content: center; margin: 10px 0 22px; }
   .ff-on { font-size: .85rem; color: var(--accent, #f0b429); font-weight: 600; }
   .ff-panel {
-    max-width: 560px; margin: 14px auto; padding: 16px 18px; text-align: left;
+    max-width: 560px; margin: 14px auto 24px; padding: 16px 18px; text-align: left;
     border: 1px solid var(--border, #3a3630); border-radius: 14px; background: var(--surface, #17150f);
   }
   .ff-panel h3 { margin: 0 0 8px; font-size: 1rem; }

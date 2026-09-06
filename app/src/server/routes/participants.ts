@@ -130,6 +130,7 @@ router.get('/me', async (req: Request, res: Response) => {
       revealedAt:     events.revealedAt,
       allowDownloads: events.allowDownloads,
       noFlash:        events.noFlash,
+      feedbackAskedAt: participants.feedbackAskedAt,
     })
     .from(participants)
     .innerJoin(events, eq(events.id, participants.eventId))
@@ -155,6 +156,9 @@ router.get('/me', async (req: Request, res: Response) => {
       // whole face-matching UI in front of guests and 503 the moment they used it.
       faceMatching:    faceMatchingAvailable() && !!p.faceMatching,
       faceEnrolled:    !!p.faceConsentAt,
+      // Asked once, on whichever surface they saw first. Both the camera and the shared gallery
+      // offer the ask, and neither should re-ask someone who already answered on the other.
+      feedbackGiven:   !!p.feedbackAskedAt,
       // True when the address we hold arrived with their payment rather than at join — the guest
       // never typed it here, so it is worth telling them which one their photos are tied to.
       emailFromPayment: !!p.upgradeEmail && p.email === p.upgradeEmail,

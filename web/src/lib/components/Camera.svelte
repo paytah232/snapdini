@@ -12,6 +12,7 @@
   import { putCapture, delCapture, listCaptures, saveProgress, getProgress } from '$lib/captureStore';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import StartYourOwn from '$lib/components/StartYourOwn.svelte';
+  import GuestFeedback from '$lib/components/GuestFeedback.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import FeedbackModal from '$lib/components/FeedbackModal.svelte';
 
@@ -217,6 +218,7 @@
         canBuyShots = !!me.canBuyShots;
         canAskHost = !!me.canAskHost;
         faceMatching = !!me.faceMatching;
+        feedbackDone = !!me.feedbackGiven;
         allowDownloads = me.allowDownloads;
         await enterCamera();
         return;
@@ -286,6 +288,7 @@
       canBuyShots = !!r.canBuyShots;
       canAskHost = !!r.canAskHost;
       faceMatching = !!r.faceMatching;
+      feedbackDone = !!r.feedbackGiven;
       saveSession(r.joinCode, r.sessionToken);
       if (r.recovered) showToast(`Welcome back! You've ${photosRemaining} shot${photosRemaining === 1 ? '' : 's'} left.`);
       await enterCamera();
@@ -361,28 +364,11 @@
   let benchStep: VidQuality | null = null;
   let benchResult: { results: Record<string, number>; best: VidQuality } | null = null;
   let benchPrompt = false;
-  // Guest feedback: offered beside the referral card and on the spent-roll card, because someone
-  // who does NOT want to run their own event may still have something worth telling us.
-  let fbOpen = false;
-  let fbRating = 0;
-  let fbComment = '';
-  let fbSent = false;
-  let fbBusy = false;
+  // Guest feedback lives in GuestFeedback.svelte, shared with the gallery page. The flag is seeded
+  // from /me so answering on either surface stops the ask on both.
+  let feedbackDone = false;
+  let feedbackOpen = false;   // the spent-roll toast opens the shared panel
 
-  async function sendGuestFeedback(dismissed = false) {
-    if (!sessionToken || fbBusy) return;
-    fbBusy = true;
-    try {
-      await fetch('/api/participants/feedback', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
-        body: JSON.stringify(dismissed ? { sessionToken, dismissed: true }
-                                       : { sessionToken, rating: fbRating || undefined, comment: fbComment || undefined }),
-      });
-      if (!dismissed) { fbSent = true; showToast('Thanks — that helps a lot'); }
-      fbOpen = false;
-    } catch { showToast('Could not send that just now', true); }
-    fbBusy = false;
-  }
   // ONE bar, used for both the recommendation and the warning. They were different numbers (24 and
   // 30) and could contradict each other: a phone measuring 29fps at 4K got "we've set you to 4K"
   // and "4K isn't smooth" on the same panel. 24 is the film standard and the honest floor for
@@ -1484,6 +1470,16 @@
             </button>
           {/if}
         </div>
+        <!-- The moment a guest finishes is the moment they have an opinion. The panel itself is
+             the shared component; this card only supplies the trigger. -->
+        {#if sessionToken && !feedbackDone}
+          <div class="oos-fb">
+            {#if !feedbackOpen}
+              <button class="fb-trigger" on:click={() => (feedbackOpen = true)}>💬 Leave feedback</button>
+            {/if}
+            <GuestFeedback sessionToken={sessionToken ?? ''} showCta={false} bind:open={feedbackOpen} bind:done={feedbackDone} />
+          </div>
+        {/if}
       </div>
     {/if}
   </div>
@@ -1573,51 +1569,9 @@
       <!-- Feedback rides INSIDE this card rather than as a second one beside it. Two stacked cards
            at the foot of a gallery read as clutter, and the ask is secondary to the referral. -->
       <StartYourOwn sourceJoinCode={ev.joinCode} emphasis={photosRemaining === 0 && ownCount > 0}
-                    footer={!!sessionToken && !fbSent}>
+                    footer={!!sessionToken && !feedbackDone}>
         <svelte:fragment slot="foot">
-    {#if fbOpen}
-
-            <div class="fb-panel">
-
-              <div class="fb-title">How was it?</div>
-
-              <div class="fb-stars">
-
-                {#each [1, 2, 3, 4, 5] as n}
-
-                  <button class="fb-star" class:on={fbRating >= n} on:click={() => (fbRating = n)}
-
-                          aria-label={`${n} out of 5`}>★</button>
-
-                {/each}
-
-              </div>
-
-              <textarea class="fb-text" rows="2" maxlength="2000" bind:value={fbComment}
-
-                        placeholder="Anything you'd change? (optional)"></textarea>
-
-              <div class="fb-actions">
-
-                <button class="fb-link" on:click={() => sendGuestFeedback(true)}>No thanks</button>
-
-                <button class="btn primary sm" disabled={fbBusy || (!fbRating && !fbComment.trim())}
-
-                        on:click={() => sendGuestFeedback()}>{fbBusy ? 'Sending…' : 'Send'}</button>
-
-              </div>
-
-            </div>
-
-          {:else}
-
-            <div class="fb-cta-row">
-
-              <button class="fb-cta" on:click={() => (fbOpen = true)}>💬 Leave feedback</button>
-
-            </div>
-
-          {/if}
+          <GuestFeedback sessionToken={sessionToken ?? ''} bind:done={feedbackDone} />
         </svelte:fragment>
       </StartYourOwn>
     {/if}
@@ -1825,25 +1779,11 @@
     color: var(--text); text-decoration: none; font-size: .88rem; font-weight: 600;
   }
   .full-gallery:hover { border-color: var(--accent); }
-  .fb-cta-row { display: flex; justify-content: center; margin: 10px 0 4px; }
-  .fb-cta, .fb-link {
-    background: none; border: none; cursor: pointer; font-size: .84rem;
-    color: var(--text-muted, #a39b8c); text-decoration: underline; text-underline-offset: 2px;
+  .oos-fb { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border, #3a3630); }
+  .fb-trigger {
+    background: none; border: none; cursor: pointer; font-size: .85rem; padding: 2px 4px;
+    color: var(--text-muted, #a39b8c); text-decoration: underline;
   }
-  .fb-panel {
-    max-width: 520px; margin: 14px auto 4px; padding: 15px 17px; text-align: left;
-    border: 1px solid var(--border, #3a3630); border-radius: 14px; background: var(--surface, #17150f);
-    display: flex; flex-direction: column; gap: 10px;
-  }
-  .fb-title { font-size: .95rem; font-weight: 600; }
-  .fb-stars { display: flex; gap: 4px; }
-  .fb-star { background: none; border: none; cursor: pointer; font-size: 1.5rem; line-height: 1;
-    color: var(--border, #3a3630); padding: 0 2px; }
-  .fb-star.on { color: var(--accent, #f0b429); }
-  .fb-text { width: 100%; resize: vertical; border-radius: 9px; padding: 8px 10px; font: inherit;
-    font-size: .87rem; background: var(--bg, #100f0d); color: var(--text, #f2ece0);
-    border: 1px solid var(--border, #3a3630); }
-  .fb-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
   .oos-panel {
     /* Clears the shutter rather than sitting over it: the controls row is ~110px tall and the
        button overhangs it, so this starts well above the whole cluster. */

@@ -127,6 +127,10 @@ export async function embedSelfie(imagePath: string): Promise<number[] | null> {
   }
   let best = faces[0], bestScore = -1;
   for (const f of faces) if (f.score > bestScore) { best = f; bestScore = f.score; }
+  // Log the winning score on success too, not just on rejection. Both floors here (enrolment and
+  // MATCH_THRESHOLD) were picked from reasoning rather than evidence, and real handsets are the
+  // only thing that can tell us whether they are set sensibly. Score only — no image, no identity.
+  console.log(`[faces] selfie accepted — score ${bestScore.toFixed(3)} (floor ${SELFIE_MIN_SCORE}), ${faces.length} face(s) in frame`);
   return best.embedding;
 }
 

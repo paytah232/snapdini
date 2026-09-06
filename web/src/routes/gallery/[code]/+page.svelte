@@ -4,6 +4,7 @@
   import { getEvent, getGalleryPhotos, getMe, type Photo, type PublicEvent } from '$lib/events';
   import { getSession } from '$lib/session';
   import FaceFinder from '$lib/components/FaceFinder.svelte';
+  import GuestFeedback from '$lib/components/GuestFeedback.svelte';
   import { applyEventTheme } from '$lib/theme';
   import { showToast } from '$lib/toast';
   import Lightbox from '$lib/components/Lightbox.svelte';
@@ -42,6 +43,10 @@
   // offered only to someone holding a participant session for THIS event (same localStorage key
   // the camera writes); a stranger with the link gets nothing to enrol into.
   let guestToken = '';
+  // Feedback is offered here too. This is where a guest arrives after the event ends, which is a
+  // better moment to ask than mid-party — and because the control needs a participant session, a
+  // stranger who was sent the gallery link is never asked at all.
+  let feedbackDone = false;
   let faceMatching = false;
   let faceEnrolled = false;
   let facePhotoIds: string[] = [];
@@ -94,6 +99,7 @@
           const me = await getMe(guestToken);
           faceMatching = !!me.faceMatching;
           faceEnrolled = !!me.faceEnrolled;
+          feedbackDone = !!me.feedbackGiven;
         } catch { guestToken = ''; }   // stale session — just don't offer it
       }
     } catch (e) {
@@ -261,7 +267,12 @@
   <!-- Surface 1 of 3: every guest lands here, and no email address is required to reach them.
        Only shown once photos are actually visible — pitching before the reveal is noise. -->
   {#if revealed && photos.length}
-    <StartYourOwn sourceJoinCode={code} emphasis={justRevealed} />
+    <StartYourOwn sourceJoinCode={code} emphasis={justRevealed}
+                  footer={!!guestToken && !feedbackDone}>
+      <svelte:fragment slot="foot">
+        <GuestFeedback sessionToken={guestToken} bind:done={feedbackDone} />
+      </svelte:fragment>
+    </StartYourOwn>
   {/if}
 </main>
 

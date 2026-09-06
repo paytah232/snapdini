@@ -188,8 +188,8 @@ export const getGalleryPhotos = (code: string, highlightsOnly = false) =>
   api<PhotosResponse>(`/api/photos/${code}?gallery=true${highlightsOnly ? '&highlightsOnly=true' : ''}`);
 
 export const joinEvent = (joinCode: string, name: string, email?: string) =>
-  postJson<{ participant: { id: string; name: string }; sessionToken: string; joinCode: string; photosRemaining: number; eventName: string; noFlash?: boolean; recovered?: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; emailFromPayment?: boolean }>(
+  postJson<{ participant: { id: string; name: string }; sessionToken: string; joinCode: string; photosRemaining: number; eventName: string; noFlash?: boolean; recovered?: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; feedbackGiven?: boolean; emailFromPayment?: boolean }>(
     '/api/participants', { joinCode, name, email: email || undefined });
 export const getMe = (sessionToken: string) =>
-  api<{ participant: { id: string; name: string; photosTaken: number; email: string | null }; photosRemaining: number; eventName: string; joinCode: string; slug: string | null; startsAt: number; expiresAt: number; isLocked: boolean; maxPhotos: number; extraPhotos?: number; allowDownloads: boolean; noFlash: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; emailFromPayment?: boolean }>(
+  api<{ participant: { id: string; name: string; photosTaken: number; email: string | null }; photosRemaining: number; eventName: string; joinCode: string; slug: string | null; startsAt: number; expiresAt: number; isLocked: boolean; maxPhotos: number; extraPhotos?: number; allowDownloads: boolean; noFlash: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; feedbackGiven?: boolean; emailFromPayment?: boolean }>(
     '/api/participants/me', { headers: { 'X-Session-Token': sessionToken } });
