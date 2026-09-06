@@ -161,6 +161,13 @@
     showToast('Preparing your download…');
     location.href = zipHref();
   }
+  // "All" means everything currently on screen, not everything in the event — otherwise the button
+  // quietly contradicts whatever filter the viewer is looking through.
+  $: allShownSelected = shownPhotos.length > 0 && shownPhotos.every((p) => selected.has(p.id));
+  function toggleSelectAll() {
+    selected = allShownSelected ? new Set() : new Set(shownPhotos.map((p) => p.id));
+  }
+
   function downloadSelected() {
     if (!selected.size) return;
     trackPhotos(code, [...selected], 'download');
@@ -189,6 +196,12 @@
     {#if revealed && allowDownloads && photos.length}
       <button class="btn ghost" on:click={toggleSelecting}>{selecting ? 'Cancel' : 'Select'}</button>
       {#if selecting}
+        <!-- Ticking 200 photos by hand to grab "most of them" is not a workflow. Select all, then
+             untick the few you don't want. Operates on what is SHOWN, so it respects the Me filter
+             and the highlights toggle rather than silently grabbing hidden photos too. -->
+        <button class="btn ghost" on:click={toggleSelectAll}>
+          {allShownSelected ? 'Clear' : `Select all${shownPhotos.length ? ` (${shownPhotos.length})` : ''}`}
+        </button>
         <button class="btn primary" on:click={downloadSelected} disabled={!selected.size}>⬇ Download{selected.size ? ` ${selected.size}` : ''}</button>
       {:else}
         <button class="btn ghost" on:click={downloadAll}>⬇ Download all</button>
