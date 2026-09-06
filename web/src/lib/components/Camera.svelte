@@ -365,9 +365,26 @@
   let benchResult: { results: Record<string, number>; best: VidQuality } | null = null;
   let benchPrompt = false;
   let benchStored = false;
-  // How long a camera measurement is trusted before we offer to take it again. Long enough not to
-  // nag between events, short enough to catch a new phone or a browser that changed its encoder.
-  const BENCH_TTL_MS = 30 * 24 * 3600 * 1000;
+  // Measured PER EVENT, not per device. localStorage is already per device, so a new phone gets a
+  // fresh measurement for free — what that misses is the same phone performing differently on the
+  // night: hot, on battery saver, three apps deep. Events are rare enough that a few seconds at
+  // the start of each one is not a nag, and it is the only way the reading reflects the conditions
+  // the video will actually be shot in.
+  const benchKey = (joinCode: string) => `snap_vidbench_${joinCode}`;
+  // Keep localStorage from growing an entry per event forever.
+  const BENCH_PRUNE_MS = 90 * 24 * 3600 * 1000;
+  function pruneBenchmarks() {
+    try {
+      // The old global key from when this was once-per-device. The chosen quality already persists
+      // separately in snap_vidq, so nothing is lost by dropping it.
+      localStorage.removeItem('snap_vidbench');
+      for (const k of Object.keys(localStorage)) {
+        if (!k.startsWith('snap_vidbench_')) continue;
+        const at = Number(JSON.parse(localStorage.getItem(k) || '{}')?.at || 0);
+        if (!at || Date.now() - at > BENCH_PRUNE_MS) localStorage.removeItem(k);
+      }
+    } catch { /* ignore */ }
+  }
   // Guest feedback lives in GuestFeedback.svelte, shared with the gallery page. The flag is seeded
   // from /me so answering on either surface stops the ask on both.
   let feedbackDone = false;
@@ -477,19 +494,15 @@
   async function setMode(v: boolean) {
     if (recording || v === videoMode) return;
     // First time on video for this device: offer the capability check before they shoot anything
-    // they cannot re-take. Cached, so it is asked once and never again.
+    // they cannot re-take. Measured once per event — see benchKey.
     if (v) {
-      // Offer it when we have never measured this device, or when what we measured has gone stale.
-      // A skip is respected for the same window rather than forever.
+      // Once per EVENT. A skip counts as answered for this event, so nobody is asked twice at the
+      // same party, but the next event measures again.
       try {
-        const raw = localStorage.getItem('snap_vidbench');
+        pruneBenchmarks();
+        const raw = ev ? localStorage.getItem(benchKey(ev.joinCode)) : null;
         benchStored = !!raw;
-        let stale = true;
-        if (raw) {
-          const at = Number(JSON.parse(raw)?.at || 0);
-          stale = !at || Date.now() - at > BENCH_TTL_MS;
-        }
-        if (stale) benchPrompt = true;
+        if (!raw) benchPrompt = true;
       } catch { /* ignore */ }
     }
     videoMode = v;
@@ -975,7 +988,7 @@
 
       videoQuality = best;
 
-      try { localStorage.setItem('snap_vidbench', JSON.stringify({ results, best, at: Date.now() })); } catch { /* ignore */ }
+      try { if (ev) localStorage.setItem(benchKey(ev.joinCode), JSON.stringify({ results, best, at: Date.now() })); } catch { /* ignore */ }
 
       try { localStorage.setItem('snap_vidq', best); } catch { /* ignore */ }
 
@@ -1462,7 +1475,7 @@
           <div class="bench-title">Check what your phone can record?</div>
           <div class="bench-sub">A few seconds. Phones vary a lot, and it's better to find out now than halfway through a clip.</div>
           <div class="bench-actions">
-            <button class="btn ghost sm" on:click={() => { benchPrompt = false; try { localStorage.setItem('snap_vidbench', JSON.stringify({ skipped: true, at: Date.now() })); } catch { /* ignore */ } }}>Skip</button>
+            <button class="btn ghost sm" on:click={() => { benchPrompt = false; try { if (ev) localStorage.setItem(benchKey(ev.joinCode), JSON.stringify({ skipped: true, at: Date.now() })); } catch { /* ignore */ } }}>Skip</button>
             <button class="btn primary sm" on:click={() => { benchPrompt = false; void runVideoBenchmark(); }}>Check my camera</button>
           </div>
         {/if}
