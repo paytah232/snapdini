@@ -12,6 +12,9 @@
    *  emotional peak of the whole product, so the same card earns a warmer lead-in and more weight.
    *  Same component rather than a second one — two near-identical cards would drift apart. */
   export let emphasis = false;
+  /** Renders the footer rail below the card's own copy. The guest-feedback ask lives there, so it
+   *  shares one card instead of stacking a second one under it. Off unless something fills it. */
+  export let footer = false;
 </script>
 
 <aside class="syo" class:emphasis>
@@ -20,6 +23,9 @@
     <span>Run one for your own event — free for up to {freeGuests} guests.</span>
   </div>
   <a class="syo-cta" href={referralLink(sourceJoinCode)}>Start your own</a>
+  {#if footer}
+    <div class="syo-foot"><slot name="foot" /></div>
+  {/if}
 </aside>
 
 <style>
@@ -35,5 +41,10 @@
     font-weight: 700; font-size: .88rem; padding: 9px 16px; border-radius: 10px; white-space: nowrap;
   }
   .syo-cta:hover { filter: brightness(1.06); }
+  /* Full-width rail under the copy/CTA row — .syo wraps, so flex-basis:100% forces its own line. */
+  .syo-foot {
+    flex-basis: 100%; margin-top: 4px; padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
   .syo.emphasis { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
 </style>

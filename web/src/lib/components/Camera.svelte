@@ -11,7 +11,6 @@
   import { putCapture, delCapture, listCaptures, saveProgress, getProgress } from '$lib/captureStore';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import StartYourOwn from '$lib/components/StartYourOwn.svelte';
-  import FaceFinder from '$lib/components/FaceFinder.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import FeedbackModal from '$lib/components/FeedbackModal.svelte';
 
@@ -52,9 +51,9 @@
   let canBuyShots = false;
   let canAskHost = false;
   // Face matching: host switch + this guest's own enrolment state, both from /me.
+  // Face matching itself lives on the shared gallery (/gallery/<code>), not here — searching your
+  // own roll for yourself makes no sense. This flag only decides whether to point guests at it.
   let faceMatching = false;
-  let faceEnrolled = false;
-  let facePhotoIds: string[] = [];
   let askedHost = false;
   let buying = false;
   $: outOfShots = photosRemaining <= 0 && screen === 'camera';
@@ -122,11 +121,10 @@
   // Gallery filter — when the host reveals everyone's shots, default to the guest's own ('mine')
   // but let them switch to All / Others. Photos already arrive newest-first from the server.
   // 'me' = photos face matching says this guest appears in; only offered once they have enrolled.
-  let galleryFilter: 'mine' | 'all' | 'others' | 'me' = 'mine';
+  let galleryFilter: 'mine' | 'all' | 'others' = 'mine';
   $: ownCount = galleryPhotos.filter((p) => p.isOwn).length;
   $: othersCount = galleryPhotos.length - ownCount;
-  $: shownPhotos = galleryFilter === 'me' ? galleryPhotos.filter((p) => facePhotoIds.includes(p.id))
-    : galleryFilter === 'all' ? galleryPhotos
+  $: shownPhotos = galleryFilter === 'all' ? galleryPhotos
     : galleryFilter === 'mine' ? galleryPhotos.filter((p) => p.isOwn)
     : galleryPhotos.filter((p) => !p.isOwn);
   let revealMsg = '';
@@ -204,7 +202,6 @@
         canBuyShots = !!me.canBuyShots;
         canAskHost = !!me.canAskHost;
         faceMatching = !!me.faceMatching;
-        faceEnrolled = !!me.faceEnrolled;
         allowDownloads = me.allowDownloads;
         await enterCamera();
         return;
@@ -274,7 +271,6 @@
       canBuyShots = !!r.canBuyShots;
       canAskHost = !!r.canAskHost;
       faceMatching = !!r.faceMatching;
-      faceEnrolled = !!r.faceEnrolled;
       saveSession(r.joinCode, r.sessionToken);
       if (r.recovered) showToast(`Welcome back! You've ${photosRemaining} shot${photosRemaining === 1 ? '' : 's'} left.`);
       await enterCamera();
@@ -1138,7 +1134,7 @@
 
       canBuyShots = !!me.canBuyShots; canAskHost = !!me.canAskHost;
 
-      faceMatching = !!me.faceMatching; faceEnrolled = !!me.faceEnrolled;
+      faceMatching = !!me.faceMatching;
 
       if (screen === 'join' || screen === 'loading') { screen = 'camera'; startCamera(); }
 
@@ -1500,13 +1496,15 @@
         <button class="gchip" class:on={galleryFilter === 'mine'} on:click={() => (galleryFilter = 'mine')}>Mine <span class="n">{ownCount}</span></button>
         <button class="gchip" class:on={galleryFilter === 'all'} on:click={() => (galleryFilter = 'all')}>All <span class="n">{galleryPhotos.length}</span></button>
         <button class="gchip" class:on={galleryFilter === 'others'} on:click={() => (galleryFilter = 'others')}>Others <span class="n">{othersCount}</span></button>
-        {#if faceEnrolled}
-          <button class="gchip" class:on={galleryFilter === 'me'} on:click={() => (galleryFilter = 'me')}>Me <span class="n">{facePhotoIds.length}</span></button>
-        {/if}
       </div>
     {/if}
-    {#if faceMatching && sessionToken}
-      <FaceFinder {sessionToken} bind:enrolled={faceEnrolled} onMatched={(ids) => (facePhotoIds = ids)} />
+    <!-- The shared gallery is the whole event's photos, and it is where "find the photos I'm in"
+         belongs. There is no automatic redirect to it when an event ends, so this link is the only
+         way most guests would ever discover that page exists. -->
+    {#if galleryRevealed && othersCount > 0 && ev?.joinCode}
+      <a class="full-gallery" href="/gallery/{ev.joinCode}">
+        🖼 Open the full event gallery{#if faceMatching} — find the photos you're in{/if} →
+      </a>
     {/if}
     {#if shownPhotos.length}
       <div class="pgrid">
@@ -1559,64 +1557,59 @@
       </div>
     {/if}
 
-    <!-- Beside the referral card, not inside it: someone who does not want to run their own
-
-         event may still have something to say, and burying feedback in a settings sheet gets
-
-         you feedback only from people already hunting for a button. -->
-
-    {#if sessionToken && !fbSent}
-
-      {#if fbOpen}
-
-        <div class="fb-panel">
-
-          <div class="fb-title">How was it?</div>
-
-          <div class="fb-stars">
-
-            {#each [1, 2, 3, 4, 5] as n}
-
-              <button class="fb-star" class:on={fbRating >= n} on:click={() => (fbRating = n)}
-
-                      aria-label={`${n} out of 5`}>★</button>
-
-            {/each}
-
-          </div>
-
-          <textarea class="fb-text" rows="2" maxlength="2000" bind:value={fbComment}
-
-                    placeholder="Anything you'd change? (optional)"></textarea>
-
-          <div class="fb-actions">
-
-            <button class="fb-link" on:click={() => sendGuestFeedback(true)}>No thanks</button>
-
-            <button class="btn primary sm" disabled={fbBusy || (!fbRating && !fbComment.trim())}
-
-                    on:click={() => sendGuestFeedback()}>{fbBusy ? 'Sending…' : 'Send'}</button>
-
-          </div>
-
-        </div>
-
-      {:else}
-
-        <div class="fb-cta-row">
-
-          <button class="fb-cta" on:click={() => (fbOpen = true)}>💬 Leave feedback</button>
-
-        </div>
-
-      {/if}
-
-    {/if}
-
     <!-- Referral surface 2: a guest lands here when their roll is spent, which is the moment they
          have just finished using the product. Emphasised only then, not on a casual gallery peek. -->
     {#if ev?.joinCode}
-      <StartYourOwn sourceJoinCode={ev.joinCode} emphasis={photosRemaining === 0 && ownCount > 0} />
+      <!-- Feedback rides INSIDE this card rather than as a second one beside it. Two stacked cards
+           at the foot of a gallery read as clutter, and the ask is secondary to the referral. -->
+      <StartYourOwn sourceJoinCode={ev.joinCode} emphasis={photosRemaining === 0 && ownCount > 0}
+                    footer={!!sessionToken && !fbSent}>
+        <svelte:fragment slot="foot">
+    {#if fbOpen}
+
+            <div class="fb-panel">
+
+              <div class="fb-title">How was it?</div>
+
+              <div class="fb-stars">
+
+                {#each [1, 2, 3, 4, 5] as n}
+
+                  <button class="fb-star" class:on={fbRating >= n} on:click={() => (fbRating = n)}
+
+                          aria-label={`${n} out of 5`}>★</button>
+
+                {/each}
+
+              </div>
+
+              <textarea class="fb-text" rows="2" maxlength="2000" bind:value={fbComment}
+
+                        placeholder="Anything you'd change? (optional)"></textarea>
+
+              <div class="fb-actions">
+
+                <button class="fb-link" on:click={() => sendGuestFeedback(true)}>No thanks</button>
+
+                <button class="btn primary sm" disabled={fbBusy || (!fbRating && !fbComment.trim())}
+
+                        on:click={() => sendGuestFeedback()}>{fbBusy ? 'Sending…' : 'Send'}</button>
+
+              </div>
+
+            </div>
+
+          {:else}
+
+            <div class="fb-cta-row">
+
+              <button class="fb-cta" on:click={() => (fbOpen = true)}>💬 Leave feedback</button>
+
+            </div>
+
+          {/if}
+        </svelte:fragment>
+      </StartYourOwn>
     {/if}
   </div>
   {#if lbOpen}<Lightbox photos={shownPhotos} index={lbIndex} on:close={() => (lbOpen = false)} />{/if}
@@ -1816,6 +1809,12 @@
     background: rgba(0,0,0,.72); border: 1px solid rgba(255,255,255,.22); backdrop-filter: blur(6px);
     color: #fff; font-size: .86rem; line-height: 1.4;
   }
+  .full-gallery {
+    display: block; max-width: 720px; margin: 0 auto 14px; padding: 12px 16px; text-align: center;
+    border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+    color: var(--text); text-decoration: none; font-size: .88rem; font-weight: 600;
+  }
+  .full-gallery:hover { border-color: var(--accent); }
   .fb-cta-row { display: flex; justify-content: center; margin: 10px 0 4px; }
   .fb-cta, .fb-link {
     background: none; border: none; cursor: pointer; font-size: .84rem;

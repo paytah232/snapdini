@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
-  import { getEvent, getGalleryPhotos, type Photo, type PublicEvent } from '$lib/events';
+  import { getEvent, getGalleryPhotos, getMe, type Photo, type PublicEvent } from '$lib/events';
+  import { getSession } from '$lib/session';
+  import FaceFinder from '$lib/components/FaceFinder.svelte';
   import { applyEventTheme } from '$lib/theme';
   import { showToast } from '$lib/toast';
   import Lightbox from '$lib/components/Lightbox.svelte';
@@ -34,6 +36,18 @@
 
   let lbOpen = false;
   let lbIndex = 0;
+
+  // "Find the photos I'm in" belongs HERE, on the shared gallery, and not in a guest's own roll —
+  // searching your own shots for yourself is pointless. This page is public, so the control is
+  // offered only to someone holding a participant session for THIS event (same localStorage key
+  // the camera writes); a stranger with the link gets nothing to enrol into.
+  let guestToken = '';
+  let faceMatching = false;
+  let faceEnrolled = false;
+  let facePhotoIds: string[] = [];
+  let meOnly = false;
+  $: shownPhotos = meOnly ? photos.filter((p) => facePhotoIds.includes(p.id)) : photos;
+  $: if (!faceEnrolled) meOnly = false;
 
   // Live countdown
   let now = Date.now();
@@ -74,6 +88,14 @@
       document.title = `${event.name} — Snapdini`;
       applyEventTheme(event.theme);
       await loadPhotos();
+      guestToken = getSession(code) ?? '';
+      if (guestToken) {
+        try {
+          const me = await getMe(guestToken);
+          faceMatching = !!me.faceMatching;
+          faceEnrolled = !!me.faceEnrolled;
+        } catch { guestToken = ''; }   // stale session — just don't offer it
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : 'Event not found';
     } finally {
@@ -206,8 +228,21 @@
   {:else if !photos.length}
     <div class="state">No photos yet</div>
   {:else}
+    {#if guestToken && (faceMatching || faceEnrolled)}
+      <FaceFinder sessionToken={guestToken} bind:enrolled={faceEnrolled}
+                  onMatched={(ids) => { facePhotoIds = ids; meOnly = ids.length > 0; }} />
+    {/if}
+    {#if faceEnrolled}
+      <div class="gfilter" role="tablist" aria-label="Filter photos">
+        <button class="gchip" class:on={!meOnly} on:click={() => (meOnly = false)}>All <span class="n">{photos.length}</span></button>
+        <button class="gchip" class:on={meOnly} on:click={() => (meOnly = true)}>Me <span class="n">{facePhotoIds.length}</span></button>
+      </div>
+    {/if}
+    {#if meOnly && !shownPhotos.length}
+      <div class="state">You weren't matched in any of these photos.</div>
+    {/if}
     <div class="grid">
-      {#each photos as p, i (p.id)}
+      {#each shownPhotos as p, i (p.id)}
         <button class="thumb" class:selected={selecting && selected.has(p.id)} on:click={() => onThumb(p, i)}
           aria-label={selecting ? `Select photo by ${p.participantName}` : `Open photo by ${p.participantName}`}>
           {#if p.mediaType === 'video'}
@@ -231,7 +266,7 @@
 </main>
 
 {#if lbOpen}
-  <Lightbox {photos} index={lbIndex} on:close={() => (lbOpen = false)} />
+  <Lightbox photos={shownPhotos} index={lbIndex} on:close={() => (lbOpen = false)} />
 {/if}
 
 <style>
@@ -241,6 +276,14 @@
     backdrop-filter: blur(10px); background: color-mix(in srgb, var(--bg) 78%, transparent);
     border-bottom: 1px solid var(--border);
   }
+  .gfilter { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin: 0 0 16px; }
+  .gchip {
+    display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text);
+    font-size: .85rem; font-weight: 600; cursor: pointer;
+  }
+  .gchip.on { border-color: var(--accent); background: var(--accent); color: var(--accent-ink, #111); }
+  .gchip .n { opacity: .7; font-variant-numeric: tabular-nums; }
   .brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 800; text-decoration: none; color: var(--text); }
   .nav-right { display: flex; gap: 8px; flex-wrap: wrap; }
   .btn { display: inline-block; font-weight: 700; border-radius: var(--radius-sm); padding: 7px 14px; font-size: .82rem;

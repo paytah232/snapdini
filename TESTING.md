@@ -220,8 +220,16 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
       endpoint refuses with 403.
 - [ ] **Consent gate:** the checkbox is **never pre-ticked**; the selfie button stays disabled until
       it is ticked; submitting without consent is refused server-side too.
-- [ ] **It works:** enrol with a selfie → told how many photos you were found in → a **Me** chip
-      appears in your gallery showing exactly those photos.
+- [ ] **Where it lives:** only on the **shared gallery** (`/gallery/<code>`) — never on a guest's own
+      roll inside the camera, where searching your own shots for yourself means nothing. Once the
+      gallery is revealed and other guests have shot something, the camera's gallery shows an
+      **Open the full event gallery** link, which is the only route guests have to that page
+      (there is no automatic redirect when an event ends).
+- [ ] **Participants only:** the control appears only if this browser holds a guest session for the
+      event. Open `/gallery/<code>` in a private window → no enrol control at all.
+- [ ] **It works:** enrol with a selfie → told how many photos you were found in → an **All / Me**
+      filter appears on the shared gallery showing exactly those photos, and the lightbox pages
+      through the filtered set, not the full one.
 - [ ] **It discriminates:** a photo of somebody else is NOT matched to you.
 - [ ] **Withdrawal:** "Stop and delete" removes the template and every match; the Me chip disappears
       and `/api/faces/mine` reports you as not enrolled.
