@@ -228,8 +228,8 @@ on their own.
       not rendered. `DELETE /api/faces/enrol` deliberately still works, so anyone who enrolled
       while it was on can always withdraw.
 - [ ] **This is how it ships.** Face matching stays **off in production** — face templates are
-      biometric data and the compliance picture varies by jurisdiction (`docs/PIA-face-matching.md`,
-      open items 6.1 and 6.2). It is fully built and supported as a **self-host** feature: a
+      biometric data and the compliance picture varies by jurisdiction. It is fully built and supported
+      as a **self-host** feature: a
       self-hoster running their own events points `MACHINE_LEARNING_URL` at an Immich ML container
       and gets it. Leave it unset on prod; devel is the only place it is on.
 - [ ] **Self-host story reads correctly:** README's *"find the photos I'm in"* section explains the

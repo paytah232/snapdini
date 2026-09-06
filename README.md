@@ -87,9 +87,11 @@ deleted in the same request that creates their template; every other face in a p
 discarded in memory. "Stop and delete" removes the template and every match it produced, and keeps
 working even if you later switch the ML container off.
 
-**Read [docs/PIA-face-matching.md](docs/PIA-face-matching.md) before turning this on for anyone
-other than yourself** — it sets out what is collected, the third-party-collection problem (you
-process the faces of guests who never consented, in order to find the one who did), and minors.
+**Think carefully before turning this on for anyone other than yourself.** Face templates are
+biometric data in most jurisdictions. Two things in particular need an answer you are comfortable
+with: you necessarily process the faces of guests who never consented in order to find the one who
+did, and events often include minors. Take your own advice on it — this project cannot give you
+legal advice for your country.
 
 - **Pin a version** with `IMAGE_TAG` in `.env` (e.g. `IMAGE_TAG=1.0.2`; default `latest`). Point at
   your own registry with `IMAGE_PREFIX`.

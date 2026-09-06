@@ -1,7 +1,7 @@
 // The face-matching kill switch.
 //
 // This feature is deliberately built but NOT enabled: it carries legal review obligations that are
-// still open (see docs/PIA-face-matching.md). MACHINE_LEARNING_URL is the single switch that keeps
+// still open. MACHINE_LEARNING_URL is the single switch that keeps
 // it inert, so it is worth testing like a safety interlock rather than a config flag. The failure
 // that matters is the quiet one — the switch off, but a stale `face_matching_enabled = true` left
 // on an events row still putting the UI in front of guests.
