@@ -214,8 +214,15 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
       stutter from the photo uploading underneath it.
 
 ## 19. Version 1.4 — face matching (verify these)
-- [ ] **Absent by default:** with no `MACHINE_LEARNING_URL`, nothing about face matching appears
-      anywhere and `/api/faces/enrol` returns 503.
+- [ ] **Absent by default (the kill switch):** with no `MACHINE_LEARNING_URL` the feature is fully
+      inert — the host never sees the *Let guests find photos of themselves* toggle, `/me` reports
+      `faceMatching: false` **even if `face_matching_enabled` is already true on the event row**,
+      `/api/faces/enrol` and `/api/faces/mine` return 503, and the privacy policy's face section is
+      not rendered. `DELETE /api/faces/enrol` deliberately still works, so anyone who enrolled
+      while it was on can always withdraw.
+- [ ] **This is how it ships.** 1.4 is built but NOT enabled in production pending legal review
+      (`docs/PIA-face-matching.md`, open items 6.1 and 6.2). Leave `MACHINE_LEARNING_URL` unset on
+      prod; devel is the only place it is on.
 - [ ] **Host gate:** with the host switch OFF, a guest sees no "Find photos of me" control and the
       endpoint refuses with 403.
 - [ ] **Consent gate:** the checkbox is **never pre-ticked**; the selfie button stays disabled until
@@ -236,7 +243,19 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
 - [ ] **No leakage:** no API response anywhere contains an `embedding`.
 - [ ] **Privacy page** section 6b explains face templates in plain language.
 
-## 20. Version 1.4 — guest feedback (verify these)
+## 20. End of event — guests land on the gallery
+- [ ] **Redirect:** open a join link for an event that has **ended with its gallery open** → you are
+      sent to `/gallery/<code>` instead of a camera that cannot take a photo. Pressing **Back** does
+      not bounce you into a loop (the join entry is replaced, not pushed).
+- [ ] **Not before reveal:** an event that has ended but whose gallery is still **locked** (manual
+      reveal, host hasn't pressed it) does **not** redirect — the in-app view is the only place a
+      guest can still see their own shots.
+- [ ] **Never mid-session:** an event that expires while you are shooting leaves you on the camera
+      with a toast. The redirect only happens on a fresh load.
+- [ ] **Nothing stranded:** if captures are still queued for upload, the redirect is skipped until
+      they finish.
+
+## 21. Version 1.4 — guest feedback (verify these)
 - [ ] **Where it's offered:** a **Leave feedback** button sits next to *Start your own* in the
       gallery, and on the **"that's your roll"** toast on the camera page. Nowhere else — it should
       never interrupt someone mid-shoot.

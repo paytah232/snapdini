@@ -4,6 +4,7 @@ import { eq, or, and, count, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { effectiveMaxPhotos, photosRemaining as remainingFor } from '../allowance';
 import { events, guestFeedback, participants, photos } from '../schema';
+import { faceMatchingAvailable } from '../faces';
 import * as email from '../email';
 import { baseUrl, escapeHtml } from '../lib';
 import { billingEnabled } from '../billing';
@@ -54,7 +55,7 @@ router.post('/', async (req: Request, res: Response) => {
         photosRemaining: remainingFor({ maxPhotos: event.maxPhotos, extraPhotos: existing.extraPhotos, photosTaken: existing.photosTaken }),
         canBuyShots: !!event.guestMayBuyShots,
         canAskHost: !!event.guestMayRequest,
-        faceMatching: !!event.faceMatchingEnabled,
+        faceMatching: faceMatchingAvailable() && !!event.faceMatchingEnabled,
         faceEnrolled: !!(existing && existing.faceConsentAt),
         eventName:       event.name,
         noFlash:         !!event.noFlash,
@@ -93,7 +94,7 @@ router.post('/', async (req: Request, res: Response) => {
     photosRemaining: remainingFor({ maxPhotos: event.maxPhotos, photosTaken: 0 }),
         canBuyShots: !!event.guestMayBuyShots,
         canAskHost: !!event.guestMayRequest,
-        faceMatching: !!event.faceMatchingEnabled,
+        faceMatching: faceMatchingAvailable() && !!event.faceMatchingEnabled,
         faceEnrolled: false,
     eventName:       event.name,
     noFlash:         !!event.noFlash,
@@ -149,7 +150,10 @@ router.get('/me', async (req: Request, res: Response) => {
       extraPhotos:     p.extraPhotos,
       canBuyShots:     !!p.guestMayBuyShots,
       canAskHost:      !!p.guestMayRequest,
-      faceMatching:    !!p.faceMatching,
+      // ANDed with the server switch, never the host toggle alone: with no
+      // MACHINE_LEARNING_URL a stale `true` in the events row would otherwise put the
+      // whole face-matching UI in front of guests and 503 the moment they used it.
+      faceMatching:    faceMatchingAvailable() && !!p.faceMatching,
       faceEnrolled:    !!p.faceConsentAt,
       // True when the address we hold arrived with their payment rather than at join — the guest
       // never typed it here, so it is worth telling them which one their photos are tied to.

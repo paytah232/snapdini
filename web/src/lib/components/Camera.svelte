@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { goto } from '$app/navigation';
   import { fade } from 'svelte/transition';
   import { getEvent, getMe, joinEvent, getPhotosBySession, type PublicEvent, type Photo } from '$lib/events';
   import { getSession, saveSession, clearSession } from '$lib/session';
@@ -178,6 +179,20 @@
     document.title = `${ev.name} — Snapdini`;
 
     if (ev.isUpcoming) { screen = 'upcoming'; return; }
+
+    // The event is over and the gallery is open: the camera is dead weight from here, and the
+    // gallery is both what the guest came back for and where "find the photos I'm in" lives.
+    //
+    // Three deliberate limits. Only once REVEALED — before that the in-app gallery is the only
+    // place a guest can still see their own shots, and the shared one would just show them a wall.
+    // Only when nothing is still waiting to upload, or the redirect would strand captures that
+    // survived in IndexedDB. And replaceState, so Back out of the gallery does not land on this
+    // page and bounce straight back in. Mid-session expiry is left alone on purpose — nobody
+    // should be yanked out of the camera while they are using it.
+    if (ev.isExpired && ev.isRevealed) {
+      const waiting = await listCaptures(ev.joinCode).catch(() => []);
+      if (!waiting.length) { await goto(`/gallery/${ev.joinCode}`, { replaceState: true }); return; }
+    }
 
     const token = getSession(ev.joinCode);
     if (token) {

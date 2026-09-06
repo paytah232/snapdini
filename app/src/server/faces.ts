@@ -14,8 +14,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const ML_URL = (process.env.MACHINE_LEARNING_URL || '').replace(/\/$/, '');
-export const faceMatchingAvailable = (): boolean => !!ML_URL;
+// Read lazily rather than captured at import: the kill switch is the whole safety story for this
+// feature, and a module-level const means the value depends on import ORDER, which is exactly the
+// kind of thing that is true in a test and false in production.
+const mlUrl = (): string => (process.env.MACHINE_LEARNING_URL || '').trim().replace(/\/$/, '');
+export const faceMatchingAvailable = (): boolean => !!mlUrl();
 
 // buffalo_l (InsightFace) via Immich ML. Detection + recognition in one call.
 const ENTRIES = JSON.stringify({
@@ -51,6 +54,7 @@ export interface DetectedFace { embedding: number[]; score: number }
  * Returns [] on any failure: face matching is a nicety and must never break an upload.
  */
 export async function detectFaces(imagePath: string): Promise<DetectedFace[]> {
+  const ML_URL = mlUrl();
   if (!ML_URL) return [];
   try {
     if (!fs.existsSync(imagePath)) return [];

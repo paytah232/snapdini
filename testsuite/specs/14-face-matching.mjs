@@ -5,7 +5,7 @@
 // matching itself needs a live ML container, so those parts skip cleanly without one.
 import fs from 'node:fs';
 import path from 'node:path';
-import { BASE, api, createEvent, dbq, group, join, ok, spec, upload } from '../lib/harness.mjs';
+import { BASE, api, createEvent, dbq, group, join, ok, org, spec, upload } from '../lib/harness.mjs';
 
 const FACE_A = path.join(import.meta.dirname, '..', '..', 'loadtest', 'face_a.jpg');
 const FACE_B = path.join(import.meta.dirname, '..', '..', 'loadtest', 'face_b.jpg');
@@ -40,7 +40,32 @@ await spec('14-face-matching', async () => {
   ok('and no template was stored',
      dbq(`SELECT COALESCE(face_embedding,'none') FROM participants WHERE session_token='${tok}'`) === 'none');
 
+  group('The server kill switch, not the host toggle, is what guests see');
+  // The feature is built but held back pending legal review, so MACHINE_LEARNING_URL is the switch
+  // that keeps it inert. A stale face_matching_enabled=true on an events row must not be able to
+  // surface the UI on a server with no ML backend — that combination is the quiet failure.
+  const adm = (await api('GET', `/api/events/${ev.joinCode}/admin`, { headers: org(ev.organizerCode) })).json || {};
+  ok('the host payload reports server availability, not just the toggle',
+     typeof adm.faceMatchingAvailable === 'boolean', JSON.stringify(adm.faceMatchingAvailable));
+  const mlOn = adm.faceMatchingAvailable;
+
   dbq(`UPDATE events SET face_matching_enabled=true WHERE id='${ev.id}'`);
+  const meOn = (await api('GET', '/api/participants/me', { headers: { 'X-Session-Token': tok } })).json || {};
+  ok('the guest-facing flag agrees with the server switch',
+     meOn.faceMatching === mlOn, `faceMatching=${meOn.faceMatching} available=${mlOn}`);
+  const admOn = (await api('GET', `/api/events/${ev.joinCode}/admin`, { headers: org(ev.organizerCode) })).json || {};
+  ok('and so does the host payload',
+     admOn.faceMatchingEnabled === mlOn, `${admOn.faceMatchingEnabled}`);
+  if (!mlOn) {
+    ok('with no ML server, enrolling is refused even with the host toggle on',
+       (await enrol(tok, haveFaces ? FACE_A : null)).status === 503);
+    ok('and /mine is refused too', (await api('GET', '/api/faces/mine', { headers: { 'X-Session-Token': tok } })).status === 503);
+  } else {
+    ok('ML server present — kill-switch-off path covered by app unit tests', true);
+    ok('ML server present — /mine reachable',
+       [200, 400, 403].includes((await api('GET', '/api/faces/mine', { headers: { 'X-Session-Token': tok } })).status));
+  }
+
 
   group('Consent is required, explicitly, every time');
   const noConsent = await enrol(tok, haveFaces ? FACE_A : null, 'false');

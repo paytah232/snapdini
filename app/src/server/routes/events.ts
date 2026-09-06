@@ -7,6 +7,7 @@ import sharp from 'sharp';
 import { eq, and, or, sql, inArray, count, desc, isNotNull } from 'drizzle-orm';
 import { db } from '../db';
 import { events, participants, photos, shares, eventCohosts, users, type Event } from '../schema';
+import { faceMatchingAvailable } from '../faces';
 import * as email from '../email';
 import * as auth from '../auth';
 import * as cleanup from '../cleanup';
@@ -557,7 +558,10 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     guestMayBuyVideo:  !!ev.guestMayBuyVideo,
     guestMayBuyFrames: !!ev.guestMayBuyFrames,
     guestMayRequest:   !!ev.guestMayRequest,
-    faceMatchingEnabled: !!ev.faceMatchingEnabled,
+    // Reported against the server switch so the host UI can hide the control entirely
+    // rather than offering a toggle that does nothing.
+    faceMatchingEnabled:   faceMatchingAvailable() && !!ev.faceMatchingEnabled,
+    faceMatchingAvailable: faceMatchingAvailable(),
     // Guests who asked for more. Shown on the host's own pages, never pushed at them mid-event.
     upgradeRequests:   participantRows.filter((r) => !!(r as { requestedMoreAt?: number | null }).requestedMoreAt).length,
     noFlash:        !!ev.noFlash,
@@ -940,7 +944,7 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
     ...(typeof guestMayBuyVideo  === 'boolean' ? { guestMayBuyVideo }  : {}),
     ...(typeof guestMayBuyFrames === 'boolean' ? { guestMayBuyFrames } : {}),
     ...(typeof guestMayRequest   === 'boolean' ? { guestMayRequest }   : {}),
-    ...(typeof faceMatchingEnabled === 'boolean' ? { faceMatchingEnabled } : {}), timezone: tz, slug: newSlug, aspectRatios: aspects, ratingMode: rMode, purgeAt,
+    ...(typeof faceMatchingEnabled === 'boolean' && faceMatchingAvailable() ? { faceMatchingEnabled } : {}), timezone: tz, slug: newSlug, aspectRatios: aspects, ratingMode: rMode, purgeAt,
   }).where(eq(events.id, ev.id));
 
   res.json({

@@ -357,6 +357,9 @@
   $: guestAskOn = (ev as unknown as { guestMayRequest?: boolean } | null)?.guestMayRequest !== false;
   // Face matching defaults OFF and stays off unless a host deliberately turns it on.
   $: faceOn = (ev as unknown as { faceMatchingEnabled?: boolean } | null)?.faceMatchingEnabled === true;
+  // With no MACHINE_LEARNING_URL on the server there is nothing behind this switch, so the host is
+  // not offered it at all — a toggle that silently does nothing is worse than an absent one.
+  $: faceAvailable = (ev as unknown as { faceMatchingAvailable?: boolean } | null)?.faceMatchingAvailable === true;
 
 
   async function setGuestFlag(key: 'guestMayBuyShots' | 'guestMayRequest' | 'faceMatchingEnabled', e: Event) {
@@ -865,6 +868,7 @@
         </div>
         <div class="divider"></div>
 
+        {#if faceAvailable}
         <div class="toggle-row">
           <div>
             <div class="t-label">Let guests find photos of themselves</div>
@@ -879,6 +883,7 @@
           </label>
         </div>
         <div class="divider"></div>
+        {/if}
 
       <div class="toggle-row">
         <div>

@@ -79,6 +79,7 @@ router.post('/enrol', selfieUpload.single('selfie'), async (req: Request, res: R
 
 // ── GET /api/faces/mine — the photos this guest appears in ────────────────────────────────────
 router.get('/mine', async (req: Request, res: Response) => {
+  if (!faceMatchingAvailable()) return res.status(503).json({ error: 'Face matching is not enabled on this server' });
   const sessionToken = String(req.header('X-Session-Token') || req.query.sessionToken || '');
   if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
   const me = await guestFor(sessionToken);
@@ -89,7 +90,9 @@ router.get('/mine', async (req: Request, res: Response) => {
   res.json({ enrolled: true, photoIds: rows.map((r) => r.photoId) });
 });
 
-// ── DELETE /api/faces/enrol — withdraw ────────────────────────────────────────────────────────
+// ── DELETE /api/faces/enrol — withdraw ─
+// Deliberately NOT gated on faceMatchingAvailable(): if the operator switches the ML server off
+// after guests enrolled, withdrawal must still work on whatever templates are already stored.───────────────────────────────────────────────────────
 // Deletes the template AND every link derived from it. Withdrawal has to actually undo the thing,
 // or consent was never meaningful.
 router.delete('/enrol', async (req: Request, res: Response) => {
