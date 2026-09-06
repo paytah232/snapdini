@@ -41,6 +41,7 @@
   let ev: AdminEvent | null = null;
   let options: AppOptions | null = null;
   let billing: BillingConfig | null = null;
+  let shapeNotice = '';
   let qrCode = '';
   let timezones: string[] = ['UTC'];
 
@@ -502,7 +503,15 @@
 
   // ── Settings ─────────────────────────────────────────────────────────────
   function toggleAspect(value: string) {
-    if (value !== '1:1' && !canAllShapes) return;   // non-square shapes need the frame pack
+    if (value !== '1:1' && !canAllShapes) {
+      // Say why. Silently ignoring the click is what made this feel broken: the box appeared to
+      // tick, the save succeeded, and the shape was gone on reload with nothing explaining it.
+      shapeNotice = billingKnown
+        ? 'Extra frame shapes need the frame pack — add it in Upgrade below, then pick your shapes.'
+        : 'Just checking what this event includes…';
+      return;
+    }
+    shapeNotice = '';
     const next = new Set(sAspects);
     if (next.has(value)) next.delete(value); else next.add(value);
     sAspects = next;
@@ -510,9 +519,15 @@
   // Entitlement: extra (non-square) shapes are free on small/free events, otherwise they need the
   // paid frame pack. If the event already has any non-square shape, the pack is owned.
   $: framePackOwned = (ev?.aspectRatios ?? []).some((a) => a !== '1:1');
-  $: canAllShapes = !billing?.billingEnabled
-    || (!!ev && ev.guestCap <= (billing?.freeAllGuests ?? 10))
-    || framePackOwned;
+  // Fail CLOSED on unknown. This read `!billing?.billingEnabled`, which is true while the billing
+  // config is still loading (and forever if that fetch fails) — so the Pro shapes were tickable,
+  // the save returned "Settings saved", and the server quietly put them back. Only treat billing
+  // as off once we have actually been told it is off.
+  $: billingKnown = billing !== null;
+  $: canAllShapes = billingKnown
+    && (billing?.billingEnabled === false
+        || (!!ev && ev.guestCap <= (billing?.freeAllGuests ?? 10))
+        || framePackOwned);
 
   async function saveSettingsForm() {
     savingSettings = true;
@@ -520,7 +535,7 @@
       const startsAt = sDate
         ? new Date(`${sDate}T${sTime || '00:00'}`).getTime()
         : undefined;
-      await saveSettings(code, orgCode, {
+      const saved = await saveSettings(code, orgCode, {
         name: sName,
         blurb: sBlurb.trim(),
         startsAt,
@@ -535,7 +550,15 @@
         slug: sSlug.trim(),
         aspectRatios: [...sAspects]
       });
-      showSuccess('Settings saved');
+      // The server saves everything else even when it will not honour the shapes, so say which
+      // happened rather than a blanket "saved".
+      if (saved?.aspectsRefused) {
+        shapeNotice = 'Saved — but the extra frame shapes need the frame pack, so they were not applied.';
+        showToast('Settings saved, except the frame shapes', true);
+      } else {
+        shapeNotice = '';
+        showSuccess('Settings saved');
+      }
       await loadEvent();
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'Save failed', true);
@@ -1002,11 +1025,20 @@
         <div class="aspect-options">
           {#each options?.aspectRatios ?? [] as a}
             <label class="aspect-opt" class:locked={a.value !== '1:1' && !canAllShapes}>
-              <input type="checkbox" checked={sAspects.has(a.value)} disabled={a.value !== '1:1' && !canAllShapes} on:change={() => toggleAspect(a.value)} />
+              <!-- Not `disabled`: a disabled input swallows the click, so the guest of an
+                   unentitled event got no tick AND no reason. It stays clickable and refuses out
+                   loud instead. click fires before change, so preventDefault stops both. -->
+              <input type="checkbox" checked={sAspects.has(a.value)}
+                     aria-disabled={a.value !== '1:1' && !canAllShapes}
+                     on:click={(e) => { if (a.value !== '1:1' && !canAllShapes) { e.preventDefault(); toggleAspect(a.value); } }}
+                     on:change={() => toggleAspect(a.value)} />
               {a.label}{#if a.pro}<span class="pro-tag">Pro</span>{/if}
             </label>
           {/each}
         </div>
+        {#if shapeNotice}
+          <p class="shape-notice">{shapeNotice}</p>
+        {/if}
       </div>
       <div class="field-row">
         <div class="field">
@@ -1411,11 +1443,13 @@
     border-radius: var(--radius-sm); color: var(--text); font: inherit; }
 
   .aspect-options { display: flex; flex-wrap: wrap; gap: 8px; }
+  .shape-notice { margin: 8px 0 0; font-size: .82rem; color: var(--accent, #f0b429); }
   .aspect-opt { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; font-size: 0.82rem;
     border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); cursor: pointer; }
   .pro-tag { font-size: 0.6rem; background: var(--accent); color: var(--accent-ink, #111); padding: 1px 5px; border-radius: 4px; font-weight: 700; }
   .aspect-opt.locked { opacity: 0.5; cursor: not-allowed; }
   .aspect-opt.locked input { cursor: not-allowed; }
+  .aspect-opt.locked { position: relative; }
 
   /* Theme presets */
   .presets { display: flex; flex-wrap: wrap; gap: 8px; }

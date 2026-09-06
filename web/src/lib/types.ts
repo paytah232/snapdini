@@ -35,6 +35,8 @@ export interface BillingConfig {
   durationFreeHours: number;
   durationTiers: DurationTier[];
   retentionFreeDays: number;
+  /** Days included on a PAID event — retention's own allowance, not the guest-tier feature rule. */
+  retentionPaidDays: number;
   retentionTiers: RetentionTier[];
 }
 

@@ -909,6 +909,7 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
   // has (toggling/removing entitled shapes, incl. promo-unlocked), OR re-quoting shows it costs no
   // more than already paid (free tiers quote to $0, so they can freely pick any shape).
   let aspects = ev.aspectRatios;
+  let aspectsRefused = false;
   const reqAspectsRaw = (req.body as { aspectRatios?: unknown }).aspectRatios;
   if (reqAspectsRaw !== undefined) {
     const reqA = sanitizeAspects(reqAspectsRaw);
@@ -919,7 +920,14 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
     } else {
       const q = quote({ maxGuests: ev.guestCap, maxPhotos: ev.maxPhotos, aspectRatios: reqA,
         videoSeconds: ev.videoSeconds, durationHours: curHours, retentionDays: ev.retentionDays });
-      aspects = q.amountCents <= (ev.amountPaidCents || 0) ? JSON.stringify(q.aspectRatios) : ev.aspectRatios;
+      if (q.amountCents <= (ev.amountPaidCents || 0)) {
+        aspects = JSON.stringify(q.aspectRatios);
+      } else {
+        // Keep saving the rest of the settings, but do NOT pretend this part happened. The client
+        // used to get a bare 200 and a "Settings saved" toast while the shapes went back.
+        aspects = ev.aspectRatios;
+        aspectsRefused = true;
+      }
     }
   }
   const rMode    = (ratingMode === 'favourite' || ratingMode === 'stars') ? ratingMode : (ev.ratingMode || 'favourite');
@@ -951,6 +959,7 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
     success: true, name: newName, startsAt, expiresAt, revealMode: mode,
     revealDelayHours: revealDelay, moderationEnabled: moderation, allowDownloads: allowDl,
     noFlash: noFlashV, timezone: tz, slug: newSlug, aspectRatios: aspects ? JSON.parse(aspects) : ['1:1'], ratingMode: rMode,
+    aspectsRefused,
   });
 });
 

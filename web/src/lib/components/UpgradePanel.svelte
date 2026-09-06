@@ -45,17 +45,26 @@
     if (!c) return `${n}s clips`;
     return featuresFreeAt(guests) ? `${n}s clips — free (normally +${money(c)})` : `${n}s clips — +${money(c)}`;
   };
+  // Retention does NOT follow the guest-tier "everything free under 10" rule — it is the opposite.
+  // A free event PAYS for anything past a week; a paid event gets a month INCLUDED. This label used
+  // featuresFreeAt() and so printed the price exactly backwards: "free" on the event that is
+  // charged $3, "+$3" on the event that already includes it.
+  const retIncludedFor = (guests: number) =>
+    guests > billing.freeAllGuests ? (billing.retentionPaidDays ?? 31) : (billing.retentionFreeDays ?? 7);
+  const retCostFor = (days: number, guests: number) => (days <= retIncludedFor(guests) ? 0 : retAddon(days));
   const retLabelPriced = (days: number, guests: number) => {
-    const c = retAddon(days);
     const base = retLabel(days);
-    if (!c) return base;
-    return featuresFreeAt(guests) ? `${base} — free (normally +${money(c)})` : `${base} — +${money(c)}`;
+    const c = retCostFor(days, guests);
+    if (!c) return days <= retIncludedFor(guests) && retAddon(days) ? `${base} — included` : base;
+    return `${base} — +${money(c)}`;
   };
-  const durLabelPriced = (h: number, guests: number) => {
+  // Duration is charged identically on every tier — the guest count buys features, not hours — so
+  // there is no "free on this tier" case to print here either.
+  const durLabelPriced = (h: number, _guests: number) => {
     const c = durationAddon(h);
     const base = durLabel(h);
     if (!c) return base;
-    return featuresFreeAt(guests) ? `${base} — free (normally +${money(c)})` : `${base} — +${money(c)}`;
+    return `${base} — +${money(c)}`;
   };
 
   // choices ≥ current — tier caps plus the event's own cap (so it's always selectable, even
@@ -65,7 +74,12 @@
   const guestChoices = guestCaps.map((n) => ({ maxGuests: n }));
   const shotChoices = (options?.shotsPerPerson ?? []).map((s) => Number(s.value)).filter((n) => n >= maxPhotos);
   const videoChoices = [0, ...billing.videoAddons.map((v) => v.seconds)].filter((n) => n >= videoSeconds);
-  const retentionChoices = billing.retentionTiers.filter((t) => t.maxDays >= retentionDays);
+  // Reactive to the SELECTED guest tier: stepping up to a paid tier includes a month, so a week is
+  // no longer on offer and the selection moves up to what is now included rather than silently
+  // keeping the free event's 7 days.
+  $: retentionFloor = Math.max(retentionDays, retIncludedFor(uGuests));
+  $: retentionChoices = billing.retentionTiers.filter((t) => t.maxDays >= retentionFloor);
+  $: if (uRet < retentionFloor) uRet = retentionFloor;
   const retLabel = (d: number) => d <= 7 ? '1 week' : d <= 31 ? '1 month' : d <= 92 ? '3 months' : d <= 182 ? '6 months' : '1 year';
   // Duration is a paid add-on, so it belongs here too — offer lengths ≥ the current event length.
   const durationChoices = (options?.durations ?? []).map((d) => Number(d.value)).filter((n) => n >= durationHours);

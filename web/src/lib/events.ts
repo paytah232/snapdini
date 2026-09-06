@@ -152,7 +152,7 @@ export const listMyCohostInvites = () => api<{ invites: MyCohostInvite[] }>(`/ap
 export const savePoster = (code: string, organizerCode: string, config: Record<string, unknown>) =>
   api(`/api/events/${code}/poster`, { method: 'PUT', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify({ config }) });
 export const saveSettings = (code: string, organizerCode: string, body: Record<string, unknown>) =>
-  api(`/api/events/${code}/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify(body) });
+  api<{ aspectsRefused?: boolean }>(`/api/events/${code}/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify(body) });
 export const setReveal = (code: string, organizerCode: string, on: boolean) =>
   postJson(`/api/events/${code}/${on ? 'reveal' : 'unreveal'}`, {}, org(organizerCode));
 export const toggleLock = (code: string, organizerCode: string) => postJson(`/api/events/${code}/lock`, {}, org(organizerCode));
