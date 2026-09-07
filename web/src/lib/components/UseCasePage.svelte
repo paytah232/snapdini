@@ -82,6 +82,7 @@
   </div>
 </nav>
 
+<main>
 <header class="hero">
   <div class="eyebrow"><span class="dot"></span> {content.eyebrow}</div>
   <h1>{@html content.h1}</h1>
@@ -142,6 +143,7 @@
     {/each}
   </div>
 </section>
+</main>
 
 <SiteFooter {loggedIn} showUses showSupport={false} />
 

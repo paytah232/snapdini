@@ -21,15 +21,20 @@
   // like a fresh shot off the event — a blurred, over-exposed latent image that sharpens and
   // settles, staggered frame-by-frame so they arrive live. Fires on load (and immediately if
   // the image is already cached, which on:load alone would miss).
-  let frameRatio = ['4 / 5', '4 / 5', '4 / 5', '4 / 5'];
-  let developed = [false, false, false, false];
+  // The shipped samples are 472x591, 472x472, 472x591, 472x472. Stating the real ratios here means
+  // the frames lay out correctly on the FIRST paint instead of being reshaped after load.
+  let frameRatio = ['4 / 5', '1 / 1', '4 / 5', '1 / 1'];
+  // The develop-in animation is pure CSS now (see .frame img). It used to be gated on this action
+  // adding a class, which meant the hero could not paint until hydration — worth ~2.3s of render
+  // delay on mobile, and the whole of a 4.0s LCP. This is left as a progressive enhancement only:
+  // if someone replaces the sample photos with a different shape, the frame still adapts.
   function develop(node: HTMLImageElement, i: number) {
     const show = () => {
       if (!node.naturalWidth || !node.naturalHeight) return;
-      frameRatio[i] = `${node.naturalWidth} / ${node.naturalHeight}`;  // reshape (photo still opacity 0)
+      const actual = `${node.naturalWidth} / ${node.naturalHeight}`;
+      if (frameRatio[i] === actual) return;      // the shipped samples already match — nothing to do
+      frameRatio[i] = actual;
       frameRatio = frameRatio;
-      developed[i] = true;                                              // then develop it in
-      developed = developed;
     };
     if (node.complete) show();
     node.addEventListener('load', show);
@@ -148,6 +153,7 @@
   </div>
 </nav>
 
+<main>
 <header class="hero">
   <div>
     <div class="eyebrow"><span class="dot"></span> The disappearing event camera</div>
@@ -166,9 +172,17 @@
       <div class="frame" style="background:linear-gradient(135deg,{g}); aspect-ratio:{frameRatio[i]}">
         <!-- Drop real event photos at static/sample/1.jpg…4.jpg. They develop in (see CSS);
              until then they fail quietly and the gradient "latent image" shows. -->
-        <img src="/sample/{i + 1}.jpg" alt="" loading="eager"
-             class:developed={developed[i]} style="--d:{(i * 0.22).toFixed(2)}s"
-             use:develop={i} on:error={(e) => e.currentTarget.remove()} />
+        <!-- Displayed at ~99px wide, so 220w covers 2x and 330w covers 3x. The originals were
+             472px and cost 180KB for four thumbnails; these cost about 32KB. -->
+        <picture>
+          <source type="image/webp"
+                  srcset="/sample/{i + 1}-220.webp 220w, /sample/{i + 1}-330.webp 330w" sizes="100px" />
+          <img src="/sample/{i + 1}-220.jpg"
+               srcset="/sample/{i + 1}-220.jpg 220w, /sample/{i + 1}-330.jpg 330w" sizes="100px"
+               alt="" loading="eager" fetchpriority={i === 0 ? 'high' : 'auto'}
+               style="--d:{(i * 0.22).toFixed(2)}s"
+               use:develop={i} on:error={(e) => e.currentTarget.closest('picture')?.remove()} />
+        </picture>
         <span class="stamp">▶ {24 + i}</span>
       </div>
     {/each}
@@ -215,6 +229,7 @@
     <a class="btn primary" href={loggedIn ? '/app' : '/signup'}>Create your event →</a>
   </div>
 </section>
+</main>
 
 <SiteFooter {loggedIn} showUses showSupport={false}>
   <button class="linklike" on:click={startDemo}>See the demo</button>
@@ -277,16 +292,18 @@
   /* Photos develop in like a fresh shot: start as a blurred, over-exposed latent image and
      settle to a sharp frame. `both` fill-mode holds the 0% state through the stagger delay
      (--d), so each frame stays "undeveloped" until its turn, then locks at 100%. */
-  .frame img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; }
-  .frame img.developed { animation: develop 1.05s ease-out var(--d, 0s) both; }
+  .frame picture { position: absolute; inset: 0; }
+  /* `both` holds opacity 0 through the per-frame delay, so this is the same effect the JS class
+     produced — it just no longer waits for hydration to start. */
+  .frame img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+    animation: develop 1.05s ease-out var(--d, 0s) both; }
   @keyframes develop {
     0%   { opacity: 0; filter: blur(13px) saturate(.12) brightness(1.95) contrast(.55); transform: scale(1.09); }
     28%  { opacity: 1; }
     100% { opacity: 1; filter: blur(0) saturate(1) brightness(1) contrast(1); transform: scale(1); }
   }
   @media (prefers-reduced-motion: reduce) {
-    .frame img { opacity: 1; }
-    .frame img.developed { animation: none; }
+    .frame img { opacity: 1; animation: none; }
   }
   .stamp { position: absolute; right: 6px; top: 5px; font-size: .55rem; color: #fff; font-family: var(--font-mono); opacity: .9; }
   .band { max-width: 1080px; margin: 0 auto; padding: 56px 24px; border-top: 1px solid var(--border); }

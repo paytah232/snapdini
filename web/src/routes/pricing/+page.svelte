@@ -63,6 +63,7 @@
   </div>
 </nav>
 
+<main>
 <header class="hero">
   <div class="eyebrow"><span class="dot"></span> Pricing</div>
   <h1>Free to start. <em>Pay once</em> per event.</h1>
@@ -134,6 +135,7 @@
     <a class="btn primary" href={loggedIn ? '/app' : '/signup'}>Create your event →</a>
   </div>
 </section>
+</main>
 
 <SiteFooter {loggedIn} showSupport={false} showUses />
 

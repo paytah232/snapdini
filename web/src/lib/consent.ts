@@ -44,6 +44,22 @@ export function analyticsHead(id: string): string {
     `gtag('set','ads_data_redaction',true);gtag('set','url_passthrough',true);` +
     `gtag('js',new Date());gtag('config','${id}');` +
     `</script>` +
-    `<script async src="https://www.googletagmanager.com/gtag/js?id=${id}"></script>`
+    // The library is ~154KB and, even async, competes with the hero for bandwidth and main-thread
+    // time during the initial paint. It is loaded on idle instead, or on the first interaction,
+    // whichever comes first.
+    //
+    // This is safe for conversion tracking, which is the only reason the tag is here: gtag() is a
+    // shim that pushes onto dataLayer, so `gtag('event','conversion',…)` fired before the library
+    // arrives is QUEUED and replayed once it loads. Consent defaults above still run first, and the
+    // page URL is unchanged by the delay, so a gclid is still readable when the tag initialises.
+    `<script>` +
+    `(function(){var loaded=false;function go(){if(loaded)return;loaded=true;` +
+    `var s=document.createElement('script');s.async=true;` +
+    `s.src='https://www.googletagmanager.com/gtag/js?id=${id}';document.head.appendChild(s);}` +
+    `['pointerdown','keydown','touchstart','scroll'].forEach(function(e){` +
+    `addEventListener(e,go,{once:true,passive:true});});` +
+    `if('requestIdleCallback' in window)requestIdleCallback(go,{timeout:3500});else setTimeout(go,2500);` +
+    `})();` +
+    `</script>`
   );
 }
