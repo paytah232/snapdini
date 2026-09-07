@@ -178,9 +178,22 @@ services:
       - "3001:80"              # reverse proxy (Traefik) routes the dev domain (see BASE_URL) → this host:3001
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    # nginx resolves `app` and `web` ONCE, at startup, because they live in an upstream{} block —
+    # and that block is not optional: without its keepalive pool nginx opens a new connection per
+    # request and exhausts the ephemeral port range in ~34s at 840rps (see nginx/default.conf).
+    #
+    # So the DNS cache cannot be made dynamic without losing the pool. Instead, `restart: true`
+    # makes Compose restart nginx whenever app or web is RECREATED, which is the only moment their
+    # container IPs change. Without this, a plain `compose up -d app` leaves nginx proxying to an
+    # address that now belongs to a different container — /api/ quietly returns the wrong service's
+    # 404 and nothing looks broken.
     depends_on:
-      - app
-      - web
+      app:
+        condition: service_started
+        restart: true
+      web:
+        condition: service_started
+        restart: true
 
 
 networks:

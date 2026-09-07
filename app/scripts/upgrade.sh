@@ -130,6 +130,24 @@ for i in $(seq 1 30); do
         | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' || true)
   [ -n "$got" ] && break; sleep 2
 done
+if [ -z "${got:-}" ]; then
+  # Distinguish "the app is broken" from "the proxy is pointing at the wrong container", because
+  # they look identical from out here and the fix is completely different. nginx resolves `app` and
+  # `web` once at startup (they are in an upstream{} block, which carries the keepalive pool we
+  # cannot give up), so recreating a backend WITHOUT restarting nginx leaves it proxying to an
+  # address that may now belong to a different container.
+  if $COMPOSE ps --status running 2>/dev/null | grep -q app; then
+    warn "the app container is running but :${PORT} did not answer — the proxy is probably stale."
+    echo "  ▸ restarting the proxy and retrying"
+    $COMPOSE restart nginx >/dev/null 2>&1 || true
+    for i in $(seq 1 15); do
+      got=$(curl -fsS --max-time 5 "http://localhost:${PORT}/api/config" 2>/dev/null \
+            | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' || true)
+      [ -n "$got" ] && break; sleep 2
+    done
+    [ -n "${got:-}" ] && ok "recovered after restarting nginx"
+  fi
+fi
 [ -n "${got:-}" ] || die "app did not come up — check: $COMPOSE logs app"
 ok "running version ${got}"
 echo "▸ done. Roll back with: sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=<previous>/' .env && $COMPOSE up -d"

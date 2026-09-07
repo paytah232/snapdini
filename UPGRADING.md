@@ -16,7 +16,30 @@ running version. It never overwrites your files — it tells you what differs an
 
 ---
 
-## The three traps
+## The traps
+
+
+### 0. Recreate a backend and the proxy may still point at the old one
+
+nginx resolves `app` and `web` **once, at startup**, because they sit in an `upstream {}` block —
+and that block is not optional: without its keepalive pool nginx opens a fresh connection per
+request and exhausts the ephemeral port range in about 34 seconds at 840 rps.
+
+So if you recreate a backend without restarting nginx, it can keep proxying to an address that now
+belongs to a different container. `/api/` then returns the *other* service's 404 and nothing looks
+broken — no error, no log, just a feature that quietly stopped working.
+
+`docker-compose.yml` now declares `depends_on: … restart: true` on nginx, so a plain
+`docker compose up -d` restarts the proxy whenever a backend is recreated. **That only fires when
+nginx is in the command's service set**, so:
+
+```bash
+docker compose up -d            # ✅ nginx follows its backends
+docker compose up -d app web    # ⚠️ nginx is NOT in the set — restart it yourself
+```
+
+`./upgrade.sh` uses the safe form, and if the site still does not answer it now tells you the
+proxy is stale rather than blaming the app, and restarts it for you.
 
 ### 1. New settings need adding in TWO places, not one
 
