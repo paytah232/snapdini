@@ -6,6 +6,7 @@
   // withdraw control that is as easy to reach as the opt-in was. Nothing here nudges — no urgency,
   // no pre-selection, no "skip" styled to look like the wrong choice.
   import { showToast } from '$lib/toast';
+  import { track } from '$lib/analytics';
 
   export let sessionToken: string;
   export let enrolled = false;

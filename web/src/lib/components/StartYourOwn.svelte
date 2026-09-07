@@ -6,6 +6,7 @@
   // that a guest has no idea this is something they can run themselves. They never signed up for
   // anything, so nothing has told them.
   import { referralLink } from '$lib/referral';
+  import { track } from '$lib/analytics';
   export let sourceJoinCode: string;
   export let freeGuests = 10;
   /** Surface 3: the reveal moment. When the gallery has only just unlocked, the guest is at the
@@ -22,7 +23,10 @@
     <strong>{emphasis ? 'Want this at yours?' : 'Liked this?'}</strong>
     <span>Run one for your own event — free for up to {freeGuests} guests.</span>
   </div>
-  <a class="syo-cta" href={referralLink(sourceJoinCode)}>Start your own</a>
+  <!-- referral_clicks currently reads 0 across every event; this records the click at the source
+       so a zero can be told apart from a card nobody ever reaches. -->
+  <a class="syo-cta" href={referralLink(sourceJoinCode)}
+     on:click={() => track('referral_card_click', { emphasis }, sourceJoinCode)}>Start your own</a>
   {#if footer}
     <div class="syo-foot"><slot name="foot" /></div>
   {/if}

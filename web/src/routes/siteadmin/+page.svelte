@@ -55,6 +55,13 @@
 
   // ── Revenue ──
   type RevUser = { userId: string | null; email: string; displayName: string | null; totalCents: number; events: { id: string; name: string; cents: number; createdAt: number; branding: boolean }[] };
+  // ── Product analytics ──
+  let an: any = null;
+  let anDays = 30;
+  async function loadAnalytics() {
+    try { an = await api(`/api/admin/analytics?days=${anDays}`); } catch { /* keep the last view */ }
+  }
+
   let revenue: { billingEnabled: boolean; currency: string; totals: { all: number; d30: number; d7: number }; users: RevUser[]; total?: number } | null = null;
   let openUser: string | null = null;
   const money = (cents: number, cur = revenue?.currency || 'AUD') =>
@@ -272,6 +279,7 @@
       await loadClientErrors();
       await loadRevenue();
       await loadSurvey();
+      await loadAnalytics();
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -663,6 +671,81 @@
       {/if}
     </section>
 
+    <!-- Product analytics. Funnels first, because the operator's question is "where do people give
+         up", and a wall of event counts does not answer it. -->
+    {#if an}
+      <section class="panel">
+        <h2>How people use the site
+          <span class="count">{an.totals.visits} visits · {an.totals.events} events</span>
+        </h2>
+        <div class="filterbar">
+          <select bind:value={anDays} on:change={loadAnalytics} aria-label="Window">
+            <option value={7}>Last 7 days</option>
+            <option value={30}>Last 30 days</option>
+            <option value={90}>Last 90 days</option>
+          </select>
+          {#if an.cameraGrantRate !== null}
+            <span class="an-note">
+              Camera allowed <b>{an.cameraGrantRate}%</b>
+              <span class="muted">({an.cameraGranted} allowed / {an.cameraDenied} denied)</span>
+            </span>
+          {/if}
+        </div>
+
+        <div class="an-cols">
+          {#each [{ t: 'Host journey', f: an.hostFunnel }, { t: 'Guest journey', f: an.guestFunnel }] as fn}
+            <div class="an-funnel">
+              <h3>{fn.t}</h3>
+              {#each fn.f as s}
+                <div class="an-step">
+                  <span class="an-label">{s.step}</span>
+                  <span class="an-bar">
+                    <!-- Width is relative to the FIRST step, so the shape of the drop is visible
+                         at a glance rather than needing the numbers read. -->
+                    <span class="an-fill" style="width:{fn.f[0].visits ? Math.max(2, (s.visits / fn.f[0].visits) * 100) : 0}%"></span>
+                  </span>
+                  <span class="an-n">{s.visits}</span>
+                  <span class="an-drop">{s.dropFromPrev === null ? '' : `−${s.dropFromPrev}%`}</span>
+                </div>
+              {/each}
+            </div>
+          {/each}
+        </div>
+
+        <div class="an-cols">
+          {#if an.topPages?.length}
+            <div>
+              <h3>Most visited</h3>
+              <table><tbody>
+                {#each an.topPages as p}<tr><td>{p.path}</td><td class="num">{p.visits}</td></tr>{/each}
+              </tbody></table>
+            </div>
+          {/if}
+          {#if an.tierClicks?.length}
+            <div>
+              <h3>Pricing tier clicked</h3>
+              <table><tbody>
+                {#each an.tierClicks as t}<tr><td>{t.tier === 'free' || !t.tier ? 'Free' : t.tier + ' guests'}</td><td class="num">{t.clicks}</td></tr>{/each}
+              </tbody></table>
+            </div>
+          {/if}
+          {#if an.faqOpens?.length}
+            <div>
+              <h3>Questions opened</h3>
+              <table><tbody>
+                {#each an.faqOpens as f}<tr><td>{f.q}</td><td class="num">{f.opens}</td></tr>{/each}
+              </tbody></table>
+            </div>
+          {/if}
+        </div>
+        <p class="hint" style="margin:10px 0 0">
+          First-party and cookieless — nothing is stored on a visitor's device and no third party sees
+          it. Visits are grouped by a hash that rotates daily, so it cannot follow anyone between days.
+          Raw rows are kept {an.days >= 90 ? '90' : an.days} days.
+        </p>
+      </section>
+    {/if}
+
     <section class="panel">
       <h2>Users <span class="count">{usrTotal}</span></h2>
       <div class="filterbar">
@@ -772,6 +855,16 @@
   .seg-btn { background: transparent; border: none; padding: 8px 14px; font: inherit; font-size: 0.82rem; font-weight: 700; color: var(--text-muted); cursor: pointer; }
   .seg-btn.on { background: var(--accent); color: var(--accent-ink, #111); }
   .seg-btn small { font-weight: 600; opacity: 0.8; }
+  .an-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 20px; margin-top: 6px; }
+  .an-funnel h3, .an-cols h3 { font-size: .9rem; margin: 0 0 8px; }
+  .an-step { display: grid; grid-template-columns: 1fr 90px 46px 52px; align-items: center; gap: 8px; padding: 3px 0; font-size: .84rem; }
+  .an-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .an-bar { background: var(--border); border-radius: 999px; height: 8px; overflow: hidden; }
+  .an-fill { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+  .an-n { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
+  .an-drop { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-muted); font-size: .78rem; }
+  .an-note { font-size: .84rem; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
   .filterbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
   .filterbar .search { flex: 1 1 220px; margin-bottom: 0; }
   .filterbar select {

@@ -4,7 +4,7 @@
 // and they are applied automatically on boot (see db.ts → init()).
 // Epoch-ms timestamps are BIGINT with mode:'number' (node-postgres BIGINT parser is
 // set to Number in db.ts, so values round-trip as JS numbers).
-import { pgTable, text, integer, bigint, boolean, smallint, real, primaryKey, uniqueIndex, index } from 'drizzle-orm/pg-core';
+import { pgTable, text, integer, bigint, bigserial, jsonb, boolean, smallint, real, primaryKey, uniqueIndex, index } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 const ms = (name: string) => bigint(name, { mode: 'number' });
@@ -307,6 +307,24 @@ export const photoFaces = pgTable('photo_faces', {
 
 // How it felt to USE the thing, from the people who used it. Separate from the host's survey and
 // from support: a different respondent, a different question.
+/**
+ * First-party product analytics. See 0037.
+ *
+ * `visit` is a daily-rotating, non-reversible hash — it exists so a funnel can be counted per
+ * visit, not so anyone can be followed. No device storage, no cross-day identity, no raw IP.
+ * `eventId` has no foreign key on purpose: analytics has to outlive the retention purge that
+ * deletes the event it refers to.
+ */
+export const siteEvents = pgTable('site_events', {
+  id:        bigserial('id', { mode: 'number' }).primaryKey(),
+  name:      text('name').notNull(),
+  path:      text('path'),
+  visit:     text('visit'),
+  eventId:   text('event_id'),
+  props:     jsonb('props').notNull().default({}),
+  createdAt: ms('created_at').notNull(),
+});
+
 export const guestFeedback = pgTable('guest_feedback', {
   id: text('id').primaryKey(),
   eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),

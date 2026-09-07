@@ -5,6 +5,10 @@
   import { getConfig, getMe, postJson } from '$lib/api';
   import Turnstile from '$lib/components/Turnstile.svelte';
   import { fireLeadConversion } from '$lib/conversions';
+  import { track } from '$lib/analytics';
+
+  let signupStarted = false;
+  const startedSignup = () => { if (!signupStarted) { signupStarted = true; track('signup_started'); } };
   import Logo from '$lib/components/Logo.svelte';
   import SiteFooter from '$lib/components/SiteFooter.svelte';
 
@@ -83,7 +87,10 @@
 
     <form on:submit={register}>
       <label for="name">Your name</label>
-      <input id="name" type="text" autocomplete="name" placeholder="e.g. Alex Rivera" maxlength="80" required bind:value={name} />
+      <!-- Fires once, on first interaction: the gap between this and signup_submitted is the
+           form abandonment that nothing currently measures. -->
+      <input id="name" type="text" autocomplete="name" placeholder="e.g. Alex Rivera" maxlength="80" required
+             bind:value={name} on:focus={startedSignup} />
 
       <label for="email">Email</label>
       <input id="email" type="email" autocomplete="email" placeholder="you@example.com" required bind:value={email} />

@@ -30,6 +30,7 @@ import billingRoutes, { stripeWebhookHandler } from './routes/billing';
 import contactRoutes from './routes/contact';
 import trackRoutes from './routes/track';
 import { startCounters } from './counters';
+import { startAnalytics } from './analytics';
 import clientErrorRoutes from './routes/clienterror';
 import adminRoutes from './routes/admin';
 import sharesRoutes from './routes/shares';
@@ -157,6 +158,13 @@ const guestEmailLimiter = rateLimit({
   message: { error: "You've already emailed yourself a few times — check your inbox, including spam." },
 });
 app.use('/api/participants/email-my-photos', guestEmailIpBackstop, guestEmailLimiter);
+// Analytics ingest is public and batched, so the ceiling is per-network and deliberately high: a
+// 60-guest party is one IP, and losing a page view matters far less than refusing a real guest.
+app.use('/api/track/events', rateLimit({
+  windowMs: 60 * 1000, limit: Number(process.env.ANALYTICS_RATE_LIMIT || 240),
+  standardHeaders: false, legacyHeaders: false,
+  message: { ok: true },     // never tell a browser its analytics were refused
+}));
 app.use('/api/billing/checkout', emailLimiter);
 app.use('/api/billing/upgrade', emailLimiter);
 app.use('/api/auth/login', loginLimiter);
@@ -332,6 +340,7 @@ init()
     startCleanup(); // periodic retention sweep (deletes expired events + their files)
     startLifecycle(); // customer lifecycle emails (welcome/check-in/survey) — off unless LIFECYCLE_EMAILS=1
     startCounters();  // write-behind flush loop for gallery/referral counters
+    startAnalytics();          // same write-behind shape as the counters above
     startOps();       // operator notifications (daily digest + instant alerts) — off unless OPS_NOTIFICATIONS=1
     const server = app.listen(PORT, '0.0.0.0', () => console.log(`Snapdini running on port ${PORT}`));
     // Multi-GB media uploads (e.g. a 90s 4K/8K clip) can take a long time on event Wi-Fi/mobile;

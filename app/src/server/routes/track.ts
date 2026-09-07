@@ -6,6 +6,7 @@ import { db } from '../db';
 import { events, photos } from '../schema';
 import { captureReferral } from '../referrals';
 import { bumpPhotoViews, bumpPhotoDownloads, bumpGalleryView } from '../counters';
+import { isEventName, cleanProps, cleanPath, visitKey, record } from '../analytics';
 
 const router = Router();
 
@@ -52,6 +53,50 @@ router.post('/photos', async (req: Request, res: Response) => {
     const ownedIds = owned.map((r) => r.id);
     if (ownedIds.length) (kind === 'download' ? bumpPhotoDownloads : bumpPhotoViews)(ownedIds);
   } catch { /* analytics only */ }
+});
+
+// ── POST /api/track/events  { events: [{ name, path?, props?, joinCode? }] } ──
+// First-party product analytics. Batched from the browser so a page view is not its own request,
+// and answered before anything is written — the buffer is flushed on an interval (analytics.ts).
+//
+// Hardened on the three things that matter for a public write endpoint: names come from a
+// server-side allowlist, props are sanitised to a handful of short scalars, and the path is reduced
+// to a route pattern so a full URL with a token in it can never be stored. Always 200: an analytics
+// endpoint that reports validation failures is an analytics endpoint that leaks what is valid.
+router.post('/events', async (req: Request, res: Response) => {
+  res.json({ ok: true });
+  try {
+    const list = (req.body as { events?: unknown })?.events;
+    if (!Array.isArray(list)) return;
+    const visit = visitKey(req.ip, req.get('user-agent'));
+    const now = Date.now();
+
+    // Resolve join codes to event ids ONCE for the batch, rather than a query per row.
+    const codes = [...new Set(list
+      .map((e) => (e as { joinCode?: unknown })?.joinCode)
+      .filter((c): c is string => typeof c === 'string' && !!c)
+      .map((c) => c.toUpperCase().slice(0, 40)))].slice(0, 10);
+    const idByCode = new Map<string, string>();
+    if (codes.length) {
+      const rows = await db.select({ id: events.id, joinCode: events.joinCode })
+        .from(events).where(inArray(events.joinCode, codes));
+      for (const r of rows) idByCode.set(r.joinCode, r.id);
+    }
+
+    for (const raw of list.slice(0, 50)) {          // one page cannot post a thousand events
+      const e = (raw || {}) as { name?: unknown; path?: unknown; props?: unknown; joinCode?: unknown };
+      if (!isEventName(e.name)) continue;           // allowlist, silently
+      const code = typeof e.joinCode === 'string' ? e.joinCode.toUpperCase().slice(0, 40) : '';
+      record({
+        name: e.name,
+        path: cleanPath(e.path),
+        visit,
+        eventId: idByCode.get(code) ?? null,
+        props: cleanProps(e.props),
+        createdAt: now,
+      });
+    }
+  } catch { /* analytics must never surface as an error to a visitor */ }
 });
 
 export default router;

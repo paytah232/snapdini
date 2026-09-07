@@ -70,6 +70,15 @@ services:
       - PHOTO_DELETE_CONFIRM_GRACE_SECONDS=${PHOTO_DELETE_CONFIRM_GRACE_SECONDS:-15}
       - IMAGE_CONCURRENCY=${IMAGE_CONCURRENCY:-}
       - MUSIC_DIR=${MUSIC_DIR:-/app/assets/music}
+      # ── First-party product analytics (site_events) ──
+      # On by default and cookieless: nothing is stored on a visitor's device, and visits are
+      # grouped by a hash that rotates daily. Set ANALYTICS_SALT to a fixed secret only if you want
+      # visit grouping to survive a restart within the same day; leaving it unset is more private.
+      - ANALYTICS_SALT=${ANALYTICS_SALT:-}
+      - ANALYTICS_FLUSH_MS=${ANALYTICS_FLUSH_MS:-5000}
+      - ANALYTICS_MAX_BUFFER=${ANALYTICS_MAX_BUFFER:-5000}
+      - ANALYTICS_RATE_LIMIT=${ANALYTICS_RATE_LIMIT:-240}
+      - ANALYTICS_RETENTION_DAYS=${ANALYTICS_RETENTION_DAYS:-90}
       - MACHINE_LEARNING_URL=${MACHINE_LEARNING_URL:-}
       - FACE_MATCH_THRESHOLD=${FACE_MATCH_THRESHOLD:-0.42}
       - FACE_MIN_SCORE=${FACE_MIN_SCORE:-0.7}

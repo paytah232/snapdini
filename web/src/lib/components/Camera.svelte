@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { goto, replaceState } from '$app/navigation';
+  // Aliased: this component already has a `track` for the MediaStreamTrack.
+  import { track as trackEvent } from '$lib/analytics';
   import { fade } from 'svelte/transition';
   import { getEvent, getMe, joinEvent, getPhotosBySession, type PublicEvent, type Photo } from '$lib/events';
   import { getSession, saveSession, clearSession } from '$lib/session';
@@ -59,6 +61,9 @@
   let askedHost = false;
   let buying = false;
   $: outOfShots = photosRemaining <= 0 && screen === 'camera';
+  // Fires once when the roll is actually spent, which is the closest thing to "the guest finished".
+  let rollReported = false;
+  $: if (outOfShots && !rollReported && ownCount > 0) { rollReported = true; trackEvent('roll_completed', { shots: ownCount }, ev?.joinCode); }
   let videoHardMaxSecs = 600;   // server's absolute ceiling; the event's own limit is a price tier
   // A guest gets a brief chance to take back a shot they have just fluffed — a thumb over the lens,
   // a blink. Short on purpose: the window is what stops "delete and reshoot" becoming an unlimited
@@ -93,6 +98,8 @@
   let focusRing: { x: number; y: number } | null = null;
   let focusTimer: ReturnType<typeof setTimeout> | undefined;
   let cameraError = '';          // a technical failure (no camera, driver, etc)
+  // Recorded once per visit: a retry after a denial is the same person, not a second data point.
+  let permissionReported = false;
   let cameraDenied = false;      // the guest declined — different screen, different tone
   let cameraStarting = false;    // true while the stream is (re)acquiring — shows a spinner
   let cameraPaused = false;      // user explicitly turned the camera off (manual privacy/battery)
@@ -292,6 +299,7 @@
       faceMatching = !!r.faceMatching;
       feedbackDone = !!r.feedbackGiven;
       saveSession(r.joinCode, r.sessionToken);
+      trackEvent('joined', undefined, r.joinCode);
       if (r.recovered) showToast(`Welcome back! You've ${photosRemaining} shot${photosRemaining === 1 ? '' : 's'} left.`);
       await enterCamera();
     } catch (e) {
@@ -333,6 +341,9 @@
     // Hardware torch (back camera on Android Chrome). iOS Safari never exposes it.
     torchSupported = 'torch' in caps && !!caps.torch;   // a fresh stream always starts with the torch physically off
     cameraError = ''; cameraDenied = false;
+    // The grant side of the ratio. Denials already reach client_errors; without this the denial
+    // count has no denominator and cannot tell you whether permission is a real problem.
+    if (!permissionReported) { permissionReported = true; trackEvent('camera_permission_granted', undefined, ev?.joinCode); }
     matchRecBitrate();   // size the recorder to whatever the camera actually gave us
     applyViewfinderAspect();
   }
@@ -442,6 +453,7 @@
         // in the operator's open-issues digest looking like a bug.
         reportClientError(`camera: ${err2 instanceof Error ? err2.name + ' ' + err2.message : 'failed'}`,
           denied ? 'camera-denied' : 'camera', ev?.joinCode);
+        if (denied && !permissionReported) { permissionReported = true; trackEvent('camera_permission_denied', undefined, ev?.joinCode); }
         return;
       }
     }
@@ -761,6 +773,7 @@
   function enqueue(blob: Blob, mediaType: 'photo' | 'video', ext: string, source: 'capture' | 'upload' = 'capture', extra?: { durationSecs?: number; w?: number; h?: number }) {
     const id = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
     queue = [...queue, { id, blob, mediaType, source, ext, status: 'pending', size: blob.size, ...extra }];
+    trackEvent('photo_captured', { kind: mediaType, source }, ev?.joinCode);
     // Persist to IndexedDB immediately so the capture survives an outage / reload / closed tab.
     if (sessionToken && ev) putCapture({ id, joinCode: ev.joinCode, sessionToken, blob, mediaType, source, ext, createdAt: Date.now() }).catch(() => {});
     if (saveToDevice) saveToDeviceCopy(blob, ext);
@@ -1202,6 +1215,7 @@
 
   async function openGallery() {
     screen = 'gallery';
+    trackEvent('guest_gallery_opened', undefined, ev?.joinCode);
     stopCamera();   // free the camera while browsing the gallery — saves battery, drops the "in use" indicator
     applyEventTheme(ev?.theme);
     try {
@@ -1535,7 +1549,7 @@
         {#if sessionToken && !feedbackDone}
           <div class="oos-fb">
             {#if !feedbackOpen}
-              <button class="fb-trigger" on:click={() => (feedbackOpen = true)}>💬 Leave feedback</button>
+              <button class="fb-trigger" on:click={() => { feedbackOpen = true; trackEvent('guest_feedback_opened', undefined, ev?.joinCode); }}>💬 Leave feedback</button>
             {/if}
             <GuestFeedback sessionToken={sessionToken ?? ''} showCta={false} bind:open={feedbackOpen} bind:done={feedbackDone} />
           </div>

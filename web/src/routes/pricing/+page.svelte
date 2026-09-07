@@ -6,6 +6,7 @@
   import Logo from '$lib/components/Logo.svelte';
   import { appearance, setAppearance } from '$lib/appearance';
   import { guestTiers, addOns, pricingFaqs } from '$lib/pricing';
+  import { track } from '$lib/analytics';
 
   let version = '';
   let loggedIn = false;
@@ -76,7 +77,10 @@
         <div class="tier-guests">{t.guests}</div>
         <div class="tier-price">{t.price}</div>
         <div class="tier-note">{t.note}</div>
+        <!-- Which tier people actually click is the question the pricing ladder needs answering. -->
         <a class="btn {t.highlight ? 'primary' : 'ghost'}"
+           on:click={() => track(t.cta ? 'cta_click' : 'pricing_tier_click',
+                                 t.cta ? { cta: 'contact_400' } : { tier: t.guests.replace(/\D/g, '') || 'free' })}
            href={t.cta ? t.cta.href : (loggedIn ? '/app' : '/signup')}>
           {t.cta ? t.cta.label : t.price === 'Free' ? 'Start free' : 'Choose'}
         </a>
@@ -88,7 +92,7 @@
     <!-- Above 400 is a capacity question before it is a billing one — how many guests shooting at
          once, over what venue wifi, against what the server and its upstream can take. Worth a
          conversation rather than a sixth card that wraps to its own row. -->
-    <a class="fine-cta" href="/contact">More than 400 guests? Talk to us →</a>
+    <a class="fine-cta" href="/contact" on:click={() => track('cta_click', { cta: 'contact_400' })}>More than 400 guests? Talk to us →</a>
   </p>
 </section>
 
@@ -115,7 +119,10 @@
   <h2 class="sec-title">Pricing FAQ</h2>
   <div class="faq">
     {#each pricingFaqs as f}
-      <details class="faq-item"><summary>{f.q}</summary><p>{f.a}</p></details>
+      <!-- Which questions people open says what the page failed to answer above the fold. -->
+      <details class="faq-item" on:toggle={(e) => { if (e.currentTarget.open) track('faq_open', { q: f.q.slice(0, 60) }); }}>
+        <summary>{f.q}</summary><p>{f.a}</p>
+      </details>
     {/each}
   </div>
 </section>

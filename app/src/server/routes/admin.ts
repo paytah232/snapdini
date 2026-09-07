@@ -331,6 +331,95 @@ router.post('/run-sweep', async (_req: Request, res: Response) => {
   res.json({ ok: true, purged });
 });
 
+// ── Product analytics ─────────────────────────────────────────────────────────
+// The question this answers is "where do people give up", so it reports funnel STEPS with the
+// drop-off between them rather than a wall of event counts. `days` windows everything; the raw
+// rows are pruned by the sweeper (ANALYTICS_RETENTION_DAYS).
+router.get('/analytics', async (req: Request, res: Response) => {
+  const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
+  const since = Date.now() - days * 86_400_000;
+
+  // Distinct VISITS per event name, not raw hits: one person reloading the pricing page five times
+  // is one person considering the price, and counting hits would flatter every step.
+  // count(DISTINCT visit) rather than COALESCE(visit, id::text): the cast forced a heap fetch and
+  // a text conversion per row (858ms vs 621ms over 170k rows at 2M total). A null visit means we
+  // had no IP, which is rare, and each such row counts as its own visit — same answer, cheaper.
+  // If this ever needs to be fast at millions of rows the answer is a daily rollup table, not a
+  // wider index: a covering index only reached 511ms and would slow every insert on the hottest
+  // table in the schema.
+  const rows = await all<{ name: string; visits: number; hits: number }>(
+    `SELECT name,
+            count(DISTINCT visit) + count(*) FILTER (WHERE visit IS NULL) AS visits,
+            count(*) AS hits
+       FROM site_events WHERE created_at >= ?
+      GROUP BY name`, [since]);
+  const byName = new Map(rows.map((r) => [r.name, { visits: Number(r.visits), hits: Number(r.hits) }]));
+  const at = (n: string) => byName.get(n) ?? { visits: 0, hits: 0 };
+
+  // Two funnels, because the host and the guest are different people with different journeys.
+  const hostFunnel = [
+    { step: 'Visited the site',      ...at('page_view') },
+    { step: 'Started a signup',      ...at('signup_started') },
+    { step: 'Submitted the signup',  ...at('signup_submitted') },
+    { step: 'Started an event',      ...at('event_create_started') },
+    { step: 'Went to checkout',      ...at('checkout_started') },
+    { step: 'Came back paid',        ...at('checkout_returned') },
+  ];
+  const guestFunnel = [
+    { step: 'Opened a join link',        ...at('join_opened') },
+    { step: 'Joined',                    ...at('joined') },
+    { step: 'Allowed the camera',        ...at('camera_permission_granted') },
+    { step: 'Took a photo',              ...at('photo_captured') },
+    { step: 'Finished their roll',       ...at('roll_completed') },
+    { step: 'Opened their gallery',      ...at('guest_gallery_opened') },
+  ];
+  // Drop-off is measured against the PREVIOUS step, which is the number a funnel is read for.
+  const withDrop = (f: typeof hostFunnel) => f.map((s, i) => ({
+    ...s,
+    dropFromPrev: i === 0 || f[i - 1].visits === 0 ? null
+      : Math.round((1 - s.visits / f[i - 1].visits) * 1000) / 10,
+  }));
+
+  // Camera permission is the one ratio worth stating outright — denials were visible before but had
+  // no denominator, so nobody could say whether they mattered.
+  const granted = at('camera_permission_granted').visits;
+  const denied  = at('camera_permission_denied').visits;
+  const cameraGrantRate = granted + denied > 0 ? Math.round((granted / (granted + denied)) * 1000) / 10 : null;
+
+  const topPages = await all(
+    `SELECT path, count(DISTINCT visit) + count(*) FILTER (WHERE visit IS NULL) AS visits, count(*) AS views
+       FROM site_events WHERE name = 'page_view' AND created_at >= ? AND path IS NOT NULL
+      GROUP BY path ORDER BY visits DESC LIMIT 15`, [since]);
+
+  // Which pricing tier gets clicked, and which FAQs get opened — the two "what are people
+  // responding to" questions the marketing pages could not answer.
+  const tierClicks = await all(
+    `SELECT props->>'tier' AS tier, count(*) AS clicks
+       FROM site_events WHERE name = 'pricing_tier_click' AND created_at >= ?
+      GROUP BY 1 ORDER BY clicks DESC`, [since]);
+  const ctaClicks = await all(
+    `SELECT props->>'cta' AS cta, count(*) AS clicks
+       FROM site_events WHERE name = 'cta_click' AND created_at >= ?
+      GROUP BY 1 ORDER BY clicks DESC LIMIT 10`, [since]);
+  const faqOpens = await all(
+    `SELECT props->>'q' AS q, count(*) AS opens
+       FROM site_events WHERE name = 'faq_open' AND created_at >= ?
+      GROUP BY 1 ORDER BY opens DESC LIMIT 10`, [since]);
+
+  const totals = await get<{ events: number; visits: number }>(
+    `SELECT count(*) AS events, count(DISTINCT visit) AS visits FROM site_events WHERE created_at >= ?`, [since]);
+
+  res.json({
+    days,
+    totals: { events: Number(totals?.events || 0), visits: Number(totals?.visits || 0) },
+    hostFunnel: withDrop(hostFunnel),
+    guestFunnel: withDrop(guestFunnel),
+    cameraGrantRate, cameraGranted: granted, cameraDenied: denied,
+    topPages, tierClicks, ctaClicks, faqOpens,
+    allEvents: [...byName.entries()].map(([name, v]) => ({ name, ...v })).sort((a, b) => b.hits - a.hits),
+  });
+});
+
 // ── Promo codes (Stripe-native) ───────────────────────────────────────────────
 // Codes are created as a Stripe coupon (the discount) + promotion code (what guests type
 // at Checkout). Stripe enforces redemption limits + expiry; allow_promotion_codes is already

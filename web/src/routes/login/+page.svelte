@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { track } from '$lib/analytics';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { getConfig, getMe, postJson } from '$lib/api';

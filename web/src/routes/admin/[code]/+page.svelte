@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
   import { goto, replaceState } from '$app/navigation';
+  import { track } from '$lib/analytics';
   import { getConfig, getMe, api } from '$lib/api';
   import { firePurchaseConversion, fireLeadConversion } from '$lib/conversions';
   import {
@@ -207,6 +208,8 @@
     // SvelteKit's replaceState. A raw history call leaves the router's bookkeeping stale, and the
     // symptom shows up somewhere else entirely: Back from another page changed the URL to this one
     // without ever rendering it.
+    // The other half of checkout_started: what actually came back from Stripe.
+    if (sp.has('paid') || sp.has('upgraded')) track('checkout_returned', { paid: true, kind: sp.has('upgraded') ? 'upgrade' : 'new' }, code);
     if (sp.has('paid') || sp.has('upgraded') || sp.has('created') || sp.has('session_id')) replaceState(location.pathname + location.hash, {});
     // Resolve identity first (and independently) so the Site-admin / My-events bar appears
     // promptly even if config is slow — and on every event, not just the viewer's own.
@@ -845,7 +848,7 @@
       </div>
       <!-- "Create" is wrong once one exists — the button reopens a saved design, it does not start
            a new one, and the label was the only thing telling you whether you had saved anything. -->
-      <button class="btn primary sm full mt" on:click={() => (posterOpen = true)} disabled={!qrCode}>
+      <button class="btn primary sm full mt" on:click={() => { posterOpen = true; track('poster_opened', undefined, code); }} disabled={!qrCode}>
         {ev?.posterConfig ? '🎩 Manage poster' : '🎩 Create poster'}
       </button>
       <button class="btn ghost sm full mt" on:click={() => copy(galleryUrl, 'Gallery link copied!')}>🖼 Copy gallery-only link</button>

@@ -7,6 +7,7 @@ import { events, photos, participants, clientErrors, slideshows, shares } from '
 import { UPLOADS_DIR, uploadDiskPath, eventDir, INCOMING_DIR } from './paths';
 import { playName, thumbName } from './images';
 import { purgeOldSlideshows } from './slideshow';
+import { pruneAnalytics } from './analytics';
 
 const SWEEP_MS = 60 * 60 * 1000; // hourly
 const CLIENT_ERROR_TTL_MS = 30 * 24 * 60 * 60 * 1000; // keep diagnostic reports ~30 days
@@ -141,6 +142,9 @@ export async function sweep(): Promise<number> {
 
   // Auto-purge non-favourite slideshow renders older than a day (favourites kept until event purge).
   try { await purgeOldSlideshows(); } catch (e) { console.error('[sweeper] slideshow purge failed:', (e as Error).message); }
+  // Raw analytics rows age out too — they answer questions that are only interesting while fresh.
+  try { const n = await pruneAnalytics(); if (n) console.log(`[sweeper] pruned ${n} analytics row(s)`); }
+  catch (e) { console.error('[sweeper] analytics prune failed:', (e as Error).message); }
 
   return due.length;
 }

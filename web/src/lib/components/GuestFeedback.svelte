@@ -9,6 +9,7 @@
   // gets asked twice, and a rating on its own is enough — demanding a written comment loses the
   // rating too.
   import { showToast } from '$lib/toast';
+  import { track } from '$lib/analytics';
 
   export let sessionToken: string;
   /** Bound out so a parent can drop its own wrapper once there is nothing left to show. */
@@ -31,7 +32,7 @@
         body: JSON.stringify(dismissed ? { sessionToken, dismissed: true }
                                        : { sessionToken, rating: rating || undefined, comment: comment || undefined }),
       });
-      if (!dismissed) showToast('Thanks — that helps a lot');
+      if (!dismissed) { showToast('Thanks — that helps a lot'); track('guest_feedback_sent', { rating: rating || 0 }); }
       done = true;
       open = false;
     } catch { showToast('Could not send that just now', true); }

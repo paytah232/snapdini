@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { getConfig, getMe, api } from '$lib/api';
+  import { track } from '$lib/analytics';
   import { createEvent, joinEvent } from '$lib/events';
   import { saveSession } from '$lib/session';
   import { showToast } from '$lib/toast';
@@ -258,6 +259,7 @@
 
     creating = true;
     try {
+      track('event_create_started');
       const data = await createEvent({
         name: name.trim(),
         blurb: blurb.trim() || undefined,
@@ -282,6 +284,9 @@
       // Paid tiers (billing on) → straight to Stripe Checkout; the event is created
       // unpaid/inactive and the webhook flips it to paid on success.
       if (billing?.billingEnabled && quote?.requiresPayment) {
+        // Recorded BEFORE leaving for Stripe. The gap between this and checkout_returned{paid:true}
+        // is checkout abandonment, which nothing currently measures.
+        track('checkout_started', { cents: quote?.amountCents ?? 0, guests: maxGuests ?? 0 }, data.joinCode);
         const { url } = await postJson<{ url: string }>('/api/billing/checkout', {
           joinCode: data.joinCode,
           organizerCode: data.organizerCode,
@@ -292,6 +297,7 @@
 
       // Free event → straight to the manager dashboard, which shows a welcome modal
       // (QR + share link) on ?created=1. The organizer code travels in the hash.
+      track('event_created', { paid: false }, data.joinCode);
       goto(`/admin/${data.joinCode}?created=1#${encodeURIComponent(data.organizerCode)}`);
       return;
     } catch (err) {

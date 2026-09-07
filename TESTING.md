@@ -284,3 +284,19 @@ on their own.
 - [ ] **It outlives the event:** feedback is product signal, so the retention purge **detaches** it
       from the guest instead of deleting it — the rating and comment survive, the person does not.
       (Before 1.4 it cascaded off `participants` and erased itself ~31 days after every event.)
+
+## 22. Product analytics (first-party, cookieless)
+- [ ] **It records:** browse the site, open a FAQ, click a pricing tier, then join an event and take
+      a shot. `/siteadmin` → **How people use the site** shows a host funnel and a guest funnel with
+      the drop-off between steps, plus most-visited pages and which tier was clicked.
+- [ ] **Camera permission finally has a denominator:** the panel states an *allowed %* — denials were
+      always visible in client errors, but nothing said how many people said yes.
+- [ ] **Nothing is stored on your device:** open DevTools → Application. There must be **no cookie
+      and no localStorage/sessionStorage key** for analytics. Visit grouping happens server-side.
+- [ ] **No URL secrets:** visit `/admin/<code>?code=<organizerCode>`, then check the panel's
+      most-visited list — it must read `/admin/:code`, never the code or the token.
+- [ ] **Unfelt:** the site should be indistinguishable with tracking blocked. Measured on a Pixel 7
+      profile over 5 runs: median FCP 104ms with tracking vs 108ms blocked on `/`, 88ms vs 104ms on
+      `/pricing`, and **0ms of long tasks** either way — the difference is noise.
+- [ ] **Ingest is cheap:** `POST /api/track/events` is 3–6ms p95, and a 20-event batch costs no more
+      than a 1-event batch (the response is sent before anything is written).

@@ -42,6 +42,22 @@
   <h2>3. How we use it</h2>
   <p>We use your information solely to provide and operate Snapdini: creating and running your events, storing and revealing photos, sending the transactional emails you've asked for (account verification, magic-link sign-in, and gallery/photo links), processing payments, and keeping the service secure and reliable. We do not use your data for advertising or profiling.</p>
 
+  <h2>3b. How we measure the site</h2>
+  <p>We keep our own basic usage statistics — which pages are opened, which buttons are clicked, and
+  where people give up — so we can fix the parts that do not work. This is <strong>first-party and
+  cookieless</strong>: we store <strong>nothing on your device</strong> for it, and no third party
+  receives it.</p>
+  <p>To count a visit rather than a click, we group events using a short code derived from your IP
+  address and browser, mixed with a secret that <strong>changes every day</strong>. We do not store
+  your IP address, the code cannot be reversed, and because it changes daily it cannot be used to
+  follow you from one day to the next or across other websites. We keep these records for
+  <strong>90 days</strong>. Nothing you type — no names, no email addresses, no photo content — is
+  recorded, and web addresses are reduced to a page pattern before being stored, so codes and links
+  from your address bar are never kept.</p>
+  <p>Separately, if you arrive from one of our ads we use Google's conversion tracking to know the
+  ad worked. That is covered by the cookie choice we ask for in the EU/UK and can be changed at any
+  time from the link in the footer.</p>
+
   <h2>4. Photos &amp; videos — storage &amp; deletion</h2>
   <p>Your event's photos and videos are stored only to provide the service. They are <strong>automatically deleted after your event's retention period</strong> (the default window, extendable on paid plans). After deletion we keep only a small summary record of the event (its settings and basic stats such as photo and participant counts) for your history and our records — the media itself is gone. If a guest left us feedback about the app, we keep their rating and comment, but it is <strong>detached from them at the same moment</strong> — it survives as an anonymous comment about Snapdini that is no longer linked to any guest, name or email.</p>
   <p>You and your guests own your content. Please keep your own copies of anything important; once the retention period passes, deleted media cannot be recovered.</p>
