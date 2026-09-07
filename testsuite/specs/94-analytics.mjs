@@ -57,10 +57,6 @@ await spec('94-analytics', async () => {
      Number(dbq(`SELECT count(*) FROM site_events WHERE visit IS NULL`)) === 0);
   ok('the hash is 32 hex characters and nothing else',
      Number(dbq(`SELECT count(*) FROM site_events WHERE visit !~ '^[0-9a-f]{32}$'`)) === 0);
-  ok('this run is one visit, not one per request',
-     Number(dbq('SELECT count(DISTINCT visit) FROM site_events')) === 1,
-     dbq('SELECT count(DISTINCT visit) FROM site_events'));
-
   group('A flood is shed, not absorbed');
   const many = Array.from({ length: 200 }, (_, i) => ({ name: 'page_view', path: `/flood/${i}` }));
   const flood = await post(many);
@@ -90,6 +86,23 @@ await spec('94-analytics', async () => {
   } else {
     ok('operator funnel skipped — no admin creds', true);
   }
+
+  group('One caller in one window is one visit');
+  // Scoped to a fresh, tight window rather than the whole spec. The salt rerolls on every app boot
+  // (ANALYTICS_SALT unset = a new random salt per process, which is the more private default) and
+  // rotates at UTC midnight, so "one visit across the last 30 seconds of test" is not something the
+  // system promises. What it does promise is that one caller, in one window, is one visit.
+  dbq('TRUNCATE site_events');
+  await post([{ name: 'page_view', path: '/visit-a' }]);
+  await post([{ name: 'page_view', path: '/visit-b' }]);
+  await settle();
+  ok('two requests from one caller are one visit, not two',
+     Number(dbq('SELECT count(DISTINCT visit) FROM site_events')) === 1,
+     dbq('SELECT count(DISTINCT visit) FROM site_events'));
+  ok('and both rows were actually recorded',
+     Number(dbq('SELECT count(*) FROM site_events')) === 2,
+     dbq('SELECT count(*) FROM site_events'));
+
 
   dbq('TRUNCATE site_events');
 });

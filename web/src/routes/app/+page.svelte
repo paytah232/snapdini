@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { goto } from '$app/navigation';
   import { getConfig, getMe, api } from '$lib/api';
   import { track } from '$lib/analytics';
@@ -98,11 +98,25 @@
     return t ? t.amountCents : 0;
   };
   // Photo-retention choices (built from the server tiers) + their add-on cost.
-  $: retentionChoices = (billing?.retentionTiers ?? []).map((t) => {
-    const label = t.maxDays <= 7 ? '1 week' : t.maxDays <= 31 ? '1 month'
-      : t.maxDays <= 92 ? '3 months' : t.maxDays <= 182 ? '6 months' : '1 year';
-    return { days: t.maxDays, amountCents: t.amountCents, label };
-  });
+  // Retention does NOT follow the guest-tier "everything free under 10" rule — it is the reverse. A
+  // free event PAYS past a week; a paid event has a month INCLUDED. So what a tier costs depends on
+  // which side of the guest threshold the event sits.
+  $: retentionIncluded = !billing ? 7
+    : (Number(maxGuests) > (billing.freeAllGuests ?? 10)
+        ? (billing.retentionPaidDays ?? 31)
+        : (billing.retentionFreeDays ?? 7));
+  $: retentionChoices = (billing?.retentionTiers ?? [])
+    .filter((t) => t.maxDays >= retentionIncluded)     // never offer less than the event already gets
+    .map((t) => {
+      const label = t.maxDays <= 7 ? '1 week' : t.maxDays <= 31 ? '1 month'
+        : t.maxDays <= 92 ? '3 months' : t.maxDays <= 182 ? '6 months' : '1 year';
+      const free = t.maxDays <= retentionIncluded;
+      return { days: t.maxDays, amountCents: free ? 0 : t.amountCents, label,
+               included: free && t.amountCents > 0 };
+    });
+  // Moving up to a paid tier includes a month. Without this the form kept asking for 7 days, so the
+  // host silently got a week they had already paid to beat.
+  $: if (retentionDays < retentionIncluded) retentionDays = retentionIncluded;
 
   // ── Create form state ──
   let name = '';
@@ -117,6 +131,29 @@
   let maxPhotos: number | string = '';
   let retentionDays = 7;
   let timezone = '';
+  // Held separately from `timezone` so a drift between the two can be shown. A silent mismatch
+  // means the event starts at the wrong time and nobody finds out until the day.
+  let deviceTz = '';
+  $: tzMismatch = !!deviceTz && !!timezone && deviceTz !== timezone;
+  // The picker lives inside the collapsed Advanced section, so "Change" has to open it and take
+  // the host there — otherwise the link just scrolls to something that is not on screen.
+  async function openTimezone() {
+    const details = document.querySelector('details.more') as HTMLDetailsElement | null;
+    if (details) details.open = true;
+    await tick();
+    const el = document.querySelector('#timezone');
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    (el?.querySelector('input') as HTMLInputElement | null)?.focus();
+  }
+  // The start rendered the way GUESTS will see it — in the event's zone, not the browser's.
+  $: startPreview = (() => {
+    if (!startDate || !startTime || !timezone) return '';
+    try {
+      return new Intl.DateTimeFormat(undefined, {
+        dateStyle: 'medium', timeStyle: 'short', timeZone: timezone, timeZoneName: 'short',
+      }).format(new Date(`${startDate}T${startTime}`));
+    } catch { return ''; }
+  })();
   let blurb = '';
   let allowDownloads = true;
   let noFlash = false;
@@ -154,7 +191,8 @@
       timezones = [];
     }
     if (!timezones.length) timezones = ['UTC'];
-    timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    deviceTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    timezone = deviceTz;
 
     // Pre-fill join code from ?code= and switch to the join tab.
     const codeParam =
@@ -450,6 +488,20 @@
           <input id="start-time" type="time" bind:value={startTime} />
         </div>
       </div>
+        <!-- The timezone picker lives in Advanced settings, which meant this card never said what
+             these times MEAN. A host setting 7pm had no way to know the event was stored in another
+             zone until the day it ran. -->
+        <p class="tz-line">
+          Times are in
+          <button type="button" class="tz-name" on:click={openTimezone}
+                  title="Change the event's timezone">{timezone || '…'}</button>{#if startPreview} — starts {startPreview}{/if}
+        </p>
+        {#if tzMismatch}
+          <div class="tz-warn">
+            Your device is in <b>{deviceTz}</b> but this event is set to <b>{timezone}</b>.
+            <button type="button" class="tz-fix" on:click={() => (timezone = deviceTz)}>Use {deviceTz}</button>
+          </div>
+        {/if}
       <div class="field">
         <label for="duration">Duration</label>
         <select id="duration" bind:value={durationHours}>
@@ -499,10 +551,18 @@
           <label for="retention">Keep photos for</label>
           <select id="retention" bind:value={retentionDays}>
             {#each retentionChoices as r}
-              <option value={r.days}>{r.label}{#if billing?.billingEnabled && r.amountCents > 0} (+{money(r.amountCents)}){/if}</option>
+              <option value={r.days}>{r.label}{#if billing?.billingEnabled && r.amountCents > 0} (+{money(r.amountCents)}){:else if r.included} — included{/if}</option>
             {/each}
           </select>
-          {#if billing?.billingEnabled}<p class="field-hint">Photos are kept {billing.retentionFreeDays} days after the event ends for free · longer is an add-on on paid events.</p>{/if}
+          {#if billing?.billingEnabled}
+              <p class="field-hint">
+                {#if retentionIncluded > (billing.retentionFreeDays ?? 7)}
+                  This event size <b>includes {retentionIncluded} days</b> of photo retention · longer is an add-on.
+                {:else}
+                  Photos are kept {billing.retentionFreeDays} days after the event ends for free · longer is an add-on on paid events.
+                {/if}
+              </p>
+            {/if}
         </div>
 
         <div class="field">
@@ -634,6 +694,18 @@
 </main>
 
 <style>
+  /* The zone name IS the control — a separate "Change" link was one more thing to read. */
+  .tz-name { padding: 0; border: 0; background: none; cursor: pointer; color: var(--accent);
+    font: inherit; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
+  .tz-name:hover { filter: brightness(1.15); }
+  .tz-line { margin: 2px 0 10px; font-size: .82rem; color: var(--text-muted); }
+  .tz-warn { margin: 0 0 12px; padding: 9px 12px; border-radius: 10px; font-size: .82rem;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); }
+  .tz-fix { margin-left: 8px; padding: 4px 10px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text);
+    font: inherit; font-size: .78rem; font-weight: 700; }
+
   /* Named for a screen reader without changing the design — the tabs are the visible heading. */
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
     clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
