@@ -13,4 +13,6 @@
 </script>
 
 <OgHead og={data.og} />
-<Camera identifier={$page.params.code ?? ''} />
+<main>
+  <Camera identifier={$page.params.code ?? ''} />
+</main>

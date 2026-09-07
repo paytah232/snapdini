@@ -345,7 +345,10 @@
 
 <svelte:head><title>Create or join — Snapdini</title></svelte:head>
 
-<div class="page">
+<main class="page">
+  <!-- The tabs below are the visual heading, so this names the page for a screen reader without
+       putting a title on a design that does not have one. -->
+  <h1 class="sr-only">Create or join an event</h1>
   <div class="top">
     <a class="brand" href={loggedIn ? '/dashboard' : '/'}><Logo /></a>
     {#if loggedIn}<a class="myevents" href="/dashboard">← My events</a>{/if}
@@ -628,9 +631,13 @@
     <p class="foot-note">Ask the host for the 8-character code or scan their QR code</p>
     <p class="foot-note">Organising this event? <button type="button" class="link-btn" on:click={goManage}>Manage it →</button></p>
   {/if}
-</div>
+</main>
 
 <style>
+  /* Named for a screen reader without changing the design — the tabs are the visible heading. */
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
   .page {
     max-width: 520px;
     margin: 0 auto;
