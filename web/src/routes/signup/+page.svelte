@@ -75,9 +75,14 @@
     // the click id — the verifying phone may have neither. Both use the same marker as the
     // de-duplication id, so the platforms count one sign-up, not two.
     if (marker) fireLead($page.data, 'signup', marker);
-    // Straight back to the event they were building, if there still is one. If another tab already
-    // claimed the draft, the dashboard is the honest destination rather than an empty form.
-    await goto(hasFreshDraft() ? '/app' : nextDest);
+    // Straight back to the event they were building, if there still is one.
+    //
+    // If there isn't, /app would show a BLANK create form — the exact "did I lose my event?" moment
+    // this whole flow exists to prevent. It happens on a single device: the tab that opened the
+    // email has already claimed the draft, so this tab has nothing to restore. The dashboard is the
+    // honest answer. A `next` pointing anywhere else is still honoured; only the create flow gets
+    // redirected, because only it promised an event.
+    await goto(hasFreshDraft() ? '/app' : fromCreate ? '/dashboard' : nextDest);
   }
   onDestroy(() => clearTimeout(pollTimer));
 
