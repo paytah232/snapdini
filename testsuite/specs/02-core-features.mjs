@@ -104,6 +104,32 @@ await spec('02-core-features', async () => {
   ok('client-error stored', Number(dbq(`SELECT count(*) FROM client_errors WHERE message='regression test'`)) >= 1);
   ok('admin client-errors gated', [401, 403].includes((await api('GET', '/api/admin/client-errors')).status));
 
+  // A guest declining the camera is a choice, not a defect. Such reports are still STORED (the
+  // denial count only means something against the number of people asked) but must arrive already
+  // handled, or every dismissed permission prompt becomes an open issue for the operator to clear
+  // by hand — which is exactly what was happening in production.
+  const denyMsg = `regression camera denial ${Date.now()}`;
+  ok('a declined-camera report is accepted',
+    (await api('POST', '/api/client-error', { body: { message: denyMsg, context: 'camera-denied' } })).status === 200);
+  ok('it is still recorded',
+    Number(dbq(`SELECT count(*) FROM client_errors WHERE message='${denyMsg}'`)) === 1);
+  ok('but arrives already handled, so it never queues for action',
+    dbq(`SELECT handled FROM client_errors WHERE message='${denyMsg}'`) === 't');
+  // The other half matters more: a real fault must NOT be silenced by this.
+  const faultMsg = `regression real fault ${Date.now()}`;
+  await api('POST', '/api/client-error', { body: { message: faultMsg, context: 'camera' } });
+  ok('a genuine camera fault still demands attention',
+    dbq(`SELECT handled FROM client_errors WHERE message='${faultMsg}'`) === 'f');
+  const uploadMsg = `regression upload fault ${Date.now()}`;
+  await api('POST', '/api/client-error', { body: { message: uploadMsg, context: 'upload' } });
+  ok('and so does an upload failure',
+    dbq(`SELECT handled FROM client_errors WHERE message='${uploadMsg}'`) === 'f');
+  const noCtxMsg = `regression no context ${Date.now()}`;
+  await api('POST', '/api/client-error', { body: { message: noCtxMsg } });
+  ok('a report with no context is treated as a fault, not waved through',
+    dbq(`SELECT handled FROM client_errors WHERE message='${noCtxMsg}'`) === 'f');
+  dbq(`DELETE FROM client_errors WHERE message LIKE 'regression camera denial%' OR message LIKE 'regression real fault%' OR message LIKE 'regression upload fault%' OR message LIKE 'regression no context%'`);
+
   // Custom slideshow audio rejects a non-audio file (MIME/extension filter is spoofable, so the
   // server ffprobe-validates it has a real audio stream).
   const badAudio = new FormData();
