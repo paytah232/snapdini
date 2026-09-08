@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { goto } from '$app/navigation';
+  import { saveDraft, takeDraft } from '$lib/eventDraft';
   import { getConfig, getMe, api } from '$lib/api';
   import { track } from '$lib/analytics';
   import { createEvent, joinEvent } from '$lib/events';
@@ -180,38 +181,22 @@
   // localStorage, NOT sessionStorage. sessionStorage was the wrong call: signing up sends you to
   // "check your email", and the verification link opens a NEW TAB — where sessionStorage does not
   // exist. The draft has to outlive the tab that created it, so it is stamped and expires instead.
-  const DRAFT_KEY = 'snapdini-event-draft';
-  const DRAFT_TTL_MS = 24 * 60 * 60 * 1000;   // long enough to go and find a verification email
-  function saveDraft() {
-    try {
-      localStorage.setItem(DRAFT_KEY, JSON.stringify({
-        savedAt: Date.now(),
-        name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, timezone,
-        maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
-        revealDelayHours, moderationEnabled,
-      }));
-    } catch { /* private mode — the draft is a convenience, never a requirement */ }
-  }
+  const DRAFT_FIELDS = () => ({
+    name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, timezone,
+    maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
+    revealDelayHours, moderationEnabled,
+  });
   function restoreDraft() {
-    try {
-      const raw = localStorage.getItem(DRAFT_KEY);
-      if (!raw) return false;
-      localStorage.removeItem(DRAFT_KEY);              // one-shot: a refresh must not resurrect it
-      const d = JSON.parse(raw);
-      // A draft older than the window is someone else's abandoned attempt, not this journey.
-      if (!d?.savedAt || Date.now() - d.savedAt > DRAFT_TTL_MS) return false;
-      ({ name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, timezone,
-         maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
-         revealDelayHours, moderationEnabled } = { ...{
-           name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, timezone,
-           maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
-           revealDelayHours, moderationEnabled }, ...d });
-      return true;
-    } catch { return false; }
+    const d = takeDraft();
+    if (!d) return false;
+    ({ name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, timezone,
+       maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
+       revealDelayHours, moderationEnabled } = { ...DRAFT_FIELDS(), ...d });
+    return true;
   }
   /** Signed out: keep what they typed, then send them to sign in and come straight back. */
   function goSignIn(path: '/login' | '/signup') {
-    saveDraft();
+    saveDraft(DRAFT_FIELDS());
     goto(`${path}?next=/app`);
   }
 

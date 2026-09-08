@@ -131,6 +131,11 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
     only one of them, and `purchaseTracked()` lets a page skip work (the Stripe session lookup)
     that exists solely to feed a conversion. Goals are operator config: `GADS_*_LABEL` for Google,
     `MSADS_*_EVENT` for Microsoft (the goal's *Action* name in Microsoft Advertising).
+  - **The draft hand-off.** A signed-out host can fill in `/app`, and the create button then sends
+    them to sign up. `web/src/lib/eventDraft.ts` owns that draft (key, 24h window, one-shot read) —
+    it must be `localStorage`, because verifying an email opens a NEW TAB where `sessionStorage`
+    does not exist. `/dashboard` peeks (never consumes) on `?verified=` and sends them back to
+    `/app` to finish, which is what the "we'll take you straight back" copy promises.
   - **When each conversion fires.** Purchase fires only after the Stripe session confirms
     `paid`. Event-created fires on the return to an event that already exists. **Sign-up fires when
     the address is VERIFIED, not when the registration form succeeds** — three paths verify an

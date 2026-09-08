@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { goto, replaceState } from '$app/navigation';
   import { page } from '$app/stores';
   import { fireLead } from '$lib/adtracking';
+  import { hasFreshDraft } from '$lib/eventDraft';
   import { getMe, getConfig, postJson } from '$lib/api';
   import SiteFooter from '$lib/components/SiteFooter.svelte';
   import { getMyEvents, listMyCohostInvites, acceptCohost, type MyEvent, type MyCohostInvite } from '$lib/events';
@@ -73,10 +74,25 @@
     // de-duplication id so the ad platforms drop a duplicate too.
     const verified = $page.url.searchParams.get('verified');
     if (verified) {
+      // Count it FIRST. gtag/uetq are queues, so this is recorded even though we may navigate away
+      // in the next breath — and it must not depend on where the user goes next.
       fireLead($page.data, 'signup', verified);
+      // /app told them "we'll take you straight back to finish setting up your event". Verification
+      // opens a new tab and lands here, so without this they were dropped on the dashboard with a
+      // perfectly good draft sitting in storage and no sign of it — the promise silently unkept.
+      // Peeked, not consumed: /app is what restores it. Done BEFORE the URL tidy below, because
+      // taking the user where they were promised matters and cleaning the address bar does not.
+      if (hasFreshDraft()) { goto('/app'); return; }
+      // Staying here, so tidy the marker away. Two non-obvious things:
+      //  • after a tick — this page is entered by a full-page server redirect, so on the first
+      //    frame SvelteKit's router has not hydrated and replaceState throws ($set of undefined),
+      //    which used to abort the rest of onMount and swallow the redirect above;
+      //  • still SvelteKit's replaceState, not history.replaceState, which desyncs the router and
+      //    leaves Back changing the URL without changing the page.
+      await tick();
       const url = new URL(location.href);
       url.searchParams.delete('verified');
-      replaceState(url.pathname + url.search + url.hash, {});
+      try { replaceState(url.pathname + url.search + url.hash, {}); } catch { /* cosmetic only */ }
     }
     let user;
     try {
