@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { goto } from '$app/navigation';
+  import { goto, replaceState } from '$app/navigation';
+  import { page } from '$app/stores';
+  import { fireLead } from '$lib/adtracking';
   import { getMe, getConfig, postJson } from '$lib/api';
   import SiteFooter from '$lib/components/SiteFooter.svelte';
   import { getMyEvents, listMyCohostInvites, acceptCohost, type MyEvent, type MyCohostInvite } from '$lib/events';
@@ -64,6 +66,18 @@
   const joinHref = (ev: MyEvent) => (ev.slug ? `/e/${ev.slug}` : `/join/${ev.joinCode}`);
 
   onMount(async () => {
+    // The sign-up conversion fires HERE, not on the sign-up form: the server appends ?verified=
+    // only the first time an account's email becomes verified (see routes/auth.ts), so a spoofed
+    // address that never opens its inbox is never counted, and a returning sign-in never re-counts.
+    // The marker is stripped immediately so a refresh cannot fire it twice, and it is passed as the
+    // de-duplication id so the ad platforms drop a duplicate too.
+    const verified = $page.url.searchParams.get('verified');
+    if (verified) {
+      fireLead($page.data, 'signup', verified);
+      const url = new URL(location.href);
+      url.searchParams.delete('verified');
+      replaceState(url.pathname + url.search + url.hash, {});
+    }
     let user;
     try {
       ({ user } = await getMe());

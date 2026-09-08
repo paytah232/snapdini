@@ -146,6 +146,16 @@ nothing changes. These go on the **`web`** service (see trap 1), not `app`:
 Google and Microsoft are **independent**: run either, both or neither. The consent banner covers
 both from one decision, and Global Privacy Control is honoured for both.
 
+**Behaviour change to an existing conversion:** the sign-up conversion now fires when the address is
+**verified**, not when the registration form succeeds. This affects Google too, not just the new
+Microsoft goal. Expect the count to drop and the quality to rise — an address that never opens its
+inbox is no longer counted. Attribution can also be lost when someone opens the verification email
+on a different device from the ad click, so treat the before/after numbers as different measures
+rather than a regression.
+
+If you use `ANALYTICS_EXCLUDE_EMAILS`, note that **site admins are excluded automatically but your
+non-admin accounts are not** — an unlisted one is indistinguishable from a real customer.
+
 `nginx/default.conf` also gains `https://bat.bing.com` in the (report-only) CSP for
 `script-src`/`connect-src`/`img-src`. Merge that in if you set `MSUET_ID` — see trap 2.
 

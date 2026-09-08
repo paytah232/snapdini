@@ -4,7 +4,6 @@
   import { page } from '$app/stores';
   import { getConfig, getMe, postJson } from '$lib/api';
   import Turnstile from '$lib/components/Turnstile.svelte';
-  import { fireLead } from '$lib/adtracking';
   import { track } from '$lib/analytics';
 
   let signupStarted = false;
@@ -54,9 +53,8 @@
       msg = data.devLink
         ? { text, link: { href: data.devLink, label: 'Dev: click to verify →' }, ok: true }
         : { text, ok: true };
-      // "Sign up" conversion — Google Ads + Microsoft UET, whichever are configured. Best-effort;
-      // no-op with nothing configured, and skipped for excluded internal/admin accounts.
-      fireLead($page.data, 'signup');
+      // No sign-up conversion here. It fires once the address is actually verified (the dashboard
+      // handles it), so a spoofed address that never opens its inbox is never counted as a sign-up.
     } catch (err) {
       msg = { text: err instanceof Error ? err.message : 'Sign-up failed', ok: false };
     } finally {

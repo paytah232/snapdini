@@ -131,6 +131,19 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
     only one of them, and `purchaseTracked()` lets a page skip work (the Stripe session lookup)
     that exists solely to feed a conversion. Goals are operator config: `GADS_*_LABEL` for Google,
     `MSADS_*_EVENT` for Microsoft (the goal's *Action* name in Microsoft Advertising).
+  - **When each conversion fires.** Purchase fires only after the Stripe session confirms
+    `paid`. Event-created fires on the return to an event that already exists. **Sign-up fires when
+    the address is VERIFIED, not when the registration form succeeds** — three paths verify an
+    address (the verification link, a magic-link sign-in, Google sign-in), so `routes/auth.ts`
+    keys on the *transition* to verified and appends `?verified=<digest>` to the `/dashboard`
+    redirect; `routes/dashboard/+page.svelte` fires on that marker and strips it. Keying on the
+    transition is what stops a returning magic-link sign-in re-counting as a new sign-up — see
+    `testsuite/specs/95-signup-conversion.mjs`. The marker is a one-way digest of the user id, so
+    it de-duplicates without handing an ad platform a user identifier.
+  - `ANALYTICS_EXCLUDE_EMAILS` suppresses conversions for the operator's own signed-in sessions.
+    Site admins are excluded automatically, so this list is for **non-admin** accounts you use for
+    testing — the easy thing to get wrong, since an unlisted non-admin account looks identical to
+    a real customer in the data.
   - One consent decision drives both: visitors in the EEA, UK and Switzerland get a consent banner
     (`ConsentBanner.svelte`, defaults denied there); elsewhere the tags run by default with a "Your
     Privacy Choices" opt-out link and Global Privacy Control honoured. Region comes from

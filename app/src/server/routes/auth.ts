@@ -84,13 +84,29 @@ router.post('/register', async (req: Request, res: Response) => {
 });
 
 // ── GET /api/auth/verify?token= ───────────────────────────────────────────────
+// A sign-up only becomes real when the address is proven, so the sign-up conversion fires the
+// FIRST time an account's email becomes verified — never at registration (which spoofed addresses
+// reach just as easily) and never again afterwards. Three paths verify an address (this link, a
+// magic-link sign-in, and Google sign-in), so the rule is keyed on the TRANSITION rather than on
+// the endpoint: a returning user signing in with a magic link is already verified and marks
+// nothing. The web dashboard fires on the marker and strips it — see routes/dashboard/+page.svelte.
+//
+// The marker is a one-way digest of the user id: stable, so the ad platforms can de-duplicate a
+// refresh, but not a user identifier being handed to a third party.
+function dashboardAfterVerify(userId: string, justVerified: boolean): string {
+  if (!justVerified) return '/dashboard';
+  const key = crypto.createHash('sha256').update(userId).digest('hex').slice(0, 16);
+  return `/dashboard?verified=${key}`;
+}
+
 router.get('/verify', async (req: Request, res: Response) => {
   const user = await auth.consumeEmailToken(req.query.token as string | undefined, 'verify');
   if (!user) return res.status(400).send('This verification link is invalid or has expired.');
-  if (!user.emailVerifiedAt)
+  const justVerified = !user.emailVerifiedAt;
+  if (justVerified)
     await db.update(users).set({ emailVerifiedAt: Date.now() }).where(eq(users.id, user.id));
   await startSession(req, res, user.id);
-  res.redirect('/dashboard');
+  res.redirect(dashboardAfterVerify(user.id, justVerified));
 });
 
 // ── POST /api/auth/login ──────────────────────────────────────────────────────
@@ -152,10 +168,13 @@ router.post('/magic-link', async (req: Request, res: Response) => {
 router.get('/magic', async (req: Request, res: Response) => {
   const user = await auth.consumeEmailToken(req.query.token as string | undefined, 'magic_login');
   if (!user) return res.status(400).send('This sign-in link is invalid or has expired.');
-  if (!user.emailVerifiedAt) // signing in via a link to your own inbox proves the address
+  // Signing in via a link to your own inbox proves the address, so a first-time magic-link user is
+  // a completed sign-up. A returning one is already verified and marks nothing.
+  const justVerified = !user.emailVerifiedAt;
+  if (justVerified)
     await db.update(users).set({ emailVerifiedAt: Date.now() }).where(eq(users.id, user.id));
   await startSession(req, res, user.id);
-  res.redirect('/dashboard');
+  res.redirect(dashboardAfterVerify(user.id, justVerified));
 });
 
 // ── POST /api/auth/logout ─────────────────────────────────────────────────────
@@ -220,21 +239,26 @@ router.get('/google/callback', async (req: Request, res: Response) => {
   const [identity] = await db.select().from(authIdentities)
     .where(and(eq(authIdentities.provider, 'google'), eq(authIdentities.providerUserId, sub)));
   let userId: string;
+  // Google has already proven the address, so a Google sign-in that verifies an account for the
+  // first time completes that sign-up. A returning Google user (identity already linked) does not.
+  let justVerified = false;
   if (identity) {
     userId = identity.userId;
   } else {
     // Link to an existing email account, or create a new one.
     const [user] = emailAddr
-      ? await db.select({ id: users.id }).from(users).where(eq(users.email, emailAddr))
+      ? await db.select({ id: users.id, emailVerifiedAt: users.emailVerifiedAt }).from(users).where(eq(users.email, emailAddr))
       : [undefined];
     if (!user) {
       userId = uuidv4();
+      justVerified = true;
       await db.insert(users).values({
         id: userId, email: emailAddr, displayName: (profile.name || '').slice(0, 80) || null,
         emailVerifiedAt: now, plan: 'free', createdAt: now,
       });
     } else {
       userId = user.id;
+      justVerified = !user.emailVerifiedAt;
       await db.update(users).set({ emailVerifiedAt: sql`COALESCE(${users.emailVerifiedAt}, ${now})` })
         .where(eq(users.id, userId));
     }
@@ -244,7 +268,7 @@ router.get('/google/callback', async (req: Request, res: Response) => {
   }
 
   await startSession(req, res, userId);
-  res.redirect('/dashboard');
+  res.redirect(dashboardAfterVerify(userId, justVerified));
 });
 
 export default router;
