@@ -42,6 +42,7 @@
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let pollStop = 0;                  // wall-clock deadline; the token outlives nothing
   let verifyExpired = false;
+  let emailFailed = false;
   let resending = false;
 
   // Verification usually happens on ANOTHER DEVICE — you sign up on a laptop and open the email on
@@ -49,6 +50,7 @@
   // event actually lives. So this browser asks the server whether the address has been proven yet,
   // and picks the journey back up itself when it has.
   const POLL_MS = 3000;
+  let polling = false;
   function startPolling(token: string, ttlMs: number) {
     pendingToken = token;
     pollStop = Date.now() + Math.max(60_000, ttlMs || 0);
@@ -57,17 +59,35 @@
   function schedule() {
     clearTimeout(pollTimer);
     if (!pendingToken || Date.now() > pollStop) { if (pendingToken) verifyExpired = true; return; }
+    // A hidden tab is nobody's waiting room: this is the case where the user has gone to their
+    // phone, so polling here would just burn requests and battery to tell an unwatched tab
+    // something it cannot show. wake() picks it straight back up — and does so IMMEDIATELY, which
+    // is what makes coming back to the laptop feel instant instead of up to POLL_MS late.
+    if (hidden()) return;
     pollTimer = setTimeout(poll, POLL_MS);
   }
+  const hidden = () => typeof document !== 'undefined' && document.visibilityState === 'hidden';
   async function poll() {
-    if (!pendingToken) return;
+    if (!pendingToken || polling) return;
+    // Checked here as well as in schedule(): a timer already in flight when the tab was hidden
+    // would otherwise still fire once, asking a question nobody is waiting to hear the answer to.
+    if (hidden()) return;
+    polling = true;
     try {
       const r = await fetch(`/api/auth/pending?token=${encodeURIComponent(pendingToken)}`);
       const d = (await r.json()) as { verified?: boolean; expired?: boolean; marker?: string };
       if (d.expired) { pendingToken = ''; verifyExpired = true; return; }
       if (d.verified) { pendingToken = ''; await onVerified(d.marker); return; }
     } catch { /* offline or a blip — just try again */ }
+    finally { polling = false; }
     schedule();
+  }
+  /** Focus/visibility is the strongest possible hint that the user just came back from verifying
+   *  somewhere else, so check right now rather than waiting out the interval. */
+  function wake() {
+    if (!pendingToken) return;
+    clearTimeout(pollTimer);
+    poll();
   }
   async function onVerified(marker?: string) {
     clearTimeout(pollTimer);
@@ -84,6 +104,12 @@
     // redirected, because only it promised an event.
     await goto(hasFreshDraft() ? '/app' : fromCreate ? '/dashboard' : nextDest);
   }
+  // visibilitychange fires AT document, so it is bound there rather than on window, where it only
+  // arrives by bubbling.
+  onMount(() => {
+    document.addEventListener('visibilitychange', wake);
+    return () => document.removeEventListener('visibilitychange', wake);
+  });
   onDestroy(() => clearTimeout(pollTimer));
 
   async function resend() {
@@ -92,6 +118,7 @@
     try {
       const d = await postJson<{ devLink?: string }>('/api/auth/magic-link', { email: awaitingEmail });
       if (d.devLink) devVerifyLink = d.devLink;
+      emailFailed = false;
       msg = { text: 'Sent again — check your inbox (and your spam folder).', ok: true };
     } catch (e) {
       msg = { text: e instanceof Error ? e.message : 'Could not resend just now', ok: false };
@@ -114,7 +141,7 @@
     submitting = true;
     msg = null;
     try {
-      const data = await postJson<{ devLink?: string; pendingToken?: string; pendingTtlMs?: number }>(
+      const data = await postJson<{ devLink?: string; pendingToken?: string; pendingTtlMs?: number; emailDelivered?: boolean }>(
         '/api/auth/register',
         { name: name.trim(), displayName: name.trim(), email, password, 'cf-turnstile-response': turnstileToken },
       );
@@ -122,6 +149,9 @@
       // leaving a filled-in form and a "Create account" button sitting there.
       awaitingEmail = email;
       devVerifyLink = data.devLink || '';
+      // If the send itself failed there is nothing to wait for, and "check your email" would have
+      // someone watching an empty inbox indefinitely. Say so, and offer the resend.
+      emailFailed = data.emailDelivered === false && !data.devLink;
       msg = null;
       if (data.pendingToken) startPolling(data.pendingToken, data.pendingTtlMs || 0);
       // No sign-up conversion here. It fires once the address is actually verified (the dashboard
@@ -149,6 +179,8 @@
   }
 </script>
 
+<svelte:window on:focus={wake} on:online={wake} />
+
 <svelte:head><title>Sign up — Snapdini</title></svelte:head>
 
 <main>
@@ -171,7 +203,11 @@
       <!-- Nothing here to fill in: the account exists and the only remaining step happens in an
            inbox, which may well be on a different device. -->
       <div class="verify">
-        {#if verifyExpired}
+        {#if emailFailed}
+          <p class="vwait">We couldn't send that email just now.</p>
+          <p class="vhint">Your account exists — only the email failed. Try resending, or check the
+          address is right.</p>
+        {:else if verifyExpired}
           <p class="vwait">The link has expired. Send a fresh one and we'll carry on.</p>
         {:else}
           <p class="vwait"><span class="spin" aria-hidden="true"></span> Waiting for you to confirm…</p>
@@ -185,7 +221,8 @@
           {resending ? 'Sending…' : 'Resend the email'}
         </button>
         <button class="btn ghost" type="button"
-                on:click={() => { awaitingEmail = ''; pendingToken = ''; verifyExpired = false; msg = null; }}>
+                on:click={() => { awaitingEmail = ''; pendingToken = ''; verifyExpired = false;
+                                  emailFailed = false; msg = null; }}>
           Use a different email
         </button>
       </div>

@@ -171,8 +171,14 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   - Both libraries are loaded on **idle or first interaction**, never during the initial paint —
     they queue, so a conversion fired before the library arrives is replayed. Keep it that way;
     loading either eagerly costs the mobile LCP.
-  - `bat.bing.com` is allowed in the nginx CSP (`script`/`connect`/`img`). Run the tests with
-  `cd web && npm test`.
+  - `bat.bing.com` is allowed in the nginx CSP (`script`/`connect`/`img`).
+  - **You cannot verify either tag from inside the LAN**: `bat.bing.com` and
+    `www.googletagmanager.com` are blocked at DNS (Pi-hole), so both fail with a connection error
+    and never run. That is why dev traffic cannot reach either platform — convenient, but it also
+    means testing the tags on production from a home device shows nothing. Use a connection off
+    that network (mobile data) or allowlist the two domains.
+  - Run the tests with `cd web && npm test`; the journey itself is covered end to end in
+    `web/e2e/signup-verification.spec.ts`.
 
 ## Releasing (maintainers)
 

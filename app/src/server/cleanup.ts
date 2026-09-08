@@ -3,7 +3,7 @@ import path from 'path';
 import { and, eq, isNotNull, lt, count } from 'drizzle-orm';
 import { db } from './db';
 import { RESCHEDULE_WINDOW_MS, RESCHEDULE_RETENTION_GRACE_MS } from './lib';
-import { events, photos, participants, clientErrors, slideshows, shares } from './schema';
+import { events, photos, participants, clientErrors, slideshows, shares, emailTokens, sessions } from './schema';
 import { UPLOADS_DIR, uploadDiskPath, eventDir, INCOMING_DIR } from './paths';
 import { playName, thumbName } from './images';
 import { purgeOldSlideshows } from './slideshow';
@@ -11,6 +11,8 @@ import { pruneAnalytics } from './analytics';
 
 const SWEEP_MS = 60 * 60 * 1000; // hourly
 const CLIENT_ERROR_TTL_MS = 30 * 24 * 60 * 60 * 1000; // keep diagnostic reports ~30 days
+// Expired auth tokens are kept briefly so an expired link still reports itself as expired.
+const EXPIRED_TOKEN_GRACE_MS = 24 * 60 * 60 * 1000;
 
 function safeUnlink(file: string): void {
   fs.promises.unlink(file).catch(() => {}); // best-effort; ignore missing
@@ -145,6 +147,26 @@ export async function sweep(): Promise<number> {
   // Raw analytics rows age out too — they answer questions that are only interesting while fresh.
   try { const n = await pruneAnalytics(); if (n) console.log(`[sweeper] pruned ${n} analytics row(s)`); }
   catch (e) { console.error('[sweeper] analytics prune failed:', (e as Error).message); }
+
+  // Single-use auth tokens and dead sessions were never cleaned up, so both tables only ever grew:
+  // a row per verification email, per sign-in link and (since the cross-device sign-up poll) per
+  // registration again. Nothing read them once expired — they just made every token lookup, which
+  // is on the sign-in path, progressively more expensive.
+  //
+  // A short grace period past expiry keeps a just-expired token available long enough to answer
+  // "this link has expired" properly rather than as "invalid".
+  try {
+    const cutoff = Date.now() - EXPIRED_TOKEN_GRACE_MS;
+    const r = await db.delete(emailTokens).where(lt(emailTokens.expiresAt, cutoff));
+    const n = (r as { rowCount?: number }).rowCount ?? 0;
+    if (n) console.log(`[sweeper] pruned ${n} expired auth token(s)`);
+  } catch (e) { console.error('[sweeper] auth token prune failed:', (e as Error).message); }
+
+  try {
+    const r = await db.delete(sessions).where(lt(sessions.expiresAt, Date.now()));
+    const n = (r as { rowCount?: number }).rowCount ?? 0;
+    if (n) console.log(`[sweeper] pruned ${n} expired session(s)`);
+  } catch (e) { console.error('[sweeper] session prune failed:', (e as Error).message); }
 
   return due.length;
 }
