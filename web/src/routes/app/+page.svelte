@@ -134,7 +134,10 @@
   // Held separately from `timezone` so a drift between the two can be shown. A silent mismatch
   // means the event starts at the wrong time and nobody finds out until the day.
   let deviceTz = '';
-  $: tzMismatch = !!deviceTz && !!timezone && deviceTz !== timezone;
+  // Dismissal is remembered against the zone it was shown FOR, so waving it away once does not
+  // hide a genuinely different mismatch later in the same session.
+  let tzDismissedFor = '';
+  $: tzMismatch = !!deviceTz && !!timezone && deviceTz !== timezone && tzDismissedFor !== timezone;
   // The picker lives inside the collapsed Advanced section, so "Change" has to open it and take
   // the host there — otherwise the link just scrolls to something that is not on screen.
   async function openTimezone() {
@@ -164,7 +167,45 @@
 
   let timezones: string[] = [];
   let creating = false;
-  let loggedIn = false;   // show a "My events" shortcut for signed-in hosts
+  let loggedIn = false;
+  let draftRestored = false;   // show a "My events" shortcut for signed-in hosts
+
+  // Creating an event REQUIRES an account (the server answers 401), but the form was fully usable
+  // signed out — so a host could configure everything and lose the lot to a "Not signed in" toast.
+  // The form stays open, because filling it in is what makes someone want an account; what changes
+  // is that the draft survives the trip through sign-in.
+  //
+  // sessionStorage, not localStorage: this is a half-finished form in one tab, not a saved document.
+  const DRAFT_KEY = 'snapdini-event-draft';
+  function saveDraft() {
+    try {
+      sessionStorage.setItem(DRAFT_KEY, JSON.stringify({
+        name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, timezone,
+        maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
+        revealDelayHours, moderationEnabled,
+      }));
+    } catch { /* private mode — the draft is a convenience, never a requirement */ }
+  }
+  function restoreDraft() {
+    try {
+      const raw = sessionStorage.getItem(DRAFT_KEY);
+      if (!raw) return false;
+      sessionStorage.removeItem(DRAFT_KEY);            // one-shot: a refresh must not resurrect it
+      const d = JSON.parse(raw);
+      ({ name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, timezone,
+         maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
+         revealDelayHours, moderationEnabled } = { ...{
+           name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, timezone,
+           maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
+           revealDelayHours, moderationEnabled }, ...d });
+      return true;
+    } catch { return false; }
+  }
+  /** Signed out: keep what they typed, then send them to sign in and come straight back. */
+  function goSignIn(path: '/login' | '/signup') {
+    saveDraft();
+    goto(`${path}?next=/app`);
+  }
 
   // ── Join form state ──
   let joinName = '';
@@ -175,6 +216,8 @@
 
   onMount(async () => {
     try { loggedIn = !!(await getMe()).user; } catch { /* anon */ }
+    // Coming back from sign-in: put their event back the way they left it.
+    if (restoreDraft()) draftRestored = true;
     // Default the start to midnight at the beginning of the following day — events are almost
     // always planned ahead, and this avoids accidentally starting one mid-creation.
     const tm = new Date();
@@ -475,6 +518,10 @@
       {/if}
     </div>
 
+    {#if draftRestored}
+      <div class="draft-back">✓ Welcome back — your event details are just as you left them.</div>
+    {/if}
+
     <!-- 2 ── When it runs. -->
     <div class="card">
       <div class="card-title">When</div>
@@ -499,7 +546,13 @@
         {#if tzMismatch}
           <div class="tz-warn">
             Your device is in <b>{deviceTz}</b> but this event is set to <b>{timezone}</b>.
-            <button type="button" class="tz-fix" on:click={() => (timezone = deviceTz)}>Use {deviceTz}</button>
+            <span class="tz-acts">
+              <button type="button" class="tz-fix" on:click={() => (timezone = deviceTz)}>Use {deviceTz}</button>
+              <!-- Deliberate is a valid answer: a host in one country running an event in another
+                   should be able to clear this rather than look at it for the rest of the form. -->
+              <button type="button" class="tz-dismiss" on:click={() => (tzDismissedFor = timezone)}
+                      aria-label="Dismiss timezone warning">Keep {timezone}</button>
+            </span>
           </div>
         {/if}
       <div class="field">
@@ -595,9 +648,7 @@
         <div class="field toggle-field">
           <span class="tf-label">
             <label for="allow-downloads">Allow downloads</label>
-            <button type="button" class="help-tip" aria-label="What does allow downloads do?">?
-              <span class="tip">When on, guests can save individual photos from the shared gallery and download the whole event as a zip. Turn it off to make the gallery view-only — people can still see the photos, just not download them.</span>
-            </button>
+            <HelpTip text={`When on, guests can save individual photos from the shared gallery and download the whole event as a zip. Turn it off to make the gallery view-only — people can still see the photos, just not download them.`} />
           </span>
           <label class="toggle">
             <input id="allow-downloads" type="checkbox" bind:checked={allowDownloads} />
@@ -608,9 +659,7 @@
         <div class="field toggle-field">
           <span class="tf-label">
             <label for="no-flash">No flash</label>
-            <button type="button" class="help-tip" aria-label="What does no flash do?">?
-              <span class="tip">Stops guests' phones firing the bright rear camera flash — handy for ceremonies, dark venues or anywhere a flash would be disruptive. The gentle front-camera selfie flash still works.</span>
-            </button>
+            <HelpTip text={`Stops guests' phones firing the bright rear camera flash — handy for ceremonies, dark venues or anywhere a flash would be disruptive. The gentle front-camera selfie flash still works.`} />
           </span>
           <label class="toggle">
             <input id="no-flash" type="checkbox" bind:checked={noFlash} />
@@ -661,10 +710,19 @@
       </div>
     </details>
 
-    <button class="btn primary" on:click={submitCreate} disabled={creating}>
-      {creating ? 'Creating…' : quote?.requiresPayment ? `Create event · ${money(quote.amountCents)}` : 'Create event'}
-    </button>
-    <p class="foot-note">You'll get a QR code + join code to share with guests</p>
+    {#if loggedIn}
+      <button class="btn primary" on:click={submitCreate} disabled={creating}>
+        {creating ? 'Creating…' : quote?.requiresPayment ? `Create event · ${money(quote.amountCents)}` : 'Create event'}
+      </button>
+      <p class="foot-note">You'll get a QR code + join code to share with guests</p>
+    {:else}
+      <!-- The server requires an account here (it answers 401), so the plain button could only ever
+           fail — after the host had filled in the whole form. Ask for the account at the point it
+           is actually needed, and keep the draft so nothing is lost. -->
+      <button class="btn primary" on:click={() => goSignIn('/signup')}>Create my account &amp; event</button>
+      <button class="btn ghost signin-alt" on:click={() => goSignIn('/login')}>I already have an account</button>
+      <p class="foot-note">Your event details are kept — you'll come straight back here to finish.</p>
+    {/if}
   {:else}
     <div class="card">
       <div class="card-title">Join an event</div>
@@ -698,11 +756,19 @@
   .tz-name { padding: 0; border: 0; background: none; cursor: pointer; color: var(--accent);
     font: inherit; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
   .tz-name:hover { filter: brightness(1.15); }
+  .signin-alt { margin-top: 8px; }
+  .draft-back { margin: 0 0 14px; padding: 10px 12px; border-radius: 10px; font-size: .84rem;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
   .tz-line { margin: 2px 0 10px; font-size: .82rem; color: var(--text-muted); }
   .tz-warn { margin: 0 0 12px; padding: 9px 12px; border-radius: 10px; font-size: .82rem;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); }
-  .tz-fix { margin-left: 8px; padding: 4px 10px; border-radius: 8px; cursor: pointer;
+  .tz-acts { display: inline-flex; gap: 8px; margin-left: 8px; flex-wrap: wrap; }
+  .tz-dismiss { padding: 4px 10px; border-radius: 8px; cursor: pointer; border: 1px solid transparent;
+    background: none; color: var(--text-muted); font: inherit; font-size: .78rem; }
+  .tz-dismiss:hover { color: var(--text); border-color: var(--border); }
+  .tz-fix { margin-left: 0; padding: 4px 10px; border-radius: 8px; cursor: pointer;
     border: 1px solid var(--border); background: var(--surface); color: var(--text);
     font: inherit; font-size: .78rem; font-weight: 700; }
 
@@ -865,20 +931,6 @@
   }
   .tf-label { display: flex; align-items: center; gap: 7px; }
   .tf-label label { margin-bottom: 0; }
-  .help-tip {
-    position: relative; flex: none; width: 18px; height: 18px; border-radius: 50%;
-    border: 1px solid var(--border); background: transparent; color: var(--text-muted);
-    font-size: 0.72rem; font-weight: 700; cursor: help; padding: 0;
-    display: inline-flex; align-items: center; justify-content: center;
-  }
-  .help-tip .tip {
-    position: absolute; bottom: 135%; left: 0; width: 230px;
-    background: var(--surface-2, #1b1b1b); color: var(--text); border: 1px solid var(--border);
-    border-radius: 8px; padding: 9px 11px; font-size: 0.75rem; font-weight: 400; line-height: 1.45;
-    text-align: left; opacity: 0; pointer-events: none; transition: opacity .15s ease; z-index: 30;
-    box-shadow: 0 8px 24px rgba(0,0,0,.3);
-  }
-  .help-tip:hover .tip, .help-tip:focus .tip { opacity: 1; }
   .toggle {
     position: relative;
     display: inline-block;

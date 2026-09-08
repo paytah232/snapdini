@@ -14,6 +14,9 @@
 
   // Same-origin relative destination after auth (no open-redirect); default dashboard.
   $: nextDest = (() => { const n = $page.url.searchParams.get('next'); return n && n.startsWith('/') && !n.startsWith('//') ? n : '/dashboard'; })();
+  // Came from a part-filled event form, so the page should read as the next step of that rather
+  // than a cold sign-up.
+  $: fromCreate = nextDest === '/app';
 
   let name = '';
   let email = '';
@@ -82,8 +85,14 @@
 <main>
   <div class="card">
     <a class="brand" href="/"><Logo /></a>
-    <h1>Now you see them, now you don't</h1>
-    <p class="sub">Snapdini is the shared event camera with a disappearing act — every photo vanishes the moment it's snapped, then reappears all at once, like magic, when your event ends. ✨</p>
+    {#if fromCreate}
+      <h1>Your event is almost ready</h1>
+      <p class="sub">Create your account and confirm your email — we'll take you straight back to
+      finish setting up your event, exactly as you left it.</p>
+    {:else}
+      <h1>Now you see them, now you don't</h1>
+      <p class="sub">Snapdini is the shared event camera with a disappearing act — every photo vanishes the moment it's snapped, then reappears all at once, like magic, when your event ends. ✨</p>
+    {/if}
 
     <form on:submit={register}>
       <label for="name">Your name</label>

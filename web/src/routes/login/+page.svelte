@@ -10,6 +10,8 @@
 
   // Post-login destination — only same-origin relative paths (no open-redirect); default dashboard.
   $: nextDest = (() => { const n = $page.url.searchParams.get('next'); return n && n.startsWith('/') && !n.startsWith('//') ? n : '/dashboard'; })();
+  // Arrived from a part-filled event form: this is a step in creating it, not a cold sign-in.
+  $: fromCreate = nextDest === '/app';
 
   let email = '';
   let password = '';
@@ -85,7 +87,12 @@
 <main>
   <div class="card">
     <a class="brand" href="/"><Logo /></a>
-    <h1>Welcome back</h1>
+    {#if fromCreate}
+      <h1>Sign in to finish your event</h1>
+      <p class="sub-note">We've kept everything you set up — you'll come straight back to it.</p>
+    {:else}
+      <h1>Welcome back</h1>
+    {/if}
 
     <form on:submit={login}>
       <label for="email">Email</label>
@@ -127,6 +134,8 @@
 <SiteFooter showSupport={false} />
 
 <style>
+  .sub-note { margin: 0 0 18px; color: var(--text-muted); font-size: .9rem; line-height: 1.5; }
+
   main {
     min-height: 100vh;
     display: flex;

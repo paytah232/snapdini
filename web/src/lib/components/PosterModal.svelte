@@ -528,7 +528,9 @@
             {#if bounds[el.key]}
               {@const b = bounds[el.key]}
               <!-- The whole footprint is the move target; outline shows on hover or when selected. -->
-              <div class="el-box" class:active={dragKey === el.key} class:selected={selectedKey === el.key} class:warn={el.key === 'qr' && qrTooSmall} class:lock-x={el.axis === 'x'}
+              <!-- label-below: near the top of the stage there is no room above, and the sheet
+                   clips anything that overflows it, so the label would simply vanish. -->
+              <div class="el-box" class:active={dragKey === el.key} class:selected={selectedKey === el.key} class:warn={el.key === 'qr' && qrTooSmall} class:lock-x={el.axis === 'x'} class:label-below={(b.y / H) < 0.07}
                 style="left:{(b.x / W) * 100}%; top:{(b.y / H) * 100}%; width:{(b.w / W) * 100}%; height:{(b.h / H) * 100}%"
                 on:pointerdown={(e) => startDrag(el.key, 'move', e)} role="button" tabindex="-1" aria-label="Move {el.label}">
                 <span class="el-name">{el.label}{#if el.key === 'qr' && qrTooSmall} ⚠{/if}</span>
@@ -667,8 +669,10 @@
   /* Label sits as a tab just ABOVE the top-left corner — outside the footprint so it never covers
      content — and only appears on hover / while active. */
   .el-name { position: absolute; bottom: 100%; left: 0; margin-bottom: 3px;
+    /* see .label-below */
     background: rgba(17,17,17,0.82); color: #fff; font-size: 0.55rem; font-weight: 700; letter-spacing: 0.02em;
     padding: 1px 6px; border-radius: 5px; white-space: nowrap; pointer-events: none; opacity: 0; transition: opacity 0.12s; line-height: 1.25; }
+  .el-box.label-below .el-name { bottom: auto; top: 100%; margin-bottom: 0; margin-top: 3px; }
   .el-box:hover .el-name, .el-box.active .el-name { opacity: 1; pointer-events: auto; }
   /* Resize grip sits at the bottom-right corner, just touching the outline without covering content. */
   .el-rz { position: absolute; transform: translate(-2px, -2px); display: inline-flex; align-items: center; justify-content: center;

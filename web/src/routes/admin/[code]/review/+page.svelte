@@ -560,6 +560,8 @@
   .who-menu > summary.on { background: var(--accent); color: var(--accent-ink, #111); }
   .who-pop {
     position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; min-width: 220px;
+    /* Never wider than the screen, and never flush against its edge on a narrow phone. */
+    max-width: calc(100vw - 16px);
     max-height: 320px; overflow-y: auto; padding: 8px; border-radius: var(--radius-sm);
     background: var(--surface); border: 1px solid var(--border); box-shadow: 0 10px 30px rgba(0,0,0,.35);
   }
