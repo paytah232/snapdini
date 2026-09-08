@@ -138,6 +138,8 @@
   // hide a genuinely different mismatch later in the same session.
   let tzDismissedFor = '';
   $: tzMismatch = !!deviceTz && !!timezone && deviceTz !== timezone && tzDismissedFor !== timezone;
+  /** Just the city — "Australia/Brisbane" inside a button is mostly prefix. */
+  const tzShort = (z: string) => (z || '').split('/').pop()?.replace(/_/g, ' ') || z;
   // The picker lives inside the collapsed Advanced section, so "Change" has to open it and take
   // the host there — otherwise the link just scrolls to something that is not on screen.
   async function openTimezone() {
@@ -175,11 +177,15 @@
   // The form stays open, because filling it in is what makes someone want an account; what changes
   // is that the draft survives the trip through sign-in.
   //
-  // sessionStorage, not localStorage: this is a half-finished form in one tab, not a saved document.
+  // localStorage, NOT sessionStorage. sessionStorage was the wrong call: signing up sends you to
+  // "check your email", and the verification link opens a NEW TAB — where sessionStorage does not
+  // exist. The draft has to outlive the tab that created it, so it is stamped and expires instead.
   const DRAFT_KEY = 'snapdini-event-draft';
+  const DRAFT_TTL_MS = 24 * 60 * 60 * 1000;   // long enough to go and find a verification email
   function saveDraft() {
     try {
-      sessionStorage.setItem(DRAFT_KEY, JSON.stringify({
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({
+        savedAt: Date.now(),
         name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, timezone,
         maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
         revealDelayHours, moderationEnabled,
@@ -188,10 +194,12 @@
   }
   function restoreDraft() {
     try {
-      const raw = sessionStorage.getItem(DRAFT_KEY);
+      const raw = localStorage.getItem(DRAFT_KEY);
       if (!raw) return false;
-      sessionStorage.removeItem(DRAFT_KEY);            // one-shot: a refresh must not resurrect it
+      localStorage.removeItem(DRAFT_KEY);              // one-shot: a refresh must not resurrect it
       const d = JSON.parse(raw);
+      // A draft older than the window is someone else's abandoned attempt, not this journey.
+      if (!d?.savedAt || Date.now() - d.savedAt > DRAFT_TTL_MS) return false;
       ({ name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, timezone,
          maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
          revealDelayHours, moderationEnabled } = { ...{
@@ -545,13 +553,14 @@
         </p>
         {#if tzMismatch}
           <div class="tz-warn">
-            Your device is in <b>{deviceTz}</b> but this event is set to <b>{timezone}</b>.
+            <p class="tz-msg">Your device is in <b>{deviceTz}</b> but this event is set to <b>{timezone}</b>.</p>
             <span class="tz-acts">
-              <button type="button" class="tz-fix" on:click={() => (timezone = deviceTz)}>Use {deviceTz}</button>
+              <button type="button" class="tz-fix" on:click={() => (timezone = deviceTz)} title="Use {deviceTz}">Use {tzShort(deviceTz)}</button>
               <!-- Deliberate is a valid answer: a host in one country running an event in another
                    should be able to clear this rather than look at it for the rest of the form. -->
               <button type="button" class="tz-dismiss" on:click={() => (tzDismissedFor = timezone)}
-                      aria-label="Dismiss timezone warning">Keep {timezone}</button>
+                      aria-label="Keep {timezone} and dismiss this warning"
+                        title="Keep {timezone}">Keep {tzShort(timezone)}</button>
             </span>
           </div>
         {/if}
@@ -764,13 +773,18 @@
   .tz-warn { margin: 0 0 12px; padding: 9px 12px; border-radius: 10px; font-size: .82rem;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); }
-  .tz-acts { display: inline-flex; gap: 8px; margin-left: 8px; flex-wrap: wrap; }
-  .tz-dismiss { padding: 4px 10px; border-radius: 8px; cursor: pointer; border: 1px solid transparent;
-    background: none; color: var(--text-muted); font: inherit; font-size: .78rem; }
-  .tz-dismiss:hover { color: var(--text); border-color: var(--border); }
-  .tz-fix { margin-left: 0; padding: 4px 10px; border-radius: 8px; cursor: pointer;
-    border: 1px solid var(--border); background: var(--surface); color: var(--text);
-    font: inherit; font-size: .78rem; font-weight: 700; }
+  .tz-msg { margin: 0 0 9px; }
+  /* Their own row, so both actions sit on one line instead of trailing the sentence and wrapping. */
+  .tz-acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch; }
+  /* Both are real buttons sharing one shape. The secondary is quieter through weight and text
+     colour — giving it no background just made it read as a line of text beside a button. */
+  .tz-fix, .tz-dismiss {
+    padding: 5px 11px; border-radius: 8px; cursor: pointer; font: inherit; font-size: .78rem;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); line-height: 1.35;
+  }
+  .tz-fix { font-weight: 700; }
+  .tz-dismiss { color: var(--text-muted); }
+  .tz-fix:hover, .tz-dismiss:hover { border-color: var(--accent); color: var(--text); }
 
   /* Named for a screen reader without changing the design — the tabs are the visible heading. */
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;

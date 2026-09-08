@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
+  import { updateUetConsent, type Uetq } from '$lib/msads';
 
   // Shown only to EEA/UK visitors who haven't chosen yet, and only when an analytics/ads tag is
   // actually configured (window.__snapdiniConsent is injected by hooks.server.ts). Consent Mode v2
@@ -40,14 +41,17 @@
     } catch {
       /* ignore */
     }
-    const gtag = (window as unknown as { gtag?: (...a: unknown[]) => void }).gtag;
+    // One decision drives every platform on the page. Google takes the four Consent Mode v2
+    // signals; Microsoft UET has only ad_storage.
+    const w = window as unknown as { gtag?: (...a: unknown[]) => void; uetq?: Uetq };
     const state = granted ? 'granted' : 'denied';
-    gtag?.('consent', 'update', {
+    w.gtag?.('consent', 'update', {
       ad_storage: state,
       ad_user_data: state,
       ad_personalization: state,
       analytics_storage: state,
     });
+    updateUetConsent(w.uetq, granted);
     show = false;
   }
 </script>
@@ -55,8 +59,8 @@
 {#if show}
   <div class="consent" role="dialog" aria-label="Privacy consent" aria-live="polite">
     <p class="consent-text">
-      We use Google to measure our ads and understand what's working. Allow Snapdini to share your
-      data with Google for this? You can change your mind any time — see our
+      We use Google and Microsoft to measure our ads and understand what's working. Allow Snapdini
+      to share your data with them for this? You can change your mind any time — see our
       <a href="/privacy">Privacy&nbsp;Policy</a>.
     </p>
     <div class="consent-actions">

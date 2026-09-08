@@ -47,21 +47,32 @@ proxy is stale rather than blaming the app, and restarts it for you.
 `.env` but not to the compose file **never reaches the container**, and nothing warns you — the
 feature is simply, silently inert.
 
-So for each new setting: add it to `.env` **and** to the `environment:` list of the `app` service.
+So for each new setting: add it to `.env` **and** to the `environment:` list of the service that
+reads it. **Two services read settings, not one** — most belong to `app`, but anything the web
+front-end reads (the ad/analytics tags, `BASE_URL`) belongs to `web`, and putting it on the wrong
+service is as silent as leaving it out.
 
 ```yaml
   app:
     environment:
       - TURNSTILE_SECRET=${TURNSTILE_SECRET:-}     # ← must exist here too
+
+  web:
+    environment:
+      - MSUET_ID=${MSUET_ID:-}                     # ← front-end settings go HERE, not on app
 ```
 
 Check with:
 
 ```bash
 docker compose exec app printenv | grep TURNSTILE
+docker compose exec web printenv | grep MSUET
 ```
 
 If it prints nothing, the variable never arrived.
+
+A unit test (`app/src/server/__tests__/compose-env.test.ts`) now enforces this for both services,
+so a setting missing from either compose file fails the build rather than the deployment.
 
 ### 2. `docker-compose.yml` and `nginx/default.conf` are YOUR files
 
@@ -120,6 +131,24 @@ docker compose up -d
 ---
 
 ## Version notes
+
+### 1.4.1
+Adds **Microsoft Advertising (UET)** alongside the existing Google tag. All optional — skip it and
+nothing changes. These go on the **`web`** service (see trap 1), not `app`:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `MSUET_ID` | unset | Numeric UET tag id (Microsoft Advertising → Tools → UET tag). **Unset = `bat.bing.com` is never loaded.** |
+| `MSADS_PURCHASE_EVENT` | unset | Goal *Action* name fired on a completed payment, with the real amount charged |
+| `MSADS_SIGNUP_EVENT` | unset | Goal *Action* name fired on sign-up |
+| `MSADS_CREATE_EVENT` | unset | Goal *Action* name fired when an event is created |
+
+Google and Microsoft are **independent**: run either, both or neither. The consent banner covers
+both from one decision, and Global Privacy Control is honoured for both.
+
+`nginx/default.conf` also gains `https://bat.bing.com` in the (report-only) CSP for
+`script-src`/`connect-src`/`img-src`. Merge that in if you set `MSUET_ID` — see trap 2.
+
 
 ### 1.1.1
 Fixes a case where a visitor whose network blocks `challenges.cloudflare.com` (ad blockers, privacy

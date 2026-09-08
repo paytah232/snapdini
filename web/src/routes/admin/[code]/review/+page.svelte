@@ -10,7 +10,7 @@
   import { applyEventTheme } from '$lib/theme';
   import { getAdminCode, saveAdminCode } from '$lib/session';
   import { api } from '$lib/api';
-  import { firePurchaseConversion } from '$lib/conversions';
+  import { firePurchase, purchaseTracked } from '$lib/adtracking';
   import { showToast, showSuccess } from '$lib/toast';
   import { imgFallback, hidePoster } from '$lib/ui';
   import SlideshowPanel from '$lib/components/SlideshowPanel.svelte';
@@ -73,13 +73,13 @@
         showSuccess('Add-on unlocked — you can now generate a slideshow with no Snapdini frames 🎬');
         view = 'slideshow';
         const sid = sp.get('session_id');
-        if (sid && $page.data.purchaseSendTo && !$page.data.analyticsExclude) {
+        if (sid && purchaseTracked($page.data)) {
           try {
             const s = await api<{ paid: boolean; amountTotalCents: number; currency: string; transactionId: string }>(
               '/api/billing/session/' + encodeURIComponent(sid),
             );
             if (s?.paid) {
-              firePurchaseConversion((window as unknown as { gtag?: (...a: unknown[]) => void }).gtag, $page.data.purchaseSendTo, {
+              firePurchase($page.data, {
                 amountTotalCents: s.amountTotalCents,
                 currency: s.currency,
                 transactionId: s.transactionId,

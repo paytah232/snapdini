@@ -4,7 +4,7 @@
   import { page } from '$app/stores';
   import { getConfig, getMe, postJson } from '$lib/api';
   import Turnstile from '$lib/components/Turnstile.svelte';
-  import { fireLeadConversion } from '$lib/conversions';
+  import { fireLead } from '$lib/adtracking';
   import { track } from '$lib/analytics';
 
   let signupStarted = false;
@@ -54,9 +54,9 @@
       msg = data.devLink
         ? { text, link: { href: data.devLink, label: 'Dev: click to verify →' }, ok: true }
         : { text, ok: true };
-      // Google Ads "Sign up" conversion (best-effort; no-op unless a label is configured; skipped
-      // for excluded internal/admin accounts).
-      if (!$page.data.analyticsExclude) fireLeadConversion((window as unknown as { gtag?: (...a: unknown[]) => void }).gtag, $page.data.signupSendTo);
+      // "Sign up" conversion — Google Ads + Microsoft UET, whichever are configured. Best-effort;
+      // no-op with nothing configured, and skipped for excluded internal/admin accounts.
+      fireLead($page.data, 'signup');
     } catch (err) {
       msg = { text: err instanceof Error ? err.message : 'Sign-up failed', ok: false };
     } finally {

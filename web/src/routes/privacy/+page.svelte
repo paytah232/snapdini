@@ -54,9 +54,10 @@
   <strong>90 days</strong>. Nothing you type — no names, no email addresses, no photo content — is
   recorded, and web addresses are reduced to a page pattern before being stored, so codes and links
   from your address bar are never kept.</p>
-  <p>Separately, if you arrive from one of our ads we use Google's conversion tracking to know the
-  ad worked. That is covered by the cookie choice we ask for in the EU/UK and can be changed at any
-  time from the link in the footer.</p>
+  <p>Separately, if you arrive from one of our ads we use the ad network's conversion tracking to
+  know the ad worked — Google and/or Microsoft Advertising, depending on where the ad ran. That is
+  covered by the cookie choice we ask for in the EU/UK and can be changed at any time from the link
+  in the footer.</p>
 
   <h2>4. Photos &amp; videos — storage &amp; deletion</h2>
   <p>Your event's photos and videos are stored only to provide the service. They are <strong>automatically deleted after your event's retention period</strong> (the default window, extendable on paid plans). After deletion we keep only a small summary record of the event (its settings and basic stats such as photo and participant counts) for your history and our records — the media itself is gone. If a guest left us feedback about the app, we keep their rating and comment, but it is <strong>detached from them at the same moment</strong> — it survives as an anonymous comment about Snapdini that is no longer linked to any guest, name or email.</p>
@@ -77,7 +78,7 @@
   <p>We share information with these providers only to the extent needed to deliver the service, and not for their own marketing.</p>
 
   <h2>6a. Advertising &amp; analytics</h2>
-  <p>Where analytics or advertising measurement is enabled on this deployment, we use Google (Google Ads / Google Analytics) to understand how our marketing performs. This is implemented with <strong>Google Consent Mode v2</strong>: visitors in the EEA, the UK and Switzerland are asked to consent <em>before</em> any such data is shared with Google, using the banner shown on your first visit. You can decline (nothing is shared), and you can change your choice at any time — <a href="/?consent=1">reopen the consent options</a>. Outside those regions the tag runs by default; you can opt out there the same way, and we honour your browser's Global Privacy Control signal automatically. When enabled, this shares some data (such as a device/cookie identifier and pages viewed) with Google, which may process it on servers overseas, including in the United States. If the operator hasn't configured a tag, no analytics or advertising scripts are loaded at all.</p>
+  <p>Where analytics or advertising measurement is enabled on this deployment, we use Google (Google Ads / Google Analytics) and/or <strong>Microsoft Advertising</strong> (its Universal Event Tracking tag) to understand how our marketing performs. Each is optional and configured independently, so a deployment may use one, both or neither. Both are consent-gated the same way — <strong>Google Consent Mode v2</strong> and Microsoft's equivalent consent signal: visitors in the EEA, the UK and Switzerland are asked to consent <em>before</em> any such data is shared, using the banner shown on your first visit. You can decline (nothing is shared), and you can change your choice at any time — <a href="/?consent=1">reopen the consent options</a>. Outside those regions the tags run by default; you can opt out there the same way, and we honour your browser's Global Privacy Control signal automatically. When enabled, this shares some data (such as a device/cookie identifier and pages viewed) with Google and/or Microsoft, which may process it on servers overseas, including in the United States. If the operator hasn't configured a tag, no analytics or advertising scripts are loaded at all.</p>
 
   {#if faceAvailable}
   <h2>6b. Finding photos of yourself (face matching)</h2>

@@ -4,7 +4,7 @@
   import { goto, replaceState } from '$app/navigation';
   import { track } from '$lib/analytics';
   import { getConfig, getMe, api } from '$lib/api';
-  import { firePurchaseConversion, fireLeadConversion } from '$lib/conversions';
+  import { firePurchase, fireLead, purchaseTracked, leadTracked } from '$lib/adtracking';
   import {
     getAdmin, saveSettings, setReveal, toggleLock, deleteEvent,
     setHighlights, saveTheme, emailGallery, setAllowDownloads,
@@ -179,15 +179,16 @@
     if (createdReturn) welcome = { title: 'Your event is live! 🎉', sub: 'Share the link or QR below with your guests. Customise the theme, reveal mode and more right here whenever you like.' };
     else if (paidReturn) welcome = { title: 'Payment received — your event is active! 🎉', sub: 'Share the link or QR below with your guests. Everything you paid for is unlocked.' };
     else if (upgradedReturn) welcome = { title: 'Upgrade applied! 🎉', sub: 'Your event now includes the extra capacity. Nothing else to do — carry on.' };
-    // Google Ads "Create event" conversion — fires for every new event (free ?created or paid ?paid),
-    // NOT for upgrades. Keyed by the join code so a revisit doesn't double-count. Best-effort.
-    if ((createdReturn || paidReturn) && $page.data.createSendTo && !$page.data.analyticsExclude) {
-      fireLeadConversion((window as unknown as { gtag?: (...a: unknown[]) => void }).gtag, $page.data.createSendTo, $page.params.code);
+    // "Create event" conversion (Google Ads + Microsoft UET) — fires for every new event (free
+    // ?created or paid ?paid), NOT for upgrades. Keyed by the join code so a revisit doesn't
+    // double-count. Best-effort; no-op unless a platform is configured.
+    if ((createdReturn || paidReturn) && leadTracked($page.data, 'create')) {
+      fireLead($page.data, 'create', $page.params.code);
     }
-    // Fire a Google Ads purchase conversion on a successful payment/upgrade return, with the real
-    // amount charged (looked up via the Stripe session, so promos are reflected). Best-effort:
-    // never blocks the page, no-op when analytics/label aren't configured.
-    if ((paidReturn || upgradedReturn) && $page.data.purchaseSendTo && !$page.data.analyticsExclude) {
+    // Purchase conversion on a successful payment/upgrade return, with the real amount charged
+    // (looked up via the Stripe session, so promos are reflected). The lookup exists only to feed
+    // the conversion, so purchaseTracked() gates it — no platform configured ⇒ no extra request.
+    if ((paidReturn || upgradedReturn) && purchaseTracked($page.data)) {
       const sid = sp.get('session_id');
       if (sid) {
         try {
@@ -195,7 +196,7 @@
             '/api/billing/session/' + encodeURIComponent(sid),
           );
           if (s?.paid) {
-            firePurchaseConversion((window as unknown as { gtag?: (...a: unknown[]) => void }).gtag, $page.data.purchaseSendTo, {
+            firePurchase($page.data, {
               amountTotalCents: s.amountTotalCents,
               currency: s.currency,
               transactionId: s.transactionId,

@@ -143,6 +143,14 @@ services:
       - GADS_PURCHASE_LABEL=${GADS_PURCHASE_LABEL:-}
       - GADS_SIGNUP_LABEL=${GADS_SIGNUP_LABEL:-}
       - GADS_CREATE_LABEL=${GADS_CREATE_LABEL:-}
+      # --- Microsoft Advertising (UET) --- independent of the Google tag above: either, both or
+      # neither. Unset ⇒ bat.js is never loaded. MSUET_ID is the numeric UET tag id; the *_EVENT vars
+      # are the goal ACTION names configured in Microsoft Advertising (the UET equivalent of a
+      # Google Ads conversion label).
+      - MSUET_ID=${MSUET_ID:-}
+      - MSADS_PURCHASE_EVENT=${MSADS_PURCHASE_EVENT:-}
+      - MSADS_SIGNUP_EVENT=${MSADS_SIGNUP_EVENT:-}
+      - MSADS_CREATE_EVENT=${MSADS_CREATE_EVENT:-}
       # Comma-separated emails whose signed-in sessions never fire conversions (site admins are always
       # excluded) — keeps the operator's own testing out of the ad data.
       - ANALYTICS_EXCLUDE_EMAILS=${ANALYTICS_EXCLUDE_EMAILS:-}

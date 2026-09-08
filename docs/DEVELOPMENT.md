@@ -119,13 +119,27 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   the fonts baked into `Dockerfile.dev`). See that script's header to regenerate.
 - **Capacity / load testing** — uploads are the CPU-bound ceiling; see `loadtest/CAPACITY.md` and
   `npm run test:load` / `npm run test:load:multi`.
-- **Analytics / ads (optional, off by default)** — set **`GTAG_ID`** (a Google tag id, e.g.
-  `AW-…`/`G-…`) to load a Google tag with **Consent Mode v2**. Unset ⇒ no third-party scripts at all.
-  Logic lives in `web/src/lib/consent.ts` (unit-tested in `consent.test.ts`); the SSR hook
-  `web/src/hooks.server.ts` injects it into the `%snapdini.analytics%` slot in `app.html`. Visitors in
-  the EEA, UK and Switzerland get a consent banner (`ConsentBanner.svelte`, defaults denied there);
-  elsewhere it runs by default with a "Your Privacy Choices" opt-out link and Global Privacy Control
-  honoured. Region is detected from Cloudflare's `CF-IPCountry` header. Run the tests with
+- **Analytics / ads (optional, off by default)** — two ad platforms are supported, configured
+  **independently**: set **`GTAG_ID`** (a Google tag id, e.g. `AW-…`/`G-…`) for a Google tag with
+  **Consent Mode v2**, and/or **`MSUET_ID`** (the numeric Microsoft Advertising UET tag id) for the
+  Microsoft UET tag. Either, both or neither — with neither set, no third-party scripts load at all.
+  - Per-platform logic lives in `web/src/lib/consent.ts` (Google) and `web/src/lib/msads.ts`
+    (Microsoft), both unit-tested. The SSR hook `web/src/hooks.server.ts` injects whichever are
+    configured into the `%snapdini.analytics%` slot in `app.html`.
+  - **Conversions go through `web/src/lib/adtracking.ts`, not the per-platform modules.** That
+    facade fires every configured platform from one call, so a call site can't accidentally measure
+    only one of them, and `purchaseTracked()` lets a page skip work (the Stripe session lookup)
+    that exists solely to feed a conversion. Goals are operator config: `GADS_*_LABEL` for Google,
+    `MSADS_*_EVENT` for Microsoft (the goal's *Action* name in Microsoft Advertising).
+  - One consent decision drives both: visitors in the EEA, UK and Switzerland get a consent banner
+    (`ConsentBanner.svelte`, defaults denied there); elsewhere the tags run by default with a "Your
+    Privacy Choices" opt-out link and Global Privacy Control honoured. Region comes from
+    Cloudflare's `CF-IPCountry` header. Google takes the four Consent Mode v2 signals; UET has a
+    single `ad_storage`, and because UET has no region parameter its default is decided server-side.
+  - Both libraries are loaded on **idle or first interaction**, never during the initial paint —
+    they queue, so a conversion fired before the library arrives is replayed. Keep it that way;
+    loading either eagerly costs the mobile LCP.
+  - `bat.bing.com` is allowed in the nginx CSP (`script`/`connect`/`img`). Run the tests with
   `cd web && npm test`.
 
 ## Releasing (maintainers)
