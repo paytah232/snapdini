@@ -88,6 +88,55 @@ await spec('95-signup-conversion', async () => {
     ok('the second sign-in carries no marker either', second.loc === '/dashboard', `location "${second.loc}"`);
   }
 
+  group('Sign-up poll: verifying on another device');
+  {
+    // The browser that filled in the form is usually NOT the one that opens the email. It holds the
+    // half-finished event in its own localStorage, so it needs to find out that the address was
+    // proven elsewhere. That is what /api/auth/pending is for.
+    const email3 = `conv_poll_${stamp}@example.com`;
+    emails.push(email3);
+    const reg = await api('POST', '/api/auth/register',
+      { body: { name: 'Poll Test', displayName: 'Poll Test', email: email3, password: 'Str0ngPass!23' } });
+    ok('registration returns a poll token', typeof reg.json?.pendingToken === 'string' && reg.json.pendingToken.length >= 32);
+    ok('and how long it is good for', Number(reg.json?.pendingTtlMs) > 0, String(reg.json?.pendingTtlMs));
+    const tok = reg.json.pendingToken;
+
+    // It must never become an "is this address verified?" oracle: it takes an opaque token issued
+    // to whoever registered, never an address.
+    const noTok = await api('GET', '/api/auth/pending');
+    ok('no token ⇒ nothing to report', noTok.json?.verified === false && noTok.json?.expired === true, JSON.stringify(noTok.json));
+    const bogus = await api('GET', `/api/auth/pending?token=${'0'.repeat(64)}`);
+    ok('an invented token reveals nothing', bogus.json?.verified === false && bogus.json?.expired === true, JSON.stringify(bogus.json));
+    ok('and cannot be distinguished from an expired one', JSON.stringify(bogus.json) === JSON.stringify(noTok.json));
+
+    // Before verification: an honest "not yet", and NO session handed out.
+    const before = await api('GET', `/api/auth/pending?token=${tok}`);
+    ok('before verifying it says not yet', before.json?.verified === false, JSON.stringify(before.json));
+    ok('and does not claim to have expired', !before.json?.expired, JSON.stringify(before.json));
+    ok('and hands out no marker to fire a conversion with', !before.json?.marker);
+    // Polling repeatedly must not spend the token — the whole point is to keep asking.
+    const again = await api('GET', `/api/auth/pending?token=${tok}`);
+    ok('polling does not spend the token', again.json?.verified === false && !again.json?.expired, JSON.stringify(again.json));
+
+    // Verify on the "other device" — a plain GET of the emailed link.
+    const v = await location(reg.json.devLink);
+    const marker = (MARKER.exec(v.loc) || [])[1];
+    ok('the other device verifies fine', !!marker, `location "${v.loc}"`);
+
+    // Now the waiting browser gets its answer, its session, and the SAME marker — identical ids are
+    // what stop two devices counting two sign-ups.
+    const after = await api('GET', `/api/auth/pending?token=${tok}`);
+    ok('the waiting browser is told it is verified', after.json?.verified === true, JSON.stringify(after.json));
+    ok('it gets the same marker the other device used', after.json?.marker === marker, `${after.json?.marker} vs ${marker}`);
+    const me = await api('GET', '/api/auth/me');
+    ok('and it is now signed in on this device', me.json?.user?.email === email3, JSON.stringify(me.json?.user || {}));
+
+    // One hand-off per registration: a leaked token cannot be replayed into a fresh session later.
+    const replay = await api('GET', `/api/auth/pending?token=${tok}`);
+    ok('the token is spent after the hand-off', replay.json?.expired === true, JSON.stringify(replay.json));
+    ok('a spent token yields no marker', !replay.json?.marker);
+  }
+
   for (const e of emails) dbq(`DELETE FROM users WHERE email='${e}'`);
   session.cookie = ownerCookie;
 }, {});

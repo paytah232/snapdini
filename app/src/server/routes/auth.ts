@@ -75,11 +75,18 @@ router.post('/register', async (req: Request, res: Response) => {
   const link   = `${baseUrl(req)}/api/auth/verify?token=${token}`;
   const result = await email.sendAuthLink({ to: emailAddr, kind: 'verify', link });
 
+  // A capability for THIS browser to ask "verified yet?" — so the device that filled in the form
+  // can carry on even though the address was proven somewhere else entirely (phone, work laptop,
+  // webmail on a tablet). It only ever becomes a session once the address really is verified.
+  const pendingToken = await auth.createEmailToken(userId, 'signup_poll');
+
   res.status(201).json({
     ok: true,
     message: 'Account created — check your email to verify.',
     emailDelivered: result.delivered,
     devLink: result.devLink,           // present only when SMTP is disabled (dev)
+    pendingToken,
+    pendingTtlMs: auth.TOKEN_TTL_MS,
   });
 });
 
@@ -94,9 +101,7 @@ router.post('/register', async (req: Request, res: Response) => {
 // The marker is a one-way digest of the user id: stable, so the ad platforms can de-duplicate a
 // refresh, but not a user identifier being handed to a third party.
 function dashboardAfterVerify(userId: string, justVerified: boolean): string {
-  if (!justVerified) return '/dashboard';
-  const key = crypto.createHash('sha256').update(userId).digest('hex').slice(0, 16);
-  return `/dashboard?verified=${key}`;
+  return justVerified ? `/dashboard?verified=${auth.signupMarker(userId)}` : '/dashboard';
 }
 
 router.get('/verify', async (req: Request, res: Response) => {
@@ -107,6 +112,32 @@ router.get('/verify', async (req: Request, res: Response) => {
     await db.update(users).set({ emailVerifiedAt: Date.now() }).where(eq(users.id, user.id));
   await startSession(req, res, user.id);
   res.redirect(dashboardAfterVerify(user.id, justVerified));
+});
+
+// ── GET /api/auth/pending?token= ──────────────────────────────────────────────
+// "Has this address been verified yet?", asked by the browser that registered.
+//
+// This exists because verification very often happens on a DIFFERENT DEVICE: you sign up on a
+// laptop and open the email on your phone. The phone gets the session and the redirect, and the
+// laptop — which is where the half-finished event actually lives, in its own localStorage — would
+// otherwise sit on a stale form forever.
+//
+// It is not an "is this email verified" oracle: it takes an opaque single-purpose token issued to
+// whoever completed the registration, never an address, so it reveals nothing about accounts the
+// caller did not just create. Until the address is verified it says so and nothing else happens;
+// once it is, THIS device gets a session too and the token is spent.
+router.get('/pending', async (req: Request, res: Response) => {
+  const token = req.query.token as string | undefined;
+  const user  = await auth.peekEmailToken(token, 'signup_poll');
+  // Expired or already spent. Deliberately not an error: the browser should stop polling and fall
+  // back to "sign in when you've verified", not show a failure for a link that simply aged out.
+  if (!user) return res.json({ verified: false, expired: true });
+  if (!user.emailVerifiedAt) return res.json({ verified: false });
+
+  await auth.consumeEmailToken(token, 'signup_poll');   // one hand-off per registration
+  await startSession(req, res, user.id);
+  // The same id the redirect uses, so a phone and a laptop firing the conversion count once.
+  res.json({ verified: true, marker: auth.signupMarker(user.id) });
 });
 
 // ── POST /api/auth/login ──────────────────────────────────────────────────────

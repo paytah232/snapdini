@@ -1,10 +1,12 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { getConfig, getMe, postJson } from '$lib/api';
   import Turnstile from '$lib/components/Turnstile.svelte';
   import { track } from '$lib/analytics';
+  import { fireLead } from '$lib/adtracking';
+  import { hasFreshDraft } from '$lib/eventDraft';
 
   let signupStarted = false;
   const startedSignup = () => { if (!signupStarted) { signupStarted = true; track('signup_started'); } };
@@ -30,6 +32,67 @@
   // Inline message (mirrors the old #msg element).
   let msg: { text: string; link?: { href: string; label: string }; ok: boolean } | null = null;
 
+  // ── Waiting for verification ───────────────────────────────────────────────
+  // Once the account exists there is nothing left to fill in, so the form is replaced outright.
+  // Leaving name/email/password/Turnstile/"Create account" on screen read as if nothing had
+  // happened and invited a second submission.
+  let awaitingEmail = '';            // truthy ⇒ show the verification card instead of the form
+  let pendingToken = '';
+  let devVerifyLink = '';
+  let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  let pollStop = 0;                  // wall-clock deadline; the token outlives nothing
+  let verifyExpired = false;
+  let resending = false;
+
+  // Verification usually happens on ANOTHER DEVICE — you sign up on a laptop and open the email on
+  // your phone. That device gets the session and the redirect; this one is where the half-finished
+  // event actually lives. So this browser asks the server whether the address has been proven yet,
+  // and picks the journey back up itself when it has.
+  const POLL_MS = 3000;
+  function startPolling(token: string, ttlMs: number) {
+    pendingToken = token;
+    pollStop = Date.now() + Math.max(60_000, ttlMs || 0);
+    schedule();
+  }
+  function schedule() {
+    clearTimeout(pollTimer);
+    if (!pendingToken || Date.now() > pollStop) { if (pendingToken) verifyExpired = true; return; }
+    pollTimer = setTimeout(poll, POLL_MS);
+  }
+  async function poll() {
+    if (!pendingToken) return;
+    try {
+      const r = await fetch(`/api/auth/pending?token=${encodeURIComponent(pendingToken)}`);
+      const d = (await r.json()) as { verified?: boolean; expired?: boolean; marker?: string };
+      if (d.expired) { pendingToken = ''; verifyExpired = true; return; }
+      if (d.verified) { pendingToken = ''; await onVerified(d.marker); return; }
+    } catch { /* offline or a blip — just try again */ }
+    schedule();
+  }
+  async function onVerified(marker?: string) {
+    clearTimeout(pollTimer);
+    // Fire the conversion from THIS device. It is the one that saw the ad, so it is the one holding
+    // the click id — the verifying phone may have neither. Both use the same marker as the
+    // de-duplication id, so the platforms count one sign-up, not two.
+    if (marker) fireLead($page.data, 'signup', marker);
+    // Straight back to the event they were building, if there still is one. If another tab already
+    // claimed the draft, the dashboard is the honest destination rather than an empty form.
+    await goto(hasFreshDraft() ? '/app' : nextDest);
+  }
+  onDestroy(() => clearTimeout(pollTimer));
+
+  async function resend() {
+    if (resending || !awaitingEmail) return;
+    resending = true;
+    try {
+      const d = await postJson<{ devLink?: string }>('/api/auth/magic-link', { email: awaitingEmail });
+      if (d.devLink) devVerifyLink = d.devLink;
+      msg = { text: 'Sent again — check your inbox (and your spam folder).', ok: true };
+    } catch (e) {
+      msg = { text: e instanceof Error ? e.message : 'Could not resend just now', ok: false };
+    } finally { resending = false; }
+  }
+
   onMount(async () => {
     try {
       const { user, googleEnabled: g } = await getMe();
@@ -46,13 +109,16 @@
     submitting = true;
     msg = null;
     try {
-      const data = await postJson<{ devLink?: string }>('/api/auth/register', {
-        name: name.trim(), displayName: name.trim(), email, password, 'cf-turnstile-response': turnstileToken
-      });
-      const text = 'Account created — check your email to verify and finish signing in.';
-      msg = data.devLink
-        ? { text, link: { href: data.devLink, label: 'Dev: click to verify →' }, ok: true }
-        : { text, ok: true };
+      const data = await postJson<{ devLink?: string; pendingToken?: string; pendingTtlMs?: number }>(
+        '/api/auth/register',
+        { name: name.trim(), displayName: name.trim(), email, password, 'cf-turnstile-response': turnstileToken },
+      );
+      // The account exists now; there is nothing left to type. Swap the card over rather than
+      // leaving a filled-in form and a "Create account" button sitting there.
+      awaitingEmail = email;
+      devVerifyLink = data.devLink || '';
+      msg = null;
+      if (data.pendingToken) startPolling(data.pendingToken, data.pendingTtlMs || 0);
       // No sign-up conversion here. It fires once the address is actually verified (the dashboard
       // handles it), so a spoofed address that never opens its inbox is never counted as a sign-up.
     } catch (err) {
@@ -83,7 +149,11 @@
 <main>
   <div class="card">
     <a class="brand" href="/"><Logo /></a>
-    {#if fromCreate}
+    {#if awaitingEmail}
+      <h1>Check your email</h1>
+      <p class="sub">We've sent a confirmation link to <b class="to">{awaitingEmail}</b>. Open it and
+      your account is ready.{#if fromCreate} We'll bring you straight back here to finish your event.{/if}</p>
+    {:else if fromCreate}
       <h1>Your event is almost ready</h1>
       <p class="sub">Create your account and confirm your email — we'll take you straight back to
       finish setting up your event, exactly as you left it.</p>
@@ -92,6 +162,29 @@
       <p class="sub">Snapdini is the shared event camera with a disappearing act — every photo vanishes the moment it's snapped, then reappears all at once, like magic, when your event ends. ✨</p>
     {/if}
 
+    {#if awaitingEmail}
+      <!-- Nothing here to fill in: the account exists and the only remaining step happens in an
+           inbox, which may well be on a different device. -->
+      <div class="verify">
+        {#if verifyExpired}
+          <p class="vwait">The link has expired. Send a fresh one and we'll carry on.</p>
+        {:else}
+          <p class="vwait"><span class="spin" aria-hidden="true"></span> Waiting for you to confirm…</p>
+          <p class="vhint">You can open the link on <b>any device</b> — your phone is fine. This page
+          is watching, and will pick things up here the moment you do.</p>
+        {/if}
+        {#if devVerifyLink}
+          <a class="btn" href={devVerifyLink}>Dev: click to verify →</a>
+        {/if}
+        <button class="btn ghost" type="button" on:click={resend} disabled={resending}>
+          {resending ? 'Sending…' : 'Resend the email'}
+        </button>
+        <button class="btn ghost" type="button"
+                on:click={() => { awaitingEmail = ''; pendingToken = ''; verifyExpired = false; msg = null; }}>
+          Use a different email
+        </button>
+      </div>
+    {:else}
     <form on:submit={register}>
       <label for="name">Your name</label>
       <!-- Fires once, on first interaction: the gap between this and signup_submitted is the
@@ -117,6 +210,7 @@
     {#if googleEnabled}
       <div class="divider">or</div>
       <a class="btn ghost block" href="/api/auth/google">Continue with Google</a>
+    {/if}
     {/if}
 
     {#if msg}
@@ -218,5 +312,20 @@
     color: var(--text-muted);
     letter-spacing: 0.03em;
     font-family: var(--font-mono);
+  }
+
+  .to { word-break: break-all; }
+  .verify { display: flex; flex-direction: column; gap: 10px; }
+  .vwait { display: flex; align-items: center; gap: 9px; margin: 2px 0 0; font-weight: 600; }
+  .vhint { margin: 0 0 4px; font-size: .86rem; color: var(--text-muted); line-height: 1.45; }
+  /* A quiet, continuous signal that the page really is watching — the whole point of the state. */
+  .spin {
+    width: 14px; height: 14px; flex: none; border-radius: 50%;
+    border: 2px solid var(--border); border-top-color: var(--text);
+    animation: spin 900ms linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .spin { animation: none; border-top-color: var(--border); }
   }
 </style>

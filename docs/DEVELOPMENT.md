@@ -136,6 +136,15 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
     it must be `localStorage`, because verifying an email opens a NEW TAB where `sessionStorage`
     does not exist. `/dashboard` peeks (never consumes) on `?verified=` and sends them back to
     `/app` to finish, which is what the "we'll take you straight back" copy promises.
+  - **Verification can happen on another device**, and usually does — you sign up on a laptop and
+    open the email on your phone. The phone gets the session and the redirect; the laptop is where
+    the draft lives. So registration returns a `pendingToken` and the signup page polls
+    `GET /api/auth/pending?token=…` (`signup_poll` purpose, non-consuming `peekEmailToken`) until
+    the address is verified, at which point that browser gets a session too and carries on. It is
+    deliberately token-based, never address-based: an address parameter would make it an
+    account-enumeration oracle. Both devices fire the conversion with the same
+    `auth.signupMarker(userId)` digest, which is what makes the platforms count one sign-up — keep
+    them identical if you touch either side.
   - **When each conversion fires.** Purchase fires only after the Stripe session confirms
     `paid`. Event-created fires on the return to an event that already exists. **Sign-up fires when
     the address is VERIFIED, not when the registration form succeeds** — three paths verify an

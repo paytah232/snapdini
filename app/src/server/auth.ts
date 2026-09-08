@@ -8,7 +8,7 @@ import { users, sessions, emailTokens, type User } from './schema';
 
 export const SESSION_COOKIE = 'sid';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-const TOKEN_TTL_MS = 30 * 60 * 1000;             // 30 min for verify / magic-link
+export const TOKEN_TTL_MS = 30 * 60 * 1000;      // 30 min for verify / magic-link / signup poll
 
 // ── Password hashing (argon2id) ───────────────────────────────────────────────
 export const hashPassword = (pw: string): Promise<string> => argon2.hash(pw, { type: argon2.argon2id });
@@ -37,6 +37,26 @@ export async function consumeEmailToken(raw: string | undefined, purpose: string
   await db.update(emailTokens).set({ consumedAt: Date.now() }).where(eq(emailTokens.id, row.id));
   const [user] = await db.select().from(users).where(eq(users.id, row.userId));
   return user ?? null;
+}
+
+// Validate a token WITHOUT spending it. Needed by the sign-up poll, which asks "verified yet?"
+// repeatedly and must stay valid until the answer is yes.
+export async function peekEmailToken(raw: string | undefined, purpose: string): Promise<User | null> {
+  if (!raw) return null;
+  const [row] = await db.select().from(emailTokens)
+    .where(and(eq(emailTokens.tokenHash, hashToken(raw)), eq(emailTokens.purpose, purpose)));
+  if (!row || row.consumedAt || row.expiresAt < Date.now()) return null;
+  const [user] = await db.select().from(users).where(eq(users.id, row.userId));
+  return user ?? null;
+}
+
+// The de-duplication id for the sign-up conversion. Both the verification redirect and the sign-up
+// poll hand this to the browser, and they MUST agree: when someone verifies on their phone while
+// the desktop is still waiting, both devices fire the conversion, and this identical id is what
+// makes the ad platforms count it once. A one-way digest, so it de-duplicates without handing an
+// ad network a user identifier.
+export function signupMarker(userId: string): string {
+  return crypto.createHash('sha256').update(userId).digest('hex').slice(0, 16);
 }
 
 // ── Sessions (server-side, opaque id in an HttpOnly cookie) ───────────────────
