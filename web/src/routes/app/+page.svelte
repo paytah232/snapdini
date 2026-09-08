@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { goto } from '$app/navigation';
-  import { saveDraft, takeDraft } from '$lib/eventDraft';
+  import { saveDraft, readDraft, clearDraft } from '$lib/eventDraft';
   import { getConfig, getMe, api } from '$lib/api';
   import { track } from '$lib/analytics';
   import { createEvent, joinEvent } from '$lib/events';
@@ -187,7 +187,7 @@
     revealDelayHours, moderationEnabled,
   });
   function restoreDraft() {
-    const d = takeDraft();
+    const d = readDraft();
     if (!d) return false;
     ({ name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, timezone,
        maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
@@ -354,6 +354,11 @@
         videoSeconds,
         retentionDays
       });
+
+      // The event exists now, so the draft has done its job — cleared here rather than when it was
+      // read, so two tabs can never race each other for it. This covers both branches below: a
+      // paid event is already created (just unpaid) before we leave for Stripe.
+      clearDraft();
 
       // Paid tiers (billing on) → straight to Stripe Checkout; the event is created
       // unpaid/inactive and the webhook flips it to paid on success.

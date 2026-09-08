@@ -132,7 +132,12 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
     that exists solely to feed a conversion. Goals are operator config: `GADS_*_LABEL` for Google,
     `MSADS_*_EVENT` for Microsoft (the goal's *Action* name in Microsoft Advertising).
   - **The draft hand-off.** A signed-out host can fill in `/app`, and the create button then sends
-    them to sign up. `web/src/lib/eventDraft.ts` owns that draft (key, 24h window, one-shot read) —
+    them to sign up. `web/src/lib/eventDraft.ts` owns that draft (key, 24h window). Reading it is
+    **non-destructive on purpose**: it used to consume, and two tabs then raced for it — on one
+    device the tab opening the email and the tab that was polling both head for `/app`, and
+    whichever mounted first ate the draft, leaving the other blank. The draft's life ends when the
+    event is created (`clearDraft()` right after the create call, so it covers the Stripe branch
+    too) or when it ages out. Do not reintroduce consume-on-read. It
     it must be `localStorage`, because verifying an email opens a NEW TAB where `sessionStorage`
     does not exist. `/dashboard` peeks (never consumes) on `?verified=` and sends them back to
     `/app` to finish, which is what the "we'll take you straight back" copy promises.

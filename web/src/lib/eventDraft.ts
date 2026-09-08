@@ -36,17 +36,28 @@ export function clearDraft(): void {
   try { localStorage.removeItem(DRAFT_KEY); } catch { /* ignore */ }
 }
 
-/** One-shot: reads and REMOVES, so a refresh cannot resurrect a draft the user has already been
- *  given back. Returns null when there is nothing fresh — a stale draft is someone's abandoned
- *  attempt, not this journey, and is cleared rather than left to reappear later. */
-export function takeDraft(): Record<string, unknown> | null {
+/**
+ * Reads the draft WITHOUT removing it, and clears it only if it has gone stale.
+ *
+ * It used to consume on read, which created a race that could only bite the person it was meant to
+ * help: on one device, the tab that opens the verification email and the tab that was polling both
+ * head for /app, and whichever mounted first ATE the draft — leaving the other showing an empty
+ * form. Roughly a one-in-five coin flip, and the loser was often the tab in front of the user,
+ * because they had just clicked the link in it.
+ *
+ * So nothing competes for it now. The draft's life ends where it should: when the event is actually
+ * created (clearDraft below), or when it ages out. Re-reading it is harmless — on a refresh mid-
+ * creation it restores what someone typed instead of handing them a blank form, which is the better
+ * outcome anyway, since unsaved edits were going to be lost either way.
+ */
+export function readDraft(): Record<string, unknown> | null {
   const d = read();
-  clearDraft();
+  if (d && !fresh(d)) { clearDraft(); return null; }   // an abandoned attempt, not this journey
   return fresh(d) ? (d as Record<string, unknown>) : null;
 }
 
-/** NON-consuming: "is there an event waiting to be finished?". Used to decide where to send a
- *  freshly verified user, which must not itself spend the draft — /app is what restores it. */
+/** "Is there an event waiting to be finished?" — used to decide where to send a freshly verified
+ *  user. Like readDraft it leaves the draft alone; only creating the event ends it. */
 export function hasFreshDraft(): boolean {
   const d = read();
   if (d && !fresh(d)) { clearDraft(); return false; }
