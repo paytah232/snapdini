@@ -208,7 +208,13 @@
           <p class="vhint">Your account exists — only the email failed. Try resending, or check the
           address is right.</p>
         {:else if verifyExpired}
-          <p class="vwait">The link has expired. Send a fresh one and we'll carry on.</p>
+          <!-- Careful with this wording: what ran out is this page's ability to notice, not
+               necessarily the confirmation. Someone who confirmed on their phone half an hour ago
+               is verified — telling them the link expired would send them round in a circle. -->
+          <p class="vwait">We've stopped watching for now.</p>
+          <p class="vhint">If you've already confirmed, just
+            <a href="/login?next=/app">sign in</a> — your event details are still here. Otherwise
+            send a fresh email below.</p>
         {:else}
           <p class="vwait"><span class="spin" aria-hidden="true"></span> Waiting for you to confirm…</p>
           <p class="vhint">You can open the link on <b>any device</b> — your phone is fine. This page
