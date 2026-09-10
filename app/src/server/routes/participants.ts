@@ -13,6 +13,16 @@ const router = Router();
 
 const isEmail = (s: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 
+// 23505 = unique_violation. The only unique constraint a guest can trip is
+// (event_id, lower(email)) — one address per event, so an email can never point at two rolls (see
+// 0031_guest_upgrades.sql). Two people sharing an inbox is entirely normal, so hitting it is not a
+// server fault and must never surface as "Something went wrong". Drizzle wraps the driver error, so
+// check both levels.
+const isDuplicate = (e: unknown): boolean => {
+  const err = e as { code?: string; cause?: { code?: string } };
+  return err?.code === '23505' || err?.cause?.code === '23505';
+};
+
 // ── POST /api/participants — join an event ─────────────────────────────────────
 
 router.post('/', async (req: Request, res: Response) => {
@@ -41,9 +51,25 @@ router.post('/', async (req: Request, res: Response) => {
   // Recovery: if this email already joined this event (e.g. they got logged out, or are on a new
   // device), reuse that participant — issue a fresh session and keep their remaining shot count.
   // Done before the cap check so a returning guest is never turned away as "full".
+  //
+  // Keyed on the EMAIL ALONE, deliberately — not email + name. An address identifies one roll for
+  // the event, which is what makes recovery work at all when someone returns on a new device and
+  // types their name slightly differently.
+  //
+  // The known consequence, accepted: two people sharing an inbox share a roll. The second to join
+  // takes over the first one's participant — including the name on it, so earlier photos then show
+  // under the new name, and the first person's session stops working. Matching on name as well
+  // would avoid that, but it would break the common case it exists for, and the address could not
+  // then be stored for the second person anyway (see the UNIQUE index below). If this is ever
+  // revisited, specs/97-participant-email.mjs pins the current intent.
   if (cleanEmail) {
+    // lower(), to match the UNIQUE INDEX exactly. It used to compare case-sensitively while the
+    // constraint was on lower(email), so a returning guest whose phone had autocapitalised their
+    // address missed recovery, fell through to the INSERT, and hit the index — HTTP 500, locked out
+    // of the event. The guard and the constraint have to agree on what "the same address" means.
     const [existing] = await db.select().from(participants)
-      .where(and(eq(participants.eventId, event.id), eq(participants.email, cleanEmail)));
+      .where(and(eq(participants.eventId, event.id),
+                 sql`lower(${participants.email}) = lower(${cleanEmail})`));
     if (existing) {
       const sessionToken = newToken();
       const newName = name.trim().slice(0, 40) || existing.name;
@@ -85,7 +111,18 @@ router.post('/', async (req: Request, res: Response) => {
     joinedAt:      now,
   };
 
-  await db.insert(participants).values(participant);
+  try {
+    await db.insert(participants).values(participant);
+  } catch (e) {
+    if (!isDuplicate(e)) throw e;
+    // Recovery above should have caught this, so we are in a race (two devices joining with the
+    // same address at once) or a case the guard still cannot see. Either way, letting someone into
+    // the event with their OWN roll matters more than storing their address, so drop the address
+    // and keep going. They lose email-based recovery; they do not lose the event.
+    console.warn(`[participants] ${event.joinCode}: address already used in this event — joining without it`);
+    participant.email = null;
+    await db.insert(participants).values(participant);
+  }
 
   res.json({
     participant:     { id: participant.id, name: participant.name, photosTaken: 0 },
@@ -161,7 +198,7 @@ router.get('/me', async (req: Request, res: Response) => {
       feedbackGiven:   !!p.feedbackAskedAt,
       // True when the address we hold arrived with their payment rather than at join — the guest
       // never typed it here, so it is worth telling them which one their photos are tied to.
-      emailFromPayment: !!p.upgradeEmail && p.email === p.upgradeEmail,
+      emailFromPayment: !!p.upgradeEmail && (p.email || '').toLowerCase() === p.upgradeEmail.toLowerCase(),
     allowDownloads:  !!p.allowDownloads,
     noFlash:         !!p.noFlash,
   });
@@ -220,9 +257,20 @@ router.post('/email-my-photos', async (req: Request, res: Response) => {
   if (toAddr.length > 200 || !isEmail(toAddr))
     return res.status(400).json({ error: 'Enter a valid email address' });
 
-  // If they provided a new address, save it
-  if (emailOverride && emailOverride !== p.email) {
-    await db.update(participants).set({ email: toAddr }).where(eq(participants.id, p.id));
+  // If they provided a new address, save it — best effort, and case-insensitively compared so
+  // retyping the same address differently is not a pointless write.
+  //
+  // Sending does not depend on storing: the email is built from THIS participant's row and links to
+  // their own gallery. So an address already used by another guest at the event means "we cannot
+  // attach it to your roll", not "you cannot have your photos" — which is what it used to mean,
+  // because the failed UPDATE took the whole request down with it.
+  if (emailOverride && emailOverride.toLowerCase() !== (p.email || '').toLowerCase()) {
+    try {
+      await db.update(participants).set({ email: toAddr }).where(eq(participants.id, p.id));
+    } catch (e) {
+      if (!isDuplicate(e)) throw e;
+      console.warn(`[participants] ${p.id}: address in use by another guest — emailing photos anyway, not stored`);
+    }
   }
 
   const [{ c: photoCount }] = await db

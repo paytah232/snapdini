@@ -1,23 +1,12 @@
 import type { RequestHandler } from './$types';
+import { env } from '$env/dynamic/private';
+import { isIndexable, robotsTxt, canonicalOrigin } from '$lib/seo';
 
-// robots.txt — index the marketing landing, keep app/admin/private + per-event pages out.
-// Origin-aware so it's correct on any domain (dev or prod) without hard-coding.
+// robots.txt. On the canonical deployment: index the marketing landing, keep app/admin/private and
+// per-event pages out. On anything else (a preview host): crawlable but noindex — see $lib/seo for
+// why crawling must stay allowed there.
 export const GET: RequestHandler = ({ url }) => {
-  const body = `User-agent: *
-Allow: /$
-Disallow: /app
-Disallow: /dashboard
-Disallow: /admin
-Disallow: /siteadmin
-Disallow: /gallery
-Disallow: /join
-Disallow: /e/
-Disallow: /login
-Disallow: /signup
-Disallow: /contact
-Disallow: /api/
-
-Sitemap: ${url.origin}/sitemap.xml
-`;
+  const indexable = isIndexable(env.SEO_INDEXABLE);
+  const body = robotsTxt({ indexable, origin: canonicalOrigin(env.ORIGIN, url.origin) });
   return new Response(body, { headers: { 'content-type': 'text/plain; charset=utf-8' } });
 };

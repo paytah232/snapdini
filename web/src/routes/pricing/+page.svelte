@@ -17,7 +17,8 @@
 
   const TITLE = 'Pricing — Snapdini | Free Event Photo App, Pay Per Event';
   const DESC = 'Snapdini pricing: free for up to 10 guests with every feature, then a one-off pass from A$5 per event (up to 400 guests). No subscription. Optional add-ons for shots, length and video. Self-host free.';
-  $: origin = $page.url.origin;
+  // Configuration, NOT the request host: a preview host must not declare itself canonical.
+  $: origin = $page.data.canonicalOrigin ?? $page.url.origin;
   $: canonical = origin + '/pricing';
   $: ldApp = {
     '@context': 'https://schema.org', '@type': 'SoftwareApplication', name: 'Snapdini',
@@ -34,7 +35,7 @@
   <title>{TITLE}</title>
   <meta name="description" content={DESC} />
   <link rel="canonical" href={canonical} />
-  <meta name="robots" content="index, follow" />
+  <meta name="robots" content={$page.data.robotsMeta ?? 'noindex, nofollow'} />
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Snapdini" />
   <meta property="og:title" content={TITLE} />

@@ -80,6 +80,10 @@ services:
       - ANALYTICS_RATE_LIMIT=${ANALYTICS_RATE_LIMIT:-240}
       - ANALYTICS_RETENTION_DAYS=${ANALYTICS_RETENTION_DAYS:-90}
       - MACHINE_LEARNING_URL=${MACHINE_LEARNING_URL:-}
+      # How long to keep retrying a database that is not answering yet at boot (transient errors
+      # only — a schema fault still fails fast). Stops a DB restart leaving the app permanently
+      # half-alive; see the comment above initWithRetry() in src/server/index.ts.
+      - DB_INIT_MAX_WAIT_MS=${DB_INIT_MAX_WAIT_MS:-300000}
       - FACE_MATCH_THRESHOLD=${FACE_MATCH_THRESHOLD:-0.42}
       - FACE_MIN_SCORE=${FACE_MIN_SCORE:-0.7}
       - FACE_TIMEOUT_MS=${FACE_TIMEOUT_MS:-20000}
@@ -153,6 +157,10 @@ services:
       - MSADS_PURCHASE_EVENT=${MSADS_PURCHASE_EVENT:-}
       - MSADS_SIGNUP_EVENT=${MSADS_SIGNUP_EVENT:-}
       - MSADS_CREATE_EVENT=${MSADS_CREATE_EVENT:-}
+      # Whether THIS deployment may be indexed by search engines. Unset ⇒ every page answers
+      # noindex and no sitemap is served, so a staging or preview host suppresses itself instead of
+      # competing with the real site for its own search results. Set it to 1 on exactly one host.
+      - SEO_INDEXABLE=${SEO_INDEXABLE:-}
       # Comma-separated emails whose signed-in sessions never fire conversions (site admins are always
       # excluded). Keeps the operator's own testing out of the ad data. Needs INTERNAL_API_BASE (set).
       - ANALYTICS_EXCLUDE_EMAILS=${ANALYTICS_EXCLUDE_EMAILS:-}

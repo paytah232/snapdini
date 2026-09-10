@@ -334,7 +334,49 @@ app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-init()
+// A database that is briefly unavailable must not be able to kill this process for good.
+//
+// This bit us on devel: the DB crash-recovered, the app booted while it was still in "the database
+// system is starting up", init() failed on its single attempt, and the container then sat there
+// serving 502s for half an hour. Nothing recovered it — Docker does not restart a container merely
+// because its healthcheck says unhealthy, and the process was still running, so the restart policy
+// never came into play either.
+//
+// Recovery from that state took a human noticing. So instead of one attempt, keep trying: a
+// recovering Postgres is usually back within seconds, and anything that looks transient is worth
+// waiting out. Only a fault that persists past the whole window is worth giving up on, and then we
+// exit non-zero so `restart: unless-stopped` cycles the process rather than leaving it half-alive.
+const INIT_MAX_MS = Number(process.env.DB_INIT_MAX_WAIT_MS || 5 * 60 * 1000);
+const INIT_STEP_MS = 2000;
+
+// Postgres says which of these are worth retrying: 57P03 starting up, 57P01 shutting down,
+// 08006/08001/08004 connection failures, plus the socket-level errors from a container that has not
+// opened its port yet.
+const TRANSIENT = /57P03|57P01|08006|08001|08004|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|starting up|not yet accepting/i;
+const transient = (e: unknown): boolean => {
+  const err = e as { code?: string; message?: string; cause?: { code?: string; message?: string } };
+  return TRANSIENT.test(`${err?.code ?? ''} ${err?.message ?? ''} ${err?.cause?.code ?? ''} ${err?.cause?.message ?? ''}`);
+};
+
+async function initWithRetry(): Promise<void> {
+  const deadline = Date.now() + INIT_MAX_MS;
+  let attempt = 0;
+  for (;;) {
+    attempt++;
+    try {
+      await init();
+      if (attempt > 1) console.log(`[boot] database ready after ${attempt} attempts`);
+      return;
+    } catch (err) {
+      // A schema/migration fault will never fix itself by waiting, so fail fast and loudly on it.
+      if (!transient(err) || Date.now() > deadline) throw err;
+      console.warn(`[boot] database not ready (attempt ${attempt}): ${(err as Error).message.split('\n')[0]} — retrying in ${INIT_STEP_MS}ms`);
+      await new Promise((r) => setTimeout(r, INIT_STEP_MS));
+    }
+  }
+}
+
+initWithRetry()
   .then(async () => {
     await ensureAdminFromEnv(); // bootstrap a site admin from ADMIN_EMAIL/ADMIN_PASSWORD (no-op if unset)
     startCleanup(); // periodic retention sweep (deletes expired events + their files)
@@ -365,4 +407,9 @@ init()
           });
       });
   })
-  .catch((err) => { console.error('Failed to initialize database:', err); process.exit(1); });
+  .catch((err) => {
+    // Exit rather than linger: a running-but-uninitialised process answers 502s forever, and the
+    // restart policy can only help if we actually stop.
+    console.error('Failed to initialize database after retrying:', err);
+    process.exit(1);
+  });

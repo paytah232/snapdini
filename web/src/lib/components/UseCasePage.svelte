@@ -26,7 +26,8 @@
   // Internal cross-links to the other use-case pages (good for SEO + discovery).
   $: others = Object.values(usecases).filter((u) => u.slug !== content.slug);
 
-  $: origin = $page.url.origin;
+  // Configuration, NOT the request host: a preview host must not declare itself canonical.
+  $: origin = $page.data.canonicalOrigin ?? $page.url.origin;
   $: canonical = `${origin}/${content.slug}`;
   $: fullTitle = `${content.title} | Snapdini`;
   $: ldApp = {
@@ -52,7 +53,7 @@
   <title>{fullTitle}</title>
   <meta name="description" content={content.desc} />
   <link rel="canonical" href={canonical} />
-  <meta name="robots" content="index, follow" />
+  <meta name="robots" content={$page.data.robotsMeta ?? 'noindex, nofollow'} />
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Snapdini" />
   <meta property="og:title" content={fullTitle} />

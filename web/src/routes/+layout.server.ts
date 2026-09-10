@@ -3,6 +3,7 @@ import { env } from '$env/dynamic/private';
 import { isValidGtagId } from '$lib/consent';
 import { composeSendTo } from '$lib/conversions';
 import { isValidUetId, uetAction } from '$lib/msads';
+import { isIndexable, canonicalOrigin, robotsMeta } from '$lib/seo';
 
 // Surfaces analytics/ads config to pages:
 //  • analyticsEnabled — gates the "Your Privacy Choices" opt-out link (US requirement).
@@ -13,7 +14,7 @@ import { isValidUetId, uetAction } from '$lib/msads';
 //    address, so the operator's own testing doesn't fire conversions and pollute the data. Only a
 //    BOOLEAN is exposed (never the email list — that would leak owner PII into the page).
 // All operator config (env); no tag ⇒ nothing tracks. SSR so there's no hydration flash.
-export const load: LayoutServerLoad = async ({ request, fetch }) => {
+export const load: LayoutServerLoad = async ({ request, fetch, url }) => {
   const id = (env.GTAG_ID || '').trim();
   const uetId = (env.MSUET_ID || '').trim();
   // Either tag being present means measurement is on, which is what gates the opt-out link.
@@ -34,7 +35,13 @@ export const load: LayoutServerLoad = async ({ request, fetch }) => {
     } catch { /* best-effort — default to not excluding */ }
   }
 
+  // SEO identity. Pages must NEVER build a canonical from the request host — see $lib/seo.
+  const seoIndexable = isIndexable(env.SEO_INDEXABLE);
+
   return {
+    seoIndexable,
+    canonicalOrigin: canonicalOrigin(env.ORIGIN, url.origin),
+    robotsMeta: robotsMeta(seoIndexable),
     analyticsEnabled,
     analyticsExclude,
     purchaseSendTo: composeSendTo(id, (env.GADS_PURCHASE_LABEL || '').trim()),

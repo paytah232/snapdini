@@ -1,21 +1,18 @@
 import type { RequestHandler } from './$types';
+import { env } from '$env/dynamic/private';
 import { useCaseSlugs } from '$lib/usecases';
+import { isIndexable, sitemapXml, canonicalOrigin } from '$lib/seo';
 
-// sitemap.xml — public, indexable marketing pages only. Origin-aware.
+// sitemap.xml — public marketing pages only, and ONLY on the canonical deployment. A preview host
+// publishing a sitemap of its own URLs is how a dev clone got itself indexed in the first place, so
+// a non-canonical deployment serves nothing here at all.
 export const GET: RequestHandler = ({ url }) => {
-  // Homepage (priority 1.0) + the use-case landing pages (0.8).
-  const pages: { path: string; priority: string }[] = [
+  if (!isIndexable(env.SEO_INDEXABLE)) return new Response('Not found', { status: 404 });
+  const pages = [
     { path: '/', priority: '1.0' },
     { path: '/pricing', priority: '0.9' },
     ...useCaseSlugs.map((slug) => ({ path: `/${slug}`, priority: '0.8' })),
   ];
-  const urls = pages
-    .map(({ path, priority }) => `  <url>\n    <loc>${url.origin}${path}</loc>\n    <changefreq>weekly</changefreq>\n    <priority>${priority}</priority>\n  </url>`)
-    .join('\n');
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-${urls}
-</urlset>
-`;
+  const xml = sitemapXml(canonicalOrigin(env.ORIGIN, url.origin), pages);
   return new Response(xml, { headers: { 'content-type': 'application/xml; charset=utf-8' } });
 };

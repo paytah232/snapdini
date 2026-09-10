@@ -107,7 +107,8 @@
     { q: 'Can I use it for a wedding?', a: 'Yes — Snapdini is ideal for weddings, birthdays, parties and corporate events. Print the QR poster for the tables and guests join in a tap.' },
     { q: 'Can everyone download the photos?', a: 'Yes. All shots collect in one shared gallery you can browse and download together, including a full zip of the event.' },
   ];
-  $: origin = $page.url.origin;
+  // Configuration, NOT the request host: a preview host must not declare itself canonical.
+  $: origin = $page.data.canonicalOrigin ?? $page.url.origin;
   $: ldApp = {
     '@context': 'https://schema.org', '@type': 'SoftwareApplication', name: 'Snapdini',
     applicationCategory: 'MultimediaApplication', operatingSystem: 'Web', url: origin + '/',
@@ -124,7 +125,7 @@
   <title>{TITLE}</title>
   <meta name="description" content={DESC} />
   <link rel="canonical" href={origin + '/'} />
-  <meta name="robots" content="index, follow" />
+  <meta name="robots" content={$page.data.robotsMeta ?? 'noindex, nofollow'} />
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Snapdini" />
   <meta property="og:title" content={TITLE} />

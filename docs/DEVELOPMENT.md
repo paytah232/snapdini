@@ -119,6 +119,44 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   the fonts baked into `Dockerfile.dev`). See that script's header to regenerate.
 - **Capacity / load testing** — uploads are the CPU-bound ceiling; see `loadtest/CAPACITY.md` and
   `npm run test:load` / `npm run test:load:multi`.
+- **Search indexing — only ONE deployment may say "I am the original"** (`SEO_INDEXABLE`).
+  Every SEO tag used to be built from the *request host*, and robots.txt even documented that as a
+  feature ("correct on any domain, dev or prod"). It is the opposite: the dev deployment served
+  `canonical: <itself>` plus `robots: index, follow`, so Google saw two identical pages each
+  declaring itself the master copy, **picked the dev one, and demoted the real homepage to a
+  duplicate**. A preview host cannot be trusted to describe itself.
+  - `SEO_INDEXABLE=1` opts a deployment in. **Unset is the default and means noindex**, so a new
+    staging or preview host suppresses itself without anyone remembering to do anything. Set it on
+    exactly one host — the public one named in `BASE_URL`.
+  - Canonical, `og:url` and the sitemap come from `ORIGIN` (= `BASE_URL`), never the request host.
+    Logic is in `web/src/lib/seo.ts` (unit-tested); pages read `$page.data.canonicalOrigin` and
+    `$page.data.robotsMeta` from `routes/+layout.server.ts`, and `hooks.server.ts` adds an
+    `X-Robots-Tag` header so routes rendering no head tags are covered too.
+  - **Crawling stays ALLOWED on a non-indexable host, deliberately.** A crawler has to fetch a page
+    to see the noindex, so `Disallow: /` would strand a preview host in the index with no way to
+    tell anyone to drop it. What it does not do is advertise a sitemap, and `/sitemap.xml` 404s.
+  - Per-event `og:url` (join/gallery/share pages) is still request-derived on purpose — those are
+    social previews for one shared link, not canonicals, and they are all `Disallow`ed.
+  - **Alternative, if you cannot set env on your host**: send the header at your reverse proxy
+    instead. Traefik file provider:
+
+    ```yaml
+    http:
+      middlewares:
+        dev-noindex:
+          headers:
+            customResponseHeaders:
+              X-Robots-Tag: "noindex, nofollow"
+      routers:
+        my-dev-router:
+          middlewares: [dev-noindex]
+    ```
+
+    or as labels: `traefik.http.middlewares.dev-noindex.headers.customresponseheaders.X-Robots-Tag=noindex, nofollow`
+    and `traefik.http.routers.<router>.middlewares=dev-noindex`. nginx: `add_header X-Robots-Tag
+    "noindex, nofollow" always;`. Caddy: `header X-Robots-Tag "noindex, nofollow"`. Same caveat
+    applies — do **not** also block it in robots.txt, or the noindex is never read.
+
 - **Analytics / ads (optional, off by default)** — two ad platforms are supported, configured
   **independently**: set **`GTAG_ID`** (a Google tag id, e.g. `AW-…`/`G-…`) for a Google tag with
   **Consent Mode v2**, and/or **`MSUET_ID`** (the numeric Microsoft Advertising UET tag id) for the

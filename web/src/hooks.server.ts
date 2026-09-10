@@ -2,6 +2,7 @@ import type { Handle } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import { analyticsHead, isConsentRegion, isValidGtagId } from '$lib/consent';
 import { isValidUetId, uetHead } from '$lib/msads';
+import { isIndexable, robotsHeader } from '$lib/seo';
 
 // Injects the ad/analytics tags into the %snapdini.analytics% placeholder in app.html at SSR —
 // Google (Consent Mode v2) when GTAG_ID is set, and Microsoft Advertising (UET) when MSUET_ID is
@@ -22,7 +23,11 @@ export const handle: Handle = async ({ event, resolve }) => {
   // Ask when ANY tag is present and the visitor is in a prior-consent region.
   const ask = (google || microsoft) && inConsentRegion;
 
-  return resolve(event, {
+  // Belt and braces alongside the per-page <meta>: the header covers routes that render no head
+  // tags at all, and is what a crawler sees even for a non-HTML response.
+  const xRobots = robotsHeader(isIndexable(env.SEO_INDEXABLE));
+
+  const response = await resolve(event, {
     transformPageChunk: ({ html }) => {
       if (!google && !microsoft) return html.replace('%snapdini.analytics%', '');
       // Tell the client-side banner whether to ask (consent region) and that a tag is present.
@@ -31,4 +36,6 @@ export const handle: Handle = async ({ event, resolve }) => {
       return html.replace('%snapdini.analytics%', flag + tags);
     },
   });
+  if (xRobots) response.headers.set('X-Robots-Tag', xRobots);
+  return response;
 };

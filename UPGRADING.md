@@ -132,6 +132,23 @@ docker compose up -d
 
 ## Version notes
 
+### 1.4.3
+**Action required if you want your site in search results.** Search indexing is now opt-in per
+deployment, because deriving SEO tags from the request host let a staging copy declare itself
+canonical and outrank the real site.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `SEO_INDEXABLE` | unset ⇒ **noindex** | `1` allows search engines to index this deployment. Set it on exactly one host — the public one in `BASE_URL`. |
+
+Goes on the **`web`** service (see trap 1). If you run a single public instance and want it indexed,
+add `SEO_INDEXABLE=1`; otherwise every page will answer `noindex, nofollow` after upgrading. If you
+run a staging copy, leave it unset there — that is the point.
+
+Crawling remains allowed on non-indexable hosts on purpose: a crawler must fetch a page to see the
+noindex. Prefer to do this at your reverse proxy instead? `X-Robots-Tag: noindex, nofollow` on the
+staging router has the same effect — see `docs/DEVELOPMENT.md` for Traefik/nginx/Caddy snippets.
+
 ### 1.4.1
 Adds **Microsoft Advertising (UET)** alongside the existing Google tag. All optional — skip it and
 nothing changes. These go on the **`web`** service (see trap 1), not `app`:
