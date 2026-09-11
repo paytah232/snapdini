@@ -28,3 +28,13 @@ playwright-report/
 # Agent / maintainer-internal notes (not part of the product)
 CLAUDE.md
 **/CLAUDE.md
+
+# Reference material dropped into docs/ for analysis — reels, screen recordings, screenshots of
+# other people's apps. This is a PUBLIC repo: none of it belongs in history, and it is the kind of
+# thing `git add -A` sweeps up silently. The genuine video fixtures live in loadtest/ and stay
+# tracked, which is why this is scoped to docs/ rather than a blanket *.mp4.
+/docs/*.mp4
+/docs/*.mov
+/docs/*.m4v
+/docs/*.webm
+/docs/reel-frames/
