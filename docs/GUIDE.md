@@ -109,6 +109,15 @@ The organizer control panel (owners and co-hosts; accessed by your account or th
   it themes the join screen, gallery, poster and slideshow.
 - **Upgrades** (billing on): raise guests/shots/video/retention/length or add the frame pack — you
   pay only the difference.
+- **Trick list** (optional, off until you add one): a short list of shots to hunt for — "someone
+  laughing", "the oldest person here". Pick your **event type** to load a tailored set, tap a
+  **mood** (fun, silly, sentimental…) for an instant list, or go through the full list and choose
+  your own — you can write your own tricks too. Five by default; anything from 1 to 20.
+  - Pick the **tick** guests and cards mark off with (a heart, a bottle, a star, or type your own).
+  - **Several cards** (up to 8) hand different guests slightly different lists, so the room isn't
+    shooting the same six things. Name each one — "Golden oldies", "The tricksters" — and print
+    them separately. Every guest is given one card and keeps it.
+  - Guests see it as a pill in the camera; ticking one off is automatic when they shoot it.
 - **Review & Curate** — link to the photo hub (shows a pending count under moderation).
 - **Co-hosts:** invite by email (they get a link + an in-app accept), copy a pending invite link, or
   remove a co-host. The owner can't be removed and only the owner can delete the event.
@@ -164,6 +173,10 @@ the same camera.
   limit, and a quality picker.
 - **Upload queue:** photos are saved on your device immediately and uploaded one at a time with a live
   %. If you go offline they queue and **auto-retry** when you're back — nothing is lost.
+- **Trick list:** if the host set one up, a pill in the top bar — the event's tick glyph and a
+  "2/5" count, captioned *trick list* — opens the list of shots to hunt for. Shoot one and it
+  ticks itself off — one go per trick — with confetti when you finish the lot.
+  It's a suggestion, never a requirement; you can ignore it and just shoot.
 - **Gallery (🖼):** before reveal you always see your own shots (with "#N" snap numbers); after reveal,
   **Mine / All / Others** filters. Downloads appear only if the host allowed them.
 

@@ -119,7 +119,8 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   the fonts baked into `Dockerfile.dev`). See that script's header to regenerate.
 - **Capacity / load testing** — uploads are the CPU-bound ceiling; see `loadtest/CAPACITY.md` and
   `npm run test:load` / `npm run test:load:multi`.
-- **Photo missions** — a shot list a host gives guests, printed on cards and ticked off in the app.
+- **Trick list** — a shot list a host gives guests, printed on cards and ticked off in the app.
+  (Named "photo missions" while it was built; the ids and columns still say `challenge`.)
   - Content lives in `web/src/lib/challenges.ts`: 9 packs (the 8 use-case types + a `general`
     default) × 24 challenges, each tagged with one or more **moods** that drive the quick-pick
     buttons. Ids are **stable for the life of the product** — they are stored on photos and counted
@@ -143,6 +144,16 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   - Guest UI is one pill in the camera topbar (`Camera.svelte`) opening a sheet — the camera has to
     stay a camera. Note `.topbar` is `pointer-events: none`, so anything tappable in there must opt
     back in. Completion fires `Confetti.svelte`, which honours `prefers-reduced-motion`.
+  - A **tick glyph** per event (`events.challenge_tick`) is what a guest and a printed card mark
+    off with — a heart for a wedding, a bottle for a baby shower. The event type only sets the
+    *default*; the host can pick any of the offered glyphs or type their own, so `parseTick` keeps
+    a short free-text value rather than an enum.
+  - A set's **label** is the host's, not ours. The backend stores the key (`a`, `b`, …) and the
+    label beside it, so "Golden oldies" can be renamed without moving anyone between sets. The
+    field only appears once there are two sets, because a lone card's name is never printed.
+  - The count defaults to **5** and goes to 20. It is the host's call, not a rule: `setCount()`
+    tops up from the pack or trims the tail rather than refusing, so the number field and the
+    ticked list can never disagree.
   - Cards print from the poster designer as **4-up A6 sheets, one sheet per set**.
 
 - **Search indexing — only ONE deployment may say "I am the original"** (`SEO_INDEXABLE`).
