@@ -6,6 +6,7 @@ import QRCode from 'qrcode';
 import sharp from 'sharp';
 import { eq, and, or, sql, inArray, count, desc, isNotNull } from 'drizzle-orm';
 import { db } from '../db';
+import { parseChallengeSets, readSets, serialiseSets, parseEventType, MAX_CHALLENGES, MAX_SETS } from '../challenges';
 import { events, participants, photos, shares, eventCohosts, users, type Event } from '../schema';
 import { faceMatchingAvailable } from '../faces';
 import * as email from '../email';
@@ -452,7 +453,15 @@ router.get('/:joinCode/qr', async (req: Request, res: Response) => {
 
   const base     = baseUrl(req);
   const joinPath = event.slug ? `/e/${event.slug}` : `/join/${event.joinCode}`;
-  const joinUrl  = base + joinPath;
+  // A printed mission card can name the set it belongs to, so the guest who scans THAT card is
+  // handed THAT card's list. Without it the join falls back to round-robin and the card in
+  // someone's hand can disagree with the app, which defeats the point of printing several.
+  //
+  // Validated against the event's own sets rather than echoed: this ends up in a QR that gets
+  // printed hundreds of times, so a typo must fail here and not at the table.
+  const wantSet = typeof req.query.set === 'string' ? req.query.set.trim().toLowerCase() : '';
+  const setKey  = wantSet && readSets(event.challenges).some((s) => s.key === wantSet) ? wantSet : '';
+  const joinUrl  = base + joinPath + (setKey ? `?set=${encodeURIComponent(setKey)}` : '');
 
   // Every QR is rendered the SAME way — black-on-white, high error-correction ('H', ~30%
   // recoverable) with the Snapdini brand mark punched into the centre — so the in-app, saved and
@@ -573,6 +582,8 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     paid:           !!ev.paid,
     amountPaidCents: ev.amountPaidCents,
     posterConfig:   ev.posterConfig ? JSON.parse(ev.posterConfig) : null,
+    eventType:      ev.eventType ?? null,
+    challengeSets:  readSets(ev.challenges),
     purged:         !!ev.purgedAt,
     participantCount: participantRows.length,
     photoCount,
@@ -600,6 +611,22 @@ router.post('/:joinCode/highlights', requireOrganizer, async (req: Request, res:
     .set({ isHighlighted: !!highlight, rating: highlight ? 5 : 0 })
     .where(and(inArray(photos.id, photoIds), eq(photos.eventId, req.event!.id)));
   res.json({ success: true, highlightCount: photoIds.length, highlight: !!highlight });
+});
+
+// ── PUT /api/events/:joinCode/challenges — save the photo missions + event type ──
+// Mirrors the poster endpoint: a small bounded blob owned by the organizer. Event type lives here
+// rather than at creation because it belongs with theming, and asking at creation would add a
+// question to the one flow we most want frictionless.
+router.put('/:joinCode/challenges', requireOrganizer, async (req: Request, res: Response) => {
+  const body = req.body as { eventType?: unknown; challenges?: unknown };
+  const sets = parseChallengeSets(body.challenges);
+  if (sets === null) return res.status(400).json({ error: 'challenges must be a list, or {sets:[…]}' });
+  await db.update(events)
+    .set({ eventType: parseEventType(body.eventType), challenges: serialiseSets(sets) })
+    .where(eq(events.id, req.event!.id));
+  // Echo what was STORED, so a host whose malformed entry was dropped finds out now rather than on
+  // the printed card.
+  res.json({ success: true, sets, max: MAX_CHALLENGES, maxSets: MAX_SETS });
 });
 
 // ── PUT /api/events/:joinCode/poster — save the poster designer customisation ──

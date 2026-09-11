@@ -45,6 +45,8 @@ export const EVENT_NAMES = [
   'camera_permission_denied',
   'photo_captured',
   'roll_completed',
+  // Photo missions — opened, completed, and the host saving a list.
+  'mission_list_opened', 'mission_captured', 'missions_saved',
   'guest_gallery_opened',
   'guest_feedback_opened',
   'guest_feedback_sent',

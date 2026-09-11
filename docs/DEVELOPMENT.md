@@ -119,6 +119,32 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   the fonts baked into `Dockerfile.dev`). See that script's header to regenerate.
 - **Capacity / load testing** — uploads are the CPU-bound ceiling; see `loadtest/CAPACITY.md` and
   `npm run test:load` / `npm run test:load:multi`.
+- **Photo missions** — a shot list a host gives guests, printed on cards and ticked off in the app.
+  - Content lives in `web/src/lib/challenges.ts`: 9 packs (the 8 use-case types + a `general`
+    default) × 24 challenges, each tagged with one or more **moods** that drive the quick-pick
+    buttons. Ids are **stable for the life of the product** — they are stored on photos and counted
+    to rank packs, so renaming one silently rewrites history. Add a new id instead.
+  - An event can carry **1–8 sets**. A guest is handed exactly one and keeps it (`participants
+    .challenge_set`), so different tables hunt for different things. Assignment is **round-robin,
+    not random** — several sets exist for even coverage and random clusters. `varySets()` gives every
+    card the same **core** from the front of the pack, because picking each card independently puts
+    the must-have shots on one card out of six.
+  - A printed card's QR carries `?set=<key>`, validated server-side against the event's own sets
+    before it is encoded — a typo there would be printed onto every card before anyone noticed.
+  - **Progress is derived, never stored**: "how far through is this guest" is a count over
+    `photos.challenge_id`, so deleting a photo un-ticks its mission and there is no second copy of
+    the truth to drift. Do not add a completions table.
+  - The server holds **no opinion on the wording** (`app/src/server/challenges.ts` validates shape
+    only) because a host can write their own, and stores the host's text rather than resolving an id
+    at read time — a printed card cannot be updated, so improving our wording later must not
+    silently disagree with the card on the table.
+  - `videoSeconds: 0` events must not be offered clip prompts; `pickChallenges({allowVideo:false})`
+    strips them and can still fill the maximum for every pack and mood.
+  - Guest UI is one pill in the camera topbar (`Camera.svelte`) opening a sheet — the camera has to
+    stay a camera. Note `.topbar` is `pointer-events: none`, so anything tappable in there must opt
+    back in. Completion fires `Confetti.svelte`, which honours `prefers-reduced-motion`.
+  - Cards print from the poster designer as **4-up A6 sheets, one sheet per set**.
+
 - **Search indexing — only ONE deployment may say "I am the original"** (`SEO_INDEXABLE`).
   Every SEO tag used to be built from the *request host*, and robots.txt even documented that as a
   feature ("correct on any domain, dev or prod"). It is the opposite: the dev deployment served

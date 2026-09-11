@@ -37,7 +37,9 @@
     {:else}
       <img src={photo.url} alt="Photo by {photo.participantName}" decoding="async" />
     {/if}
-    <div class="cap">{photo.participantName} · {new Date(photo.takenAt).toLocaleString()}{#if mediaMeta(photo)} · {mediaMeta(photo)}{/if} · {index + 1}/{photos.length}</div>
+    <!-- The mission first when there was one: a caption the grid shows must not vanish on the way
+         into the photo. -->
+    <div class="cap">{#if photo.challenge}<span class="mission">{photo.challenge}</span> · {/if}{photo.participantName} · {new Date(photo.takenAt).toLocaleString()}{#if mediaMeta(photo)} · {mediaMeta(photo)}{/if} · {index + 1}/{photos.length}</div>
   {/if}
   {#if index > 0}<button class="nav l" on:click={prev} aria-label="Previous">‹</button>{/if}
   {#if index < photos.length - 1}<button class="nav r" on:click={next} aria-label="Next">›</button>{/if}
@@ -51,6 +53,7 @@
     border: none; width: 40px; height: 40px; border-radius: 50%; font-size: 1.2rem; cursor: pointer; }
   .cap { position: absolute; bottom: 18px; left: 0; right: 0; text-align: center; color: #fff;
     font-size: 0.82rem; text-shadow: 0 1px 3px #000; }
+  .cap .mission { font-weight: 700; }
   .nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(0,0,0,0.4);
     color: #fff; border: none; width: 44px; height: 64px; font-size: 2rem; cursor: pointer; }
   .nav.l { left: 8px; border-radius: 0 8px 8px 0; } .nav.r { right: 8px; border-radius: 8px 0 0 8px; }

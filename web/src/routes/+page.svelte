@@ -7,6 +7,7 @@
   import { claimReferral } from '$lib/referral';
   import SiteFooter from '$lib/components/SiteFooter.svelte';
   import Logo from '$lib/components/Logo.svelte';
+  import MissionList from '$lib/components/MissionList.svelte';
   import { appearance, setAppearance } from '$lib/appearance';
 
   let version = '';
@@ -201,6 +202,24 @@
 </section>
 
 <section class="band">
+  <div class="kicker">Photo missions</div>
+  <h2>Hand your guests a shot list.</h2>
+  <div class="missions">
+    <div>
+      <p>Pick the shots you’d hate to miss. They print on a card for the tables, and guests get the
+        same list inside the camera to tick off as they shoot — so the cake gets photographed before
+        it’s cut, and the quiet table in the corner ends up in a frame.</p>
+      <p>The usual version of this sits on top of a shared album, where a guest can shoot the same
+        thing fifty times and keep the best one. Snapdini is the camera: one roll, no takebacks,
+        nothing visible until the reveal. Spending a frame on a mission is a real decision, which is
+        what makes a ticked-off list worth looking at.</p>
+      <p class="note">Every kind of event gets its own list. Reword any line, or write your own.</p>
+    </div>
+    <MissionList eventType="wedding" />
+  </div>
+</section>
+
+<section class="band">
   <div class="kicker">How it works</div>
   <h2>Set up the whole trick in about a minute.</h2>
   <div class="grid steps">
@@ -322,6 +341,10 @@
   .card h3 { font-size: 1.05rem; margin: 12px 0 8px; }
   .card p { color: var(--text-muted); font-size: .92rem; }
   .step-n { font-size: .78rem; color: var(--accent); font-family: var(--font-mono); }
+  .missions { display: grid; grid-template-columns: 1.05fr .95fr; gap: 40px; align-items: start; }
+  .missions p { color: var(--text-muted); font-size: .98rem; line-height: 1.6; margin: 0 0 14px; }
+  /* .note is smaller and muted everywhere else on the page; keep it that way inside the grid. */
+  .missions p.note { font-size: .82rem; margin: 18px 0 0; }
   .cta-card { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 54px 40px; text-align: center; }
   .cta-card h2 { margin-left: auto; margin-right: auto; }
   .cta-card p { color: var(--text-muted); margin: 14px auto 28px; max-width: 44ch; }
@@ -338,6 +361,7 @@
     .hero .lede { margin-left: auto; margin-right: auto; }
     .hero .cta { justify-content: center; }
     .grid, .grid.steps { grid-template-columns: 1fr 1fr; }
+    .missions { grid-template-columns: 1fr; gap: 26px; }
   }
   @media (max-width: 520px) { .grid, .grid.steps { grid-template-columns: 1fr; } }
 </style>

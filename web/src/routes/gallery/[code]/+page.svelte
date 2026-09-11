@@ -280,7 +280,10 @@
           {/if}
           {#if p.isHighlighted}<span class="star" aria-hidden="true">⭐</span>{/if}
           {#if selecting}<span class="check" class:on={selected.has(p.id)} aria-hidden="true">{selected.has(p.id) ? '✓' : ''}</span>{/if}
-          <span class="cap">{p.participantName} · {fmtTime(p.takenAt)}</span>
+          <span class="cap">
+            {#if p.challenge}<span class="mission">{p.challenge}</span>{/if}
+            <span class="who">{p.participantName} · {fmtTime(p.takenAt)}</span>
+          </span>
         </button>
       {/each}
     </div>
@@ -384,10 +387,15 @@
   .star { position: absolute; top: 6px; left: 6px; font-size: .9rem; filter: drop-shadow(0 1px 2px rgba(0,0,0,.6)); }
   .cap {
     position: absolute; left: 0; right: 0; bottom: 0; padding: 12px 6px 5px;
-    font-size: .68rem; color: #fff; text-align: left;
+    font-size: .68rem; line-height: 1.35; color: #fff; text-align: left;
     background: linear-gradient(transparent, rgba(0,0,0,.72));
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  /* Each line clips on its own, so a long mission cannot push the shooter line out of the tile. The
+     caption is absolutely positioned, so a second line grows up over the photo and a photo without
+     a mission is unchanged — no reserved gap. */
+  .cap > span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cap .mission { font-weight: 700; }
+  .cap .who { opacity: .82; }
   @media (min-width: 640px) {
     .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
   }

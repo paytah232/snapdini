@@ -18,6 +18,13 @@ export type UseCase = {
   lede: string;
   features: Feature[];
   faqs: Faq[];
+  /** The challenges.ts pack key for this event type. Each page shows ITS OWN pack's missions, so
+   *  the examples are real and differ from page to page instead of repeating one list. */
+  packKey: string;
+  /** Heading and copy for the photo-missions section, written per page for the same reason
+   *  everything else here is. */
+  missionsTitle: string;
+  missionsText: string;
   ctaTitle: string;
   ctaText: string;
 };
@@ -57,6 +64,9 @@ export const usecases: Record<string, UseCase> = {
       { q: 'Can we download all the wedding photos afterwards?', a: 'Yes. Every shot lands in one gallery you can browse, favourite and download — including a single zip of the entire wedding.' },
       { q: 'How many shots does each guest get?', a: 'You decide when you set up the event — a limited roll keeps it fun and intentional, just like a real disposable camera. You can top up shots any time.' },
     ],
+    packKey: 'wedding',
+    missionsTitle: 'A shot list for every table.',
+    missionsText: 'Choose the moments you’d hate to come home without and they print on the table cards. Guests tick each one off in the camera as they shoot it, which is how you end up with the cake before it was cut and your great-aunt on the dance floor — frames nobody working the room could be standing next to. Each guest has one roll and sees nothing until the reveal, so spending a shot on the list is a decision they actually make.',
     ctaTitle: 'Set up your wedding camera in a minute.',
     ctaText: 'Create your event free, print the table QR, and have it ready before the first guest arrives.',
   },
@@ -82,6 +92,9 @@ export const usecases: Record<string, UseCase> = {
       { q: 'When do the party photos appear?', a: 'You choose: reveal everything at once when the party ends, or show photos live as they’re taken.' },
       { q: 'Can everyone download the photos after?', a: 'Yes — one shared gallery for the whole party, with a full zip download.' },
     ],
+    packKey: 'birthday',
+    missionsTitle: 'Give the party something to hunt for.',
+    missionsText: 'A list on the table turns the guests into photographers with a job. The candles still lit, the worst party hat, the face when the present comes out of the bag — they tick each one off in the camera as they get it. Nobody can shoot the same thing twenty times and keep the best one, so what comes back is the first honest attempt.',
     ctaTitle: 'Get the party shooting.',
     ctaText: 'Create your event free and share one QR code with everyone — the gallery builds itself.',
   },
@@ -107,6 +120,9 @@ export const usecases: Record<string, UseCase> = {
       { q: 'Can we get all the photos for marketing afterwards?', a: 'Yes — download the whole event as a zip, or generate a slideshow video for the recap.' },
       { q: 'Is it suitable for large conferences?', a: 'Yes — pick a guest tier to match attendance, and top up shots or capacity any time during the event.' },
     ],
+    packKey: 'corporate',
+    missionsTitle: 'The bits nobody thinks to photograph.',
+    missionsText: 'Attendees will shoot the keynote without being asked. Put a list on the tables and you also get the coffee queue, the busiest whiteboard, and two people from teams that never speak. Each mission ticks off in the app as it is taken, so afterwards you can see which prompts the room actually went for — worth knowing before you plan the next one.',
     ctaTitle: 'Capture your next company event.',
     ctaText: 'Create an event, drop the QR on your signage, and collect every attendee’s photos in one gallery.',
   },
@@ -132,6 +148,9 @@ export const usecases: Record<string, UseCase> = {
       { q: 'When do the photos appear?', a: 'You choose — reveal them all at once when the shower ends, or show them live as they’re taken.' },
       { q: 'Can we download all the photos afterwards?', a: 'Yes — one shared gallery with a full zip download to keep forever.' },
     ],
+    packKey: 'baby-shower',
+    missionsTitle: 'A gentle list for the tables.',
+    missionsText: 'Nobody wants a scavenger hunt at a baby shower, and this works differently. A short list gives the guest who knows one person in the room a reason to talk to someone else, and it makes sure the dessert table got photographed before the games started. Guests tick each one off in the camera, and the whole lot stays hidden until you reveal it together.',
     ctaTitle: 'Set up your baby-shower camera.',
     ctaText: 'Create your event free, share one QR code, and gather every guest’s photos into one keepsake gallery.',
   },
@@ -156,6 +175,9 @@ export const usecases: Record<string, UseCase> = {
       { q: 'Can we keep the photos private until the end?', a: 'Yes — choose the end-of-night reveal so nothing shows until the party’s over, then it all reappears at once.' },
       { q: 'Can we get all the photos afterwards?', a: 'Yes — one shared gallery with a full zip download for the bride to keep.' },
     ],
+    packKey: 'hens',
+    missionsTitle: 'One list, however the day splits up.',
+    missionsText: 'Hen dos run long and the group comes apart and back together. A list keeps everyone shooting the same day: matching outfits before they wilt, the sash on someone it was never meant for, the one quiet moment somewhere in the middle. Missions tick off in the camera as they happen, and nothing is visible until the end, so nobody gets to edit the story while it is still going on.',
     ctaTitle: 'Get the whole night in one gallery.',
     ctaText: 'Create your event free and share one QR — every photo from every phone, in one place.',
   },
@@ -180,6 +202,9 @@ export const usecases: Record<string, UseCase> = {
       { q: 'Can we use it again for the wedding?', a: 'Yes — set up a fresh event for the wedding when the time comes. Same simple QR, new gallery.' },
       { q: 'Can everyone download the photos?', a: 'Yes — one shared gallery with a full zip download.' },
     ],
+    packKey: 'engagement',
+    missionsTitle: 'A dry run for the wedding list.',
+    missionsText: 'An engagement party is usually the first time both sides are in one room, which is exactly why the list is worth printing. Ask for the ring close up, both families in one frame, the longest-married couple in the room. Guests tick them off as they shoot, on a fixed roll with no previews, so what comes back is what was in front of them.',
     ctaTitle: 'Capture the celebration.',
     ctaText: 'Create your event free, share one QR, and collect every guest’s photos from the night.',
   },
@@ -204,6 +229,9 @@ export const usecases: Record<string, UseCase> = {
       { q: 'Can family who couldn’t attend see the photos?', a: 'Yes — create a share link to the gallery so distant family can view and download.' },
       { q: 'Can we download everything afterwards?', a: 'Yes — one shared gallery with a full zip to keep.' },
     ],
+    packKey: 'graduation',
+    missionsTitle: 'Decide what gets photographed.',
+    missionsText: 'Half the day is a ceremony and the other half is a party, and the phone shots usually do neither of them properly. A printed list settles it in advance: the cap mid-air, the teacher who mattered, whoever paid for all this. Guests tick each one off in the camera as they go, and the whole gallery arrives at once when it is over.',
     ctaTitle: 'Capture the big day.',
     ctaText: 'Create your event free, share one QR, and gather every photo from the graduation into one gallery.',
   },
@@ -228,6 +256,9 @@ export const usecases: Record<string, UseCase> = {
       { q: 'Is there a free option?', a: 'Free for up to 10 guests with all features; larger parties are a one-off pass from A$5.' },
       { q: 'Can we download all the photos?', a: 'Yes — one shared gallery with a full zip download.' },
     ],
+    packKey: 'christmas',
+    missionsTitle: 'Something for the tables besides crackers.',
+    missionsText: 'A work Christmas party needs a reason for people to get up and mix, and a shot list is a cheap one. The worst jumper, a cracker mid-pull, someone from a team you never work with — each one ticks off in the app as it is taken. One roll each and no previews, so the photos are all first takes and they look like it.',
     ctaTitle: 'Capture the holiday party.',
     ctaText: 'Create your event free, share one QR, and collect everyone’s photos from the night in one gallery.',
   },

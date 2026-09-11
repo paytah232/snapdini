@@ -4,6 +4,7 @@
   import { page } from '$app/stores';
   import SiteFooter from '$lib/components/SiteFooter.svelte';
   import Logo from '$lib/components/Logo.svelte';
+  import MissionList from '$lib/components/MissionList.svelte';
   import { appearance, setAppearance } from '$lib/appearance';
   import { usecases, type UseCase } from '$lib/usecases';
 
@@ -106,6 +107,15 @@
 </section>
 
 <section class="band">
+  <div class="kicker">Photo missions</div>
+  <h2>{content.missionsTitle}</h2>
+  <div class="missions">
+    <p>{content.missionsText}</p>
+    <MissionList eventType={content.packKey} />
+  </div>
+</section>
+
+<section class="band">
   <div class="kicker">How it works</div>
   <h2>Set it up in about a minute.</h2>
   <div class="grid steps">
@@ -187,6 +197,8 @@
   .card h3 { font-size: 1.05rem; margin: 12px 0 8px; }
   .card p { color: var(--text-muted); font-size: .92rem; }
   .step-n { font-size: .78rem; color: var(--accent); font-family: var(--font-mono); }
+  .missions { display: grid; grid-template-columns: 1.05fr .95fr; gap: 40px; align-items: start; }
+  .missions p { color: var(--text-muted); font-size: .98rem; line-height: 1.6; margin: 0; }
   .cta-card { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 54px 40px; text-align: center; }
   .cta-card h2 { margin-left: auto; margin-right: auto; }
   .cta-card p { color: var(--text-muted); margin: 14px auto 28px; max-width: 44ch; }
@@ -196,6 +208,7 @@
   .also-link:hover { border-color: var(--accent); }
   @media (max-width: 820px) {
     .grid, .grid.steps { grid-template-columns: 1fr 1fr; }
+    .missions { grid-template-columns: 1fr; gap: 26px; }
   }
   @media (max-width: 520px) { .grid, .grid.steps { grid-template-columns: 1fr; } }
 </style>

@@ -445,6 +445,7 @@
             {/if}
           </div>
 
+          {#if p.challenge}<div class="mission" title={p.challenge}>{p.challenge}</div>{/if}
           <div class="meta">{p.participantName} · {fmtTime(p.takenAt)}</div>
           {#if mediaMeta(p)}<div class="media-meta">{p.mediaType === 'video' ? '🎥' : '🖼'} {mediaMeta(p)}</div>{/if}
 
@@ -482,7 +483,7 @@
         <div class="srow">
           <span class="counter">{singleIndex + 1} / {filtered.length}</span>
           <button class="star" class:on={current.rating >= 5} on:click={() => onFavouriteClick(current)} aria-label="Favourite">{current.rating >= 5 ? '★' : '☆'}</button>
-          <span class="single-meta">{current.participantName} · {fmtFull(current.takenAt)}{#if mediaMeta(current)} · {mediaMeta(current)}{/if}</span>
+          <span class="single-meta">{#if current.challenge}<span class="smission">{current.challenge}</span> · {/if}{current.participantName} · {fmtFull(current.takenAt)}{#if mediaMeta(current)} · {mediaMeta(current)}{/if}</span>
         </div>
         <div class="srow">
           {#if current.status === 'rejected'}
@@ -608,7 +609,11 @@
     display: flex; align-items: center; justify-content: center; font-size: 0.85rem; line-height: 1;
     color: var(--accent); background: rgba(0,0,0,.5); box-shadow: 0 1px 4px rgba(0,0,0,.4); }
 
+  /* The mission this shot was for, above the shooter line because it says what the photo IS. Full
+     text on hover, since a card is far narrower than the 48 characters a mission may run to. */
+  .mission { font-size: 0.72rem; font-weight: 700; color: var(--text); padding: 8px 10px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .meta { font-size: 0.7rem; color: var(--text-muted); padding: 8px 10px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mission + .meta { padding-top: 2px; }
   .media-meta { font-size: 0.64rem; color: var(--text-muted); font-family: var(--font-mono); padding: 2px 10px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.85; }
   .mod { display: flex; gap: 6px; padding: 8px; flex-wrap: nowrap; }
   /* Keep mod-button labels on one line so a narrow (2-button) row never grows taller than a
@@ -640,6 +645,7 @@
   .srow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .counter { font-size: 0.82rem; color: var(--text-muted); font-weight: 700; white-space: nowrap; }
   .single-meta { flex: 1; font-size: 0.76rem; color: var(--text-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .single-meta .smission { color: var(--text); font-weight: 700; }
 
   @media (min-width: 640px) {
     .grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }

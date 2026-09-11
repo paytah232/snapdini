@@ -16,6 +16,7 @@
   import StartYourOwn from '$lib/components/StartYourOwn.svelte';
   import GuestFeedback from '$lib/components/GuestFeedback.svelte';
   import Logo from '$lib/components/Logo.svelte';
+  import Confetti from './Confetti.svelte';
   import FeedbackModal from '$lib/components/FeedbackModal.svelte';
 
   export let identifier: string; // joinCode or slug
@@ -110,8 +111,30 @@
   let aspect = '1:1';
 
   // upload queue
-  interface QueueItem { id: string; blob: Blob; mediaType: 'photo' | 'video'; source: 'capture' | 'upload'; ext: string; status: 'pending' | 'uploading' | 'done' | 'error'; error?: string; progress?: number; size: number; durationSecs?: number; w?: number; h?: number; retries?: number; uploadId?: string; doneChunks?: number[]; }
+  interface QueueItem { id: string; blob: Blob; mediaType: 'photo' | 'video'; source: 'capture' | 'upload'; ext: string; status: 'pending' | 'uploading' | 'done' | 'error'; error?: string; progress?: number; size: number; durationSecs?: number; w?: number; h?: number; retries?: number; uploadId?: string; challengeId?: string; doneChunks?: number[]; }
   const MAX_UPLOAD_RETRIES = 5;   // auto-retry a failing upload this many times (with backoff) before asking the user
+  // ── Photo missions ─────────────────────────────────────────────────────────
+  //
+  // The host's shot list, and which of them this guest has already captured. Both come from the
+  // join / me responses rather than the public event, because a guest is handed ONE card of
+  // possibly several and must never be shown somebody else's.
+  //
+  // `armed` is the mission the next shot counts towards. Nothing is armed by default: a guest who
+  // ignores the list entirely still just takes photos, which is the point of a disposable camera.
+  let missions: { id: string; text: string }[] = [];
+  let missionsDone: string[] = [];
+  let armed: string | null = null;
+  let missionsOpen = false;
+  let confetti: { burst: (n?: number) => void } | undefined;
+  $: missionsLeft = missions.filter((m) => !missionsDone.includes(m.id));
+  $: armedText = missions.find((m) => m.id === armed)?.text ?? '';
+  const isDone = (id: string) => missionsDone.includes(id);
+  function armMission(id: string) {
+    // Tapping the armed one again disarms it, so there is always a way back to just shooting.
+    armed = armed === id ? null : id;
+    missionsOpen = false;
+  }
+
   let queue: QueueItem[] = [];
   let uploading = false;
   let capturing = false;          // one capture at a time (guards rapid double-taps)
@@ -229,6 +252,8 @@
         faceMatching = !!me.faceMatching;
         feedbackDone = !!me.feedbackGiven;
         allowDownloads = me.allowDownloads;
+        missions = Array.isArray(me.challenges) ? me.challenges : [];
+        missionsDone = Array.isArray(me.challengesDone) ? me.challengesDone : [];
         await enterCamera();
         return;
       } catch {
@@ -298,6 +323,8 @@
       canAskHost = !!r.canAskHost;
       faceMatching = !!r.faceMatching;
       feedbackDone = !!r.feedbackGiven;
+      missions = Array.isArray(r.challenges) ? r.challenges : [];
+      missionsDone = Array.isArray(r.challengesDone) ? r.challengesDone : [];
       saveSession(r.joinCode, r.sessionToken);
       trackEvent('joined', undefined, r.joinCode);
       if (r.recovered) showToast(`Welcome back! You've ${photosRemaining} shot${photosRemaining === 1 ? '' : 's'} left.`);
@@ -771,8 +798,11 @@
   // the app (often deliberately, for 4K the browser cannot manage) and cannot be re-trimmed, so the
   // server keeps it even when it runs over. Defaults to 'capture' — the strict side.
   function enqueue(blob: Blob, mediaType: 'photo' | 'video', ext: string, source: 'capture' | 'upload' = 'capture', extra?: { durationSecs?: number; w?: number; h?: number }) {
+    // Whatever was armed at the moment of the shot, not at the moment of upload: a guest may well
+    // arm the next mission while this one is still going up.
+    const challengeId = armed ?? undefined;
     const id = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
-    queue = [...queue, { id, blob, mediaType, source, ext, status: 'pending', size: blob.size, ...extra }];
+    queue = [...queue, { id, blob, mediaType, source, ext, status: 'pending', size: blob.size, challengeId, ...extra }];
     trackEvent('photo_captured', { kind: mediaType, source }, ev?.joinCode);
     // Persist to IndexedDB immediately so the capture survives an outage / reload / closed tab.
     if (sessionToken && ev) putCapture({ id, joinCode: ev.joinCode, sessionToken, blob, mediaType, source, ext, createdAt: Date.now() }).catch(() => {});
@@ -875,6 +905,7 @@
       form.append('photo', item.blob, `media.${item.ext}`);
       form.append('sessionToken', sessionToken!);
       form.append('source', item.source);
+      if (item.challengeId) form.append('challengeId', item.challengeId);
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/photos');
       xhr.upload.onprogress = (e) => { if (e.lengthComputable) { item.progress = Math.round((e.loaded / e.total) * 100); queue = queue; } };
@@ -940,7 +971,7 @@
     }
     const complete = () => fetch('/api/photos/complete', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
-      body: JSON.stringify({ sessionToken, uploadId, total, ext: item.ext, mediaType: item.mediaType, source: item.source }),
+      body: JSON.stringify({ sessionToken, uploadId, total, ext: item.ext, mediaType: item.mediaType, source: item.source, challengeId: item.challengeId }),
     });
     let res = await complete();
     if (res.status === 409) {   // server missing some parts → resend them, then retry complete
@@ -1057,6 +1088,18 @@
       // optimistic count during a burst, so only ever take the lower of the two.
       // Authoritative: this already accounts for every uploaded photo including this one.
       serverRemaining = data.photosRemaining;
+      // A mission just landed. Tick it locally rather than refetching — the server derives progress
+      // from the photos table, so a reload agrees with this; doing it here just avoids a round trip
+      // before the guest sees their own list update.
+      if (item.challengeId && !missionsDone.includes(item.challengeId)) {
+        missionsDone = [...missionsDone, item.challengeId];
+        confetti?.burst();
+        const left = missions.filter((m) => !missionsDone.includes(m.id)).length;
+        showToast(left ? `Nice — ${left} to go` : 'That’s the whole list. Well done.');
+        trackEvent('mission_captured', { left }, ev?.joinCode);
+      }
+      // Disarm either way: the next shot should be an ordinary one unless they say otherwise.
+      if (item.challengeId && armed === item.challengeId) armed = null;
       delCapture(item.id).catch(() => {});   // uploaded → drop from the offline queue
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : 'Upload failed';
@@ -1309,6 +1352,7 @@
         </div>
       {/if}
       {#if fillActive}<div class="fill"></div>{/if}
+      <Confetti bind:this={confetti} colors={ev?.theme?.accent ? [ev.theme.accent, '#f4e4c1', '#e8825a', '#7fb3a3'] : undefined} />
       <div class="topbar">
         {#if ev?.isDemo}
           <div class="demo-nav">
@@ -1319,8 +1363,27 @@
         {:else}
           <div class="evname"><Logo word={false} color={ev?.theme?.accent ?? ''} /> {ev?.name}</div>
         {/if}
+        {#if missions.length}
+          <!-- One small pill is the whole affordance. The camera screen has to stay a camera: a
+               permanent list would compete with the viewfinder, so the list lives behind this. -->
+          <button class="mbadge" class:alldone={!missionsLeft.length}
+                  on:click={() => { missionsOpen = true; trackEvent('mission_list_opened', undefined, ev?.joinCode); }}
+                  aria-label="Photo missions, {missionsDone.length} of {missions.length} done">
+            <span class="mb-ico" aria-hidden="true">{!missionsLeft.length ? '✓' : '◎'}</span>
+            {missionsDone.length}/{missions.length}
+          </button>
+        {/if}
         <div class="counter" class:low={photosRemaining <= 5}>{photosRemaining}<small>left</small></div>
       </div>
+      {#if armed}
+        <!-- Shown only while a mission is armed, so there is never any doubt what the next shot
+             counts towards — and an obvious way out of it. -->
+        <div class="armed">
+          <span class="armed-label">Shooting</span>
+          <span class="armed-text">{armedText}</span>
+          <button class="armed-x" on:click={() => (armed = null)} aria-label="Cancel this mission">✕</button>
+        </div>
+      {/if}
       <div class="rail">
         {#if facing === 'user'}<button class="ctrl" on:click={() => (screenFlash = !screenFlash)} class:active={screenFlash} title="Flash" aria-label="Flash">⚡</button>{/if}
         {#if torchSupported && !ev?.noFlash}<button class="ctrl" on:click={() => (flashArmed = !flashArmed)} class:active={flashArmed} title="Flash" aria-label="Flash">⚡</button>{/if}
@@ -1333,6 +1396,36 @@
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
         </button>
       </div>
+      {#if missionsOpen}
+        <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
+        <div class="settings-back" on:click|self={() => (missionsOpen = false)} role="dialog" aria-modal="true" aria-label="Photo missions">
+          <div class="settings-modal">
+            <div class="sm-head">
+              <span>Your photo missions</span>
+              <button class="ctrl tiny" on:click={() => (missionsOpen = false)} aria-label="Close">✕</button>
+            </div>
+            <p class="m-lede">
+              {#if !missionsLeft.length}
+                Every one of them, captured. Nothing left to do but enjoy the party.
+              {:else}
+                Pick one, then shoot it. You don’t have to — these are just here if you fancy it.
+              {/if}
+            </p>
+            <div class="m-prog"><div class="m-prog-fill" style="width:{(missionsDone.length / missions.length) * 100}%"></div></div>
+            <ul class="m-list">
+              {#each missions as m (m.id)}
+                <li class="m-item" class:done={isDone(m.id)} class:armed={armed === m.id}>
+                  <button class="m-btn" on:click={() => armMission(m.id)} disabled={isDone(m.id)}>
+                    <span class="m-tick" aria-hidden="true">{isDone(m.id) ? '✓' : armed === m.id ? '◉' : '○'}</span>
+                    <span class="m-text">{m.text}</span>
+                    {#if !isDone(m.id)}<span class="m-go">{armed === m.id ? 'Armed' : 'Shoot'}</span>{/if}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          </div>
+        </div>
+      {/if}
       {#if settingsOpen}
         <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
         <div class="settings-back" on:click|self={() => (settingsOpen = false)} role="dialog" aria-modal="true" aria-label="Camera settings">
@@ -1923,4 +2016,68 @@
   .play { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 1.5rem; text-shadow: 0 1px 4px #000; }
   .snapno { position: absolute; top: 5px; left: 5px; min-width: 18px; padding: 1px 5px; border-radius: 9px;
     background: rgba(0,0,0,0.6); color: #fff; font-size: 0.7rem; font-weight: 700; line-height: 1.4; pointer-events: none; }
+
+  /* ── Photo missions ─────────────────────────────────────────────────────── */
+  /* The pill sits beside the shot counter and borrows its shape, so the topbar still reads as one
+     row of two small facts rather than as a new piece of furniture. */
+  .mbadge {
+    /* The topbar is pointer-events:none so taps fall through to the viewfinder; anything meant to
+       be tappable in there has to opt back in, the same way .home-btn does. */
+    pointer-events: auto;
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 10px; border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, .28);
+    background: rgba(0, 0, 0, .42);
+    color: #fff; font: inherit; font-size: .8rem; font-variant-numeric: tabular-nums;
+    cursor: pointer; -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  }
+  .mbadge:hover { border-color: rgba(255, 255, 255, .5); }
+  .mbadge.alldone { border-color: rgba(127, 179, 163, .75); color: #cdeade; }
+  .mb-ico { font-size: .9em; opacity: .9; }
+
+  .armed {
+    /* Anchored between the left edge and the control rail rather than centred: the rail is 40px at
+       right:14px starting at top:64px, so a centred strip runs underneath it on a narrow phone and
+       buries its own cancel button. Left-anchored with the rail's gutter reserved, it can never
+       collide at any width. */
+    position: absolute; left: 12px; right: 66px; max-width: 460px;
+    top: 58px; z-index: 6;
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px 6px 12px; border-radius: 999px;
+    background: rgba(0, 0, 0, .55); border: 1px solid rgba(255, 255, 255, .22);
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    color: #fff; font-size: .82rem;
+  }
+  .armed-label { opacity: .62; flex: none; font-size: .74rem; text-transform: uppercase; letter-spacing: .06em; }
+  /* The mission itself can be 48 characters, so it has to be allowed to shrink rather than push the
+     cancel button off the strip. */
+  .armed-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .armed-x {
+    flex: none; width: 22px; height: 22px; border-radius: 50%; cursor: pointer;
+    border: none; background: rgba(255, 255, 255, .16); color: #fff; font-size: .72rem; line-height: 1;
+  }
+  .armed-x:hover { background: rgba(255, 255, 255, .28); }
+
+  .m-lede { margin: 0 0 12px; font-size: .86rem; line-height: 1.45; color: var(--text-muted, #b9b9b9); }
+  .m-prog { height: 4px; border-radius: 999px; background: rgba(255, 255, 255, .14); overflow: hidden; margin-bottom: 12px; }
+  .m-prog-fill { height: 100%; background: #7fb3a3; transition: width .35s ease; }
+  .m-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+  .m-btn {
+    width: 100%; display: flex; align-items: center; gap: 10px; text-align: left;
+    padding: 11px 12px; border-radius: 11px; cursor: pointer; font: inherit; font-size: .9rem;
+    border: 1px solid rgba(255, 255, 255, .16); background: rgba(255, 255, 255, .05); color: inherit;
+  }
+  .m-btn:hover:not(:disabled) { background: rgba(255, 255, 255, .1); }
+  .m-item.armed .m-btn { border-color: #7fb3a3; background: rgba(127, 179, 163, .14); }
+  /* Done stays legible rather than greyed to nothing — it is a record of what they did. */
+  .m-item.done .m-btn { opacity: .55; cursor: default; }
+  .m-item.done .m-text { text-decoration: line-through; }
+  .m-tick { flex: none; width: 1.1em; text-align: center; }
+  .m-text { flex: 1; min-width: 0; }
+  .m-go { flex: none; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; opacity: .6; }
+  .m-item.armed .m-go { opacity: 1; color: #7fb3a3; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .m-prog-fill { transition: none; }
+  }
 </style>

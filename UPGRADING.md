@@ -132,6 +132,13 @@ docker compose up -d
 
 ## Version notes
 
+### 1.4.4
+Adds **photo missions** — an optional shot list a host gives guests, printed on cards and ticked off
+in the camera. Nothing to configure: it is off for every existing event until a host sets one up.
+
+Migrations `0038` (event type, challenges, `photos.challenge_id`) and `0039`
+(`participants.challenge_set`) apply automatically on boot. All columns are nullable and additive.
+
 ### 1.4.3
 **Action required if you want your site in search results.** Search indexing is now opt-in per
 deployment, because deriving SEO tags from the request host let a staging copy declare itself

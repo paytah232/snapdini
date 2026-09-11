@@ -15,7 +15,13 @@ export type EventName =
   | 'event_create_started' | 'event_created' | 'checkout_started' | 'checkout_returned'
   | 'upgrade_panel_opened' | 'poster_opened' | 'slideshow_started' | 'share_link_created'
   | 'join_opened' | 'joined' | 'camera_permission_granted' | 'camera_permission_denied'
-  | 'photo_captured' | 'roll_completed' | 'guest_gallery_opened'
+  | 'photo_captured' | 'roll_completed'
+  // Photo missions: a guest opening their card, completing one, and a host saving a list. The first
+  // two give the engagement read the feature exists for — a list nobody opens is a different problem
+  // from one nobody finishes. The third is what later ranks packs by what hosts actually pick.
+  | 'mission_list_opened'
+  | 'mission_captured'
+  | 'missions_saved' | 'guest_gallery_opened'
   | 'guest_feedback_opened' | 'guest_feedback_sent' | 'referral_card_click' | 'face_finder_opened';
 
 type Queued = { name: EventName; path?: string; props?: Record<string, string | number | boolean>; joinCode?: string };

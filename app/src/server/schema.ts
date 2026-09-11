@@ -104,6 +104,8 @@ export const events = pgTable('events', {
   amountPaidCents: integer('amount_paid_cents').notNull().default(0), // total paid so far (for upgrade top-ups)
   brandingRemovalPaid: boolean('branding_removal_paid').notNull().default(false), // bought the $1 "no Snapdini frames" slideshow add-on
   posterConfig: text('poster_config'),                      // saved poster designer customisation (JSON)
+  eventType: text('event_type'),                            // wedding | birthday | … | NULL = unstated
+  challenges: text('challenges'),                           // chosen photo missions (JSON [{id,text}])
   purgeAt: ms('purge_at'),
   // Retention-end archive: when purged, media + participant rows are deleted but a slim
   // record (settings + these final stats) is kept for the organizer's history.
@@ -171,6 +173,7 @@ export const participants = pgTable('participants', {
   // host lowering the event roll cannot remove something a guest paid for.
   extraPhotos: integer('extra_photos').notNull().default(0),
   upgradeEmail: text('upgrade_email'),
+  challengeSet: text('challenge_set'),                      // which mission card this guest was handed
   amountPaidCents: integer('amount_paid_cents').notNull().default(0),
   stripePaymentIntent: text('stripe_payment_intent'),
   requestedMoreAt: ms('requested_more_at'),
@@ -190,6 +193,7 @@ export const photos = pgTable('photos', {
   participantId: text('participant_id').notNull().references(() => participants.id, { onDelete: 'cascade' }),
   filename: text('filename').notNull(),
   mediaType: text('media_type').notNull().default('photo'),
+  challengeId: text('challenge_id'),                        // the photo mission this shot satisfied
   takenAt: ms('taken_at').notNull(),
   isHighlighted: boolean('is_highlighted').notNull().default(false),
   status: text('status').notNull().default('approved'),

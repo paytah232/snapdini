@@ -6,6 +6,7 @@ import { ZipArchive } from 'archiver';
 import { v4 as uuidv4 } from 'uuid';
 import { and, asc, count, desc, eq, inArray, ne, or } from 'drizzle-orm';
 import { db } from '../db';
+import { readSets, isOfferedChallenge } from '../challenges';
 import { effectiveMaxPhotos, hasShotsLeft, photosRemaining as remainingFor } from '../allowance';
 import { matchNewPhoto } from './faces';
 import { events, participants, photos } from '../schema';
@@ -91,6 +92,7 @@ type PhotoRowInput = {
   takenAt: number;
   participantName: string;
   participantId: string;
+  challengeId: string | null;
   isHighlighted: boolean;
   rating?: number | null;
   mediaType?: string | null;
@@ -101,7 +103,20 @@ type PhotoRowInput = {
   durationMs?: number | null;
 };
 
-function photoRow(p: PhotoRowInput, myParticipantId: string | null) {
+// Mission id → the wording the host wrote, across EVERY set on the event. Built once per request
+// so a row costs a lookup rather than a JSON parse, and taken from the event's whole list rather
+// than one guest's card: the host reviewing the album must see a caption on every photo, not only
+// on the shots from whichever card they happen to be holding.
+// First set wins a shared id: two cards may reuse an id with different wording, and a stable choice
+// beats a caption that depends on set order.
+export function challengeCaptions(stored: string | null | undefined): Map<string, string> {
+  const byId = new Map<string, string>();
+  for (const set of readSets(stored))
+    for (const c of set.items) if (!byId.has(c.id)) byId.set(c.id, c.text);
+  return byId;
+}
+
+function photoRow(p: PhotoRowInput, myParticipantId: string | null, captions: Map<string, string>) {
   return {
     id:              p.id,
     url:             `/uploads/${p.filename}`,                       // full-quality original (download)
@@ -113,6 +128,10 @@ function photoRow(p: PhotoRowInput, myParticipantId: string | null) {
     takenAt:         p.takenAt,
     participantName: p.participantName,
     participantId:   p.participantId,
+    // The mission this shot was for, as the host wrote it — shown as the photo's caption, which is
+    // what turns the album into an annotated record instead of a pile of photos. An id the host has
+    // since deleted from their list resolves to nothing rather than leaking a raw slug.
+    challenge:       (p.challengeId && captions.get(p.challengeId)) || null,
     isHighlighted:   !!p.isHighlighted,
     rating:          p.rating ?? 0,
     mediaType:       p.mediaType || 'photo',
@@ -130,6 +149,7 @@ function photoRow(p: PhotoRowInput, myParticipantId: string | null) {
 type UploadParticipant = {
   id: string; photosTaken: number; maxPhotos: number; extraPhotos: number; isLocked: boolean;
   startsAt: number; expiresAt: number; eventId: string; moderationEnabled: boolean; videoSeconds: number;
+  challengeSet: string | null; eventChallenges: string | null;
 };
 
 async function participantForUpload(sessionToken: string): Promise<UploadParticipant | null> {
@@ -138,6 +158,7 @@ async function participantForUpload(sessionToken: string): Promise<UploadPartici
     extraPhotos: participants.extraPhotos,
     isLocked: events.isLocked, startsAt: events.startsAt, expiresAt: events.expiresAt,
     eventId: events.id, moderationEnabled: events.moderationEnabled, videoSeconds: events.videoSeconds,
+    challengeSet: participants.challengeSet, eventChallenges: events.challenges,
   }).from(participants).innerJoin(events, eq(events.id, participants.eventId))
     .where(eq(participants.sessionToken, sessionToken));
   return p ?? null;
@@ -167,7 +188,8 @@ function gateUpload(p: UploadParticipant, isVideo: boolean): { status: number; e
 // Move a fully-received staged file into the event folder, process it (strip+thumbnail for images,
 // probe+poster for video), insert the photo row, and bump the participant's count. Returns the
 // success payload. Throws an error tagged { status: 400 } for an invalid image (file cleaned first).
-async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo: boolean, source: 'capture' | 'upload' = 'capture') {
+async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo: boolean,
+                              source: 'capture' | 'upload' = 'capture', challengeRaw?: unknown) {
   const destDir = eventDir(p.eventId);
   fs.mkdirSync(destDir, { recursive: true });
   const baseName = path.basename(stagedPath);                       // <uuid>.ext
@@ -221,11 +243,19 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
   }
 
   // Every item starts 'pending'; visibility is gated by the event's moderation SETTING at view time.
+  // Which mission this shot was for, if the guest picked one. Validated against THEIR set, not the
+  // event's whole list: the text becomes the photo's caption in the gallery, so an unchecked value
+  // would let a guest write arbitrary text under someone else's photo — and would let them tick off
+  // a mission from a card they were never handed.
+  const challengeId = isOfferedChallenge(readSets(p.eventChallenges), p.challengeSet, challengeRaw)
+    ? String(challengeRaw).trim() : null;
+
   const status = 'pending';
   const photoId = uuidv4();
   await db.insert(photos).values({
     id: photoId, eventId: p.eventId, participantId: p.id, filename: storedName,
     mediaType: isVideo ? 'video' : 'photo', takenAt: Date.now(), status,
+    challengeId,
     sizeBytes, width: dims.width ?? null, height: dims.height ?? null, durationMs: dims.durationMs ?? null,
     source,
   });
@@ -303,7 +333,7 @@ router.post('/', upload.single('photo'), async (req: Request, res: Response) => 
   if (gate) { fs.unlinkSync(req.file.path); return res.status(gate.status).json({ error: gate.error }); }
 
   try {
-    return res.json(await finalizeUpload(participant, req.file.path, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture'));
+    return res.json(await finalizeUpload(participant, req.file.path, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId));
   } catch (e) {
     return res.status((e as { status?: number }).status || 500).json({ error: (e as Error).message || 'Upload failed' });
   }
@@ -398,7 +428,7 @@ router.post('/complete', async (req: Request, res: Response) => {
   wipe();   // parts no longer needed
 
   try {
-    return res.json(await finalizeUpload(participant, staged, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture'));
+    return res.json(await finalizeUpload(participant, staged, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId));
   } catch (e) {
     return res.status((e as { status?: number }).status || 500).json({ error: (e as Error).message || 'Upload failed' });
   }
@@ -488,6 +518,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
   const revealed = isRevealed(event);
   // Visible set for guests/gallery: moderation on → only approved; off → anything not binned.
   const visible = event.moderationEnabled ? eq(photos.status, 'approved') : ne(photos.status, 'rejected');
+  const captions = challengeCaptions(event.challenges);
 
   // ── Organizer mode — sees all photos regardless of reveal state ───────────
   if (organizerCode) {
@@ -501,6 +532,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
         isHighlighted:   photos.isHighlighted,
         rating:          photos.rating,
         participantId:   photos.participantId,
+        challengeId:     photos.challengeId,
         mediaType:       photos.mediaType,
         sizeBytes:       photos.sizeBytes,
         width:           photos.width,
@@ -519,7 +551,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
       revealed: true,
       allowDownloads: !!event.allowDownloads,
       moderationEnabled: !!event.moderationEnabled,
-      photos: rows.map(p => photoRow(p, null)),
+      photos: rows.map(p => photoRow(p, null, captions)),
     });
   }
 
@@ -538,6 +570,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
         takenAt:         photos.takenAt,
         isHighlighted:   photos.isHighlighted,
         participantId:   photos.participantId,
+        challengeId:     photos.challengeId,
         mediaType:       photos.mediaType,
         sizeBytes:       photos.sizeBytes,
         width:           photos.width,
@@ -557,7 +590,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
     return res.json({
       revealed: true, hasHighlights,
       allowDownloads: !!event.allowDownloads,
-      photos: rows.map(p => photoRow(p, null)),
+      photos: rows.map(p => photoRow(p, null, captions)),
     });
   }
 
@@ -580,6 +613,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
         isHighlighted:   photos.isHighlighted,
         rating:          photos.rating,
         participantId:   photos.participantId,
+        challengeId:     photos.challengeId,
         mediaType:       photos.mediaType,
         sizeBytes:       photos.sizeBytes,
         width:           photos.width,
@@ -594,7 +628,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
       .orderBy(desc(photos.takenAt));   // newest first
     return res.json({ revealed: false, photoCount, revealMode: event.revealMode,
       revealAt: event.revealMode === 'at_end' ? event.expiresAt + (event.revealDelayHours || 0) * 3600000 : null,
-      myParticipantId: participant.id, photos: ownRows.map(p => photoRow(p, participant.id)) });
+      myParticipantId: participant.id, photos: ownRows.map(p => photoRow(p, participant.id, captions)) });
   }
 
   const rows = await db
@@ -604,6 +638,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
       takenAt:         photos.takenAt,
       isHighlighted:   photos.isHighlighted,
       participantId:   photos.participantId,
+      challengeId:     photos.challengeId,
       mediaType:       photos.mediaType,
       sizeBytes:       photos.sizeBytes,
       width:           photos.width,
@@ -628,7 +663,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
     revealed: true, hasHighlights,
     allowDownloads: !!event.allowDownloads,
     myParticipantId: participant.id,
-    photos: rows.map(p => photoRow(p, participant.id)),
+    photos: rows.map(p => photoRow(p, participant.id, captions)),
   });
 });
 

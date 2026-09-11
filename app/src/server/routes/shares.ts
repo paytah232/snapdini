@@ -4,7 +4,7 @@ import { db } from '../db';
 import { events, photos, participants, shares } from '../schema';
 import { thumbName } from '../images';
 import { isRevealed } from '../lib';
-import { zipPhotosToResponse } from './photos';
+import { challengeCaptions, zipPhotosToResponse } from './photos';
 
 const router = Router();
 
@@ -44,7 +44,7 @@ router.get('/:token', async (req: Request, res: Response) => {
   const rows = revealed ? await db
     .select({
       id: photos.id, filename: photos.filename, takenAt: photos.takenAt,
-      mediaType: photos.mediaType, isHighlighted: photos.isHighlighted,
+      mediaType: photos.mediaType, isHighlighted: photos.isHighlighted, challengeId: photos.challengeId,
       sizeBytes: photos.sizeBytes, width: photos.width, height: photos.height, durationMs: photos.durationMs,
       participantName: participants.name,
     })
@@ -52,6 +52,10 @@ router.get('/:token', async (req: Request, res: Response) => {
     .innerJoin(participants, eq(participants.id, photos.participantId))
     .where(where)
     .orderBy(desc(photos.takenAt)) : [];
+
+  // Mission id → the host's wording, resolved once for the whole page. A shared gallery is the
+  // copy that leaves the event, so it carries the captions too.
+  const captions = challengeCaptions(event.challenges);
 
   // Count (always, even pre-reveal) so the wall can show "N photos so far".
   const [{ n: photoTotal }] = await db.select({ n: count() }).from(photos).where(where);
@@ -74,6 +78,7 @@ router.get('/:token', async (req: Request, res: Response) => {
       thumbUrl: `/uploads/${thumbName(p.filename)}`,
       takenAt: p.takenAt,
       participantName: p.participantName,
+      challenge: (p.challengeId && captions.get(p.challengeId)) || null,
       isHighlighted: !!p.isHighlighted,
       mediaType: p.mediaType || 'photo',
       sizeBytes: p.sizeBytes ?? undefined,

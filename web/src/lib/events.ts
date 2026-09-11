@@ -10,6 +10,9 @@ export interface Photo {
   takenAt: number;
   participantName: string;
   participantId: string;
+  /** The mission this shot was for, in the host's own wording — the photo's caption. Null when the
+   *  guest just took a picture, which is most of them. */
+  challenge?: string | null;
   isHighlighted: boolean;
   rating: number; // 0–5; 5 == favourite
   mediaType: 'photo' | 'video';
@@ -64,6 +67,11 @@ export interface AdminEvent extends Omit<PublicEvent, 'participantCount'> {
   // entitlement (upgrades)
   guestCap: number; videoSeconds: number; retentionDays: number; paid: boolean; amountPaidCents: number;
   posterConfig: Record<string, unknown> | null; purged: boolean;
+  /** What kind of event the host chose in their theming. Null = they never said, which means
+   *  the general mission pack. */
+  eventType?: string | null;
+  /** The host's photo-mission cards. Several exist so different tables get different lists. */
+  challengeSets?: { key: string; label: string; items: { id: string; text: string }[] }[];
 }
 
 const org = (organizerCode: string) => ({ 'X-Organizer-Code': organizerCode });
@@ -198,9 +206,17 @@ export const getPhotosByOrganizer = (code: string, organizerCode: string) =>
 export const getGalleryPhotos = (code: string, highlightsOnly = false) =>
   api<PhotosResponse>(`/api/photos/${code}?gallery=true${highlightsOnly ? '&highlightsOnly=true' : ''}`);
 
+/** The missions on THIS guest's card, and the ids they have already captured. A guest is handed
+ *  one card of possibly several, so this is per-participant, never the event's whole list. */
+export type GuestMissions = {
+  challenges?: { id: string; text: string }[];
+  challengesDone?: string[];
+  challengeSet?: string | null;
+};
+
 export const joinEvent = (joinCode: string, name: string, email?: string) =>
-  postJson<{ participant: { id: string; name: string }; sessionToken: string; joinCode: string; photosRemaining: number; eventName: string; noFlash?: boolean; recovered?: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; feedbackGiven?: boolean; emailFromPayment?: boolean }>(
+  postJson<{ participant: { id: string; name: string }; sessionToken: string; joinCode: string; photosRemaining: number; eventName: string; noFlash?: boolean; recovered?: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; feedbackGiven?: boolean; emailFromPayment?: boolean } & GuestMissions>(
     '/api/participants', { joinCode, name, email: email || undefined });
 export const getMe = (sessionToken: string) =>
-  api<{ participant: { id: string; name: string; photosTaken: number; email: string | null }; photosRemaining: number; eventName: string; joinCode: string; slug: string | null; startsAt: number; expiresAt: number; isLocked: boolean; maxPhotos: number; extraPhotos?: number; allowDownloads: boolean; noFlash: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; feedbackGiven?: boolean; emailFromPayment?: boolean }>(
+  api<{ participant: { id: string; name: string; photosTaken: number; email: string | null }; photosRemaining: number; eventName: string; joinCode: string; slug: string | null; startsAt: number; expiresAt: number; isLocked: boolean; maxPhotos: number; extraPhotos?: number; allowDownloads: boolean; noFlash: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; feedbackGiven?: boolean; emailFromPayment?: boolean } & GuestMissions>(
     '/api/participants/me', { headers: { 'X-Session-Token': sessionToken } });

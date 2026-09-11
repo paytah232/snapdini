@@ -4,6 +4,7 @@
   import { showToast } from '$lib/toast';
   import { savePoster, type EventTheme } from '$lib/events';
   import { DEFAULT_EVENT_THEME } from '$lib/theme';
+  import { TICKS_OUTLINE, TICKS_EMOJI, tickFor, cleanTick } from '$lib/challenges';
   import EventImageEditor from './EventImageEditor.svelte';
 
   export let eventName: string;
@@ -95,8 +96,28 @@
   let activeTarget: CTarget = 'headline';
   let editorFile: File | null = null;
 
+  // ── Mission cards: a second OUTPUT of the same design, not a second design ──
+  // The printable mission card is how a shot list actually reaches a guest: four A6 cards to an A4
+  // sheet, one per place setting. It borrows the poster's title, colours, background and join
+  // details so the two read as one printed set; what is card-specific is the shot list itself, the
+  // tick glyph beside each row, and an ink-saver option — four cards a sheet on a home printer is a
+  // very different ink bill from one poster.
+  type MissionSet = { key: string; label: string; items: { id: string; text: string }[] };
+  let view: 'poster' | 'cards' = 'poster';
+  let sheets: MissionSet[] = [];
+  let eventType: string | null = null;
+  let sheetIdx = 0;
+  let cardsDrawn = false;                  // first sheet rendered — until then the preview spins
+  let cardCanvas: HTMLCanvasElement;
+  // Blank means "follow the poster title" / "follow the event type". Both defaults have to survive
+  // the modal opening before the event's missions have loaded, and a host who never opens this tab
+  // should still get a sensible card.
+  let cardTitle = '';
+  let cardTick = '';
+  let cardInkSaver = false;
+
   // ── Persistence (auto-save on every change) ──
-  $: cfg = { headline, message, stepsText, bgMode, cBg, codeDisplay, showFooterUrl, layout, colorsLocked, cHeadline, cMessage, cSteps, cCode, cFooter };
+  $: cfg = { headline, message, stepsText, bgMode, cBg, codeDisplay, showFooterUrl, layout, colorsLocked, cHeadline, cMessage, cSteps, cCode, cFooter, cardTitle, cardTick, cardInkSaver };
   // Keep the default text colours readable as the background changes — until the organizer edits a
   // colour (colorsLocked). The void refs make Svelte re-run this when bgMode/cBg/theme change.
   $: if (!colorsLocked) { void bgMode; void cBg; void theme; ({ cHeadline, cMessage, cSteps, cCode, cFooter } = themeDefaults()); }
@@ -132,6 +153,7 @@
     layout = cloneLayout(c.layout);
     colorsLocked = c.colorsLocked;
     cHeadline = c.cHeadline; cMessage = c.cMessage; cSteps = c.cSteps; cCode = c.cCode; cFooter = c.cFooter;
+    cardTitle = c.cardTitle; cardTick = c.cardTick; cardInkSaver = c.cardInkSaver;
   }
   async function step(from: string[], to: string[], setFrom: (v: string[]) => void, setTo: (v: string[]) => void) {
     if (!from.length) return;
@@ -193,6 +215,9 @@
       cHeadline = (c.cHeadline as string) ?? cHeadline; cMessage = (c.cMessage as string) ?? cMessage; cSteps = (c.cSteps as string) ?? cSteps;
       cCode = (c.cCode as string) ?? cCode; cFooter = (c.cFooter as string) ?? cFooter;
     }
+    // Card settings are plain overrides — an absent one keeps meaning "follow the poster".
+    cardTitle = (c.cardTitle as string) ?? cardTitle; cardTick = (c.cardTick as string) ?? cardTick;
+    cardInkSaver = (c.cardInkSaver as boolean) ?? cardInkSaver;
     if (bgMode === 'custom') bgMode = themeImageUrl ? 'event' : 'plain'; // custom blob can't persist across reloads
   }
 
@@ -465,6 +490,26 @@
 
   // Fetch a print-quality, white-background, high-error-correction QR for the poster (the in-app QR
   // passed in is small + tinted). Falls back silently to that prop QR if the fetch fails.
+  // One QR per set, cached.
+  //
+  // A card printed for Table B has to carry `?set=b`, or the guest who scans it gets whatever the
+  // round-robin hands out and may be given Table A's list — the card in their hand disagreeing with
+  // the app, which is exactly what printing several cards is meant to avoid. The server validates
+  // the key against the event's own sets before it goes anywhere near a QR.
+  const setQrCache = new Map<string, string>();
+  async function qrForSet(key: string | null): Promise<string> {
+    const k = key ?? '';
+    const hit = setQrCache.get(k);
+    if (hit) return hit;
+    try {
+      const q = `?print=1${k ? `&set=${encodeURIComponent(k)}` : ''}`;
+      const r = await fetch(`/api/events/${encodeURIComponent(joinCode)}/qr${q}`, { credentials: 'same-origin' });
+      const d = await r.json();
+      if (d?.qrCode) { setQrCache.set(k, d.qrCode); return d.qrCode; }
+    } catch { /* fall through to the plain QR — a card with the wrong set still joins the event */ }
+    return qrImg;
+  }
+
   async function loadPosterQr() {
     try {
       const r = await fetch(`/api/events/${encodeURIComponent(joinCode)}/qr?print=1`, { credentials: 'same-origin' });
@@ -472,12 +517,14 @@
       if (d?.qrCode) { qrImg = d.qrCode; scheduleRedraw(); }
     } catch { /* keep the provided QR */ }
   }
-  onMount(() => { restore(); mounted = true; loadPosterQr(); draw().catch(() => { busy = false; showToast('Could not build the poster', true); }); });
+  onMount(() => { restore(); mounted = true; loadPosterQr(); loadMissions(); draw().catch(() => { busy = false; showToast('Could not build the poster', true); }); });
   onDestroy(() => { if (customBgUrl) URL.revokeObjectURL(customBgUrl); });
 
-  function download(blob: Blob, ext: string) {
+  // `kind` names what was exported — the poster and each set's card sheet land in the same
+  // downloads folder, so "cards-b" has to be distinguishable from "poster" at a glance.
+  function download(blob: Blob, ext: string, kind = 'poster') {
     const href = URL.createObjectURL(blob); const a = document.createElement('a');
-    a.href = href; a.download = `${slug}-poster.${ext}`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(href);
+    a.href = href; a.download = `${slug}-${kind}.${ext}`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(href);
   }
   function exportPng() { canvas.toBlob((b) => b && download(b, 'png'), 'image/png'); }
   function exportJpg() { canvas.toBlob((b) => b && download(b, 'jpg'), 'image/jpeg', 0.92); }
@@ -495,6 +542,236 @@
     w.document.write(`<img src="${url}" style="width:100%" onload="window.focus();window.print()">`); w.document.close();
   }
 
+  // ── Mission card sheets ─────────────────────────────────────────────────────
+  // A4 is exactly 2×2 A6, so four cards tile one sheet with nothing left over. Everything below is
+  // laid out in the poster's own 1080×1527 design space — so px·0.194 ≈ mm still holds — and the
+  // canvas is scaled up by the transform on the way out.
+  const CARD_SCALE = 2;                // 2× A4 out: at 1× a 12px mission line prints mushy
+  const CW = W / 2, CH = H / 2;        // one A6 card in design space
+  const CARD_GAP = 10;                 // gutter inside the cut line, so scissors have somewhere to go
+  const CARD_PAD = 34;                 // ≈6.6mm of quiet space inside the card's edge
+  // The card's QR. QR_MIN_PX (≈33mm) is the floor that keeps a code with our logo punched into its
+  // centre scannable, and this clears it at ≈39mm. QR_WARN_PX (≈45mm) is deliberately NOT applied
+  // here: that line sizes a code to be read across a room, and a card is held in the hand.
+  const CARD_QR_PX = 200;
+  const CARD_FAMILY = '"Helvetica Neue", Arial, sans-serif';
+  const CARD_MONO = 'ui-monospace, Menlo, Consolas, monospace';
+
+  $: activeSheet = sheets[sheetIdx] ?? sheets[0] ?? null;
+  // Heading and tick follow the design the host already made until they say otherwise.
+  $: cardHeading = cardTitle.trim() || headline.trim() || eventName || 'Our Event';
+  $: cardGlyph = cleanTick(cardTick) ?? tickFor(eventType);
+  // Emoji sit outside the BMP and are painted in colour by the device's own font, so they ignore
+  // the card's ink — the trade-off documented in challenges.ts. Surface it rather than let someone
+  // discover it at the printer.
+  $: tickIsEmoji = ([...cardGlyph][0]?.codePointAt(0) ?? 0) > 0xffff;
+  // Is the card dark? Mirrors what drawCard actually paints: the poster's (darkened) image when
+  // there is one, otherwise the poster's plain colour — unless ink-saver forces white paper.
+  $: cardDark = !cardInkSaver && (!!(bgMode !== 'plain' && bgSrc()) || lum(cBg) <= 140);
+  // Swap a colour for a readable version of itself on the given background. The poster's own
+  // colours are correct for the poster, not necessarily for the card: its near-black join code is
+  // invisible on a dark card, its white mission line invisible on an ink-saver one.
+  const readableOn = (hex: string, dark: boolean): string =>
+    dark ? (lum(hex) < 110 ? '#ffffff' : hex) : (lum(hex) > 170 ? '#1a1a1a' : hex);
+  $: cardInk = {
+    title: readableOn(cHeadline, cardDark),
+    body:  readableOn(cSteps, cardDark),
+    code:  readableOn(cCode, cardDark),
+    muted: cardDark ? 'rgba(255,255,255,0.72)' : '#6b6b6b',
+    rule:  cardDark ? 'rgba(255,255,255,0.30)' : 'rgba(0,0,0,0.16)',
+  };
+
+  // The shot list lives on the event, not in the poster design, so the card sheet fetches it
+  // itself — the organizer payload carries both the sets and the event type that picks the default
+  // tick. Same raw-fetch idiom as loadPosterQr: a failure just means no cards on offer.
+  async function loadMissions() {
+    try {
+      const r = await fetch(`/api/events/${encodeURIComponent(joinCode)}/admin`,
+        { credentials: 'same-origin', headers: orgCode ? { 'X-Organizer-Code': orgCode } : {} });
+      const d = await r.json();
+      eventType = typeof d?.eventType === 'string' ? d.eventType : null;
+      sheets = Array.isArray(d?.challengeSets)
+        ? (d.challengeSets as MissionSet[]).filter((s) => !!s?.items?.length) : [];
+      sheetIdx = Math.min(sheetIdx, Math.max(0, sheets.length - 1));
+    } catch { /* no cards on offer */ }
+  }
+
+  /** One card, top-left at (ox, oy). All four on a sheet are identical — they go to four people. */
+  function drawCard(ctx: CanvasRenderingContext2D, ox: number, oy: number, set: MissionSet, qr: HTMLImageElement, bg: HTMLImageElement | null) {
+    const x0 = ox + CARD_GAP, y0 = oy + CARD_GAP, cw = CW - CARD_GAP * 2, ch = CH - CARD_GAP * 2;
+    // Background inside the card's own rounded edge. An image is covered into EACH card rather than
+    // across the sheet, so the four cards look the same instead of showing four different crops.
+    ctx.save();
+    roundRect(ctx, x0, y0, cw, ch, 22); ctx.clip();
+    if (bg) { ctx.translate(x0, y0); drawCover(ctx, bg, cw, ch); ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, cw, ch); }
+    else { ctx.fillStyle = cardInkSaver ? '#ffffff' : (cBg || '#ffffff'); ctx.fillRect(x0, y0, cw, ch); }
+    ctx.restore();
+    roundRect(ctx, x0, y0, cw, ch, 22); ctx.strokeStyle = cardInk.rule; ctx.lineWidth = 1.5; ctx.stroke();
+
+    const L = x0 + CARD_PAD, innerW = cw - CARD_PAD * 2;
+    let y = y0 + CARD_PAD;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+
+    // Which sheet this is — only when there is more than one, because that is the only time two
+    // cards on a table can be confused. "Set A" on its own is noise.
+    if (sheets.length > 1) {
+      ctx.fillStyle = cardInk.muted;
+      fitText(ctx, set.label.toUpperCase(), L, y, innerW, 700, 19, CARD_FAMILY);
+      y += 28;
+    }
+    // Title, two lines at most: past that there is no card left for the missions.
+    ctx.fillStyle = cardInk.title; ctx.font = `800 34px ${CARD_FAMILY}`;
+    for (const ln of wrapToLines(ctx, cardHeading, innerW).slice(0, 2)) {
+      fitText(ctx, ln, L, y, innerW, 800, 34, CARD_FAMILY); y += 41;
+    }
+    y += 10;
+    ctx.fillStyle = cardInk.rule; ctx.fillRect(L, y, innerW, 1.5);
+
+    // The QR block is anchored to the bottom; the mission list takes everything left and sizes
+    // itself to fill it — a 5-mission card breathes, a 20-mission one packs in without spilling.
+    const qrTop = y0 + ch - CARD_PAD - CARD_QR_PX;
+    const top = y + 20, bottom = qrTop - 20, n = set.items.length;
+    // The cap only bites on a short list: it stops five missions being squeezed into the top third
+    // of the card, while leaving a generous row you can actually put a pen through.
+    const rowH = clamp((bottom - top) / Math.max(n, 1), 17, 56);
+    // ONE font size for every row — fitting each row on its own leaves the list visually ragged.
+    // Take the largest that suits the row height AND keeps the longest mission on a single line.
+    // Text width scales linearly with font size for a given string, so the widest is measured once
+    // at a reference size; the tick column is 1.5em and the gap after it 0.5em, hence innerW − 2em.
+    ctx.font = `400 100px ${CARD_FAMILY}`;
+    const perPx = Math.max(...set.items.map((it) => ctx.measureText(it.text).width), 1) / 100;
+    const fs = Math.max(11, Math.min(Math.round(rowH * 0.56), 21, Math.floor(innerW / (perPx + 2))));
+    let ry = top + Math.max(0, (bottom - top - rowH * n) / 2);
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i < n; i++) {
+      const cy = ry + rowH / 2;
+      // The tick is drawn in the card's ink; an emoji one is painted in colour by the device font
+      // and ignores this (see tickIsEmoji).
+      ctx.fillStyle = cardInk.body; ctx.font = `400 ${fs}px ${CARD_FAMILY}`;
+      ctx.textAlign = 'center'; ctx.fillText(cardGlyph, L + fs * 0.75, cy);
+      ctx.textAlign = 'left'; ctx.fillText(set.items[i].text, L + fs * 2, cy);
+      // A dashed rule between rows, like the on-page card this stands in for.
+      if (i < n - 1) {
+        ctx.save(); ctx.setLineDash([4, 5]); ctx.strokeStyle = cardInk.rule; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(L, ry + rowH); ctx.lineTo(L + innerW, ry + rowH); ctx.stroke(); ctx.restore();
+      }
+      ry += rowH;
+    }
+
+    // Join block: QR on the left, details beside it, so the mission list keeps the card's height.
+    // The white panel guarantees the code stays black-on-white whatever the card sits on, and
+    // matches the poster's QR panel.
+    ctx.fillStyle = '#ffffff'; roundRect(ctx, L - 9, qrTop - 9, CARD_QR_PX + 18, CARD_QR_PX + 18, 14); ctx.fill();
+    ctx.imageSmoothingEnabled = false; ctx.drawImage(qr, L, qrTop, CARD_QR_PX, CARD_QR_PX); ctx.imageSmoothingEnabled = true;
+    drawBrandChip(ctx, L + CARD_QR_PX / 2, qrTop + CARD_QR_PX / 2, CARD_QR_PX * 0.20);
+
+    const tx = L + CARD_QR_PX + 24, tw = L + innerW - tx;
+    let ty = qrTop + 4;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillStyle = cardInk.muted; ctx.font = `700 20px ${CARD_FAMILY}`;
+    ctx.fillText('Scan to join', tx, ty); ty += 30;
+    ctx.fillStyle = cardInk.code;
+    if (codeDisplay === 'code') { fitText(ctx, joinCode, tx, ty, tw, 800, 34, CARD_MONO); ty += 48; }
+    else if (codeDisplay === 'url') { drawUrl(ctx, cleanUrl, tx, ty, tw, 700, 21, CARD_FAMILY, 26); ty += 58; }
+    // What the card is FOR. Without this a guest has a list and no idea it is tickable in the app.
+    ctx.fillStyle = cardInk.muted; ctx.font = `400 18px ${CARD_FAMILY}`;
+    for (const ln of wrapToLines(ctx, 'Then tick these off as you shoot them.', tw)) { ctx.fillText(ln, tx, ty); ty += 23; }
+  }
+
+  /** Paint one set's 4-up sheet at CARD_SCALE. */
+  async function drawSheet(ctx: CanvasRenderingContext2D, set: MissionSet) {
+    ctx.setTransform(CARD_SCALE, 0, 0, CARD_SCALE, 0, 0);
+    // The sheet is paper: white, always. Each card paints its own background inside its cut line,
+    // so an ink-saver sheet leaves the gutters unprinted (and a JPG/PDF export never goes black
+    // where the canvas would otherwise be transparent).
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+    let bg: HTMLImageElement | null = null;
+    const src = cardInkSaver ? null : bgSrc();
+    if (src) { try { bg = await loadImg(src); } catch { bg = null; } }
+    // The sheet's own QR, so each printed card points at its own set.
+    const qr = await loadImg(await qrForSet(sheets.length > 1 ? (activeSheet?.key ?? null) : null));
+    for (let i = 0; i < 4; i++) drawCard(ctx, (i % 2) * CW, Math.floor(i / 2) * CH, set, qr, bg);
+    // Cut guides: the four cards tile A4 exactly, so one cross through the gutters is all a pair of
+    // scissors needs. Always dark — they are drawn on the white sheet, not on a card.
+    ctx.save();
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1; ctx.setLineDash([9, 9]);
+    ctx.beginPath(); ctx.moveTo(CW, 0); ctx.lineTo(CW, H); ctx.moveTo(0, CH); ctx.lineTo(W, CH); ctx.stroke();
+    ctx.restore();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  async function drawCards() {
+    if (!cardCanvas || !activeSheet) return;
+    const ctx = cardCanvas.getContext('2d'); if (!ctx) return;
+    cardCanvas.width = W * CARD_SCALE; cardCanvas.height = H * CARD_SCALE;
+    await drawSheet(ctx, activeSheet);
+    cardsDrawn = true;
+  }
+  let cardRaf = 0;
+  function scheduleCardRedraw() { if (cardRaf) return; cardRaf = requestAnimationFrame(() => { cardRaf = 0; drawCards().catch(() => {}); }); }
+  // Everything a sheet is drawn from, in one value — and only while the cards tab is open, because
+  // a 2× sheet is the expensive redraw of the two and the poster has its own loop. It has to be a
+  // reactive DECLARATION that the redraw then reads in its condition: a bare `void x` reference
+  // inside a reactive block does not register plain state like the selected sheet as a dependency,
+  // and the preview would go stale the moment a host switched sheets.
+  $: cardSig = mounted && view === 'cards'
+    ? JSON.stringify([cfg, customBgUrl, activeSheet, cardGlyph, cardInk]) : '';
+  $: if (cardSig) scheduleCardRedraw();
+
+  /** A sheet on its own canvas, so an export never depends on which one is being previewed. */
+  async function sheetCanvas(set: MissionSet): Promise<HTMLCanvasElement> {
+    const c = document.createElement('canvas');
+    c.width = W * CARD_SCALE; c.height = H * CARD_SCALE;
+    const ctx = c.getContext('2d');
+    if (!ctx) throw new Error('no canvas context');
+    await drawSheet(ctx, set);
+    return c;
+  }
+  /** Print one sheet or the whole stack — a page per set, so a host can run off one table's cards
+   *  on their own or take everything to the printer in one job. */
+  async function printSheets(list: MissionSet[]) {
+    if (!list.length) return;
+    try {
+      const pages: string[] = [];
+      for (const s of list) pages.push((await sheetCanvas(s)).toDataURL('image/png'));
+      const w = window.open('', '_blank');
+      if (!w) { showToast('Allow pop-ups to print', true); return; }
+      // Every page has to decode before print() fires, or a multi-page job comes out with blank
+      // pages. The break goes BEFORE each image after the first, so there is no trailing blank.
+      w.document.write(
+        '<style>@page{size:A4;margin:0}body{margin:0}img{width:100%;display:block}img+img{page-break-before:always}</style>'
+        + `<script>let n=0;function k(){if(++n===${pages.length}){window.focus();window.print();}}<\/script>`
+        + pages.map((u) => `<img src="${u}" onload="k()">`).join(''));
+      w.document.close();
+    } catch { showToast('Could not build the cards', true); }
+  }
+  async function exportSheetPng() {
+    const set = activeSheet; if (!set) return;
+    // PNG rather than JPG: JPEG ringing around a 12px mission line is visible on paper.
+    (await sheetCanvas(set)).toBlob((b) => b && download(b, 'png', `cards-${set.key}`), 'image/png');
+  }
+  async function exportSheetsPdf(list: MissionSet[]) {
+    if (!list.length) return;
+    try {
+      const { jsPDF } = await import('jspdf');
+      const pdf = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
+      for (let i = 0; i < list.length; i++) {
+        if (i) pdf.addPage();
+        const c = await sheetCanvas(list[i]);
+        pdf.addImage(c.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, pdf.internal.pageSize.getWidth(), pdf.internal.pageSize.getHeight());
+      }
+      pdf.save(`${slug}-${list.length > 1 ? 'mission-cards' : `cards-${list[0].key}`}.pdf`);
+    } catch { showToast('Could not build the PDF', true); }
+  }
+  // A host's own tick is one character (cleanTick counts code points, so an emoji counts as one).
+  // Anything else is silently refused and the field snaps back — a validation error for a typo in a
+  // one-character field would be more noise than help.
+  function onTickInput(e: Event) {
+    const el = e.target as HTMLInputElement;
+    const v = cleanTick(el.value);
+    if (v) cardTick = v; else el.value = cardGlyph;
+  }
+
   const COLOR_ROWS: { key: CTarget; label: string; get: () => string }[] = [
     { key: 'headline', label: 'Title', get: () => cHeadline },
     { key: 'message', label: 'Message', get: () => cMessage },
@@ -509,16 +786,31 @@
 
 <div class="back" on:click|self={() => dispatch('close')} role="dialog" aria-modal="true" aria-label="Event poster">
   <div class="sheet" class:fs={fsEdit} tabindex="-1" use:modalFocus>
-    <div class="head"><span>{fsEdit ? 'Arrange layout' : 'Event poster'}</span>
+    <div class="head"><span>{fsEdit ? 'Arrange layout' : view === 'cards' ? 'Mission cards' : 'Event poster'}</span>
       <div class="head-actions">
-        <button class="tog" on:click={() => (fsEdit = !fsEdit)} aria-label={fsEdit ? 'Exit full screen' : 'Full-screen layout'} title={fsEdit ? 'Exit full screen' : 'Full-screen layout — easier to arrange'}>{fsEdit ? '✓ Done' : '⛶ Arrange'}</button>
+        <!-- Arranging is the poster's own free layout; the card sheet is a fixed 4-up grid. -->
+        {#if view === 'poster'}<button class="tog" on:click={() => (fsEdit = !fsEdit)} aria-label={fsEdit ? 'Exit full screen' : 'Full-screen layout'} title={fsEdit ? 'Exit full screen' : 'Full-screen layout — easier to arrange'}>{fsEdit ? '✓ Done' : '⛶ Arrange'}</button>{/if}
         {#if !fsEdit}<button class="x" on:click={() => dispatch('close')} aria-label="Close">✕</button>{/if}
       </div></div>
 
+    <!-- Two outputs of one design: the A4 poster for the room, and A6 cards for the tables. -->
+    {#if !fsEdit}
+      <div class="tabs">
+        <button class="tab" class:on={view === 'poster'} aria-pressed={view === 'poster'} on:click={() => (view = 'poster')}>🖼 Poster</button>
+        <button class="tab" class:on={view === 'cards'} aria-pressed={view === 'cards'} on:click={() => (view = 'cards')}>🃏 Mission cards</button>
+      </div>
+    {/if}
+
     <div class="poster-body" class:fs={fsEdit}>
     <div class="preview">
-      {#if busy}<div class="spinner" aria-label="Building poster"></div>{/if}
-      <div class="canvas-wrap" class:hidden={busy}>
+      {#if view === 'poster' ? busy : (!!activeSheet && !cardsDrawn)}<div class="spinner" aria-label={view === 'cards' ? 'Building cards' : 'Building poster'}></div>{/if}
+      {#if view === 'cards' && !activeSheet}<p class="empty">No photo missions on this event yet.</p>{/if}
+      <!-- Both previews stay mounted so switching tabs costs nothing and the poster keeps its
+           measured drag bounds; the inactive one is just hidden. -->
+      <div class="canvas-wrap" class:hidden={view !== 'cards' || !activeSheet || !cardsDrawn}>
+        <canvas bind:this={cardCanvas}></canvas>
+      </div>
+      <div class="canvas-wrap" class:hidden={busy || view !== 'poster'}>
         <canvas bind:this={canvas}></canvas>
         <!-- Click an element to select it → its outline + resize corner ⤡ appear. Drag anywhere on
              it to move; drag the corner to resize. Click empty space to deselect. -->
@@ -547,7 +839,47 @@
     </div>
 
     <details class="editor" open>
-      <summary>✏️ Customise</summary>
+      <summary>✏️ Customise {view === 'cards' ? 'cards' : ''}</summary>
+      {#if view === 'cards'}
+      {#if !activeSheet}
+        <p class="layout-hint">This event has no photo missions yet. Choose a shot list for it and the printable table cards appear here.</p>
+      {:else}
+        <p class="layout-hint">Four identical A6 cards to an A4 sheet — print, cut along the dashed guides, one per place setting. The colours, background and join details follow the poster you designed.</p>
+        <label class="fld"><span>Card title</span><input bind:value={cardTitle} maxlength="60" placeholder={headline} /></label>
+
+        {#if sheets.length > 1}
+          <div class="fld"><span>Sheet ({sheetIdx + 1} of {sheets.length})</span>
+            <div class="bg-row">
+              {#each sheets as s, i}
+                <button class="seg" class:on={sheetIdx === i} on:click={() => (sheetIdx = i)}>{s.label}</button>
+              {/each}
+            </div>
+            <p class="layout-hint" style="margin-top:8px">One sheet per set, each printed with its own name on every card so the tables don't get mixed up. Print the sheet you're looking at, or all {sheets.length} at once.</p>
+          </div>
+        {/if}
+
+        <div class="fld"><span>Tick box</span>
+          <div class="bg-row">
+            {#each TICKS_OUTLINE as t}
+              <button class="seg glyph" class:on={cardGlyph === t} on:click={() => (cardTick = t)} aria-label="Use {t}">{t}</button>
+            {/each}
+          </div>
+          <div class="bg-row" style="margin-top:6px">
+            {#each TICKS_EMOJI as t}
+              <button class="seg glyph" class:on={cardGlyph === t} on:click={() => (cardTick = t)} aria-label="Use {t}">{t}</button>
+            {/each}
+          </div>
+          <div class="bg-row" style="margin-top:6px">
+            <!-- maxlength 2 because an emoji is two UTF-16 units; cleanTick still allows exactly one character. -->
+            <label class="seg own">Your own<input maxlength="2" value={cardGlyph} on:input={onTickInput} aria-label="Your own tick character" /></label>
+            {#if cardTick}<button class="seg" on:click={() => (cardTick = '')}>↺ Match event</button>{/if}
+          </div>
+          {#if tickIsEmoji}<p class="warn-note">⚠ Emoji ticks are printed in colour by your device's own font, so they won't match the card's ink colour — the outline ticks above will.</p>{/if}
+        </div>
+
+        <label class="chk"><input type="checkbox" bind:checked={cardInkSaver} /> Plain white cards (saves ink — four to a sheet adds up)</label>
+      {/if}
+      {:else}
       <label class="fld"><span>Title</span><input bind:value={headline} maxlength="60" /></label>
       <label class="fld"><span>Message</span><input bind:value={message} maxlength="80" placeholder="(blank to hide)" /></label>
       <label class="fld"><span>How-to line</span><input bind:value={stepsText} maxlength="120" placeholder="(blank to hide)" /></label>
@@ -610,16 +942,30 @@
           </div>
         {/if}
       </div>
+      {/if}
     </details>
     </div>
 
-    <p class="hint">Print it, drop it on the tables, or send the link out in advance — guests scan to join. Changes save automatically.</p>
-    <div class="actions">
-      <button class="btn primary" on:click={printPoster} disabled={busy}>🖨 Print</button>
-      <button class="btn ghost" on:click={exportPdf} disabled={busy}>PDF</button>
-      <button class="btn ghost" on:click={exportPng} disabled={busy}>PNG</button>
-      <button class="btn ghost" on:click={exportJpg} disabled={busy}>JPG</button>
-    </div>
+    {#if view === 'cards'}
+      <p class="hint">Cut along the dashed lines and drop a card at each place setting — guests scan, shoot, and tick them off as they go. Changes save automatically.</p>
+      <div class="actions">
+        <button class="btn primary" on:click={() => printSheets(activeSheet ? [activeSheet] : [])} disabled={!cardsDrawn}>🖨 Print{sheets.length > 1 ? ' this sheet' : ''}</button>
+        <button class="btn ghost" on:click={() => exportSheetsPdf(activeSheet ? [activeSheet] : [])} disabled={!cardsDrawn}>PDF</button>
+        <button class="btn ghost" on:click={exportSheetPng} disabled={!cardsDrawn}>PNG</button>
+        {#if sheets.length > 1}
+          <button class="btn ghost" on:click={() => printSheets(sheets)} disabled={!cardsDrawn}>🖨 All {sheets.length} sheets</button>
+          <button class="btn ghost" on:click={() => exportSheetsPdf(sheets)} disabled={!cardsDrawn}>PDF (all)</button>
+        {/if}
+      </div>
+    {:else}
+      <p class="hint">Print it, drop it on the tables, or send the link out in advance — guests scan to join. Changes save automatically.</p>
+      <div class="actions">
+        <button class="btn primary" on:click={printPoster} disabled={busy}>🖨 Print</button>
+        <button class="btn ghost" on:click={exportPdf} disabled={busy}>PDF</button>
+        <button class="btn ghost" on:click={exportPng} disabled={busy}>PNG</button>
+        <button class="btn ghost" on:click={exportJpg} disabled={busy}>JPG</button>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -645,6 +991,12 @@
   .tog { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 7px; padding: 5px 10px; font: inherit; font-size: 0.78rem; font-weight: 700; cursor: pointer; }
   .tog:hover { border-color: var(--accent); }
   .warn-note { font-size: 0.74rem; color: #ff8a8a; margin: 6px 0 8px; line-height: 1.4; }
+  /* Poster / mission-cards switch — two outputs of the same design. */
+  .tabs { display: flex; gap: 6px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+  .tab { flex: 1; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: transparent;
+    color: var(--text); font: inherit; font-size: 0.8rem; font-weight: 700; cursor: pointer; }
+  .tab.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); }
+  .empty { font-size: 0.8rem; color: var(--text-muted); text-align: center; margin: 0; }
 
   /* Full-screen layout mode — a big stage so dragging/placing elements is easy. */
   .sheet.fs { max-width: none; width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; overflow: hidden; }
@@ -693,6 +1045,12 @@
   .seg.file { display: inline-flex; align-items: center; }
   .seg.color { display: inline-flex; align-items: center; gap: 7px; }
   .seg.color input[type="color"] { width: 22px; height: 22px; padding: 0; border: none; background: none; cursor: pointer; }
+  /* A tick glyph needs a square button: the glyphs differ wildly in width and would otherwise give
+     a ragged row of buttons. */
+  .seg.glyph { min-width: 38px; padding: 7px 6px; text-align: center; font-size: 1rem; line-height: 1.1; }
+  .seg.own { display: inline-flex; align-items: center; gap: 7px; }
+  .seg.own input { width: 34px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 5px;
+    background: var(--surface); color: var(--text); font: inherit; font-size: 0.95rem; text-align: center; }
   .layout-hint { font-size: 0.74rem; color: var(--text-muted); margin: 0 0 8px; line-height: 1.45; }
   .colors { margin-top: 14px; }
   .c-head { font-size: 0.78rem; color: var(--text-muted); margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }

@@ -1,15 +1,37 @@
 import { Router, type Request, type Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { eq, or, and, count, sql } from 'drizzle-orm';
+import { eq, or, and, count, sql, isNotNull } from 'drizzle-orm';
 import { db } from '../db';
 import { effectiveMaxPhotos, photosRemaining as remainingFor } from '../allowance';
 import { events, guestFeedback, participants, photos } from '../schema';
+import { readSets, setByKey, assignSet } from '../challenges';
 import { faceMatchingAvailable } from '../faces';
 import * as email from '../email';
 import { baseUrl, escapeHtml } from '../lib';
 import { billingEnabled } from '../billing';
 
 const router = Router();
+
+// The missions on THIS guest's card, plus the ids they have already captured.
+//
+// A guest sees one set and only one. Several sets exist so a host can hand out different cards, and
+// showing a guest somebody else's list would defeat that and let them tick off a mission they were
+// never given.
+//
+// Progress is DERIVED from the photos table, never stored beside it: delete the photo and the
+// mission un-ticks on its own, so there is no second copy of the truth to drift. A photo held back
+// by moderation still counts, which is the kinder reading — the guest did the thing.
+async function missionsFor(eventChallenges: string | null, setKey: string | null, participantId: string) {
+  const set = setByKey(readSets(eventChallenges), setKey);
+  if (!set) return { challenges: [], challengesDone: [] as string[], challengeSet: null as string | null };
+  const rows = await db.selectDistinct({ id: photos.challengeId }).from(photos)
+    .where(and(eq(photos.participantId, participantId), isNotNull(photos.challengeId)));
+  return {
+    challenges: set.items,
+    challengesDone: rows.map((r) => r.id).filter((x): x is string => !!x),
+    challengeSet: set.key,
+  };
+}
 
 const isEmail = (s: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 
@@ -85,6 +107,7 @@ router.post('/', async (req: Request, res: Response) => {
         faceEnrolled: !!(existing && existing.faceConsentAt),
         eventName:       event.name,
         noFlash:         !!event.noFlash,
+        ...(await missionsFor(event.challenges, existing.challengeSet, existing.id)),
         recovered:       true,
       });
     }
@@ -101,6 +124,15 @@ router.post('/', async (req: Request, res: Response) => {
 
   const sessionToken = newToken();
 
+  // Which mission card this guest gets. A printed card may name its own set (?set=b on the QR);
+  // otherwise round-robin by how many have already joined, so the sets stay evenly spread.
+  const sets = readSets(event.challenges);
+  let challengeSet: string | null = null;
+  if (sets.length) {
+    const [{ c: soFar }] = await db.select({ c: count() }).from(participants).where(eq(participants.eventId, event.id));
+    challengeSet = assignSet(sets, req.body?.set ?? req.query?.set, Number(soFar) || 0);
+  }
+
   const participant = {
     id:            uuidv4(),
     eventId:       event.id,
@@ -109,6 +141,7 @@ router.post('/', async (req: Request, res: Response) => {
     sessionToken:  sessionToken,
     photosTaken:   0,
     joinedAt:      now,
+    challengeSet,
   };
 
   try {
@@ -135,6 +168,7 @@ router.post('/', async (req: Request, res: Response) => {
         faceEnrolled: false,
     eventName:       event.name,
     noFlash:         !!event.noFlash,
+    ...(await missionsFor(event.challenges, challengeSet, participant.id)),
   });
 });
 
@@ -156,6 +190,8 @@ router.get('/me', async (req: Request, res: Response) => {
       guestMayRequest:  events.guestMayRequest,
       faceMatching:     events.faceMatchingEnabled,
       faceConsentAt:    participants.faceConsentAt,
+      challengeSet:     participants.challengeSet,
+      challenges:       events.challenges,
       upgradeEmail:     participants.upgradeEmail,
       eventName:      events.name,
       joinCode:       events.joinCode,
@@ -193,6 +229,7 @@ router.get('/me', async (req: Request, res: Response) => {
       // whole face-matching UI in front of guests and 503 the moment they used it.
       faceMatching:    faceMatchingAvailable() && !!p.faceMatching,
       faceEnrolled:    !!p.faceConsentAt,
+      ...(await missionsFor(p.challenges, p.challengeSet, p.id)),
       // Asked once, on whichever surface they saw first. Both the camera and the shared gallery
       // offer the ask, and neither should re-ask someone who already answered on the other.
       feedbackGiven:   !!p.feedbackAskedAt,

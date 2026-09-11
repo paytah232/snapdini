@@ -23,6 +23,7 @@
   import { imgFallback } from '$lib/ui';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import PosterModal from '$lib/components/PosterModal.svelte';
+  import MissionsModal from '$lib/components/MissionsModal.svelte';
   import EventImageEditor from '$lib/components/EventImageEditor.svelte';
   import FeedbackModal from '$lib/components/FeedbackModal.svelte';
 
@@ -40,6 +41,7 @@
   let viewerIsAdmin = false;    // site admin drilled in via support-override → offer "back to site admin"
 
   let ev: AdminEvent | null = null;
+  let missionsOpen = false;
   let options: AppOptions | null = null;
   let billing: BillingConfig | null = null;
   let shapeNotice = '';
@@ -1156,6 +1158,34 @@
       <p class="hint" style="margin:4px 0 0">{savingTheme ? 'Saving…' : 'Changes apply and save automatically.'}</p>
     </div>
 
+    <div class="card">
+      <div class="card-title">Photo missions</div>
+      <p class="hint" style="margin:0 0 10px">
+        A short list of shots for your guests — printed on cards for the tables, and ticked off in
+        the camera as they shoot. Optional, and guests can ignore it and just take photos.
+      </p>
+      {#if ev.challengeSets?.length}
+        <div class="mset-list">
+          {#each ev.challengeSets as s}
+            <div class="mset">
+              <span class="mset-name">{s.label}</span>
+              <span class="mset-n">{s.items.length} mission{s.items.length === 1 ? '' : 's'}</span>
+            </div>
+          {/each}
+        </div>
+        <p class="hint" style="margin:8px 0 10px">
+          {ev.challengeSets.length > 1
+            ? 'Guests are spread evenly across the cards, so different tables hunt for different things.'
+            : 'Every guest gets this card.'}
+          Print them from <strong>Create poster</strong>.
+        </p>
+      {/if}
+      <button class="btn ghost" on:click={() => (missionsOpen = true)}>
+        {ev.challengeSets?.length ? 'Edit missions' : 'Set up photo missions'}
+      </button>
+    </div>
+
+
     <!-- Upgrades (top up to a bigger config; only the difference is charged) -->
     {#if billing && ev}
       <!-- Remount the panel when the SAVED entitlement changes (e.g. after Save settings) so its
@@ -1316,6 +1346,20 @@
     on:close={() => (posterOpen = false)}
   />
 {/if}
+
+{#if missionsOpen && ev}
+  <MissionsModal
+    joinCode={code}
+    orgCode={orgCode}
+    eventType={ev.eventType ?? null}
+    savedSets={ev.challengeSets ?? []}
+    maxPhotos={ev.maxPhotos}
+    videoSeconds={ev.videoSeconds ?? 0}
+    onClose={() => (missionsOpen = false)}
+    onSaved={(sets) => { if (ev) ev.challengeSets = sets; }}
+  />
+{/if}
+
 
 {#if editorFile}
   <EventImageEditor
@@ -1554,4 +1598,9 @@
   @media (max-width: 480px) {
     .stat-grid { grid-template-columns: repeat(2, 1fr); }
   }
+  .mset-list { display: flex; flex-direction: column; gap: 6px; }
+  .mset { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+    padding: 8px 11px; border-radius: 9px; border: 1px solid var(--border); background: var(--bg); }
+  .mset-name { font-weight: 700; font-size: .87rem; }
+  .mset-n { font-size: .78rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 </style>
