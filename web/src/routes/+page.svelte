@@ -9,6 +9,7 @@
   import Logo from '$lib/components/Logo.svelte';
   import MissionList from '$lib/components/MissionList.svelte';
   import { appearance, setAppearance } from '$lib/appearance';
+  import ScrollDepth from '$lib/components/ScrollDepth.svelte';
 
   let version = '';
   let loggedIn = false;   // logged-in visitors get "My events" links (→ portal), not a sign-in prompt
@@ -89,7 +90,11 @@
     { ic: '🎞️', t: 'A limited roll', d: 'Each guest gets a set number of shots. No do-overs, no endless scrolling — every frame counts.' },
     { ic: '🪄', t: 'The grand reveal', d: 'Photos stay up the magician’s sleeve all night, then reappear together the moment your event ends.' },
     { ic: '🔗', t: 'Join in one tap', d: 'Scan a QR or punch in a short code. No app to install — poof, they’re in.' },
-    { ic: '🎩', t: 'One shared gallery', d: 'Every guest’s shots land in one gallery to relive and download together.' }
+    { ic: '🎩', t: 'One shared gallery', d: 'Every guest’s shots land in one gallery to relive and download together.' },
+      // Sits here rather than in the hero: the lede already explains the whole product in eight
+      // words, and a hero that explains two things explains neither. This is still the first
+      // screenful on most viewports.
+      { ic: '🃏', t: 'A list of tricks', d: 'Hand out a few shots to pull off — printed for the tables, ticked off in the camera. Optional.' }
   ];
   const steps = [
     { n: '01 / CONJURE', t: 'Set the stage', d: 'Name it, choose how many shots each guest gets, and when the photos reappear.' },
@@ -121,6 +126,8 @@
     mainEntity: faqs.map((f) => ({ '@type': 'Question', name: f.q, acceptedAnswer: { '@type': 'Answer', text: f.a } })),
   };
 </script>
+
+<ScrollDepth page="home" />
 
 <svelte:head>
   <title>{TITLE}</title>
@@ -202,8 +209,8 @@
 </section>
 
 <section class="band">
-  <div class="kicker">Photo missions</div>
-  <h2>Hand your guests a shot list.</h2>
+  <div class="kicker">Trick list</div>
+  <h2>Hand your guests a few tricks.</h2>
   <div class="missions">
     <div>
       <p>Pick the shots you’d hate to miss. They print on a card for the tables, and guests get the
@@ -211,9 +218,10 @@
         it’s cut, and the quiet table in the corner ends up in a frame.</p>
       <p>The usual version of this sits on top of a shared album, where a guest can shoot the same
         thing fifty times and keep the best one. Snapdini is the camera: one roll, no takebacks,
-        nothing visible until the reveal. Spending a frame on a mission is a real decision, which is
+        nothing visible until the reveal. Spending a frame on a trick is a real decision, which is
         what makes a ticked-off list worth looking at.</p>
-      <p class="note">Every kind of event gets its own list. Reword any line, or write your own.</p>
+      <p class="note">Every kind of event gets its own list — reword any line, or write your own.
+        It’s a suggestion, never a task: guests can ignore the whole thing and just take photos.</p>
     </div>
     <MissionList eventType="wedding" />
   </div>

@@ -7,6 +7,7 @@
   import MissionList from '$lib/components/MissionList.svelte';
   import { appearance, setAppearance } from '$lib/appearance';
   import { usecases, type UseCase } from '$lib/usecases';
+  import ScrollDepth from '$lib/components/ScrollDepth.svelte';
 
   export let content: UseCase;
 
@@ -49,6 +50,8 @@
     ],
   };
 </script>
+
+<ScrollDepth page={`usecase:${content.slug}`} />
 
 <svelte:head>
   <title>{fullTitle}</title>
@@ -107,7 +110,7 @@
 </section>
 
 <section class="band">
-  <div class="kicker">Photo missions</div>
+  <div class="kicker">Trick list</div>
   <h2>{content.missionsTitle}</h2>
   <div class="missions">
     <p>{content.missionsText}</p>

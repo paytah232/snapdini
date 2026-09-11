@@ -102,6 +102,9 @@
   // Recorded once per visit: a retry after a denial is the same person, not a second data point.
   let permissionReported = false;
   let cameraDenied = false;      // the guest declined — different screen, different tone
+  // Set when the CAMERA is fine but the microphone was refused. Tracked separately because the two
+  // are separate permissions and conflating them produced a screen that could not be dismissed.
+  let micDenied = false;
   let cameraStarting = false;    // true while the stream is (re)acquiring — shows a spinner
   let cameraPaused = false;      // user explicitly turned the camera off (manual privacy/battery)
   let focusSupported = false;     // true only if the device exposes tap-to-focus controls
@@ -125,6 +128,9 @@
   let missionsDone: string[] = [];
   let armed: string | null = null;
   let missionsOpen = false;
+  // The host's chosen mark. Falls back to a plain circle rather than guessing from the event type:
+  // the guest payload does not carry the type, and a wrong glyph is worse than a neutral one.
+  let missionTick = '\u25CB';
   let confetti: { burst: (n?: number) => void } | undefined;
   $: missionsLeft = missions.filter((m) => !missionsDone.includes(m.id));
   $: armedText = missions.find((m) => m.id === armed)?.text ?? '';
@@ -254,6 +260,8 @@
         allowDownloads = me.allowDownloads;
         missions = Array.isArray(me.challenges) ? me.challenges : [];
         missionsDone = Array.isArray(me.challengesDone) ? me.challengesDone : [];
+      if (me.challengeTick) missionTick = me.challengeTick;
+        if (me.challengeTick) missionTick = me.challengeTick;
         await enterCamera();
         return;
       } catch {
@@ -325,6 +333,7 @@
       feedbackDone = !!r.feedbackGiven;
       missions = Array.isArray(r.challenges) ? r.challenges : [];
       missionsDone = Array.isArray(r.challengesDone) ? r.challengesDone : [];
+      if (r.challengeTick) missionTick = r.challengeTick;
       saveSession(r.joinCode, r.sessionToken);
       trackEvent('joined', undefined, r.joinCode);
       if (r.recovered) showToast(`Welcome back! You've ${photosRemaining} shot${photosRemaining === 1 ? '' : 's'} left.`);
@@ -367,7 +376,7 @@
     focusSupported = 'pointsOfInterest' in caps || 'focusMode' in caps;
     // Hardware torch (back camera on Android Chrome). iOS Safari never exposes it.
     torchSupported = 'torch' in caps && !!caps.torch;   // a fresh stream always starts with the torch physically off
-    cameraError = ''; cameraDenied = false;
+    cameraError = ''; cameraDenied = false; micDenied = false;
     // The grant side of the ratio. Denials already reach client_errors; without this the denial
     // count has no denominator and cannot tell you whether permission is a real problem.
     if (!permissionReported) { permissionReported = true; trackEvent('camera_permission_granted', undefined, ev?.joinCode); }
@@ -468,6 +477,26 @@
       try {
         await attachCamera({ video: true, audio });
       } catch (err2) {
+        const denied0 = err2 instanceof DOMException && (err2.name === 'NotAllowedError' || err2.name === 'SecurityError');
+        // The MICROPHONE is a separate permission from the camera, and video mode is the first thing
+        // that asks for it. A guest who has happily granted the camera, then switches to video and
+        // dismisses the mic prompt, used to land on a screen insisting we needed their camera — with
+        // an "Allow camera" button that re-requested the mic and failed again, so it appeared dead.
+        //
+        // So: find out which one it actually was by asking for the camera alone. If that works, the
+        // camera was never the problem — keep it running, fall back to photos, and say so.
+        if (denied0 && audio) {
+          try {
+            await attachCamera({ video: true, audio: false });
+            micDenied = true;
+            videoMode = false;                       // photos still work; do not strand them on a dead screen
+            cameraStarting = false;
+            cameraDenied = false; cameraError = '';
+            showToast('Video needs your microphone too. Photos are working — allow the mic to record clips.', true);
+            reportClientError('camera: microphone declined for video', 'camera-denied', ev?.joinCode);
+            return;
+          } catch { /* the camera really is unavailable — fall through to the honest error */ }
+        }
         stopCamera();   // make sure no half-open stream remains (shutter stays disabled on error)
         cameraStarting = false;
         const denied = err2 instanceof DOMException && (err2.name === 'NotAllowedError' || err2.name === 'SecurityError');
@@ -1095,7 +1124,7 @@
         missionsDone = [...missionsDone, item.challengeId];
         confetti?.burst();
         const left = missions.filter((m) => !missionsDone.includes(m.id)).length;
-        showToast(left ? `Nice — ${left} to go` : 'That’s the whole list. Well done.');
+        showToast(left ? `Nice one — ${left} to go` : 'That’s the whole act. Well done.');
         trackEvent('mission_captured', { left }, ev?.joinCode);
       }
       // Disarm either way: the next shot should be an ordinary one unless they say otherwise.
@@ -1356,9 +1385,12 @@
       <div class="topbar">
         {#if ev?.isDemo}
           <div class="demo-nav">
-            <a class="home-btn" href="/" aria-label="Back to Snapdini home">⌂ Home</a>
-            {#if demoHostHref}<a class="home-btn" href={demoHostHref} aria-label="See the host view">🎛 Host</a>{/if}
-            <a class="home-btn" href={demoGalleryHref} aria-label="See the gallery">🖼 Gallery</a>
+            <!-- Order is the tour, not the escape: a visitor should see what the host and the
+                 gallery look like before they are offered the way out. "Home" was ambiguous — it
+                 read as "my dashboard" as easily as "leave" — so the exit says what it does. -->
+            {#if demoHostHref}<a class="home-btn" href={demoHostHref} aria-label="See the host's view of this demo">🎛 Host view</a>{/if}
+            <a class="home-btn" href={demoGalleryHref} aria-label="See the gallery for this demo">🖼 Gallery</a>
+            <a class="home-btn quiet" href="/" aria-label="Leave the demo and go back to the Snapdini home page">✕ Exit demo</a>
           </div>
         {:else}
           <div class="evname"><Logo word={false} color={ev?.theme?.accent ?? ''} /> {ev?.name}</div>
@@ -1366,29 +1398,48 @@
         {#if missions.length}
           <!-- One small pill is the whole affordance. The camera screen has to stay a camera: a
                permanent list would compete with the viewfinder, so the list lives behind this. -->
-          <button class="mbadge" class:alldone={!missionsLeft.length}
-                  on:click={() => { missionsOpen = true; trackEvent('mission_list_opened', undefined, ev?.joinCode); }}
-                  aria-label="Photo missions, {missionsDone.length} of {missions.length} done">
-            <span class="mb-ico" aria-hidden="true">{!missionsLeft.length ? '✓' : '◎'}</span>
-            {missionsDone.length}/{missions.length}
-          </button>
+          <!-- The count alone read as decoration — nobody could tell it was tappable, let alone
+               what it opened. A two-word caption under it names the thing and invites the tap. -->
+          <div class="mwrap">
+            <button class="mbadge" class:alldone={!missionsLeft.length}
+                    on:click={() => { missionsOpen = true; trackEvent('mission_list_opened', undefined, ev?.joinCode); }}
+                    aria-label="Trick list, {missionsDone.length} of {missions.length} pulled off">
+              <span class="mb-ico" aria-hidden="true">{!missionsLeft.length ? '✓' : missionTick}</span>
+              {missionsDone.length}/{missions.length}
+            </button>
+            <span class="mcap">{!missionsLeft.length ? 'all done' : 'trick list'}</span>
+          </div>
         {/if}
         <div class="counter" class:low={photosRemaining <= 5}>{photosRemaining}<small>left</small></div>
       </div>
+      {#if micDenied}
+        <div class="micnote">
+          <span class="micnote-t">Video needs your microphone. Photos are working fine.</span>
+          <button class="micnote-a" on:click={() => { videoMode = true; startCamera(); }}>Try again</button>
+          <button class="micnote-x" on:click={() => (micDenied = false)} aria-label="Dismiss">✕</button>
+        </div>
+      {/if}
       {#if armed}
         <!-- Shown only while a mission is armed, so there is never any doubt what the next shot
              counts towards — and an obvious way out of it. -->
         <div class="armed">
-          <span class="armed-label">Shooting</span>
+          <span class="armed-label">Pulling off</span>
           <span class="armed-text">{armedText}</span>
-          <button class="armed-x" on:click={() => (armed = null)} aria-label="Cancel this mission">✕</button>
+          <button class="armed-x" on:click={() => (armed = null)} aria-label="Stop shooting for this trick">✕</button>
         </div>
       {/if}
       <div class="rail">
         {#if facing === 'user'}<button class="ctrl" on:click={() => (screenFlash = !screenFlash)} class:active={screenFlash} title="Flash" aria-label="Flash">⚡</button>{/if}
         {#if torchSupported && !ev?.noFlash}<button class="ctrl" on:click={() => (flashArmed = !flashArmed)} class:active={flashArmed} title="Flash" aria-label="Flash">⚡</button>{/if}
         {#if allowedAspects.length > 1}<button class="ctrl" on:click={cycleAspect} title="Photo shape" aria-label="Change photo shape (currently {aspect})">{aspect === 'full' ? 'Full' : aspect}</button>{/if}
-        <button class="ctrl" on:click={() => (settingsOpen = !settingsOpen)} class:active={settingsOpen} title="Settings" aria-label="Camera settings">⚙</button>
+        <button class="ctrl" on:click={() => (settingsOpen = !settingsOpen)} class:active={settingsOpen} title="Settings" aria-label="Camera settings">
+          <!-- Drawn rather than typed: the ⚙ character is rendered by whatever font the device has
+               and frequently is not recognisably a cog, which is the one icon users navigate by. -->
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3.2"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
         <button class="ctrl" on:click={toggleCameraPower} class:active={cameraPaused} title={cameraPaused ? 'Turn camera on' : 'Turn camera off'} aria-label={cameraPaused ? 'Turn camera on' : 'Turn camera off'} aria-pressed={cameraPaused}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="3.5"/>{#if !cameraPaused}<line x1="2" y1="2" x2="22" y2="22"/>{/if}</svg>
         </button>
@@ -1398,17 +1449,18 @@
       </div>
       {#if missionsOpen}
         <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
-        <div class="settings-back" on:click|self={() => (missionsOpen = false)} role="dialog" aria-modal="true" aria-label="Photo missions">
+        <div class="settings-back" on:click|self={() => (missionsOpen = false)} role="dialog" aria-modal="true" aria-label="Trick list">
           <div class="settings-modal">
             <div class="sm-head">
-              <span>Your photo missions</span>
+              <span>Tricks up your sleeve</span>
               <button class="ctrl tiny" on:click={() => (missionsOpen = false)} aria-label="Close">✕</button>
             </div>
             <p class="m-lede">
               {#if !missionsLeft.length}
-                Every one of them, captured. Nothing left to do but enjoy the party.
+                Every one of them, pulled off. Nothing left to do but enjoy the party.
               {:else}
-                Pick one, then shoot it. You don’t have to — these are just here if you fancy it.
+                Pick one, then shoot it. One chance each, so make it count.
+                Ignore the lot if you’d rather just take photos.
               {/if}
             </p>
             <div class="m-prog"><div class="m-prog-fill" style="width:{(missionsDone.length / missions.length) * 100}%"></div></div>
@@ -1416,7 +1468,10 @@
               {#each missions as m (m.id)}
                 <li class="m-item" class:done={isDone(m.id)} class:armed={armed === m.id}>
                   <button class="m-btn" on:click={() => armMission(m.id)} disabled={isDone(m.id)}>
-                    <span class="m-tick" aria-hidden="true">{isDone(m.id) ? '✓' : armed === m.id ? '◉' : '○'}</span>
+                    <!-- The host's own mark, so a digital-only list still looks like the card it
+                         would have printed. A done one becomes a tick regardless — the point of that
+                         row is that it is finished. -->
+                    <span class="m-tick" aria-hidden="true">{isDone(m.id) ? '✓' : armed === m.id ? '◉' : missionTick}</span>
                     <span class="m-text">{m.text}</span>
                     {#if !isDone(m.id)}<span class="m-go">{armed === m.id ? 'Armed' : 'Shoot'}</span>{/if}
                   </button>
@@ -1851,7 +1906,7 @@
   .focus-ring { position: absolute; z-index: 4; width: 76px; height: 76px; margin: -38px 0 0 -38px; border: 2px solid #fff;
     border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,.3); pointer-events: none; animation: focuspulse 0.85s ease-out forwards; }
   @keyframes focuspulse { 0% { transform: scale(1.4); opacity: 0; } 25% { transform: scale(1); opacity: 1; } 100% { transform: scale(0.9); opacity: 0; } }
-  .topbar { position: absolute; top: 0; left: 0; right: 0; z-index: 6; padding: 16px 20px; display: flex; justify-content: space-between; align-items: flex-start; background: linear-gradient(to bottom, rgba(0,0,0,0.6), transparent); pointer-events: none; }
+  .topbar { position: absolute; top: 0; left: 0; right: 0; z-index: 6; padding: 16px 20px; display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; background: linear-gradient(to bottom, rgba(0,0,0,0.6), transparent); pointer-events: none; }
   .evname { display: inline-flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: 0.85rem; color: #fff; }
   .demo-nav { display: flex; gap: 6px; flex-wrap: wrap; }
   /* Demo-only escape hatch back to the marketing site. pointer-events:auto re-enables
@@ -2080,4 +2135,25 @@
   @media (prefers-reduced-motion: reduce) {
     .m-prog-fill { transition: none; }
   }
+  /* Stacked so the caption sits under the pill without widening the topbar row. */
+  .mwrap { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; pointer-events: none; }
+  .mcap { font-size: .62rem; text-transform: uppercase; letter-spacing: .08em; color: rgba(255,255,255,.72);
+    text-shadow: 0 1px 3px rgba(0,0,0,.6); }
+  /* The exit is the one thing here that is not part of the tour, so it recedes. */
+  .home-btn.quiet { background: rgba(0,0,0,.32); font-weight: 600; opacity: .82; }
+  .home-btn.quiet:hover { opacity: 1; }
+  /* Sits where the armed strip does, and clears the control rail the same way. */
+  .micnote {
+    position: absolute; left: 12px; right: 66px; max-width: 460px; top: 58px; z-index: 7;
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 8px 7px 12px; border-radius: 12px;
+    background: rgba(0, 0, 0, .62); border: 1px solid rgba(245, 197, 24, .5);
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    color: #fff; font-size: .78rem; pointer-events: auto;
+  }
+  .micnote-t { flex: 1; min-width: 0; line-height: 1.35; }
+  .micnote-a { flex: none; border: 1px solid rgba(255,255,255,.3); background: rgba(255,255,255,.12);
+    color: #fff; border-radius: 8px; padding: 4px 9px; font: inherit; font-size: .74rem; cursor: pointer; }
+  .micnote-x { flex: none; width: 22px; height: 22px; border-radius: 50%; border: none;
+    background: rgba(255,255,255,.16); color: #fff; font-size: .7rem; line-height: 1; cursor: pointer; }
 </style>

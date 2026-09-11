@@ -47,6 +47,8 @@ export const EVENT_NAMES = [
   'roll_completed',
   // Photo missions — opened, completed, and the host saving a list.
   'mission_list_opened', 'mission_captured', 'missions_saved',
+  // How far down a page someone got, and how long they stayed.
+  'scroll_depth', 'page_dwell',
   'guest_gallery_opened',
   'guest_feedback_opened',
   'guest_feedback_sent',

@@ -4,7 +4,7 @@ import { eq, or, and, count, sql, isNotNull } from 'drizzle-orm';
 import { db } from '../db';
 import { effectiveMaxPhotos, photosRemaining as remainingFor } from '../allowance';
 import { events, guestFeedback, participants, photos } from '../schema';
-import { readSets, setByKey, assignSet } from '../challenges';
+import { readSets, setByKey, assignSet, readTick } from '../challenges';
 import { faceMatchingAvailable } from '../faces';
 import * as email from '../email';
 import { baseUrl, escapeHtml } from '../lib';
@@ -23,13 +23,14 @@ const router = Router();
 // by moderation still counts, which is the kinder reading — the guest did the thing.
 async function missionsFor(eventChallenges: string | null, setKey: string | null, participantId: string) {
   const set = setByKey(readSets(eventChallenges), setKey);
-  if (!set) return { challenges: [], challengesDone: [] as string[], challengeSet: null as string | null };
+  if (!set) return { challenges: [], challengesDone: [] as string[], challengeSet: null as string | null, challengeTick: null as string | null };
   const rows = await db.selectDistinct({ id: photos.challengeId }).from(photos)
     .where(and(eq(photos.participantId, participantId), isNotNull(photos.challengeId)));
   return {
     challenges: set.items,
     challengesDone: rows.map((r) => r.id).filter((x): x is string => !!x),
     challengeSet: set.key,
+    challengeTick: readTick(eventChallenges),
   };
 }
 

@@ -34,6 +34,22 @@ const TYPE_RE = /^[a-z][a-z0-9-]{2,30}$/;
 const SET_RE = /^[a-z0-9]{1,8}$/;
 
 export type StoredChallenge = { id: string; text: string };
+
+/**
+ * The tick glyph, stored WITH the trick list rather than with the poster.
+ *
+ * A host may never print anything — a digital-only list is a perfectly good way to run this — so the
+ * glyph has to live where the list lives, or the guest's screen and the card would disagree about
+ * what a tick looks like. One character, counted by code point because an emoji is two UTF-16 units
+ * and .length would reject a perfectly good bottle.
+ */
+export function parseTick(input: unknown): string | null {
+  if (typeof input !== 'string') return null;
+  const chars = [...input.trim()];
+  if (chars.length !== 1) return null;
+  const code = chars[0].codePointAt(0) ?? 0;
+  return code < 0x20 || code === 0x7f ? null : chars[0];
+}
 export type ChallengeSet = { key: string; label: string; items: StoredChallenge[] };
 
 function parseItems(input: unknown): StoredChallenge[] {
@@ -96,9 +112,9 @@ export function parseChallengeSets(input: unknown): ChallengeSet[] | null {
 
 /** Serialise for the column, or null when there is nothing to store. Refuses anything absurdly
  *  large rather than truncating mid-JSON, which would be unreadable on the way back. */
-export function serialiseSets(sets: ChallengeSet[]): string | null {
+export function serialiseSets(sets: ChallengeSet[], tick?: string | null): string | null {
   if (!sets.length) return null;
-  const json = JSON.stringify({ sets });
+  const json = JSON.stringify(tick ? { sets, tick } : { sets });
   return json.length <= MAX_BLOB ? json : null;
 }
 
@@ -146,4 +162,10 @@ export function isOfferedChallenge(sets: ChallengeSet[], setKey: string | null |
   if (typeof id !== 'string') return false;
   const set = setByKey(sets, setKey);
   return !!set && set.items.some((c) => c.id === id.trim());
+}
+
+/** The glyph a host chose, or null to let the front end fall back to the event type's default. */
+export function readTick(stored: string | null | undefined): string | null {
+  if (!stored) return null;
+  try { return parseTick((JSON.parse(stored) as { tick?: unknown }).tick); } catch { return null; }
 }

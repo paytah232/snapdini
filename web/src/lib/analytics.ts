@@ -19,6 +19,11 @@ export type EventName =
   // Photo missions: a guest opening their card, completing one, and a host saving a list. The first
   // two give the engagement read the feature exists for — a list nobody opens is a different problem
   // from one nobody finishes. The third is what later ranks packs by what hosts actually pick.
+  // How far down a page a visitor actually got, and how long they stayed. Without these, every
+  // decision about what goes above or below the fold is guesswork — and the current funnel (visits
+  // ≫ signups) cannot distinguish "nobody scrolled" from "they scrolled and were not convinced".
+  | 'scroll_depth'
+  | 'page_dwell'
   | 'mission_list_opened'
   | 'mission_captured'
   | 'missions_saved' | 'guest_gallery_opened'

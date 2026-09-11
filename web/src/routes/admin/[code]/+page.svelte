@@ -1159,17 +1159,25 @@
     </div>
 
     <div class="card">
-      <div class="card-title">Photo missions</div>
+      <div class="card-title">Trick list</div>
       <p class="hint" style="margin:0 0 10px">
-        A short list of shots for your guests — printed on cards for the tables, and ticked off in
-        the camera as they shoot. Optional, and guests can ignore it and just take photos.
+        <strong>Guests shoot more, and they shoot what you'd have missed.</strong> Left alone,
+        people photograph the obvious — the couple, the cake, whoever's loudest. A list gets you the
+        table you never sat at, someone's gran on the dance floor, and the quiet moment in the
+        corner. It also gives the guest who knows one person in the room a reason to talk to
+        someone else.
+      </p>
+      <p class="hint" style="margin:0 0 10px">
+        Every photo comes back labelled with the trick it was for, so the gallery reads as a story
+        instead of a pile. A few tricks print on cards for the tables, and guests tick them off in
+        the camera as they shoot.
       </p>
       {#if ev.challengeSets?.length}
         <div class="mset-list">
           {#each ev.challengeSets as s}
             <div class="mset">
               <span class="mset-name">{s.label}</span>
-              <span class="mset-n">{s.items.length} mission{s.items.length === 1 ? '' : 's'}</span>
+              <span class="mset-n">{s.items.length} trick{s.items.length === 1 ? '' : 's'}</span>
             </div>
           {/each}
         </div>
@@ -1177,11 +1185,22 @@
           {ev.challengeSets.length > 1
             ? 'Guests are spread evenly across the cards, so different tables hunt for different things.'
             : 'Every guest gets this card.'}
-          Print them from <strong>Create poster</strong>.
+          Print them from <strong>Create poster</strong>. Guests can still ignore the list and just
+          take photos.
+        </p>
+      {/if}
+      {#if !ev.challengeSets?.length}
+        <!-- Said plainly rather than left implied: a host should never wonder whether their guests
+             are being shown a list they have not read. It stays off until they choose it, and it
+             needs printed cards to work properly, so switching it on for them would leave a
+             half-finished version of the feature on someone's wedding. -->
+        <p class="hint" style="margin:0 0 10px">
+          <strong>Off at the moment.</strong> Your guests just take photos — they won't see a list
+          unless you set one up, and you can turn it off again at any time.
         </p>
       {/if}
       <button class="btn ghost" on:click={() => (missionsOpen = true)}>
-        {ev.challengeSets?.length ? 'Edit missions' : 'Set up photo missions'}
+        {ev.challengeSets?.length ? 'Edit the trick list' : 'Set up a trick list'}
       </button>
     </div>
 
@@ -1353,6 +1372,7 @@
     orgCode={orgCode}
     eventType={ev.eventType ?? null}
     savedSets={ev.challengeSets ?? []}
+    savedTick={ev.challengeTick ?? null}
     maxPhotos={ev.maxPhotos}
     videoSeconds={ev.videoSeconds ?? 0}
     onClose={() => (missionsOpen = false)}

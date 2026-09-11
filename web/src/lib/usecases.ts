@@ -18,10 +18,10 @@ export type UseCase = {
   lede: string;
   features: Feature[];
   faqs: Faq[];
-  /** The challenges.ts pack key for this event type. Each page shows ITS OWN pack's missions, so
+  /** The challenges.ts pack key for this event type. Each page shows ITS OWN pack's tricks, so
    *  the examples are real and differ from page to page instead of repeating one list. */
   packKey: string;
-  /** Heading and copy for the photo-missions section, written per page for the same reason
+  /** Heading and copy for the photo-tricks section, written per page for the same reason
    *  everything else here is. */
   missionsTitle: string;
   missionsText: string;
@@ -122,7 +122,7 @@ export const usecases: Record<string, UseCase> = {
     ],
     packKey: 'corporate',
     missionsTitle: 'The bits nobody thinks to photograph.',
-    missionsText: 'Attendees will shoot the keynote without being asked. Put a list on the tables and you also get the coffee queue, the busiest whiteboard, and two people from teams that never speak. Each mission ticks off in the app as it is taken, so afterwards you can see which prompts the room actually went for — worth knowing before you plan the next one.',
+    missionsText: 'Attendees will shoot the keynote without being asked. Put a list on the tables and you also get the coffee queue, the busiest whiteboard, and two people from teams that never speak. Each one ticks off in the app as it is taken, so afterwards you can see which prompts the room actually went for — worth knowing before you plan the next one.',
     ctaTitle: 'Capture your next company event.',
     ctaText: 'Create an event, drop the QR on your signage, and collect every attendee’s photos in one gallery.',
   },
@@ -177,7 +177,7 @@ export const usecases: Record<string, UseCase> = {
     ],
     packKey: 'hens',
     missionsTitle: 'One list, however the day splits up.',
-    missionsText: 'Hen dos run long and the group comes apart and back together. A list keeps everyone shooting the same day: matching outfits before they wilt, the sash on someone it was never meant for, the one quiet moment somewhere in the middle. Missions tick off in the camera as they happen, and nothing is visible until the end, so nobody gets to edit the story while it is still going on.',
+    missionsText: 'Hen dos run long and the group comes apart and back together. A list keeps everyone shooting the same day: matching outfits before they wilt, the sash on someone it was never meant for, the one quiet moment somewhere in the middle. Each one ticks off in the camera as it happens, and nothing is visible until the end, so nobody gets to edit the story while it is still going on.',
     ctaTitle: 'Get the whole night in one gallery.',
     ctaText: 'Create your event free and share one QR — every photo from every phone, in one place.',
   },

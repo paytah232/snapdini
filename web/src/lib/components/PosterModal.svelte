@@ -675,7 +675,7 @@
     else if (codeDisplay === 'url') { drawUrl(ctx, cleanUrl, tx, ty, tw, 700, 21, CARD_FAMILY, 26); ty += 58; }
     // What the card is FOR. Without this a guest has a list and no idea it is tickable in the app.
     ctx.fillStyle = cardInk.muted; ctx.font = `400 18px ${CARD_FAMILY}`;
-    for (const ln of wrapToLines(ctx, 'Then tick these off as you shoot them.', tw)) { ctx.fillText(ln, tx, ty); ty += 23; }
+    for (const ln of wrapToLines(ctx, 'Tick them off as you pull them off.', tw)) { ctx.fillText(ln, tx, ty); ty += 23; }
   }
 
   /** Paint one set's 4-up sheet at CARD_SCALE. */
@@ -786,7 +786,7 @@
 
 <div class="back" on:click|self={() => dispatch('close')} role="dialog" aria-modal="true" aria-label="Event poster">
   <div class="sheet" class:fs={fsEdit} tabindex="-1" use:modalFocus>
-    <div class="head"><span>{fsEdit ? 'Arrange layout' : view === 'cards' ? 'Mission cards' : 'Event poster'}</span>
+    <div class="head"><span>{fsEdit ? 'Arrange layout' : view === 'cards' ? 'Trick cards' : 'Event poster'}</span>
       <div class="head-actions">
         <!-- Arranging is the poster's own free layout; the card sheet is a fixed 4-up grid. -->
         {#if view === 'poster'}<button class="tog" on:click={() => (fsEdit = !fsEdit)} aria-label={fsEdit ? 'Exit full screen' : 'Full-screen layout'} title={fsEdit ? 'Exit full screen' : 'Full-screen layout — easier to arrange'}>{fsEdit ? '✓ Done' : '⛶ Arrange'}</button>{/if}
@@ -797,14 +797,14 @@
     {#if !fsEdit}
       <div class="tabs">
         <button class="tab" class:on={view === 'poster'} aria-pressed={view === 'poster'} on:click={() => (view = 'poster')}>🖼 Poster</button>
-        <button class="tab" class:on={view === 'cards'} aria-pressed={view === 'cards'} on:click={() => (view = 'cards')}>🃏 Mission cards</button>
+        <button class="tab" class:on={view === 'cards'} aria-pressed={view === 'cards'} on:click={() => (view = 'cards')}>🃏 Trick cards</button>
       </div>
     {/if}
 
     <div class="poster-body" class:fs={fsEdit}>
     <div class="preview">
       {#if view === 'poster' ? busy : (!!activeSheet && !cardsDrawn)}<div class="spinner" aria-label={view === 'cards' ? 'Building cards' : 'Building poster'}></div>{/if}
-      {#if view === 'cards' && !activeSheet}<p class="empty">No photo missions on this event yet.</p>{/if}
+      {#if view === 'cards' && !activeSheet}<p class="empty">No trick list on this event yet.</p>{/if}
       <!-- Both previews stay mounted so switching tabs costs nothing and the poster keeps its
            measured drag bounds; the inactive one is just hidden. -->
       <div class="canvas-wrap" class:hidden={view !== 'cards' || !activeSheet || !cardsDrawn}>
@@ -842,7 +842,7 @@
       <summary>✏️ Customise {view === 'cards' ? 'cards' : ''}</summary>
       {#if view === 'cards'}
       {#if !activeSheet}
-        <p class="layout-hint">This event has no photo missions yet. Choose a shot list for it and the printable table cards appear here.</p>
+        <p class="layout-hint">This event has no trick list yet. Set one up and the printable table cards appear here.</p>
       {:else}
         <p class="layout-hint">Four identical A6 cards to an A4 sheet — print, cut along the dashed guides, one per place setting. The colours, background and join details follow the poster you designed.</p>
         <label class="fld"><span>Card title</span><input bind:value={cardTitle} maxlength="60" placeholder={headline} /></label>

@@ -6,7 +6,7 @@ import QRCode from 'qrcode';
 import sharp from 'sharp';
 import { eq, and, or, sql, inArray, count, desc, isNotNull } from 'drizzle-orm';
 import { db } from '../db';
-import { parseChallengeSets, readSets, serialiseSets, parseEventType, MAX_CHALLENGES, MAX_SETS } from '../challenges';
+import { parseChallengeSets, readSets, readTick, parseTick, serialiseSets, parseEventType, MAX_CHALLENGES, MAX_SETS } from '../challenges';
 import { events, participants, photos, shares, eventCohosts, users, type Event } from '../schema';
 import { faceMatchingAvailable } from '../faces';
 import * as email from '../email';
@@ -243,6 +243,25 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
 // Lets a visitor try the real camera/gallery without signing up. Short-lived (purges
 // in ~3h via the retention sweeper). MUST be before the /:joinCode wildcard.
 
+// Three missions on the demo roll.
+//
+// The demo is how most people actually meet this product — there are far more demo rolls than real
+// events — and a mechanic you can feel in thirty seconds beats one you read about. The demo reveals
+// instantly, so a visitor shoots a mission and immediately sees their own photo captioned with it,
+// which is the annotated-album payoff the whole feature is for.
+//
+// Written specifically for a visitor sitting ALONE, wherever they happen to be: the shipped packs
+// assume a party ("Everyone you came with") and would hand a solo visitor three impossible tasks.
+// Three of twelve shots, so it reads as an invitation rather than homework.
+//
+// Their own ids, so a demo can never skew which missions hosts are seen to pick.
+const DEMO_MISSIONS = [
+  { id: 'demo-close', text: 'Whatever’s closest to you, up close' },
+  { id: 'demo-far', text: 'The room from as far as you can get' },
+  { id: 'demo-keep', text: 'Something you’d actually keep' },
+];
+
+
 router.post('/demo', async (_req: Request, res: Response) => {
   const now = Date.now();
   let joinCode: string;
@@ -268,6 +287,7 @@ router.post('/demo', async (_req: Request, res: Response) => {
     organizerCode,
     maxPhotos: 12,
     revealMode: 'instant',
+    challenges: JSON.stringify({ sets: [{ key: 'a', label: 'Demo card', items: DEMO_MISSIONS }] }),
     revealDelayHours: 0,
     moderationEnabled: false,
     startsAt: now,
@@ -584,6 +604,7 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     posterConfig:   ev.posterConfig ? JSON.parse(ev.posterConfig) : null,
     eventType:      ev.eventType ?? null,
     challengeSets:  readSets(ev.challenges),
+    challengeTick:  readTick(ev.challenges),
     purged:         !!ev.purgedAt,
     participantCount: participantRows.length,
     photoCount,
@@ -618,15 +639,15 @@ router.post('/:joinCode/highlights', requireOrganizer, async (req: Request, res:
 // rather than at creation because it belongs with theming, and asking at creation would add a
 // question to the one flow we most want frictionless.
 router.put('/:joinCode/challenges', requireOrganizer, async (req: Request, res: Response) => {
-  const body = req.body as { eventType?: unknown; challenges?: unknown };
+  const body = req.body as { eventType?: unknown; challenges?: unknown; tick?: unknown };
   const sets = parseChallengeSets(body.challenges);
   if (sets === null) return res.status(400).json({ error: 'challenges must be a list, or {sets:[…]}' });
   await db.update(events)
-    .set({ eventType: parseEventType(body.eventType), challenges: serialiseSets(sets) })
+    .set({ eventType: parseEventType(body.eventType), challenges: serialiseSets(sets, parseTick(body.tick)) })
     .where(eq(events.id, req.event!.id));
   // Echo what was STORED, so a host whose malformed entry was dropped finds out now rather than on
   // the printed card.
-  res.json({ success: true, sets, max: MAX_CHALLENGES, maxSets: MAX_SETS });
+  res.json({ success: true, sets, tick: parseTick(body.tick), max: MAX_CHALLENGES, maxSets: MAX_SETS });
 });
 
 // ── PUT /api/events/:joinCode/poster — save the poster designer customisation ──

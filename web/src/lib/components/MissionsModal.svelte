@@ -9,7 +9,8 @@
   // thorough one, but a planner who wants fifteen gets fifteen — with a warning, not a refusal, when
   // the list outruns the roll.
   import { EVENT_TYPES, MOODS, PACKS, packFor, pickChallenges, varySets, customChallenge,
-           CHALLENGE_MAX_LEN, DEFAULT_COUNT, MAX_COUNT, MAX_SETS, tickFor,
+           CHALLENGE_MAX_LEN, DEFAULT_COUNT, MAX_COUNT, MAX_SETS, tickFor, cleanTick,
+           TICKS_OUTLINE, TICKS_EMOJI,
            type Challenge, type Mood, type MissionSet } from '$lib/challenges';
   import { showToast } from '$lib/toast';
   import { track } from '$lib/analytics';
@@ -19,6 +20,8 @@
   export let eventType: string | null = null;
   /** What is already saved, in the stored shape. */
   export let savedSets: { key: string; label: string; items: { id: string; text: string }[] }[] = [];
+  /** The glyph already chosen, if any. Null means follow the event type's default. */
+  export let savedTick: string | null = null;
   /** The guest's roll size, so we can say when a list outruns it. */
   export let maxPhotos = 10;
   /** 0 means the event allows no video at all, so clip prompts must not be offered. */
@@ -31,6 +34,22 @@
   let busy = false;
   let customText = '';
   let active = 0;
+  // The tick belongs to the LIST, not the poster: a host may never print anything, and a digital-only
+  // list still needs a mark beside each line. Chosen once here, used on the guest's screen and on
+  // the printed card alike.
+  let tick = savedTick ?? tickFor(eventType);
+  let tickTouched = !!savedTick;
+  let ownTick = '';
+  // Which quick pick produced what is on screen, so the host can see where the list came from.
+  // Cleared the moment they tick anything by hand — otherwise the chip would claim credit for a
+  // list the host has since edited.
+  let lastQuick: Mood | 'shuffle' | null = null;
+  // Follow the event type until the host picks one deliberately — otherwise switching from Wedding
+  // to Baby shower would leave a heart on a bottle-themed card.
+  $: if (!tickTouched) tick = tickFor(type === 'general' ? null : type);
+  const setTick = (t: string) => { const c = cleanTick(t); if (c) { tick = c; tickTouched = true; } };
+  // Astral = emoji: drawn in colour by the device's own font, so it ignores the card's ink.
+  $: tickIsEmoji = (tick.codePointAt(0) ?? 0) > 0xffff;
 
   $: pack = packFor(type);
   $: allowVideo = videoSeconds > 0;
@@ -55,6 +74,7 @@
 
   function toggle(c: Challenge) {
     if (!current) return;
+    lastQuick = null;
     current.items = chosenIds.has(c.id)
       ? current.items.filter((i) => i.id !== c.id)
       : [...current.items, c].slice(0, MAX_COUNT);
@@ -62,7 +82,10 @@
   }
   function quick(mood: Mood | null) {
     if (!pack || !current) return;
-    current.items = pickChallenges(pack, { count, mood, allowVideo });
+    // No mood means Shuffle, which has to draw at random — re-applying the curated order would
+    // hand back the list already on screen and read as a dead button.
+    current.items = pickChallenges(pack, { count, mood, allowVideo, shuffle: !mood });
+    lastQuick = mood ?? 'shuffle';
     drafts = drafts;
   }
   function addCustom() {
@@ -74,6 +97,7 @@
     const c = customChallenge(customText, next);
     if (!c) { showToast(`Keep it under ${CHALLENGE_MAX_LEN} characters so it fits the card`, true); return; }
     current.items = [...current.items, c].slice(0, MAX_COUNT);
+    lastQuick = null;
     drafts = drafts;
     customText = '';
   }
@@ -99,6 +123,7 @@
     try {
       const body = {
         eventType: type === 'general' ? null : type,
+        tick,
         challenges: { sets: drafts.filter((d) => d.items.length).map((d) => ({
           key: d.key, label: d.label, items: d.items.map((i) => ({ id: i.id, text: i.text })),
         })) },
@@ -113,7 +138,7 @@
       if (!r.ok) throw new Error(d?.error || 'Could not save');
       onSaved(d.sets ?? []);
       track('missions_saved', { cards: (d.sets ?? []).length, per: count, type }, joinCode);
-      showToast(d.sets?.length ? `Saved — ${d.sets.length} card${d.sets.length === 1 ? '' : 's'} ready to print` : 'Missions cleared');
+      showToast(d.sets?.length ? `Saved — ${d.sets.length} card${d.sets.length === 1 ? '' : 's'} ready to print` : 'Trick list cleared');
       onClose();
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'Could not save', true);
@@ -124,23 +149,40 @@
 </script>
 
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
-<div class="back" on:click|self={onClose} role="dialog" aria-modal="true" aria-label="Photo missions">
+<div class="back" on:click|self={onClose} role="dialog" aria-modal="true" aria-label="Trick list">
   <div class="sheet">
     <div class="head">
-      <span>Photo missions</span>
+      <span>Trick list</span>
       <button class="x" on:click={onClose} aria-label="Close">✕</button>
     </div>
 
     <p class="lede">
-      A short list of shots for your guests. It prints on cards for the tables, and they tick them
-      off in the camera as they go.
+      A short list of shots for your guests — a few tricks to pull off. It prints on cards for the
+      tables, and they tick them off in the camera as they go. Entirely optional: guests can ignore
+      the list and just take photos.
     </p>
 
     <label class="fld" for="m-type">What kind of event is this?</label>
     <select id="m-type" bind:value={type} on:change={() => { seeded = false; }}>
       {#each EVENT_TYPES as t}<option value={t.key}>{t.label}</option>{/each}
     </select>
-    <p class="hint">Sets which list you're offered, and the tick on the card ({tickFor(type === 'general' ? null : type)}).</p>
+    <p class="hint">Sets which tricks you're offered, and the mark beside each one.</p>
+
+    <span class="fld">The mark beside each trick</span>
+    <div class="ticks">
+      {#each TICKS_OUTLINE as t}
+        <button class="tk" class:on={tick === t} on:click={() => setTick(t)} aria-label="Use {t}">{t}</button>
+      {/each}
+      {#each TICKS_EMOJI as t}
+        <button class="tk" class:on={tick === t} on:click={() => setTick(t)} aria-label="Use {t}">{t}</button>
+      {/each}
+      <input class="tkown" bind:value={ownTick} maxlength="2" placeholder="•"
+             aria-label="Your own character" on:input={() => setTick(ownTick)} />
+    </div>
+    <p class="hint">
+      Used on the guests' screens and on the printed cards.
+      {#if tickIsEmoji}Emoji are drawn in colour by each device's own font, so they won't match the card's ink — the outline marks will.{/if}
+    </p>
 
     {#if drafts.length > 1}
       <div class="tabs" role="tablist">
@@ -164,13 +206,13 @@
     {/if}
 
     <div class="ctl">
-      <label class="fld" for="m-count">How many on each card</label>
+      <label class="fld" for="m-count">How many tricks per card</label>
       <input id="m-count" type="number" min="1" max={MAX_COUNT} bind:value={count} />
       <span class="of">{current?.items.length ?? 0} chosen</span>
     </div>
     {#if outrunsRoll}
       <p class="warn">
-        That's more missions than the {maxPhotos} shots on a guest's roll. They can still shoot
+        That's more tricks than the {maxPhotos} shots on a guest's roll. They can still shoot
         whatever they like — they just can't finish the list.
       </p>
     {/if}
@@ -178,13 +220,13 @@
     <div class="quick">
       <span class="qlabel">Quick pick</span>
       {#each MOODS as m}
-        <button class="chip" on:click={() => quick(m.key)} title={m.hint}>{m.label}</button>
+        <button class="chip" class:on={lastQuick === m.key} on:click={() => quick(m.key)} title={m.hint}>{m.label}</button>
       {/each}
-      <button class="chip" on:click={() => quick(null)} title="The pack's own order">Shuffle</button>
+      <button class="chip" class:on={lastQuick === 'shuffle'} on:click={() => quick(null)} title="Pick at random from the whole list">Shuffle</button>
     </div>
 
     <div class="listhead">
-      <span>Everything {pack?.label ?? ''} offers</span>
+      <span>Every trick {pack?.label ?? ''} offers</span>
       <span class="lh-hint">Tick the ones you want</span>
     </div>
     <ul class="opts">
@@ -220,7 +262,7 @@
     <div class="foot">
       <button class="btn ghost" on:click={onClose}>Cancel</button>
       <button class="btn primary" on:click={save} disabled={busy}>
-        {busy ? 'Saving…' : drafts.length > 1 ? `Save ${drafts.length} cards` : 'Save missions'}
+        {busy ? 'Saving…' : drafts.length > 1 ? `Save ${drafts.length} cards` : 'Save trick list'}
       </button>
     </div>
   </div>
@@ -247,9 +289,9 @@
     font-size: inherit; text-decoration: underline; }
 
   .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
-  .tab { padding: 6px 11px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg);
+  .tab { padding: 7px 11px; border: 1px solid var(--border); border-radius: 8px; background: transparent;
     color: var(--text); font: inherit; font-size: .8rem; cursor: pointer; }
-  .tab.on { border-color: var(--accent); background: rgba(245,197,24,.14); font-weight: 700; }
+  .tab.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); font-weight: 700; }
   .tcount { opacity: .55; font-variant-numeric: tabular-nums; }
 
   .ctl { display: flex; align-items: end; gap: 8px; margin-bottom: 10px; }
@@ -260,9 +302,12 @@
 
   .quick { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 4px 0 16px; }
   .qlabel { font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
-  .chip { padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg);
-    color: var(--text); font: inherit; font-size: .78rem; cursor: pointer; }
+  /* Same shape as .seg in the poster designer and .tab in the admin page, so the modal looks like
+     the rest of Snapdini rather than a component with its own opinions. */
+  .chip { padding: 7px 11px; border: 1px solid var(--border); border-radius: 8px; background: transparent;
+    color: var(--text); cursor: pointer; font: inherit; font-size: .8rem; }
   .chip:hover { border-color: var(--accent); }
+  .chip.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); font-weight: 700; }
 
   .listhead { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 7px;
     font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
@@ -274,7 +319,7 @@
     padding: 9px 10px; border-radius: 9px; font: inherit; font-size: .87rem;
     border: 1px solid var(--border); background: var(--bg); color: var(--text); }
   .opt:hover { border-color: var(--text-muted); }
-  .opt.on { border-color: var(--accent); background: rgba(245,197,24,.1); }
+  .opt.on { border-color: var(--accent); background: rgba(245, 197, 24, .1); }
   .obox { flex: none; width: 18px; height: 18px; border-radius: 5px; border: 1px solid var(--border);
     display: flex; align-items: center; justify-content: center; font-size: .7rem; }
   .opt.on .obox { border-color: var(--accent); color: var(--accent); }
@@ -284,4 +329,9 @@
 
   .foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
   .btn.sm { padding: 7px 11px; font-size: .8rem; }
+  .ticks { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; margin-bottom: 6px; }
+  .tk { width: 34px; height: 34px; border-radius: 8px; cursor: pointer; font-size: 1rem; line-height: 1;
+    border: 1px solid var(--border); background: transparent; color: var(--text); }
+  .tk.on { background: var(--accent); border-color: var(--accent); }
+  .tkown { width: 46px; flex: none; text-align: center; }
 </style>

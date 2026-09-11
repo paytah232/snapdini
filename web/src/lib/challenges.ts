@@ -215,7 +215,7 @@ export const PACKS: Pack[] = [
       C('hens-mid-laugh',   'The group, mid-laugh',                 ['classic', 'fun']),
       C('hens-message',     'A message for the bride',              ['heartfelt'], true),
       C('hens-organiser',   'Whoever organised all this',           ['heartfelt', 'social']),
-      C('hens-worst-move',  'Someone’s worst dance move',           ['silly'], true),
+      C('hens-first-round', 'The first round of the day', ['classic', 'fun']),
       C('hens-sash',        'The sash on someone unexpected',       ['silly']),
       C('hens-mirror',      'The best bathroom-mirror selfie',      ['fun', 'silly']),
       C('hens-how-met',     'How you met the bride, to camera',     ['heartfelt', 'social'], true),
@@ -226,7 +226,7 @@ export const PACKS: Pack[] = [
       C('hens-just-met',    'A photo with someone you just met',    ['social']),
       C('hens-all-together', 'Everyone in one frame, no one missing', ['classic', 'social']),
       C('hens-bride-laughing', 'The bride laughing properly', ['classic', 'heartfelt']),
-      C('hens-first-round', 'The first round of the day', ['classic', 'fun']),
+      C('hens-worst-move',  'Someone’s worst dance move',           ['silly'], true),
       C('hens-outfit-change', 'An outfit change, before and after', ['fun']),
       C('hens-packed-floor', 'The dance floor at its fullest', ['fun']),
       C('hens-old-young', 'The oldest and youngest of the group', ['heartfelt', 'social']),
@@ -244,7 +244,7 @@ export const PACKS: Pack[] = [
       C('eng-both-families', 'Both families in one frame',          ['heartfelt', 'social']),
       C('eng-cheers',       'Cheers, all glasses up',               ['classic', 'social']),
       C('eng-proposal-story', 'Someone telling the proposal story', ['fun', 'social'], true),
-      C('eng-first-toast',  'The first toast',                      ['classic']),
+      C('eng-quiet-corner', 'The quietest corner of the party',     ['heartfelt']),
       C('eng-happiest',     'The happiest person here, not the couple', ['heartfelt', 'fun']),
       C('eng-not-met',      'A guest you’ve not met before',        ['social']),
       C('eng-hands',        'The couple’s hands',                   ['heartfelt']),
@@ -273,7 +273,7 @@ export const PACKS: Pack[] = [
       C('grad-family',      'The whole family, squeezed in',        ['classic', 'social']),
       C('grad-proudest',    'Whoever’s proudest, and it isn’t them', ['heartfelt']),
       C('grad-day-one',     'A friend from day one',                ['heartfelt', 'social']),
-      C('grad-cap-toss',    'The cap toss',                         ['classic', 'fun'], true),
+      C('grad-cheer',      'The loudest cheer of the day',         ['classic', 'fun'], true),
       C('grad-happy-tears', 'Someone crying happy tears',           ['heartfelt']),
       C('grad-message',     'A message for the graduate',           ['heartfelt'], true),
       C('grad-group-gowns', 'Everyone in gowns, together',          ['classic', 'social']),
@@ -401,6 +401,10 @@ export type PickOpts = {
    *  mission a guest physically cannot complete is worse than one fewer mission. */
   allowVideo?: boolean;
   rng?: Rng;
+  /** Draw from the WHOLE pack at random rather than its curated order. Without this, "shuffle"
+   *  with no mood re-applied the curated order — which is the list the host is already looking at,
+   *  so the button appeared to do nothing. */
+  shuffle?: boolean;
   /** Cap on clip prompts in one list. A clip eats the guest's video allowance and takes longer to
    *  set up than a still, so a list of mostly-video missions quietly ruins the roll. */
   maxVideo?: number;
@@ -414,11 +418,12 @@ export type PickOpts = {
  * the host always gets the number they asked for even from a thinly-tagged mood.
  */
 export function pickChallenges(pack: Pack, opts: PickOpts = {}): Challenge[] {
-  const { count = DEFAULT_COUNT, mood = null, allowVideo = true, rng = Math.random, maxVideo = 2 } = opts;
+  const { count = DEFAULT_COUNT, mood = null, allowVideo = true, rng = Math.random, maxVideo = 2, shuffle = false } = opts;
   const n = Math.max(1, Math.min(MAX_COUNT, Math.floor(count)));
 
   const usable = pack.challenges.filter((c) => allowVideo || !c.video);
-  const preferred = mood ? shuffled(usable.filter((c) => c.moods.includes(mood)), rng) : usable;
+  const preferred = mood ? shuffled(usable.filter((c) => c.moods.includes(mood)), rng)
+                  : shuffle ? shuffled(usable, rng) : usable;
   const rest = mood ? usable.filter((c) => !c.moods.includes(mood)) : [];
 
   const out: Challenge[] = [];

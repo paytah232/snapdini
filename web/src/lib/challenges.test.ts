@@ -60,6 +60,14 @@ describe('the library itself', () => {
   it('every pack offers more than the maximum a host can pick, so there is real choice', () => {
     for (const p of PACKS) expect(p.challenges.length).toBeGreaterThanOrEqual(MAX_COUNT);
   });
+  it('shows at most one clip prompt in the first six', () => {
+    // The first six ARE the examples on each landing page, and a page of clip prompts misrepresents
+    // a product whose default event allows no video at all.
+    for (const p of PACKS) {
+      const clips = p.challenges.slice(0, 6).filter((c) => c.video).length;
+      expect(clips, `${p.key} leads with ${clips} clip prompts`).toBeLessThanOrEqual(1);
+    }
+  });
   it('packs are mostly stills — a roll of video prompts would eat the allowance', () => {
     for (const p of PACKS) {
       const vids = p.challenges.filter((c) => c.video).length;
@@ -103,7 +111,25 @@ describe('pickChallenges', () => {
       }
     }
   });
-  it('shuffles within a mood, so "shuffle" actually changes something', () => {
+  it('shuffle with no mood draws at RANDOM, not the curated order', () => {
+    // The bug this covers: with mood:null the picker returned the pack's curated order, which is the
+    // list the host is already looking at — so the Shuffle button appeared to do nothing at all.
+    const plain = pickChallenges(wed, { count: 6 }).map((c) => c.id);
+    const a = pickChallenges(wed, { count: 6, shuffle: true, rng: seeded(41) }).map((c) => c.id);
+    const b = pickChallenges(wed, { count: 6, shuffle: true, rng: seeded(97) }).map((c) => c.id);
+    expect(a).not.toEqual(plain);
+    expect(a).not.toEqual(b);
+    expect(new Set(a).size).toBe(6);
+  });
+  it('shuffling still respects the count, the video rules and the pack', () => {
+    for (const p of PACKS) {
+      const got = pickChallenges(p, { count: MAX_COUNT, shuffle: true, allowVideo: false, rng: seeded(43) });
+      expect(got, p.key).toHaveLength(MAX_COUNT);
+      expect(got.some((c) => c.video), p.key).toBe(false);
+      for (const c of got) expect(p.challenges.some((x) => x.id === c.id), `${p.key}/${c.id}`).toBe(true);
+    }
+  });
+  it('shuffles within a mood, so a mood pick changes something', () => {
     const a = pickChallenges(wed, { mood: 'heartfelt', count: 3, rng: seeded(1) }).map((c) => c.id);
     const b = pickChallenges(wed, { mood: 'heartfelt', count: 3, rng: seeded(99) }).map((c) => c.id);
     expect(a).not.toEqual(b);

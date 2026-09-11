@@ -72,6 +72,8 @@ export interface AdminEvent extends Omit<PublicEvent, 'participantCount'> {
   eventType?: string | null;
   /** The host's photo-mission cards. Several exist so different tables get different lists. */
   challengeSets?: { key: string; label: string; items: { id: string; text: string }[] }[];
+  /** The mark beside each trick, shared by the app and the printed card. */
+  challengeTick?: string | null;
 }
 
 const org = (organizerCode: string) => ({ 'X-Organizer-Code': organizerCode });
@@ -212,6 +214,7 @@ export type GuestMissions = {
   challenges?: { id: string; text: string }[];
   challengesDone?: string[];
   challengeSet?: string | null;
+  challengeTick?: string | null;
 };
 
 export const joinEvent = (joinCode: string, name: string, email?: string) =>
