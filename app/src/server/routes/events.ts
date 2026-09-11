@@ -601,7 +601,7 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     retentionDays:  ev.retentionDays,
     paid:           !!ev.paid,
     amountPaidCents: ev.amountPaidCents,
-    posterConfig:   ev.posterConfig ? JSON.parse(ev.posterConfig) : null,
+    posterConfig:   readPosterConfig(ev.posterConfig),
     eventType:      ev.eventType ?? null,
     challengeSets:  readSets(ev.challenges),
     challengeTick:  readTick(ev.challenges),
@@ -650,11 +650,36 @@ router.put('/:joinCode/challenges', requireOrganizer, async (req: Request, res: 
   res.json({ success: true, sets, tick: parseTick(body.tick), max: MAX_CHALLENGES, maxSets: MAX_SETS });
 });
 
+// The poster designer's saved settings. Generous next to a full design (~1kB) so hosts never meet
+// the ceiling, small enough that the column stays a setting and not a document store.
+const MAX_POSTER_CONFIG = 16000;
+
+// Never let a bad row take the event page down with it. Anything unparseable — a blob truncated by
+// the old .slice(), a hand-edited row — reads as "no saved design", which is recoverable: the host
+// opens the designer and saves again. A throw here is not.
+function readPosterConfig(raw: string | null): unknown {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === 'object' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 // ── PUT /api/events/:joinCode/poster — save the poster designer customisation ──
 router.put('/:joinCode/poster', requireOrganizer, async (req: Request, res: Response) => {
   const config = (req.body as { config?: unknown }).config;
-  // store a bounded JSON blob (poster text/colours/toggles — no untrusted execution)
-  const json = config && typeof config === 'object' ? JSON.stringify(config).slice(0, 4000) : null;
+  // A bounded JSON blob (poster text/colours/toggles — no untrusted execution). This used to be
+  // truncated with .slice(), which is the one thing you must never do to JSON: a blob cut mid-string
+  // is unparseable, and the organizer payload below parses it on every load, so one oversized design
+  // would have locked the host out of their own event page. Refuse it instead — a design that big is
+  // a bug on our side, and the host gets told rather than silently losing their work.
+  const json = config && typeof config === 'object' ? JSON.stringify(config) : null;
+  if (json && json.length > MAX_POSTER_CONFIG) {
+    res.status(413).json({ error: 'That design is too detailed to save. Simplify it and try again.' });
+    return;
+  }
   await db.update(events).set({ posterConfig: json }).where(eq(events.id, req.event!.id));
   res.json({ success: true });
 });
