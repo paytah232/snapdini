@@ -132,6 +132,16 @@ resize** (it can't leave the poster; the outline shows its real size). Backgroun
 plain colour (incl. **Match theme**), or an upload. Per-element colours (or **Use theme colours**).
 The QR always carries the centre logo. Export **PDF / PNG / JPG** or **Print**. Changes auto-save.
 
+#### Trick cards (in the poster editor)
+The cards guests hold, on a second tab beside the poster. Choose **4 per A4 / 2 / 1**, keep or drop
+the **rounded corners** (off = the card edge *is* the cut line), show or hide the **QR** and the join
+link, write your own caption, and drag or resize the title and QR block as on the poster. Pick which
+**sets** to print and which one you're looking at. Turn the **card identifiers** off to shuffle the
+stack and hand them out at random — each card still points at its own list. Add a **decoration**
+(border, bow ties, birds, glasses, confetti, sparkles, or a camera drawn around the QR), with its own
+position, size and colour. Text colours adjust themselves to stay readable on whatever background you
+pick, including the ink-saving white. The tick is the one you chose in the trick list editor.
+
 ### Review & Curate — `/admin/<code>/review`
 Where you approve, curate and share photos.
 - **Cards / Single** views + a **🎬 Slideshow** button.

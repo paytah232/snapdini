@@ -154,7 +154,22 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   - The count defaults to **5** and goes to 20. It is the host's call, not a rule: `setCount()`
     tops up from the pack or trims the tail rather than refusing, so the number field and the
     ticked list can never disagree.
-  - Cards print from the poster designer as **4-up A6 sheets, one sheet per set**.
+  - Cards print from the poster designer: **4-up A6, 2-up A5 or 1-up A4**, one sheet per set, with
+    the cut guides and the corner radius following the choice (square corners exist because a
+    guillotine cannot round them). Paper scale is **height-based, not area-based** — an A5 half
+    sheet is the same height as an A6, so scaling it by √2 blew the QR up and squeezed the list.
+  - Card identifiers can be turned **off** so a host shuffles the stack and hands them out at
+    random; the QR still carries its own `?set=`, so a shuffled card is still the right card.
+  - `cardSkip` stores **exclusions**, not inclusions, so a set added later prints by default.
+  - Decorations (`web/src/lib/cardDecor.ts`) are drawn vector, no assets and no requests, before
+    the content so text always sits on top. Confetti is **seeded** or it shimmers between redraws.
+  - `readableOn()` walks a colour's own lightness until it clears the WCAG bar rather than
+    flipping to black — a gold title on white goes darker gold. The join code is drawn on the QR
+    panel's **white**, so it needs contrast against that, not against the poster background.
+  - **Never truncate `poster_config`.** It used to be `.slice(0, 4000)`, and the organizer payload
+    parses that column on every load — JSON cut mid-string is a syntax error, so one oversized
+    design would have 500'd the event page permanently. Saving now refuses (413) and reading is
+    defensive, so a row that is already bad reads as "no design" instead of locking the host out.
 
 - **Search indexing — only ONE deployment may say "I am the original"** (`SEO_INDEXABLE`).
   Every SEO tag used to be built from the *request host*, and robots.txt even documented that as a
