@@ -8,7 +8,7 @@
   // Second, the count is the host's call. Five is the default because a list you can finish beats a
   // thorough one, but a planner who wants fifteen gets fifteen — with a warning, not a refusal, when
   // the list outruns the roll.
-  import { EVENT_TYPES, MOODS, PACKS, packFor, pickChallenges, varySets, customChallenge,
+  import { EVENT_TYPES, MOODS, PACKS, packFor, pickChallenges, varySets, varyOne, customChallenge,
            CHALLENGE_MAX_LEN, DEFAULT_COUNT, MAX_COUNT, MAX_SETS, tickFor, cleanTick,
            TICKS_OUTLINE, TICKS_EMOJI,
            type Challenge, type Mood, type MissionSet } from '$lib/challenges';
@@ -67,10 +67,31 @@
     seeded = true;
   }
   $: current = drafts[active] ?? drafts[0];
+  // Each card has its own length, so the field follows whichever one is open.
+  $: if (current) count = current.items.length;
   $: chosenIds = new Set(current?.items.map((i) => i.id) ?? []);
   // The warning that matters: a guest with a 10-shot roll and 15 missions cannot finish, and would
   // spend the whole roll trying. Said plainly, not enforced — a host may have a reason.
   $: outrunsRoll = (current?.items.length ?? 0) > maxPhotos;
+
+  /** The number field and the tick list were two views of one thing that could disagree — a host
+   *  could ask for 6 and tick 9, and nothing reconciled them or said which one the card would use.
+   *  Now there is a single number: ticking moves it, and typing it tops up from the pack or trims
+   *  from the end rather than throwing away what the host already chose. */
+  function setCount(n: number) {
+    if (!pack || !current) return;
+    const want = Math.max(1, Math.min(MAX_COUNT, Math.floor(n || 1)));
+    const items = [...current.items];
+    if (items.length > want) items.length = want;
+    else for (const c of pack.challenges) {
+      if (items.length >= want) break;
+      if ((allowVideo || !c.video) && !items.some((i) => i.id === c.id)) items.push(c);
+    }
+    current.items = items;
+    count = items.length;
+    lastQuick = null;                     // the list is no longer what a quick pick produced
+    drafts = drafts;
+  }
 
   function toggle(c: Challenge) {
     if (!current) return;
@@ -78,6 +99,7 @@
     current.items = chosenIds.has(c.id)
       ? current.items.filter((i) => i.id !== c.id)
       : [...current.items, c].slice(0, MAX_COUNT);
+    count = current.items.length;         // the field always shows what is actually on the card
     drafts = drafts;
   }
   function quick(mood: Mood | null) {
@@ -85,6 +107,7 @@
     // No mood means Shuffle, which has to draw at random — re-applying the curated order would
     // hand back the list already on screen and read as a dead button.
     current.items = pickChallenges(pack, { count, mood, allowVideo, shuffle: !mood });
+    count = current.items.length;
     lastQuick = mood ?? 'shuffle';
     drafts = drafts;
   }
@@ -97,6 +120,7 @@
     const c = customChallenge(customText, next);
     if (!c) { showToast(`Keep it under ${CHALLENGE_MAX_LEN} characters so it fits the card`, true); return; }
     current.items = [...current.items, c].slice(0, MAX_COUNT);
+    count = current.items.length;
     lastQuick = null;
     drafts = drafts;
     customText = '';
@@ -104,7 +128,12 @@
   function addCard() {
     if (!pack || drafts.length >= MAX_SETS) return;
     const key = String.fromCharCode(97 + drafts.length);
-    drafts = [...drafts, { key, label: `Card ${key.toUpperCase()}`, items: pickChallenges(pack, { count, allowVideo }) }];
+    // Varied against the cards that already exist, not a fresh copy of the curated order — which
+    // would hand the host an exact duplicate of card A and leave them to rebuild it by hand. It
+    // keeps whatever the existing cards already share, so the essentials stay on every table, and
+    // the host can still rework the whole thing from here.
+    const items = varyOne(pack, drafts.map((d) => d.items), { count, allowVideo });
+    drafts = [...drafts, { key, label: `Card ${key.toUpperCase()}`, items }];
     active = drafts.length - 1;
   }
   function removeCard(i: number) {
@@ -188,7 +217,7 @@
       <div class="tabs" role="tablist">
         {#each drafts as d, i}
           <button class="tab" class:on={i === active} on:click={() => (active = i)} role="tab" aria-selected={i === active}>
-            {d.label} <span class="tcount">{d.items.length}</span>
+            {d.label}<span class="tcount" aria-label="{d.items.length} tricks">{d.items.length}</span>
           </button>
         {/each}
         {#if drafts.length < MAX_SETS}<button class="tab add" on:click={addCard}>+ Card</button>{/if}
@@ -206,9 +235,10 @@
     {/if}
 
     <div class="ctl">
-      <label class="fld" for="m-count">How many tricks per card</label>
-      <input id="m-count" type="number" min="1" max={MAX_COUNT} bind:value={count} />
-      <span class="of">{current?.items.length ?? 0} chosen</span>
+      <label class="fld" for="m-count">Tricks on this card</label>
+      <input id="m-count" type="number" min="1" max={MAX_COUNT} value={count}
+             on:change={(e) => setCount(+e.currentTarget.value)} />
+      <span class="of">of {pack?.challenges.length ?? 0} to choose from</span>
     </div>
     {#if outrunsRoll}
       <p class="warn">
@@ -288,11 +318,23 @@
   .link { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit;
     font-size: inherit; text-decoration: underline; }
 
-  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
-  .tab { padding: 7px 11px; border: 1px solid var(--border); border-radius: 8px; background: transparent;
-    color: var(--text); font: inherit; font-size: .8rem; cursor: pointer; }
+  .tabs { display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0 6px; }
+  .tab { position: relative; padding: 7px 11px; border: 1px solid var(--border); border-radius: 8px;
+    background: transparent; color: var(--text); font: inherit; font-size: .8rem; cursor: pointer; }
   .tab.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); font-weight: 700; }
-  .tcount { opacity: .55; font-variant-numeric: tabular-nums; }
+  /* Same corner-bubble treatment as .preset-check on the admin page, so the count reads as a badge
+     on the card rather than a second word in its name. The ring in --surface keeps it legible
+     wherever it lands, including over the accent fill of the selected tab. */
+  .tcount {
+    position: absolute; top: -7px; right: -7px;
+    min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--accent); color: var(--accent-ink, #111);
+    font-size: .64rem; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums;
+    box-shadow: 0 0 0 2px var(--surface);
+  }
+  /* On the selected tab the accent is already the background, so the badge inverts to stay visible. */
+  .tab.on .tcount { background: var(--surface); color: var(--text); }
 
   .ctl { display: flex; align-items: end; gap: 8px; margin-bottom: 10px; }
   .ctl .fld { flex: 1; margin: 0 0 5px; }
@@ -328,7 +370,12 @@
     color: var(--text-muted); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; }
 
   .foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
-  .btn.sm { padding: 7px 11px; font-size: .8rem; }
+  .btn { font-weight: 700; border-radius: var(--radius-sm); padding: 10px 14px; font-size: 0.86rem;
+    border: 1px solid transparent; cursor: pointer; text-decoration: none; text-align: center; }
+  .btn.sm { padding: 7px 12px; font-size: 0.8rem; }
+  .btn.primary { background: var(--accent); color: var(--accent-ink, #111); }
+  .btn.ghost { background: transparent; color: var(--text); border-color: var(--border); }
+  .btn:disabled { opacity: 0.6; cursor: default; }
   .ticks { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; margin-bottom: 6px; }
   .tk { width: 34px; height: 34px; border-radius: 8px; cursor: pointer; font-size: 1rem; line-height: 1;
     border: 1px solid var(--border); background: transparent; color: var(--text); }

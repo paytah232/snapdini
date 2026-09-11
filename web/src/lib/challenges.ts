@@ -514,3 +514,54 @@ export function varySets(pack: Pack, opts: PickOpts & { sets?: number; shared?: 
   }
   return out;
 }
+
+/**
+ * One more card, varied against the cards that already exist.
+ *
+ * Adding a card used to call the plain picker, which returns the pack's curated order — so the
+ * second card came out identical to the first and the host had to rebuild it by hand before it was
+ * worth printing.
+ *
+ * The core is taken from what the existing cards ALREADY share, rather than from the pack: a host
+ * who has reworked card A should get a card B that agrees with their version, not with ours. With a
+ * single card to go on there is nothing to intersect, so its opening run stands in for the core —
+ * those are the ones a host is most likely to have chosen deliberately.
+ *
+ * Everything after the core prefers challenges no existing card is using, so a new card genuinely
+ * adds coverage instead of reshuffling what is already out there.
+ */
+export function varyOne(pack: Pack, existing: Challenge[][], opts: PickOpts & { shared?: number } = {}): Challenge[] {
+  const { count = DEFAULT_COUNT, allowVideo = true, rng = Math.random, maxVideo = 2 } = opts;
+  const per = Math.max(1, Math.min(MAX_COUNT, Math.floor(count)));
+  const shared = Math.max(0, Math.min(per, opts.shared ?? Math.max(1, Math.round(per / 3))));
+
+  const usable = pack.challenges.filter((c) => allowVideo || !c.video);
+  const byId = new Map(usable.map((c) => [c.id, c]));
+
+  let core: Challenge[] = [];
+  if (existing.length === 1) {
+    core = existing[0].slice(0, shared).map((c) => byId.get(c.id) ?? c);
+  } else if (existing.length > 1) {
+    const common = existing[0].filter((c) => existing.every((e) => e.some((x) => x.id === c.id)));
+    core = common.slice(0, shared).map((c) => byId.get(c.id) ?? c);
+  }
+  if (!core.length) core = usable.slice(0, shared);
+
+  const coreIds = new Set(core.map((c) => c.id));
+  const usedElsewhere = new Set(existing.flat().map((c) => c.id));
+  const fresh = shuffled(usable.filter((c) => !coreIds.has(c.id) && !usedElsewhere.has(c.id)), rng);
+  const rest = shuffled(usable.filter((c) => !coreIds.has(c.id) && usedElsewhere.has(c.id)), rng);
+
+  const out = [...core];
+  let videos = out.filter((c) => c.video).length;
+  for (const c of [...fresh, ...rest]) {
+    if (out.length >= per) break;
+    if (out.some((o) => o.id === c.id)) continue;
+    if (c.video && videos >= maxVideo) continue;
+    if (c.video) videos++;
+    out.push(c);
+  }
+  // Never hand back a short card because the video cap or the pool ran dry.
+  if (out.length < per) for (const c of usable) { if (out.length >= per) break; if (!out.some((o) => o.id === c.id)) out.push(c); }
+  return out;
+}

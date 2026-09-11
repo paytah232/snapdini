@@ -105,6 +105,38 @@
   // Set when the CAMERA is fine but the microphone was refused. Tracked separately because the two
   // are separate permissions and conflating them produced a screen that could not be dismissed.
   let micDenied = false;
+  // WHY the mic failed, which decides whether retrying can possibly work.
+  //
+  // 'blocked' is the case that matters and the one that looks like a broken app: once a browser has
+  // remembered a "block" for a site, getUserMedia rejects instantly and never prompts again, so a
+  // "Try again" button is pressed, nothing appears, and the app looks broken. It is not — the
+  // browser has stopped asking, and only site settings can undo it. Saying so beats a dead button.
+  let micState: 'unknown' | 'prompt' | 'blocked' | 'missing' = 'unknown';
+
+  // Lift toasts clear of the camera's own bottom furniture: the shutter sits ~116px up and the
+  // photo/video toggle ~138px, so a message at the default 28px lands squarely on both. Set on the
+  // document rather than this component because the toast is position:fixed and rendered outside
+  // this subtree, so a variable set here would never reach it.
+  const TOAST_LIFT = '156px';
+  $: if (typeof document !== 'undefined') {
+    document.documentElement.style.setProperty('--toast-bottom', screen === 'camera' ? TOAST_LIFT : '');
+  }
+
+  async function diagnoseMic() {
+    micState = 'unknown';
+    try {
+      // A device with no audio input at all is not a permission problem, and telling someone to
+      // check their settings when they have no microphone is the wrong advice.
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      if (devs.length && !devs.some((d) => d.kind === 'audioinput')) { micState = 'missing'; return; }
+    } catch { /* enumeration unsupported — fall through to the permission check */ }
+    try {
+      // Not supported by Safari, which is why 'unknown' stays a valid answer rather than an error.
+      const st = await navigator.permissions?.query?.({ name: 'microphone' as PermissionName });
+      if (st?.state === 'denied') micState = 'blocked';
+      else if (st?.state) micState = 'prompt';
+    } catch { /* leave it unknown and offer the retry — it may well prompt */ }
+  }
   let cameraStarting = false;    // true while the stream is (re)acquiring — shows a spinner
   let cameraPaused = false;      // user explicitly turned the camera off (manual privacy/battery)
   let focusSupported = false;     // true only if the device exposes tap-to-focus controls
@@ -307,6 +339,8 @@
   }
 
   onDestroy(() => {
+    // Leave the rest of the app's toasts where they belong.
+    if (typeof document !== 'undefined') document.documentElement.style.removeProperty('--toast-bottom');
     clearInterval(undoTimer);
     // onDestroy also runs during SSR, where `document` is undefined — guard it.
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
@@ -489,6 +523,7 @@
           try {
             await attachCamera({ video: true, audio: false });
             micDenied = true;
+            void diagnoseMic();                      // decides whether a retry can even prompt
             videoMode = false;                       // photos still work; do not strand them on a dead screen
             cameraStarting = false;
             cameraDenied = false; cameraError = '';
@@ -1414,8 +1449,22 @@
       </div>
       {#if micDenied}
         <div class="micnote">
-          <span class="micnote-t">Video needs your microphone. Photos are working fine.</span>
-          <button class="micnote-a" on:click={() => { videoMode = true; startCamera(); }}>Try again</button>
+          <span class="micnote-t">
+            {#if micState === 'missing'}
+              No microphone on this device, so clips can’t record. Photos are working fine.
+            {:else if micState === 'blocked'}
+              Your browser has blocked the microphone for this site, so it won’t ask again. Tap the
+              <b>padlock</b> (or <b>aA</b> on iPhone) in the address bar → <b>Microphone</b> →
+              <b>Allow</b>, then reload. Photos are working fine meanwhile.
+            {:else}
+              Video needs your microphone. Photos are working fine.
+            {/if}
+          </span>
+          <!-- Offered only when a retry can actually produce a prompt. A button that cannot work is
+               worse than no button: it is the thing that makes the app look broken. -->
+          {#if micState !== 'blocked' && micState !== 'missing'}
+            <button class="micnote-a" on:click={() => { videoMode = true; startCamera(); }}>Try again</button>
+          {/if}
           <button class="micnote-x" on:click={() => (micDenied = false)} aria-label="Dismiss">✕</button>
         </div>
       {/if}
@@ -2145,13 +2194,13 @@
   /* Sits where the armed strip does, and clears the control rail the same way. */
   .micnote {
     position: absolute; left: 12px; right: 66px; max-width: 460px; top: 58px; z-index: 7;
-    display: flex; align-items: center; gap: 8px;
-    padding: 7px 8px 7px 12px; border-radius: 12px;
-    background: rgba(0, 0, 0, .62); border: 1px solid rgba(245, 197, 24, .5);
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 8px 8px 9px 12px; border-radius: 12px;
+    background: rgba(0, 0, 0, .68); border: 1px solid rgba(245, 197, 24, .5);
     -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
     color: #fff; font-size: .78rem; pointer-events: auto;
   }
-  .micnote-t { flex: 1; min-width: 0; line-height: 1.35; }
+  .micnote-t { flex: 1; min-width: 0; line-height: 1.4; }
   .micnote-a { flex: none; border: 1px solid rgba(255,255,255,.3); background: rgba(255,255,255,.12);
     color: #fff; border-radius: 8px; padding: 4px 9px; font: inherit; font-size: .74rem; cursor: pointer; }
   .micnote-x { flex: none; width: 22px; height: 22px; border-radius: 50%; border: none;

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   PACKS, MOODS, ALL_BY_ID, CHALLENGE_MAX_LEN, DEFAULT_COUNT, MAX_COUNT,
   packFor, pickChallenges, customChallenge, isCustomId, type Mood,
-  TICKS_OUTLINE, TICKS_EMOJI, DEFAULT_TICK, tickFor, cleanTick, varySets, MAX_SETS,
+  TICKS_OUTLINE, TICKS_EMOJI, DEFAULT_TICK, tickFor, cleanTick, varySets, varyOne, MAX_SETS,
 } from './challenges';
 
 // Seeded so "shuffle" is deterministic here — a flaky content test is worse than no test.
@@ -252,6 +252,45 @@ describe('varySets — several cards that differ, but not completely', () => {
       for (const s of varySets(wed, { sets: 3, count: 8, mood: m, rng: seeded(27) })) {
         expect(s.items, m).toHaveLength(8);
       }
+    }
+  });
+});
+
+describe('varyOne — adding a card', () => {
+  const wed = packFor('wedding');
+  it('does NOT duplicate the card that already exists', () => {
+    // The bug: adding a card called the curated picker, so card B came out identical to card A.
+    const a = pickChallenges(wed, { count: 5 });
+    const bNew = varyOne(wed, [a], { count: 5, rng: seeded(51) });
+    expect(bNew.map((c) => c.id)).not.toEqual(a.map((c) => c.id));
+  });
+  it('keeps a shared core, so the must-haves are on both', () => {
+    const a = pickChallenges(wed, { count: 6 });
+    const bNew = varyOne(wed, [a], { count: 6, shared: 2, rng: seeded(52) });
+    expect(bNew.slice(0, 2).map((c) => c.id)).toEqual(a.slice(0, 2).map((c) => c.id));
+  });
+  it('prefers challenges no existing card is already using', () => {
+    const a = pickChallenges(wed, { count: 5 });
+    const bNew = varyOne(wed, [a], { count: 5, shared: 1, rng: seeded(53) });
+    const overlap = bNew.slice(1).filter((c) => a.some((x) => x.id === c.id));
+    expect(overlap).toHaveLength(0);
+  });
+  it('follows the HOST’s core once they have reworked their cards', () => {
+    // Two existing cards that share a deliberate pair the host chose; a third should agree with
+    // their version, not with our curated order.
+    const shared2 = wed.challenges.slice(8, 10);
+    const a = [...shared2, ...wed.challenges.slice(2, 5)];
+    const b = [...shared2, ...wed.challenges.slice(12, 15)];
+    const c = varyOne(wed, [a, b], { count: 5, shared: 2, rng: seeded(54) });
+    expect(c.slice(0, 2).map((x) => x.id)).toEqual(shared2.map((x) => x.id));
+  });
+  it('always returns the count asked for, video rules respected', () => {
+    for (const p of PACKS) {
+      const a = pickChallenges(p, { count: 8, allowVideo: false });
+      const got = varyOne(p, [a], { count: 8, allowVideo: false, rng: seeded(55) });
+      expect(got, p.key).toHaveLength(8);
+      expect(got.some((x) => x.video), p.key).toBe(false);
+      expect(new Set(got.map((x) => x.id)).size, p.key).toBe(8);
     }
   });
 });

@@ -1199,7 +1199,10 @@
           unless you set one up, and you can turn it off again at any time.
         </p>
       {/if}
-      <button class="btn ghost" on:click={() => (missionsOpen = true)}>
+      <!-- Primary while it is OFF, because that is the one state where the card is asking for
+           something. Once a list exists, editing it is ordinary maintenance like every other ghost
+           button on this page, and a second loud button would just compete with the real work. -->
+      <button class="btn {ev.challengeSets?.length ? 'ghost' : 'primary'}" on:click={() => (missionsOpen = true)}>
         {ev.challengeSets?.length ? 'Edit the trick list' : 'Set up a trick list'}
       </button>
     </div>
