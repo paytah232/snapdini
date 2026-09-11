@@ -38,3 +38,6 @@ CLAUDE.md
 /docs/*.m4v
 /docs/*.webm
 /docs/reel-frames/
+
+# scratch fixtures written by test runs
+/testsuite/tmp/

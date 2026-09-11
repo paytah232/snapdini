@@ -136,6 +136,15 @@
     drafts = [...drafts, { key, label: `Card ${key.toUpperCase()}`, items }];
     active = drafts.length - 1;
   }
+  /** The host's own name for a card. The key ('a', 'b', …) is what the data and the QR links use
+   *  and never changes — this is only what gets printed and shown, so renaming is always safe. */
+  function renameCard(name: string) {
+    if (!current) return;
+    const t = name.trim().replace(/\s+/g, ' ').slice(0, 24);
+    current.label = t || `Card ${current.key.toUpperCase()}`;
+    drafts = drafts;
+  }
+
   function removeCard(i: number) {
     drafts = drafts.filter((_, n) => n !== i);
     active = Math.min(active, drafts.length - 1);
@@ -222,9 +231,16 @@
         {/each}
         {#if drafts.length < MAX_SETS}<button class="tab add" on:click={addCard}>+ Card</button>{/if}
       </div>
+      <div class="ctl">
+        <label class="fld" for="m-label">What to call this card</label>
+        <input id="m-label" maxlength="24" placeholder={`Card ${current?.key.toUpperCase() ?? 'A'}`}
+               value={current?.label ?? ''} on:input={(e) => renameCard(e.currentTarget.value)} />
+      </div>
       <p class="hint">
-        Each card is printed separately and guests are spread evenly across them, so different tables
-        hunt for different things. <button class="link" on:click={() => removeCard(active)}>Remove this card</button>
+        Printed on the card itself, so "Golden oldies" or "The tricksters" beats "Card B" when you're
+        handing them out. Each card prints separately and guests are spread evenly across them, so
+        different tables hunt for different things.
+        <button class="link" on:click={() => removeCard(active)}>Remove this card</button>
       </p>
     {:else}
       <div class="row">

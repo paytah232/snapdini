@@ -520,6 +520,17 @@
         // So: find out which one it actually was by asking for the camera alone. If that works, the
         // camera was never the problem — keep it running, fall back to photos, and say so.
         if (denied0 && audio) {
+          // Which of the two actually failed? The request that just broke changed BOTH things at
+          // once — it asked for a specific video resolution AND the microphone — so retrying
+          // without audio and calling it a microphone problem was a guess, and sometimes a wrong
+          // one. Test them apart: plain video WITH audio first. If that works, audio was never the
+          // problem and the resolution constraints were, and we are already running.
+          try {
+            await attachCamera({ video: true, audio: true });
+            cameraStarting = false;
+            void refreshCameras();
+            return;
+          } catch { /* audio really may be the problem — fall through and confirm it */ }
           try {
             await attachCamera({ video: true, audio: false });
             micDenied = true;
@@ -1453,9 +1464,11 @@
             {#if micState === 'missing'}
               No microphone on this device, so clips can’t record. Photos are working fine.
             {:else if micState === 'blocked'}
-              Your browser has blocked the microphone for this site, so it won’t ask again. Tap the
-              <b>padlock</b> (or <b>aA</b> on iPhone) in the address bar → <b>Microphone</b> →
-              <b>Allow</b>, then reload. Photos are working fine meanwhile.
+              Your browser is blocking the microphone here, so it won’t ask again. Tap the icon just
+              to the <b>left of the web address</b> → <b>Permissions</b> → <b>Microphone</b> →
+              <b>Allow</b>, then reload.
+              <b>On Android</b>, also check your phone’s Settings → Apps → your browser → Microphone:
+              a site can be allowed while the browser itself is not. Photos are working fine meanwhile.
             {:else}
               Video needs your microphone. Photos are working fine.
             {/if}
