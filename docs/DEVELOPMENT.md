@@ -143,7 +143,29 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
     strips them and can still fill the maximum for every pack and mood.
   - Guest UI is one pill in the camera topbar (`Camera.svelte`) opening a sheet — the camera has to
     stay a camera. Note `.topbar` is `pointer-events: none`, so anything tappable in there must opt
-    back in. Completion fires `Confetti.svelte`, which honours `prefers-reduced-motion`.
+    back in. The pill shows only the count: it used to lead with the event's tick glyph, which as a
+    bare outline circle read as a stray mark rather than an icon. The glyph still bullets each item
+    inside the sheet, which is where it means something.
+  - **The tick is optimistic, and it is taken back if it has to be.** Confetti and the tick fire in
+    `enqueue()`, at the shutter — not in the upload handler where they started. By that line the
+    shot is in the queue and on its way into IndexedDB, so the trick really is pulled off; waiting
+    on the network made a finished thing feel like the app lagging behind the guest, worst exactly
+    where connections are worst. `untickMission()` reverses it on a terminal upload failure, because
+    progress is DERIVED from the photos table and a reload would otherwise disagree with the screen.
+    A capture restored from the offline queue in a later session ticks quietly — there is no shutter
+    moment to celebrate. `Confetti.svelte` honours `prefers-reduced-motion`.
+  - **Camera fallbacks must keep the lens.** A bare `video: true` drops `facingMode` as well as
+    `deviceId`, so a failed switch to video handed the guest their front camera back. A chosen lens
+    also gets a second attempt with NO resolution ask before being abandoned: a secondary lens
+    (ultra-wide, telephoto) tops out below the main sensor and some Android stacks answer that
+    pairing with `OverconstrainedError` rather than a smaller frame. When a lens still cannot be
+    opened the picker SAYS so — `refreshCameras()` re-syncs the dropdown to what was really
+    acquired, and that silent snap-back is what "this option does nothing" actually was.
+  - **The microphone differential runs on ANY failure, not just a denial.** A mic that is permitted
+    but unavailable throws `NotReadableError` (another tab or app holds it), and gating the
+    diagnosis on `NotAllowedError` sent exactly those guests a message about permission they had
+    already granted. The `DOMException` name is reported to `client_errors` so this stops being
+    guesswork.
   - A **tick glyph** per event (`events.challenge_tick`) is what a guest and a printed card mark
     off with — a heart for a wedding, a bottle for a baby shower. The event type only sets the
     *default*; the host can pick any of the offered glyphs or type their own, so `parseTick` keeps
