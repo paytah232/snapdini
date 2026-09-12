@@ -5,7 +5,14 @@
   export let photos: Photo[] = [];
   export let index = 0;
 
-  const dispatch = createEventDispatcher<{ close: void }>();
+  /** Who may caption from in here. 'own' = only the viewer's own shots (the guest's roll), 'any' =
+   *  every photo (the host, in Review), 'none' = the read-only galleries. Opening the same editor
+   *  the grid uses, rather than a second one, is the whole point: a caption written full-screen and
+   *  a caption written on a tile have to behave identically. */
+  export let captionMode: 'none' | 'own' | 'any' = 'none';
+  $: canCaption = captionMode === 'any' || (captionMode === 'own' && !!photo?.isOwn);
+
+  const dispatch = createEventDispatcher<{ close: void; caption: Photo }>();
   $: photo = photos[index];
 
   // Move focus into the dialog on open and restore it to the trigger on close.
@@ -17,6 +24,11 @@
   function prev() { if (index > 0) index--; }
   function next() { if (index < photos.length - 1) index++; }
   function onKey(e: KeyboardEvent) {
+    // Someone typing has the keyboard, not the viewer. Without this, writing a caption over the
+    // lightbox pages the album out from under the half-typed text, and Escape closes the photo
+    // instead of the editor — arrow keys in a textarea are how you move the cursor.
+    const t = e.target as HTMLElement | null;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
     if (e.key === 'Escape') dispatch('close');
     else if (e.key === 'ArrowLeft') prev();
     else if (e.key === 'ArrowRight') next();
@@ -28,6 +40,14 @@
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
 <div class="lb" bind:this={lbEl} on:click|self={() => dispatch('close')} role="dialog" aria-modal="true" aria-label="Photo viewer" tabindex="-1">
   <button class="close" on:click={() => dispatch('close')} aria-label="Close">✕</button>
+  {#if canCaption}
+    <!-- Looking at a photo full-screen is when someone actually thinks of what to say about it;
+         making them close it and find the tile again is the wrong way round. -->
+    <button class="lb-cap" on:click|stopPropagation={() => dispatch('caption', photo)}
+            aria-label={photo.caption ? 'Edit this caption' : 'Add a caption'}>
+      💬 {photo.caption ? 'Edit caption' : 'Add a caption'}
+    </button>
+  {/if}
   {#if photo}
     {#if photo.mediaType === 'video'}
       <!-- svelte-ignore a11y-media-has-caption -->
@@ -56,6 +76,10 @@
     font-size: 0.82rem; text-shadow: 0 1px 3px #000; }
   .cap .written { font-weight: 700; }
   .cap .mission { font-weight: 700; }
+  .lb-cap { position: absolute; left: 12px; top: 12px; z-index: 3; padding: 8px 12px; border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.28); background: rgba(0,0,0,.5); color: #fff; font: inherit;
+    font-size: .82rem; cursor: pointer; -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+  .lb-cap:hover { border-color: rgba(255,255,255,.5); }
   /* Demoted, not dropped: with a caption present the mission is attribution, not the headline. */
   .cap .mission.secondary { font-weight: 400; opacity: .75; }
   .nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(0,0,0,0.4);

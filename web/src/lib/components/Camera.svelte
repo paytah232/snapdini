@@ -2095,7 +2095,9 @@
       </StartYourOwn>
     {/if}
   </div>
-  {#if lbOpen}<Lightbox photos={shownPhotos} index={lbIndex} on:close={() => (lbOpen = false)} />{/if}
+  {#if lbOpen}<Lightbox photos={shownPhotos} index={lbIndex} captionMode="own"
+                        on:caption={(e) => openCaption(e.detail)}
+                        on:close={() => (lbOpen = false)} />{/if}
   {#if captionFor}
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
     <div class="capback" on:click|self={() => (captionFor = null)} role="dialog" aria-modal="true" aria-label="Caption this photo">
