@@ -45,7 +45,10 @@ export type StoredChallenge = { id: string; text: string };
  */
 export function parseTick(input: unknown): string | null {
   if (typeof input !== 'string') return null;
-  const chars = [...input.trim()];
+  // Must match cleanTick() on the client exactly: variation selectors are stripped before the
+  // single-code-point check, so a tick pasted from an emoji picker ("\u2714\uFE0F") is accepted
+  // rather than silently dropped on save while the UI still shows it.
+  const chars = [...input.trim().replace(/[\uFE0E\uFE0F]/g, '')];
   if (chars.length !== 1) return null;
   const code = chars[0].codePointAt(0) ?? 0;
   return code < 0x20 || code === 0x7f ? null : chars[0];

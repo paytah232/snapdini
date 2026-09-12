@@ -52,7 +52,12 @@
         <button type="button" class:on={kind === 'suggestion'} on:click={() => (kind = 'suggestion')}>💡 Suggestion</button>
       </div>
       <textarea bind:value={message} rows="4" placeholder="What happened, or what would make Snapdini better?"></textarea>
-      <input class="fb-input" type="email" bind:value={emailAddr} placeholder="Your email (optional — so we can reply)" />
+      <!-- The placeholder used to carry the whole explanation and was simply clipped at phone width,
+           where this form is mostly used. A short placeholder plus a caption says more, and says it
+           even once the guest has started typing. -->
+      <input class="fb-input tight" type="email" bind:value={emailAddr} placeholder="you@example.com"
+             aria-label="Your email (optional, so we can reply)" />
+      <p class="fb-hint">Optional — only so we can reply.</p>
       <label class="fb-file">
         <input type="file" accept="image/*" on:change={pick} />
         <span>{file ? `📎 ${file.name}` : '📎 Attach a screenshot (optional)'}</span>
@@ -79,6 +84,8 @@
   .fb-kinds button.on { border-color: var(--accent, #f0b429); background: color-mix(in srgb, var(--accent, #f0b429) 16%, transparent); }
   textarea, .fb-input { width: 100%; box-sizing: border-box; background: var(--bg, #100f0d); color: var(--text, #f4efe4);
     border: 1px solid var(--border, #3a3630); border-radius: 10px; padding: 10px 12px; font: inherit; margin-bottom: 10px; resize: vertical; }
+  .fb-input.tight { margin-bottom: 4px; }
+  .fb-hint { color: var(--text-muted, #a39b8c); font-size: .78rem; margin: 0 0 10px; }
   .fb-file { display: block; border: 1px dashed var(--border, #3a3630); border-radius: 10px; padding: 10px 12px;
     color: var(--text-muted, #a39b8c); cursor: pointer; font-size: .88rem; margin-bottom: 12px; }
   .fb-file input { display: none; }

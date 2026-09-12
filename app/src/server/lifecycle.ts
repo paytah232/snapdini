@@ -94,6 +94,25 @@ export async function sendWelcome(eventId: string): Promise<void> {
   }
 }
 
+// Whether the post-event email should mention the slideshow, and with what. Pulled out of the sweep
+// so the rules are testable: they are product decisions, not plumbing, and getting one wrong sends a
+// host to a feature that cannot work for them.
+export function slideshowOffer(
+  ev: { purgedAt: number | null; purgeAt: number | null; joinCode: string },
+  photoCount: number,
+  base: string,
+  now = Date.now(),
+): { url: string; photoCount: number; photosUntil: number } | undefined {
+  if (ev.purgedAt) return undefined;                      // the photos are already gone
+  if (!ev.purgeAt || ev.purgeAt <= now) return undefined;  // …or go before they could act
+  // A floor, not just "> 0": a slideshow of three photos is not a slideshow, and suggesting one for
+  // an event that barely happened is worse than saying nothing.
+  if (photoCount < SLIDESHOW_MIN_PHOTOS) return undefined;
+  // No organizer code in the link — the other lifecycle emails don't put one in a URL either, and
+  // the host's session resolves it. An emailed code is a bearer credential.
+  return { url: `${base}/admin/${ev.joinCode}/review?view=slideshow`, photoCount, photosUntil: ev.purgeAt };
+}
+
 // ── The sweep: account welcome + activation nudge + check-in + survey ─────────
 async function sweep(): Promise<void> {
   if (!enabled() || !email.enabled) return;
@@ -182,16 +201,8 @@ async function sweep(): Promise<void> {
     // or that nobody shot anything at, must not be pointed at a feature that cannot work for it —
     // that reads as spam, not as a tip. The date is the event's own purge deadline, so the nudge is
     // useful rather than invented: on the common 7-day retention the host has about four days left.
-    let slideshow: { url: string; photoCount: number; photosUntil: number } | undefined;
-    if (!info.ev.purgedAt && info.ev.purgeAt && info.ev.purgeAt > Date.now()) {
-      const [pc] = await db.select({ n: sql<number>`count(*)` }).from(photos).where(eq(photos.eventId, ev.id));
-      const n = Number(pc?.n ?? 0);
-      // No organizer code in the link — the other lifecycle emails don't put one in a URL either,
-      // and their session resolves it. An emailed code is a bearer credential.
-      // A floor, not just "> 0": a slideshow of three photos is not a slideshow, and suggesting one
-      // for an event that barely happened is worse than saying nothing.
-      if (n >= SLIDESHOW_MIN_PHOTOS) slideshow = { url: `${BASE()}/admin/${info.ev.joinCode}/review?view=slideshow`, photoCount: n, photosUntil: info.ev.purgeAt };
-    }
+    const [pc] = await db.select({ n: sql<number>`count(*)` }).from(photos).where(eq(photos.eventId, ev.id));
+    const slideshow = slideshowOffer(info.ev, Number(pc?.n ?? 0), BASE());
     const view = buildView(info.ev, info.ownerName, { surveyUrl: `${BASE()}/survey/${token}` });
     const mail = surveyEmail({ ...view, hostReward: reward ?? undefined, slideshow });
     try { await email.sendMail({ to: info.ownerEmail, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com' }); }

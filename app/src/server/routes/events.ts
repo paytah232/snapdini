@@ -255,6 +255,7 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
 // Three of twelve shots, so it reads as an invitation rather than homework.
 //
 // Their own ids, so a demo can never skew which missions hosts are seen to pick.
+const DEMO_SET_KEY = 'a';   // the demo's single card; the auto-joined guest must be handed it
 const DEMO_MISSIONS = [
   { id: 'demo-close', text: 'Whatever’s closest to you, up close' },
   { id: 'demo-far', text: 'The room from as far as you can get' },
@@ -287,7 +288,7 @@ router.post('/demo', async (_req: Request, res: Response) => {
     organizerCode,
     maxPhotos: 12,
     revealMode: 'instant',
-    challenges: JSON.stringify({ sets: [{ key: 'a', label: 'Demo card', items: DEMO_MISSIONS }] }),
+    challenges: JSON.stringify({ sets: [{ key: DEMO_SET_KEY, label: 'Demo card', items: DEMO_MISSIONS }] }),
     revealDelayHours: 0,
     moderationEnabled: false,
     startsAt: now,
@@ -316,6 +317,10 @@ router.post('/demo', async (_req: Request, res: Response) => {
     sessionToken,
     photosTaken: 0,
     joinedAt: now,
+    // The demo writes a single set 'a' above, and missionsFor() returns an EMPTY list when a
+    // participant has no set — so without this the demo shipped a trick list nobody could see,
+    // which is the one place the feature most needs to be seen.
+    challengeSet: DEMO_SET_KEY,
   });
 
   // organizerCode is returned so the demo can showcase the manager + share views (it's a
@@ -642,12 +647,15 @@ router.put('/:joinCode/challenges', requireOrganizer, async (req: Request, res: 
   const body = req.body as { eventType?: unknown; challenges?: unknown; tick?: unknown };
   const sets = parseChallengeSets(body.challenges);
   if (sets === null) return res.status(400).json({ error: 'challenges must be a list, or {sets:[…]}' });
+  const tick = parseTick(body.tick);
+  const blob = serialiseSets(sets, tick);
   await db.update(events)
-    .set({ eventType: parseEventType(body.eventType), challenges: serialiseSets(sets, parseTick(body.tick)) })
+    .set({ eventType: parseEventType(body.eventType), challenges: blob })
     .where(eq(events.id, req.event!.id));
   // Echo what was STORED, so a host whose malformed entry was dropped finds out now rather than on
-  // the printed card.
-  res.json({ success: true, sets, tick: parseTick(body.tick), max: MAX_CHALLENGES, maxSets: MAX_SETS });
+  // the printed card. serialiseSets returns null when there are no usable sets, and the tick lives
+  // INSIDE that blob — so echoing the parsed tick there would report a glyph that was never saved.
+  res.json({ success: true, sets, tick: blob ? tick : null, max: MAX_CHALLENGES, maxSets: MAX_SETS });
 });
 
 // The poster designer's saved settings. This is NOT a budget the host spends — every text field in

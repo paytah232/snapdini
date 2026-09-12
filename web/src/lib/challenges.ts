@@ -363,7 +363,10 @@ export const tickFor = (eventType: string | null | undefined): string =>
  *  Counts with the spread operator rather than .length, because an emoji is two UTF-16 units and
  *  .length would see two characters and wrongly reject it. */
 export function cleanTick(input: string | null | undefined): string | null {
-  const chars = [...(input ?? '').trim()];
+  // Drop variation selectors first. "\u2714\uFE0F" is what you get from pasting a tick out of an
+  // emoji picker, and it is TWO code points — so the bare length check below silently rejected the
+  // most obvious thing a host would choose, reverting to the default with no explanation.
+  const chars = [...(input ?? '').trim().replace(/[\uFE0E\uFE0F]/g, '')];
   if (chars.length !== 1) return null;
   const code = chars[0].codePointAt(0) ?? 0;
   // A control character or a space renders as an invisible box on the card.

@@ -80,3 +80,46 @@ describe('the post-event email', () => {
     assert.ok(surveyEmail(view()).subject.includes('Ruby & Sam'));
   });
 });
+
+// ── Whether the slideshow is offered at all ──────────────────────────────────
+// The renderer above is only half of it. These are the rules that decide whether a host is pointed
+// at the feature, and each one exists to stop us emailing someone about something that cannot work.
+import { slideshowOffer } from '../lifecycle';
+
+const DAY = 86_400_000;
+const ev = (over: Partial<{ purgedAt: number | null; purgeAt: number | null; joinCode: string }> = {}) =>
+  ({ purgedAt: null, purgeAt: Date.now() + 4 * DAY, joinCode: 'ABC123', ...over });
+
+describe('whether to mention the slideshow', () => {
+  test('offers it when the photos are there and there are enough of them', () => {
+    const o = slideshowOffer(ev(), 40, 'https://snapdini.com');
+    assert.ok(o);
+    assert.equal(o.photoCount, 40);
+    assert.ok(o.url.endsWith('/admin/ABC123/review?view=slideshow'));
+  });
+
+  test('never on a purged event — the photos are already gone', () => {
+    assert.equal(slideshowOffer(ev({ purgedAt: Date.now() - DAY }), 40, 'https://snapdini.com'), undefined);
+  });
+
+  test('never when the photos go before the host could act on it', () => {
+    assert.equal(slideshowOffer(ev({ purgeAt: Date.now() - 1 }), 40, 'https://snapdini.com'), undefined);
+    assert.equal(slideshowOffer(ev({ purgeAt: null }), 40, 'https://snapdini.com'), undefined);
+  });
+
+  test('not for an event that barely happened', () => {
+    assert.equal(slideshowOffer(ev(), 0, 'https://snapdini.com'), undefined);
+    assert.equal(slideshowOffer(ev(), 7, 'https://snapdini.com'), undefined);
+    assert.ok(slideshowOffer(ev(), 8, 'https://snapdini.com'), 'eight photos should qualify');
+  });
+
+  test('the link carries no organizer code — an emailed code is a bearer credential', () => {
+    const o = slideshowOffer(ev(), 40, 'https://snapdini.com');
+    assert.ok(!/#/.test(o!.url) && !/code=/.test(o!.url), o!.url);
+  });
+
+  test('the deadline it reports is the event’s own, not a guess', () => {
+    const purgeAt = Date.now() + 11 * DAY;
+    assert.equal(slideshowOffer(ev({ purgeAt }), 40, 'https://snapdini.com')!.photosUntil, purgeAt);
+  });
+});

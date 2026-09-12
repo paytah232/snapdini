@@ -49,6 +49,9 @@
   let stream: MediaStream | null = null;
   let facing: 'environment' | 'user' = 'environment';
   let cameras: { id: string; label: string }[] = [];   // available video inputs (for the picker)
+  // Why the last EXACT lens request failed. A phone lists lenses it cannot always open, and
+  // without the reason "it doesn't work" is all anyone — guest or operator — ever learns.
+  let lastLensError = '';
   let deviceId: string | null = null;                   // specific chosen camera (multi-camera systems)
   let videoMaxSecs = 0;
   // Set from /me. The guest UI must offer only what the server will actually accept — the host
@@ -292,7 +295,6 @@
         allowDownloads = me.allowDownloads;
         missions = Array.isArray(me.challenges) ? me.challenges : [];
         missionsDone = Array.isArray(me.challengesDone) ? me.challengesDone : [];
-      if (me.challengeTick) missionTick = me.challengeTick;
         if (me.challengeTick) missionTick = me.challengeTick;
         await enterCamera();
         return;
@@ -504,53 +506,78 @@
         ? { deviceId: { exact: deviceId }, ...res }
         : { facingMode: { ideal: facing }, ...res };
       await attachCamera({ video, audio });
-    } catch {
+    } catch (err1) {
+      // Give the CHOSEN lens a second chance before abandoning it. The first attempt asked for a
+      // specific camera AND a resolution; a secondary lens (ultra-wide, telephoto) routinely tops
+      // out well below the main sensor, and some Android stacks answer that pairing with an
+      // OverconstrainedError rather than just handing back a smaller frame. Retrying the same lens
+      // with no resolution ask is the difference between "the wide angle doesn't work" and it
+      // simply working at whatever size it has.
+      if (deviceId) {
+        try {
+          await attachCamera({ video: { deviceId: { exact: deviceId } }, audio });
+          cameraStarting = false;
+          void refreshCameras();
+          return;
+        } catch (err1b) {
+          // Keep the more informative of the two for the report below.
+          lastLensError = err1b instanceof Error ? err1b.name : (err1 instanceof Error ? err1.name : '');
+        }
+      } else {
+        lastLensError = err1 instanceof Error ? err1.name : '';
+      }
       // The requested camera/facing may not exist (missing selfie cam, unplugged webcam, incognito).
-      // Drop the specific pick and try ANY camera before giving up.
+      // Drop the specific pick and the resolution, but KEEP THE LENS: a bare `video: true` drops the
+      // facing too, so a failed video-mode switch used to hand the guest their front camera back.
+      // Changing which way the camera points because a permission check failed is never what they
+      // asked for, and on a phone it is the most jarring thing the app can do.
       deviceId = null;
+      const anyLens: MediaTrackConstraints = { facingMode: { ideal: facing } };
       try {
-        await attachCamera({ video: true, audio });
+        await attachCamera({ video: anyLens, audio });
       } catch (err2) {
-        const denied0 = err2 instanceof DOMException && (err2.name === 'NotAllowedError' || err2.name === 'SecurityError');
-        // The MICROPHONE is a separate permission from the camera, and video mode is the first thing
-        // that asks for it. A guest who has happily granted the camera, then switches to video and
-        // dismisses the mic prompt, used to land on a screen insisting we needed their camera — with
-        // an "Allow camera" button that re-requested the mic and failed again, so it appeared dead.
-        //
-        // So: find out which one it actually was by asking for the camera alone. If that works, the
-        // camera was never the problem — keep it running, fall back to photos, and say so.
-        if (denied0 && audio) {
-          // Which of the two actually failed? The request that just broke changed BOTH things at
-          // once — it asked for a specific video resolution AND the microphone — so retrying
-          // without audio and calling it a microphone problem was a guess, and sometimes a wrong
-          // one. Test them apart: plain video WITH audio first. If that works, audio was never the
-          // problem and the resolution constraints were, and we are already running.
+        // If we asked for the microphone, we have not yet learned WHICH half failed — the request
+        // above changed the video constraints and asked for audio. Try the same video with no audio
+        // at all. This runs for ANY failure, not just a denial: the common real-world case is a
+        // microphone that is permitted but unavailable (NotReadableError — another tab or app has
+        // it), and gating this on NotAllowedError sent exactly those guests a message about
+        // permissions they had already granted.
+        if (audio) {
+          stopCamera();                                       // let the hardware go before re-asking
+          await new Promise((r) => setTimeout(r, 250));       // …and give the OS a beat to release it
           try {
-            await attachCamera({ video: true, audio: true });
-            cameraStarting = false;
-            void refreshCameras();
-            return;
-          } catch { /* audio really may be the problem — fall through and confirm it */ }
-          try {
-            await attachCamera({ video: true, audio: false });
+            await attachCamera({ video: anyLens, audio: false });
+            // Video without audio works, so the microphone really is the blocker. Say WHY, because
+            // "allow the microphone" is useless advice to someone who already has.
+            const name = err2 instanceof DOMException ? err2.name : '';
             micDenied = true;
             void diagnoseMic();                      // decides whether a retry can even prompt
             videoMode = false;                       // photos still work; do not strand them on a dead screen
             cameraStarting = false;
             cameraDenied = false; cameraError = '';
-            showToast('Video needs your microphone too. Photos are working — allow the mic to record clips.', true);
-            reportClientError('camera: microphone declined for video', 'camera-denied', ev?.joinCode);
+            showToast(
+              name === 'NotAllowedError' || name === 'SecurityError'
+                ? 'Video needs your microphone too. Photos are working — allow the mic to record clips.'
+                : name === 'NotReadableError' || name === 'AbortError' || name === 'TrackStartError'
+                ? 'Your microphone is busy — another app or browser tab may be using it. Close it and try video again. Photos are working.'
+                : 'Couldn’t get the microphone for video, so photos are on instead. Try video again in a moment.',
+              true);
+            reportClientError(`camera: microphone unavailable for video (${name || 'unknown'})`, 'camera-denied', ev?.joinCode);
             return;
-          } catch { /* the camera really is unavailable — fall through to the honest error */ }
+          } catch { /* the camera itself is unavailable — fall through to the honest error */ }
         }
         stopCamera();   // make sure no half-open stream remains (shutter stays disabled on error)
         cameraStarting = false;
         const denied = err2 instanceof DOMException && (err2.name === 'NotAllowedError' || err2.name === 'SecurityError');
         const missing = err2 instanceof DOMException && err2.name === 'NotFoundError';
+        const busy = err2 instanceof DOMException && (err2.name === 'NotReadableError' || err2.name === 'AbortError');
         // A denial is a CHOICE, not a fault. The old copy read as a settings problem and never said
         // why we need the camera or what we cannot reach — which is the actual worry.
         cameraDenied = denied;
-        cameraError = denied ? '' : missing ? 'No camera found on this device.' : "Couldn't start the camera.";
+        cameraError = denied ? ''
+          : missing ? 'No camera found on this device.'
+          : busy ? 'Your camera is busy — another app or tab may be using it.'
+          : "Couldn't start the camera.";
         // Genuine faults stay 'camera'; a declined permission gets its own context so it does not sit
         // in the operator's open-issues digest looking like a bug.
         reportClientError(`camera: ${err2 instanceof Error ? err2.name + ' ' + err2.message : 'failed'}`,
@@ -576,10 +603,28 @@
     } catch { /* enumeration unsupported — picker just won't appear */ }
   }
 
-  function pickCamera(id: string) {
+  async function pickCamera(id: string) {
     if (recording || id === deviceId) return;
+    const wanted = id;
+    const wantedLabel = cameras.find((c) => c.id === wanted)?.label || 'That camera';
     deviceId = id;   // session-only — we always start from the reliable default each visit
-    startCamera();
+    await startCamera();
+    // A phone lists every lens it has, including ones it cannot actually open on demand — an
+    // ultra-wide already in use, a duplicate entry, one that cannot meet the requested resolution.
+    // startCamera() falls back to any working lens when the exact pick fails, and refreshCameras()
+    // then snaps this dropdown back to whatever we really got. That is the right behaviour and the
+    // worst possible silence: the guest taps a camera, the list jumps back, and it reads as broken.
+    // Say what happened instead.
+    const live = track?.getSettings?.().deviceId;
+    if (live && live !== wanted) {
+      const gotLabel = cameras.find((c) => c.id === live)?.label || 'the previous camera';
+      showToast(lastLensError === 'NotReadableError' || lastLensError === 'AbortError'
+        ? `${wantedLabel} is busy — staying on ${gotLabel}.`
+        : lastLensError === 'OverconstrainedError'
+        ? `${wantedLabel} can’t do this mode — staying on ${gotLabel}.`
+        : `${wantedLabel} isn’t available right now — staying on ${gotLabel}.`);
+      reportClientError(`camera: lens unavailable (${wantedLabel}: ${lastLensError || 'unknown'})`, 'camera', ev?.joinCode);
+    }
   }
 
   function stopCamera() {
@@ -882,7 +927,28 @@
     // Persist to IndexedDB immediately so the capture survives an outage / reload / closed tab.
     if (sessionToken && ev) putCapture({ id, joinCode: ev.joinCode, sessionToken, blob, mediaType, source, ext, createdAt: Date.now() }).catch(() => {});
     if (saveToDevice) saveToDeviceCopy(blob, ext);
+    // Celebrate NOW, not when the upload lands. By this line the shot is in the queue and on its way
+    // into IndexedDB, so the trick really is pulled off — the guest is holding a finished thing.
+    // Waiting on the network made that feel like the app was lagging behind them, worst exactly
+    // where connections are worst: a hall full of people on one tower. If the upload turns out to be
+    // impossible, untickMission() takes it back rather than leaving a tick that is a lie.
+    if (challengeId && !missionsDone.includes(challengeId)) {
+      missionsDone = [...missionsDone, challengeId];
+      confetti?.burst();
+      const left = missions.filter((m) => !missionsDone.includes(m.id)).length;
+      showToast(left ? `Nice one — ${left} to go` : 'That’s the whole act. Well done.');
+      trackEvent('mission_captured', { left }, ev?.joinCode);
+    }
+    // Disarm either way: the next shot should be an ordinary one unless they say otherwise.
+    if (challengeId && armed === challengeId) armed = null;
     processQueue();
+  }
+
+  // A photo that can never reach the server must not keep its tick: progress is derived from the
+  // photos table, so the next reload would silently disagree with what the guest is looking at.
+  function untickMission(challengeId: string | undefined) {
+    if (!challengeId || !missionsDone.includes(challengeId)) return;
+    missionsDone = missionsDone.filter((m) => m !== challengeId);
   }
 
   function saveToDeviceCopy(blob: Blob, ext: string) {
@@ -1166,14 +1232,12 @@
       // A mission just landed. Tick it locally rather than refetching — the server derives progress
       // from the photos table, so a reload agrees with this; doing it here just avoids a round trip
       // before the guest sees their own list update.
+      // Normally already ticked at the shutter (see enqueue). This only catches a capture restored
+      // from the offline queue in a later session, where there was no shutter moment to celebrate —
+      // so it ticks quietly rather than firing confetti at someone who is not looking.
       if (item.challengeId && !missionsDone.includes(item.challengeId)) {
         missionsDone = [...missionsDone, item.challengeId];
-        confetti?.burst();
-        const left = missions.filter((m) => !missionsDone.includes(m.id)).length;
-        showToast(left ? `Nice one — ${left} to go` : 'That’s the whole act. Well done.');
-        trackEvent('mission_captured', { left }, ev?.joinCode);
       }
-      // Disarm either way: the next shot should be an ordinary one unless they say otherwise.
       if (item.challengeId && armed === item.challengeId) armed = null;
       delCapture(item.id).catch(() => {});   // uploaded → drop from the offline queue
     } catch (e) {
@@ -1185,6 +1249,7 @@
       if (/no shots remaining/i.test(errMsg)) {
         serverRemaining = 0;
         queue = queue.filter((q) => q.id !== item.id);   // it can never succeed
+        untickMission(item.challengeId);                 // …so its tick would be a lie
         delCapture(item.id).catch(() => {});
         uploading = false;
         showToast(canBuyShots || canAskHost
@@ -1206,6 +1271,10 @@
       }
       // Gave up after several tries — keep the photo and let them retry manually from the queue.
       item.status = 'error'; item.error = errMsg;
+      // Take the tick back: the photo is kept and can be retried by hand, and a successful retry
+      // ticks it again above — but until then the server has no record of it and a reload would
+      // show it unticked. Better to agree with the truth than to flatter the guest.
+      untickMission(item.challengeId);
       photosRemaining = Math.min(photosRemaining + 1, ev?.maxPhotos || 99);
       showToast('Still can’t upload — your photo is saved; open the queue to retry when you’re back online', true);
     }
@@ -1450,7 +1519,6 @@
             <button class="mbadge" class:alldone={!missionsLeft.length}
                     on:click={() => { missionsOpen = true; trackEvent('mission_list_opened', undefined, ev?.joinCode); }}
                     aria-label="Trick list, {missionsDone.length} of {missions.length} pulled off">
-              <span class="mb-ico" aria-hidden="true">{!missionsLeft.length ? '✓' : missionTick}</span>
               {missionsDone.length}/{missions.length}
             </button>
             <span class="mcap">{!missionsLeft.length ? 'all done' : 'trick list'}</span>
@@ -2150,7 +2218,6 @@
   }
   .mbadge:hover { border-color: rgba(255, 255, 255, .5); }
   .mbadge.alldone { border-color: rgba(127, 179, 163, .75); color: #cdeade; }
-  .mb-ico { font-size: .9em; opacity: .9; }
 
   .armed {
     /* Anchored between the left edge and the control rail rather than centred: the rail is 40px at
