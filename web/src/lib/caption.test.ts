@@ -3,7 +3,7 @@
 // refuses an insert that will not fit entirely — silently dropped the longer ones near the limit
 // while short ones still went in. That is what "it only supports some emoji" turned out to be.
 import { describe, it, expect } from 'vitest';
-import { CAPTION_MAX, CAPTION_MAX_RAW, captionLength, captionRemaining, clampCaption } from './caption';
+import { CAPTION_MAX, CAPTION_MAX_RAW, captionLength, captionRemaining, clampCaption } from '../../../shared/caption';
 
 const FAMILY = '\u{1F468}‍\u{1F469}‍\u{1F467}‍\u{1F466}';  // 11 UTF-16 units
 const FLAG = '\u{1F1E6}\u{1F1FA}';                                        // 4

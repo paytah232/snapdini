@@ -4,12 +4,17 @@ RUN apk add --no-cache python3 make g++ fontconfig ttf-dejavu ffmpeg
 
 WORKDIR /app
 
-COPY package*.json ./
+# Built from the REPO ROOT, so paths are prefixed. That context is what lets shared/ into the image
+# at all; see shared/README.md for why the two halves import one file instead of keeping copies.
+COPY app/package*.json ./
 RUN npm install --omit=dev && npm cache clean --force
 
-COPY tsconfig.json ./
-COPY src/ ./src/
-COPY assets/ ./assets/
+COPY app/tsconfig.json ./
+COPY app/src/ ./src/
+COPY app/assets/ ./assets/
+# At /shared, NOT inside /app: that mirrors the repo, where shared/ is a sibling of app/. Because
+# the layout matches, `../../../../shared/caption` resolves the same here as on a laptop.
+COPY shared/ /shared/
 
 ENV NODE_ENV=production \
     PORT=3000 \

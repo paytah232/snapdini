@@ -1,0 +1,12 @@
+# Per-Dockerfile ignore — see web/Dockerfile.dockerignore for why these exist. The server image needs
+# app/ (including its assets) and shared/; the browser sources are dead weight to it.
+*
+!app/
+!shared/
+
+app/node_modules
+app/data
+app/data-prod
+app/face_a.jpg
+**/.env
+**/.env.*

@@ -189,7 +189,7 @@ export const deleteEvent = (code: string, organizerCode: string) =>
 /** Hard cap the server applies (after trimming and collapsing whitespace). Mirrored here so an
  *  input stops the typing instead of silently losing the tail when it saves. */
 // Caption length rules live in caption.ts — see it for why they are counted in graphemes.
-export { CAPTION_MAX, CAPTION_MAX_RAW, clampCaption, captionLength, captionRemaining } from './caption';
+export { CAPTION_MAX, CAPTION_MAX_RAW, clampCaption, captionLength, captionRemaining } from '../../../shared/caption';
 
 /** Write, edit or clear the caption on one photo. Exactly one credential: a guest's session token
  *  (their OWN photos only) or the organizer code (anything in their event). An empty string clears

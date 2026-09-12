@@ -1,4 +1,4 @@
-import { clampCaption, CAPTION_MAX, CAPTION_MAX_RAW } from '../caption';
+import { clampCaption, CAPTION_MAX, CAPTION_MAX_RAW } from '../../../../shared/caption';
 import { Router, type Request, type Response } from 'express';
 import multer from 'multer';
 import path from 'path';

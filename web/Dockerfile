@@ -1,9 +1,13 @@
 # SvelteKit (adapter-node) — built and served as a standalone Node server.
 FROM node:22-alpine AS build
 WORKDIR /app
-COPY package*.json ./
+# Built from the REPO ROOT — see shared/README.md.
+COPY web/package*.json ./
 RUN npm install
-COPY . .
+COPY web/ ./
+# Sibling of the web root, mirroring the repo, so `../../../shared/caption` means the same thing in
+# here as it does in the checkout. Bundled into build/ by Vite, so it is not needed at runtime.
+COPY shared/ /shared/
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-alpine

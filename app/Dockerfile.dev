@@ -6,10 +6,11 @@ RUN apk add --no-cache python3 make g++ fontconfig ttf-dejavu ffmpeg
 
 WORKDIR /app
 
-COPY package*.json ./
+# Root build context (see shared/README.md), so the path is prefixed.
+COPY app/package*.json ./
 RUN npm install && npm cache clean --force
 
-# src/ is bind-mounted at runtime — not copied here
+# src/ AND /shared are bind-mounted at runtime — not copied here, so an edit to either is live
 ENV NODE_ENV=development \
     PORT=3000 \
     DATA_DIR=/data

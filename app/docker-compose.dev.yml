@@ -6,8 +6,8 @@ name: snapdini-dev
 services:
   app:
     build:
-      context: .
-      dockerfile: Dockerfile.dev
+      context: ..
+      dockerfile: app/Dockerfile.dev
     container_name: snapdini-dev-app
     restart: unless-stopped
     # Dev: tsx watch auto-restarts the server on any src edit (src is bind-mounted below),
@@ -15,6 +15,9 @@ services:
     command: ["npm", "run", "dev"]
     volumes:
       - ./src:/app/src         # live-mounted for dev — restart container to pick up code changes
+      # Shared with the browser build — mounted at /shared to mirror the repo, which is what makes
+      # the same relative import work in dev and in the image. See shared/README.md.
+      - ../shared:/shared:ro
       - ./assets:/app/assets:ro # bundled assets (slideshow music) — read-only
       - ./data:/data           # local data (Postgres lives in the db service; keep this on fast disk)
       # The server reads its version from package.json (src/server/index.ts). src/ is mounted
@@ -132,8 +135,8 @@ services:
 
   web:
     build:
-      context: ../web
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: web/Dockerfile
     container_name: snapdini-dev-web
     restart: unless-stopped
     environment:

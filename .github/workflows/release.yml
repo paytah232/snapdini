@@ -34,8 +34,10 @@ jobs:
       fail-fast: false
       matrix:
         image:
-          - { name: app, context: app, dockerfile: app/Dockerfile }
-          - { name: web, context: web, dockerfile: web/Dockerfile }
+          # Both build from the REPO ROOT so shared/ is inside the context — the server and the
+          # browser import one copy of the rules they have to agree about. See shared/README.md.
+          - { name: app, context: ., dockerfile: app/Dockerfile }
+          - { name: web, context: ., dockerfile: web/Dockerfile }
         platform:
           - { arch: amd64, runner: ubuntu-latest }
           - { arch: arm64, runner: ubuntu-24.04-arm }

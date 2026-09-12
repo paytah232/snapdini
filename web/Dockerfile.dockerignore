@@ -1,0 +1,17 @@
+# Per-Dockerfile ignore (BuildKit reads <dockerfile>.dockerignore before the context's .dockerignore).
+#
+# Both images build from the repo root so that shared/ is inside the context — but the browser build
+# has no use for the server's 132MB of slideshow music, and sending it on every build would trade a
+# shared file for a much slower pipeline. The web image needs web/ and shared/ and nothing else.
+*
+!web/
+!shared/
+
+# …minus the parts of web/ that must never be in an image.
+web/node_modules
+web/.svelte-kit
+web/build
+web/e2e
+web/.camtest
+**/.env
+**/.env.*

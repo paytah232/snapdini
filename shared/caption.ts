@@ -1,6 +1,3 @@
-// NOTE: this file is duplicated at app/src/server/caption.ts (and vice versa). The client and the
-// server MUST agree about what "140 characters" means — if they drift, the box accepts text the
-// server then silently truncates, which is the failure this file exists to end. Change both.
 // How long a caption is, measured the way the person writing it would measure it.
 //
 // The limit used to be 140 UTF-16 code units, enforced by the textarea's `maxlength`. That is not

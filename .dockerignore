@@ -1,0 +1,28 @@
+# Both images build from the REPO ROOT, so this one file governs both contexts. It has to keep
+# app/, web/ and shared/ and drop everything heavy or private — a root context would otherwise ship
+# the uploads, the test fixtures and the reference media into every build.
+.git
+.github
+node_modules
+**/node_modules
+**/.svelte-kit
+**/build
+.env
+.env.*
+**/.env
+**/.env.*
+npm-debug.log*
+.DS_Store
+
+# Data and uploads — never belong in an image.
+data
+data-prod
+app/data
+app/data-prod
+
+# Not needed to run the product.
+docs
+loadtest
+testsuite
+web/e2e
+web/.camtest
