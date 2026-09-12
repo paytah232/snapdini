@@ -171,6 +171,12 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
     design would have 500'd the event page permanently. Saving now refuses (413) and reading is
     defensive, so a row that is already bad reads as "no design" instead of locking the host out.
 
+- **compose-env is checked PER SERVICE.** The guard used to scan the whole compose file, so a
+  variable listed under `web:` satisfied the app's requirement and vice versa — it only ever
+  proved the name appeared somewhere. `ANALYTICS_EXCLUDE_EMAILS` passed that test for months
+  while being absent from the app container that reads it, which left internal accounts
+  un-excluded from the lifecycle emails in production. The check is now service-scoped.
+
 - **Search indexing — only ONE deployment may say "I am the original"** (`SEO_INDEXABLE`).
   Every SEO tag used to be built from the *request host*, and robots.txt even documented that as a
   feature ("correct on any domain, dev or prod"). It is the opposite: the dev deployment served

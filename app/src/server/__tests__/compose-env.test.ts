@@ -63,18 +63,32 @@ if (fs.existsSync(WEB)) {
   }
 }
 
-const composeVars = (file: string) => {
-  const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
-  return new Set([...text.matchAll(/^\s+-\s+([A-Z0-9_]+)=/gm)].map((m) => m[1]));
+// Per SERVICE, not per file. Reading the whole file made this check nearly worthless: a variable
+// listed under `web:` satisfied the app's requirement and vice versa, so it only ever proved the
+// name appeared SOMEWHERE. That is exactly how ANALYTICS_EXCLUDE_EMAILS — read by the app's
+// lifecycle sweep, listed only under web — passed this test while being absent from the container
+// that needed it, leaving internal accounts un-excluded from the lifecycle emails in production.
+const composeVars = (file: string, service: string) => {
+  const lines = fs.readFileSync(path.join(ROOT, file), 'utf8').split('\n');
+  const out = new Set<string>();
+  let inService = false;
+  for (const line of lines) {
+    const svc = /^  ([a-z0-9_-]+):\s*$/.exec(line);
+    if (svc) { inService = svc[1] === service; continue; }
+    if (!inService) continue;
+    const v = /^\s+-\s+([A-Z0-9_]+)=/.exec(line);
+    if (v) out.add(v[1]);
+  }
+  return out;
 };
 
 describe('docker-compose passes every setting the server reads', () => {
   for (const file of ['docker-compose.yml', 'docker-compose.dev.yml']) {
     test(file, () => {
-      const passed = composeVars(file);
+      const passed = composeVars(file, 'app');
       const missing = [...readVars].filter((v) => !NOT_OURS.has(v) && !passed.has(v)).sort();
       assert.deepEqual(missing, [],
-        `${file} does not pass: ${missing.join(', ')} — add them to the app service's environment: list`);
+        `${file} does not pass to the APP service: ${missing.join(', ')} — a var under another service does not count`);
     });
   }
 });
@@ -85,10 +99,10 @@ describe('docker-compose passes every setting the WEB service reads', () => {
   });
   for (const file of ['docker-compose.yml', 'docker-compose.dev.yml']) {
     test(file, () => {
-      const passed = composeVars(file);
+      const passed = composeVars(file, 'web');
       const missing = [...webVars].filter((v) => !NOT_OURS.has(v) && !passed.has(v)).sort();
       assert.deepEqual(missing, [],
-        `${file} does not pass: ${missing.join(', ')} — add them to the web service's environment: list`);
+        `${file} does not pass to the WEB service: ${missing.join(', ')} — a var under another service does not count`);
     });
   }
 });

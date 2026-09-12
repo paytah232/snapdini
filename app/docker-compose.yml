@@ -104,6 +104,7 @@ services:
       - HOST_REWARD_DAYS=${HOST_REWARD_DAYS:-90}
       # Customer lifecycle emails (welcome/nudge/check-in/survey) — off unless set to 1. Needs email configured.
       - LIFECYCLE_EMAILS=${LIFECYCLE_EMAILS:-}
+      - ANALYTICS_EXCLUDE_EMAILS=${ANALYTICS_EXCLUDE_EMAILS:-}
       # Operator notifications to SUPPORT_EMAIL (daily digest + instant alerts) — off unless set to 1.
       - OPS_NOTIFICATIONS=${OPS_NOTIFICATIONS:-}
       - OPS_TZ=${OPS_TZ:-}                                   # e.g. Australia/Brisbane (digest/times); default is used if unset

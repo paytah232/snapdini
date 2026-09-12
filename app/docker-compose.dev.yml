@@ -102,6 +102,7 @@ services:
       # emails and operator notifications could not be exercised on the dev stack AT ALL — setting
       # them in .env did nothing, because compose passes env explicitly.
       - LIFECYCLE_EMAILS=${LIFECYCLE_EMAILS:-}
+      - ANALYTICS_EXCLUDE_EMAILS=${ANALYTICS_EXCLUDE_EMAILS:-}
       - OPS_NOTIFICATIONS=${OPS_NOTIFICATIONS:-}
       - OPS_DIGEST_HOUR=${OPS_DIGEST_HOUR:-8}
       - OPS_ERROR_SPIKE=${OPS_ERROR_SPIKE:-20}
