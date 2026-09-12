@@ -57,6 +57,9 @@ export interface PublicEvent {
   /** How many tricks are on a card — never WHICH ones. This payload is public: a join code
    *  must not hand someone the whole list before the event. 0 when the host set none. */
   challengeCount?: number;
+  /** Present ONLY for a demo, which hands out its own code so any device that opens one can
+   *  reach the host view. A real event never returns this. */
+  organizerCode?: string;
 }
 
 export interface MyEvent {

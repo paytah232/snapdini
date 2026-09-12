@@ -401,6 +401,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
   const [{ c: participantCount }] = await db.select({ c: count() }).from(participants).where(eq(participants.eventId, event.id));
   const [{ c: photoCount }] = await db.select({ c: count() }).from(photos).where(eq(photos.eventId, event.id));
 
+  const isDemoEvent = !event.ownerUserId && event.name === DEMO_NAME;
   res.json({
     id:             event.id,
     name:           event.name,
@@ -422,7 +423,21 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
     // the event. Sets can differ in length, so this is the first card's count, which is
     // representative rather than a promise.
     challengeCount: readSets(event.challenges)[0]?.items.length ?? 0,
-    isDemo:         !event.ownerUserId && event.name === DEMO_NAME,
+    isDemo:         isDemoEvent,
+    // A DEMO hands out its own organizer code, and only a demo ever does.
+    //
+    // The demo is a tour of three surfaces, and the link between them died on the one route people
+    // actually take: start it on a laptop, which shows a QR because the camera wants a phone, and
+    // the code was written into the LAPTOP's localStorage. The phone that scans has never seen it,
+    // so the visitor lands in the camera with no way to the host's view — the half of the product
+    // that is being sold.
+    //
+    // Safe because a demo is a throwaway: no owner, a two-guest cap, purged about three hours
+    // later, and anyone can mint one with a single unauthenticated POST to /demo — which already
+    // returns this code for exactly this reason. So it grants nothing that was not already a
+    // request away. It is gated on the SAME expression as isDemo, not a second reading of the
+    // conditions, so the two cannot drift apart and start leaking a real event's code.
+    organizerCode:  isDemoEvent ? event.organizerCode : undefined,
     isUpcoming:     now < event.startsAt,
     isExpired:      now > event.expiresAt,
     // Reschedule eligibility: an event no guest ever used can be moved, even after it has

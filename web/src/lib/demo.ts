@@ -14,10 +14,13 @@
 // exactly why the demo route hands it back at all.
 export type DemoLinks = { camera: string; gallery: string; host: string };
 
-export function demoLinks(joinCode: string | null | undefined): DemoLinks {
+export function demoLinks(joinCode: string | null | undefined, organizerCode?: string | null): DemoLinks {
   const code = joinCode || '';
-  let org = '';
-  try { org = (typeof localStorage !== 'undefined' && localStorage.getItem('demo_org_' + code)) || ''; }
+  // The event payload is the reliable source: localStorage only ever had this on the device that
+  // STARTED the demo, and the common path is starting it on a laptop and scanning the QR with a
+  // phone that has never seen it. Storage stays as a fallback for a cached older response.
+  let org = organizerCode || '';
+  try { if (!org) org = (typeof localStorage !== 'undefined' && localStorage.getItem('demo_org_' + code)) || ''; }
   catch { org = ''; }   // private mode, or storage blocked — the host link simply is not offered
   return {
     camera: `/join/${code}`,

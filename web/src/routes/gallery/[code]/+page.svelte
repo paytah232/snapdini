@@ -180,7 +180,7 @@
   // Recomputed when the event loads, because localStorage is only readable in the browser and the
   // organizer code is not in the page payload — it is put there by the landing page that made the
   // demo, which is the only place it is ever handed out.
-  $: dlinks = demoLinks(event?.joinCode ?? code);
+  $: dlinks = demoLinks(event?.joinCode ?? code, event?.organizerCode);
 
   const modeText = (mode: string) =>
     mode === 'manual'
