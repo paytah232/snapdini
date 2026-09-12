@@ -28,6 +28,15 @@ const RETENTION_DAYS = parseInt(process.env.RETENTION_DAYS || '7');
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Global video length (self-host / billing-off default; per-event entitlement when billing on).
 const GLOBAL_VIDEO_SECONDS = parseInt(process.env.VIDEO_MAX_SECONDS || '0');
+// A demo's own clip limit, deliberately NOT the global one.
+//
+// The global is a self-hoster's setting for their real events; a demo is a throwaway a stranger
+// mints with one unauthenticated POST, and it is purged about three hours later. At the global's
+// dev value of 60s that is a 4K minute of upload per tyre-kicker, on the path that is the
+// documented capacity ceiling — and there are already 424 demo events in dev alone.
+//
+// Ten seconds is enough to show that clips work, which is the only job the demo has.
+const DEMO_VIDEO_SECONDS = 10;
 
 // Allowed capture aspect ratios validated against the single options source.
 const VALID_ASPECTS = options.aspectRatios.map((a) => a.value);
@@ -302,7 +311,7 @@ router.post('/demo', async (_req: Request, res: Response) => {
     // tiny (creator + one more, e.g. a phone scanning the QR) to limit drive-by spam — the event
     // also purges ~3h after creation (purgeAt below) via the retention sweeper.
     guestCap: 2,
-    videoSeconds: GLOBAL_VIDEO_SECONDS,
+    videoSeconds: DEMO_VIDEO_SECONDS,
     paid: true,
     purgeAt: expiresAt,
     createdAt: now,
@@ -568,6 +577,7 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     photosTaken: participants.photosTaken,
     joinedAt: participants.joinedAt,
     requestedMoreAt: participants.requestedMoreAt,
+    challengeSet: participants.challengeSet,
   }).from(participants).where(eq(participants.eventId, ev.id)).orderBy(participants.joinedAt);
   const [{ c: photoCount }] = await db.select({ c: count() }).from(photos).where(eq(photos.eventId, ev.id));
   // "Pending" only means "needs action" when moderation is ON. With it off, pending photos are
@@ -638,6 +648,7 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     participants:   participantRows.map((p) => ({
       id: p.id, name: p.name, email: p.email,
       photosTaken: p.photosTaken, joinedAt: p.joinedAt,
+      challengeSet: p.challengeSet,
     })),
     emailEnabled:   email.enabled,
   });
@@ -1214,6 +1225,35 @@ router.delete('/:joinCode/participants/:id', requireOrganizer, async (req: Reque
   for (const r of rows) cleanup.unlinkUpload(r.filename);   // remove files; rows cascade on delete
   await db.delete(participants).where(eq(participants.id, p.id));
   res.json({ ok: true, removedPhotos: rows.length });
+});
+
+// ── PUT /api/events/:joinCode/participants/:id/card — move a guest to a different trick card ──
+//
+// Cards are handed out round-robin at join, and a guest who scanned the wrong table's card was
+// stuck with it: challenge_set was written once, at insert, and nothing could change it after.
+// Scanning the right card later does not help either — a returning guest keeps the card they were
+// given, which is deliberate (it is what stops them shopping around for easier tricks) but leaves a
+// genuine mis-scan with no way out. So the HOST can move them, the same way they can already remove
+// a guest who joined twice.
+//
+// Nothing is destroyed by moving. Progress is derived from photos.challenge_id and scoped to the
+// card being held, so ticks for the old card stop counting and come back if they are moved back.
+router.put('/:joinCode/participants/:id/card', requireOrganizer, async (req: Request, res: Response) => {
+  const ev = req.event!;
+  const [p] = await db.select().from(participants)
+    .where(and(eq(participants.id, String(req.params.id)), eq(participants.eventId, ev.id)));
+  if (!p) return res.status(404).json({ error: 'Participant not found' });
+
+  // Only a card THIS event actually has. An arbitrary key would leave the guest holding a set that
+  // does not exist, and missionsFor() would fall back to the first one — a silent wrong answer.
+  const sets = readSets(ev.challenges);
+  const want = String((req.body as { set?: unknown })?.set ?? '').trim().toLowerCase();
+  if (!sets.some((x) => x.key === want))
+    return res.status(400).json({ error: 'That card is not part of this event' });
+
+  await db.update(participants).set({ challengeSet: want }).where(eq(participants.id, p.id));
+  const set = sets.find((x) => x.key === want)!;
+  res.json({ ok: true, challengeSet: want, label: set.label, tricks: set.items.length });
 });
 
 export default router;

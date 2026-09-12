@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import Turnstile from '$lib/components/Turnstile.svelte';
   import { modalFocus } from '$lib/ui';
 
   // Where it was opened from (e.g. "Manage page", "Camera") — helps us triage in Site admin.
@@ -11,6 +12,8 @@
   let emailAddr = '';
   let file: File | null = null;
   let busy = false;
+  let turnstileToken = '';
+  let turnstile: Turnstile;
   let done = false;
   let err = '';
 
@@ -27,11 +30,18 @@
       if (emailAddr.trim()) fd.append('email', emailAddr.trim());
       if (context) fd.append('context', context);
       if (file) fd.append('screenshot', file);
+      // /api/contact is bot-checked, and this form never sent a token — so every in-app report
+      // failed with "Bot check failed" and the words went nowhere. The field name is Cloudflare's
+      // own, which is what requireTurnstile reads.
+      fd.append('cf-turnstile-response', turnstileToken);
       const r = await fetch('/api/contact', { method: 'POST', body: fd, credentials: 'same-origin' });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error((d as { error?: string }).error || 'Could not send — please try again.');
       done = true;
-    } catch (e) { err = e instanceof Error ? e.message : 'Could not send.'; }
+    } catch (e) {
+      err = e instanceof Error ? e.message : 'Could not send.';
+      turnstile?.reset();   // tokens are single-use; without this a retry fails for a new reason
+    }
     finally { busy = false; }
   }
 </script>
@@ -62,6 +72,7 @@
         <input type="file" accept="image/*" on:change={pick} />
         <span>{file ? `📎 ${file.name}` : '📎 Attach a screenshot (optional)'}</span>
       </label>
+      <Turnstile bind:token={turnstileToken} bind:this={turnstile} action="contact" />
       {#if err}<p class="fb-err">{err}</p>{/if}
       <div class="fb-actions">
         <button class="fb-btn" type="button" on:click={() => dispatch('close')}>Cancel</button>

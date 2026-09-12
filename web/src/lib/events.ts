@@ -72,7 +72,9 @@ export interface MyEvent {
 export interface AdminEvent extends Omit<PublicEvent, 'participantCount'> {
   joinUrl: string; galleryUrl: string; revealedAt: number | null;
   moderationEnabled: boolean; ratingMode: RatingMode; pendingCount: number; participantCount: number;
-  participants: { id: string; name: string; email: string | null; photosTaken: number; joinedAt: number }[];
+  participants: { id: string; name: string; email: string | null; photosTaken: number; joinedAt: number;
+                  /** Which trick card they were handed. Null when the event has no trick list. */
+                  challengeSet?: string | null }[];
   emailEnabled: boolean;
   // entitlement (upgrades)
   guestCap: number; videoSeconds: number; retentionDays: number; paid: boolean; amountPaidCents: number;
@@ -226,6 +228,12 @@ export const emailGallery = (code: string, organizerCode: string, emails: string
 // Remove a participant (e.g. a duplicate join). Their uploads are deleted too — returns the count.
 export const deleteParticipant = (code: string, organizerCode: string, id: string) =>
   api<{ ok: boolean; removedPhotos: number }>(`/api/events/${code}/participants/${id}`, { method: 'DELETE', headers: org(organizerCode) });
+/** Move a guest to a different trick card. Nothing is destroyed — progress is derived from photos
+ *  and scoped to the card held, so ticks come back if they are moved back. */
+export const setParticipantCard = (code: string, organizerCode: string, id: string, set: string) =>
+  api<{ ok: boolean; challengeSet: string; label: string; tricks: number }>(
+    `/api/events/${code}/participants/${id}/card`,
+    { method: 'PUT', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify({ set }) });
 export const setAllowDownloads = (code: string, organizerCode: string, allowDownloads: boolean) =>
   postJson(`/api/events/${code}/allow-downloads`, { allowDownloads }, org(organizerCode));
 

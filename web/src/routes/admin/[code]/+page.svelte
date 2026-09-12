@@ -10,8 +10,7 @@
     setHighlights, saveTheme, emailGallery, setAllowDownloads,
     getPhotosByOrganizer, listCohosts, inviteCohost, removeCohost,
     listShares, deleteShare, deleteParticipant,
-    type AdminEvent, type Photo, type EventTheme, type CohostList, type ShareLink
-  } from '$lib/events';
+    type AdminEvent, type Photo, type EventTheme, type CohostList, type ShareLink, setParticipantCard } from '$lib/events';
   import type { AppOptions, BillingConfig } from '$lib/types';
   import UpgradePanel from '$lib/components/UpgradePanel.svelte';
   import HelpTip from '$lib/components/HelpTip.svelte';
@@ -26,6 +25,7 @@
   import MissionsModal from '$lib/components/MissionsModal.svelte';
   import EventImageEditor from '$lib/components/EventImageEditor.svelte';
   import FeedbackModal from '$lib/components/FeedbackModal.svelte';
+  import Turnstile from '$lib/components/Turnstile.svelte';
 
   const code = $page.params.code ?? '';
 
@@ -59,7 +59,13 @@
   const PART_PAGE = 25;
   let partQuery = '';
   let partLimit = PART_PAGE;
-  $: partAll = (ev?.participants ?? []) as Array<{ id: string; name: string; email: string | null; photosTaken: number; joinedAt: number }>;
+  // The cast re-declares the shape, so anything added to AdminEvent.participants has to be added
+  // here too or it is simply invisible to this page.
+  $: partAll = (ev?.participants ?? []) as Array<{ id: string; name: string; email: string | null;
+      photosTaken: number; joinedAt: number; challengeSet?: string | null }>;
+  // The trick cards, narrowed once. Reassignment is only offered when there is more than one card —
+  // with a single card there is nowhere to move a guest TO, and with no trick list there are none.
+  $: cards = ev?.challengeSets ?? [];
   $: partTotal = partAll.length;
   $: partFiltered = partQuery.trim()
     ? partAll.filter((p) => `${p.name ?? ''} ${p.email ?? ''}`.toLowerCase().includes(partQuery.trim().toLowerCase()))
@@ -510,6 +516,8 @@
   // an eligibility snapshot (requested-before-start ⇒ full refund) from the event's start time.
   let showRefund = false;
   let refundReason = '';
+  let refundToken = '';
+  let refundTurnstile: Turnstile;
   let refundBusy = false;
   let refundDone = false;
   async function requestRefund() {
@@ -521,8 +529,12 @@
       fd.append('eventCode', code);
       fd.append('context', `Manage portal · ${ev?.name ?? ''}`);
       fd.append('message', refundReason.trim() || 'The organizer requested to cancel this event and receive a refund.');
+      // /api/contact is bot-checked. Without this the request died on the bot check — so an
+      // organizer asking to cancel a PAID event was told "Bot check failed" and their words went
+      // nowhere at all, which is the worst possible moment to swallow a message.
+      fd.append('cf-turnstile-response', refundToken);
       const r = await fetch('/api/contact', { method: 'POST', body: fd, credentials: 'same-origin' });
-      if (!r.ok) throw new Error('Could not send your request');
+      if (!r.ok) { refundTurnstile?.reset(); throw new Error('Could not send your request'); }
       refundDone = true;
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'Failed — please email support@snapdini.com', true);
@@ -632,6 +644,20 @@
   const shareKindText = (k: string, n: number | null) => k === 'favourites' ? 'Favourites' : k === 'selected' ? `${n ?? ''} selected` : 'Whole gallery';
 
   // ── Participants ─────────────────────────────────────────────────────────────
+  // Which row is mid-save, so its select cannot be spun twice before the first answer lands.
+  let cardBusy: string | null = null;
+  async function moveCard(p: { id: string; name: string }, set: string) {
+    cardBusy = p.id;
+    try {
+      const r = await setParticipantCard(code, orgCode, p.id, set);
+      await loadEvent();   // re-read rather than patch locally: the server is what decides
+      showSuccess(`${p.name} is now on ${r.label} — ${r.tricks} trick${r.tricks === 1 ? '' : 's'}`);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Could not move them', true);
+      await loadEvent();   // put the select back to what is actually stored
+    } finally { cardBusy = null; }
+  }
+
   async function removeParticipant(p: { id: string; name: string; photosTaken: number }) {
     const n = p.photosTaken || 0;
     const warn = n > 0
@@ -1004,6 +1030,7 @@
               <div class="refund-actions">
                 <button class="btn ghost sm" on:click={() => (showRefund = false)} disabled={refundBusy}>Never mind</button>
                 <button class="btn danger sm" on:click={requestRefund} disabled={refundBusy}>{refundBusy ? 'Sending…' : 'Send refund request'}</button>
+                <Turnstile bind:token={refundToken} bind:this={refundTurnstile} action="contact" />
               </div>
             {/if}
           </div>
@@ -1328,6 +1355,18 @@
                   · joined {fmtTime(p.joinedAt)}
                 </div>
               </div>
+              <!-- Only when there is more than one card: with a single card there is nothing to move
+                   a guest TO, and with no trick list there are no cards at all. -->
+              {#if cards.length > 1}
+                <label class="p-card">
+                  <span class="p-card-l">Card</span>
+                  <select aria-label="Trick card for {p.name}" disabled={cardBusy === p.id}
+                          value={p.challengeSet ?? cards[0].key}
+                          on:change={(e) => moveCard(p, e.currentTarget.value)}>
+                    {#each cards as c (c.key)}<option value={c.key}>{c.label}</option>{/each}
+                  </select>
+                </label>
+              {/if}
               <button class="btn ghost sm p-del" on:click={() => removeParticipant(p)} title="Remove this participant">Remove</button>
             </div>
           {/each}
@@ -1607,6 +1646,10 @@
 
   /* Participants */
   .participant-list { display: flex; flex-direction: column; gap: 10px; }
+  .p-card { display: flex; align-items: center; gap: 6px; flex: none; }
+  .p-card-l { font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
+  .p-card select { font: inherit; font-size: .8rem; padding: 5px 7px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text); max-width: 130px; }
   .p-count { font-weight: 600; opacity: .6; font-size: .85em; }
   .p-search { width: 100%; margin: 0 0 10px; }
   .p-shots { color: var(--accent); text-decoration: none; font-weight: 600; }
