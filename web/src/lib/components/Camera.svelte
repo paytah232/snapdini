@@ -794,8 +794,12 @@
       // does have to be SAID, or the guest gets a silent clip and no idea why. This is the only
       // place that learns it now that the prompt happens here rather than inside the camera chain.
       micReason = e instanceof DOMException ? e.name : '';
+      // Work out WHICH problem this is before showing anything. diagnoseMic() resets micState to
+      // 'unknown' on its way to an answer, so setting micDenied first meant the note appeared with
+      // generic wording, then rewrote itself once the permission query came back — a box that
+      // changes its mind twice while you are reading it. It is a fast local query; wait for it.
+      await diagnoseMic();
       micDenied = true;
-      void diagnoseMic();
       return false;
     }
   }

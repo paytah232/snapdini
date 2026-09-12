@@ -199,6 +199,14 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   while being absent from the app container that reads it, which left internal accounts
   un-excluded from the lifecycle emails in production. The check is now service-scoped.
 
+- **`Permissions-Policy` must permit the features the app itself uses.** It shipped as
+  `microphone=()` on 2026-09-07. In that header `()` disables a feature for EVERY origin,
+  including our own — the browser refuses it at the document level and never shows a prompt, so
+  every guest's video clip recorded silently and nobody could grant their way out of it. The
+  camera was `(self)` and worked throughout, which is exactly what made it look like a device
+  permission problem. `(self)` still shuts third-party frames out, which was the actual intent.
+  Guarded by `testsuite/specs/99c-permissions-policy.mjs`.
+
 - **Search indexing — only ONE deployment may say "I am the original"** (`SEO_INDEXABLE`).
   Every SEO tag used to be built from the *request host*, and robots.txt even documented that as a
   feature ("correct on any domain, dev or prod"). It is the opposite: the dev deployment served
