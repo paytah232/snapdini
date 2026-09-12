@@ -1,10 +1,12 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
+  import { lensName } from '$lib/lensName';
   import { goto, replaceState } from '$app/navigation';
   // Aliased: this component already has a `track` for the MediaStreamTrack.
   import { track as trackEvent } from '$lib/analytics';
   import { fade } from 'svelte/transition';
-  import { getEvent, getMe, joinEvent, getPhotosBySession, type PublicEvent, type Photo } from '$lib/events';
+  import { getEvent, getMe, joinEvent, getPhotosBySession, savePhotoCaption, CAPTION_MAX,
+           type PublicEvent, type Photo } from '$lib/events';
   import { getSession, saveSession, clearSession } from '$lib/session';
   import { getConfig } from '$lib/api';
   import { applyEventTheme } from '$lib/theme';
@@ -404,8 +406,19 @@
     // Pin the exact camera we landed on. Without this, re-acquiring for a quality/mode change
     // selects only by facingMode + resolution, so a multi-lens phone can swap to a different
     // physical lens (e.g. 4K→main, 720p→ultra-wide). Pinning keeps the same camera across changes.
-    const liveId = track?.getSettings?.().deviceId;
+    const settings = track?.getSettings?.() ?? {};
+    const liveId = settings.deviceId;
     if (liveId) deviceId = liveId;
+    // Keep `facing` honest. It used to change ONLY inside flip(), so picking a lens from the menu
+    // left it describing where the guest used to be — and the next flip toggled it to the side they
+    // were already on, reloading the same camera. Prefer what the track reports; fall back to the
+    // device label, because iOS Safari (and fake devices) often omit facingMode entirely.
+    const reported = (settings as MediaTrackSettings & { facingMode?: string }).facingMode;
+    if (reported === 'user' || reported === 'environment') facing = reported;
+    else if (track?.label) {
+      if (/front|user|selfie|face/i.test(track.label)) facing = 'user';
+      else if (/back|rear|environment|world/i.test(track.label)) facing = 'environment';
+    }
     // Tap-to-focus only works where the device exposes focus controls (some Android
     // Chrome); iOS Safari never does. Detect it so we don't show a fake focus ring.
     const caps = (track?.getCapabilities?.() ?? {}) as Record<string, unknown>;
@@ -533,6 +546,7 @@
       // asked for, and on a phone it is the most jarring thing the app can do.
       deviceId = null;
       const anyLens: MediaTrackConstraints = { facingMode: { ideal: facing } };
+      let noAudioError: unknown = null;   // the error from an attempt that did NOT ask for the mic
       try {
         await attachCamera({ video: anyLens, audio });
       } catch (err2) {
@@ -564,13 +578,25 @@
               true);
             reportClientError(`camera: microphone unavailable for video (${name || 'unknown'})`, 'camera-denied', ev?.joinCode);
             return;
-          } catch { /* the camera itself is unavailable — fall through to the honest error */ }
+          } catch (err3) {
+            // Keep THIS error to judge by. It is the only attempt that did not ask for a microphone,
+            // so it is the only one that can honestly say anything about the camera.
+            noAudioError = err3;
+          }
         }
+        // NOTE: a failed MODE SWITCH does not strand the guest — the audio-free retry above IS the
+        // revert to photo, and it returns on success. Reaching here means even a plain camera
+        // request failed, so there is nothing working left to fall back to.
         stopCamera();   // make sure no half-open stream remains (shutter stays disabled on error)
         cameraStarting = false;
-        const denied = err2 instanceof DOMException && (err2.name === 'NotAllowedError' || err2.name === 'SecurityError');
-        const missing = err2 instanceof DOMException && err2.name === 'NotFoundError';
-        const busy = err2 instanceof DOMException && (err2.name === 'NotReadableError' || err2.name === 'AbortError');
+        // Judge by the audio-free attempt when we made one. Deciding "the camera was denied" from a
+        // request that also asked for the MICROPHONE is how a mic refusal produced a full-screen
+        // "We need your camera" panel, with an Allow button, for a camera the guest had already
+        // granted and was using a second earlier.
+        const judged = noAudioError ?? err2;
+        const denied = judged instanceof DOMException && (judged.name === 'NotAllowedError' || judged.name === 'SecurityError');
+        const missing = judged instanceof DOMException && judged.name === 'NotFoundError';
+        const busy = judged instanceof DOMException && (judged.name === 'NotReadableError' || judged.name === 'AbortError');
         // A denial is a CHOICE, not a fault. The old copy read as a settings problem and never said
         // why we need the camera or what we cannot reach — which is the actual worry.
         cameraDenied = denied;
@@ -580,7 +606,7 @@
           : "Couldn't start the camera.";
         // Genuine faults stay 'camera'; a declined permission gets its own context so it does not sit
         // in the operator's open-issues digest looking like a bug.
-        reportClientError(`camera: ${err2 instanceof Error ? err2.name + ' ' + err2.message : 'failed'}`,
+        reportClientError(`camera: ${judged instanceof Error ? judged.name + ' ' + judged.message : 'failed'}`,
           denied ? 'camera-denied' : 'camera', ev?.joinCode);
         if (denied && !permissionReported) { permissionReported = true; trackEvent('camera_permission_denied', undefined, ev?.joinCode); }
         return;
@@ -595,8 +621,8 @@
   async function refreshCameras() {
     try {
       const devs = await navigator.mediaDevices.enumerateDevices();
-      cameras = devs.filter((d) => d.kind === 'videoinput')
-        .map((d, i) => ({ id: d.deviceId, label: d.label || `Camera ${i + 1}` }));
+      const vids = devs.filter((d) => d.kind === 'videoinput');
+      cameras = vids.map((d, i) => ({ id: d.deviceId, label: lensName(d.label, i, vids.length) }));
       // Track the live camera so the picker reflects reality (e.g. after a facing flip).
       const live = track?.getSettings?.().deviceId;
       if (live) deviceId = live;
@@ -642,6 +668,30 @@
   // Quick front/back toggle. Clears any specific device pick so it follows facing again.
   function flip() { if (recording) return; deviceId = null; facing = facing === 'environment' ? 'user' : 'environment'; startCamera(); }
 
+  // Press-and-hold the flip button to jump straight to the lens picker. The hold must SUPPRESS the
+  // tap that follows it, or the guest gets the picker and a flip they did not ask for.
+  let holdTimer: ReturnType<typeof setTimeout> | undefined;
+  let heldOpen = false;
+  const HOLD_MS = 450;
+  function holdStart() {
+    if (recording) return;
+    heldOpen = false;
+    clearTimeout(holdTimer);
+    holdTimer = setTimeout(() => {
+      if (cameras.length > 1) { heldOpen = true; settingsOpen = true; lensFocus = true; }
+    }, HOLD_MS);
+  }
+  function holdEnd() { clearTimeout(holdTimer); }
+  function flipTap() { if (heldOpen) { heldOpen = false; return; } flip(); }
+  // Set when the picker was reached by holding, so it can be scrolled to rather than hunted for.
+  let lensFocus = false;
+  let lensRow: HTMLDivElement | undefined;
+  // Wait for the modal to exist before scrolling to the row inside it.
+  $: if (settingsOpen && lensFocus && lensRow) {
+    lensFocus = false;
+    tick().then(() => lensRow?.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+  }
+
   // Drive the hardware torch on/off (where supported). Used as a flash pulse for photos and a
   // continuous light for video.
   async function setTorch(on: boolean) {
@@ -656,9 +706,16 @@
     if (recording || v === videoMode) return;
     // First time on video for this device: offer the capability check before they shoot anything
     // they cannot re-take. Measured once per event — see benchKey.
-    if (v) {
-      // Once per EVENT. A skip counts as answered for this event, so nobody is asked twice at the
-      // same party, but the next event measures again.
+    videoMode = v;
+    // In phone mode, switching to video means "open the phone's camera" — that is the whole point
+    // of picking it, and re-acquiring a browser stream we are not going to record from is waste.
+    if (v && videoQuality === 'phone') { nativeVideoInput?.click(); return; }
+    await startCamera();
+    // Offer the capability check only once video is actually RUNNING. It used to be raised before
+    // the switch was attempted, so a switch that failed and fell back to photos left a "check my
+    // camera" panel on screen — still runnable, in photo mode, about a mode the guest is not in.
+    // Once per EVENT: a skip counts as answered, so nobody is asked twice at the same party.
+    if (v && videoMode) {
       try {
         pruneBenchmarks();
         const raw = ev ? localStorage.getItem(benchKey(ev.joinCode)) : null;
@@ -666,11 +723,6 @@
         if (!raw) benchPrompt = true;
       } catch { /* ignore */ }
     }
-    videoMode = v;
-    // In phone mode, switching to video means "open the phone's camera" — that is the whole point
-    // of picking it, and re-acquiring a browser stream we are not going to record from is waste.
-    if (v && videoQuality === 'phone') { nativeVideoInput?.click(); return; }
-    await startCamera();
   }
 
   // Video quality is a per-device preference; lowering it helps weaker phones record smoothly.
@@ -1308,6 +1360,36 @@
     }, 1000);
   }
 
+  // ── Captions ────────────────────────────────────────────────────────────
+  // A guest may write a line under their own shot and change it later. Deliberately NOT part of the
+  // shutter flow: the camera stays a camera, and this lives in the roll where a guest is already
+  // looking back at what they took. The editor is a small modal because the roll is a 3-across grid
+  // — a tile is ~110px wide on a phone, which is not somewhere you can type.
+  let captionFor: Photo | null = null;
+  let captionDraft = '';
+  let captionBusy = false;
+
+  function openCaption(p: Photo) {
+    captionFor = p;
+    captionDraft = p.caption ?? '';
+  }
+
+  async function saveCaption() {
+    if (!captionFor || !sessionToken || captionBusy) return;
+    const id = captionFor.id;
+    captionBusy = true;
+    try {
+      const r = await savePhotoCaption(id, captionDraft, { sessionToken });
+      // Store what the SERVER kept, not the draft: it collapses whitespace and cuts at CAPTION_MAX,
+      // so echoing the draft would show the guest a caption the gallery is not going to show.
+      galleryPhotos = galleryPhotos.map((q) => (q.id === id ? { ...q, caption: r.caption } : q));
+      captionFor = null;
+      showToast(r.caption ? 'Caption saved' : 'Caption removed');
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Could not save that caption', true);
+    } finally { captionBusy = false; }
+  }
+
   async function deletePhoto(id: string) {
     if (!sessionToken) return;
     confirmingDeleteId = null;
@@ -1319,6 +1401,12 @@
       if (!r.ok) { showToast('That one is part of the roll now', true); return; }
       const d = await r.json().catch(() => null);
       if (typeof d?.photosRemaining === 'number') serverRemaining = d.photosRemaining;
+      // Mission progress is derived from the photos table, so deleting a trick shot un-ticks its
+      // trick — and the client cannot work out WHICH one, because a gallery row carries the
+      // mission's text (`challenge`), not its id. The server re-derives the list for us on the
+      // delete; take it wholesale, exactly as the join/refresh paths do. Without this the trick
+      // list kept a tick the server had already dropped until the guest reloaded the page.
+      if (Array.isArray(d?.challengesDone)) missionsDone = d.challengesDone;
       galleryPhotos = galleryPhotos.filter((p) => p.id !== id);
       showToast('Deleted — that shot is back on your roll');
     } catch { showToast('Could not delete that one — try again', true); }
@@ -1637,7 +1725,7 @@
             </div>
 
             {#if cameras.length > 1}
-              <div class="sm-row col">
+              <div class="sm-row col" bind:this={lensRow}>
                 <span class="sm-labelwrap">
                   <span class="sm-label">Camera</span>
                   <span class="sm-desc">Switch between the cameras on this device.{#if recording} Stop recording to change.{/if}</span>
@@ -1742,7 +1830,13 @@
       <!-- Hidden, not just disabled, while recording: the stream cannot be swapped mid-clip, so a
            greyed-out button is only there to be tried and to look broken. -->
       {#if !recording}
-        <button class="round" on:click={flip} title="Flip camera" aria-label="Flip camera">🔄</button>
+        <!-- Tap flips; press and hold opens the lens picker. The picker otherwise lives only in
+             settings, which is a long way to go on a phone with four lenses. -->
+        <button class="round" on:click={flipTap}
+                on:pointerdown={holdStart} on:pointerup={holdEnd} on:pointercancel={holdEnd}
+                on:pointerleave={holdEnd} on:contextmenu|preventDefault
+                title="Flip camera (hold to choose a lens)"
+                aria-label="Flip camera. Press and hold to choose a specific lens.">🔄</button>
       {:else}
         <span class="round-spacer" aria-hidden="true"></span>
       {/if}
@@ -1876,6 +1970,21 @@
                 {/if}
               </button>
             {/if}
+            <!-- Caption strip. Tap to write or change it; the trick this shot was for rides
+                 underneath in smaller type so captioning a trick shot never costs the attribution.
+                 Own photos only — this roll holds nothing else, but the guard is the rule, not the
+                 filter that happens to be upstream of it. -->
+            {#if p.isOwn}
+              <button class="capstrip" class:blank={!p.caption} on:click|stopPropagation={() => openCaption(p)}
+                      aria-label={p.caption ? `Edit your caption: ${p.caption}` : 'Add a caption to this photo'}>
+                {#if p.caption}
+                  <span class="captext">{p.caption}</span>
+                {:else}
+                  <span class="capadd" aria-hidden="true">💬</span>
+                {/if}
+                {#if p.challenge}<span class="capmission">{p.challenge}</span>{/if}
+              </button>
+            {/if}
           </div>
         {/each}
       </div>
@@ -1929,6 +2038,34 @@
     {/if}
   </div>
   {#if lbOpen}<Lightbox photos={shownPhotos} index={lbIndex} on:close={() => (lbOpen = false)} />{/if}
+  {#if captionFor}
+    <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
+    <div class="capback" on:click|self={() => (captionFor = null)} role="dialog" aria-modal="true" aria-label="Caption this photo">
+      <div class="capmodal">
+        <div class="capm-head">
+          <span>Your caption</span>
+          <button class="sm-x" on:click={() => (captionFor = null)} aria-label="Close">✕</button>
+        </div>
+        {#if captionFor.challenge}
+          <!-- The trick stays visible while they type: a caption sits ALONGSIDE the mission, and
+               seeing it here is what stops someone retyping the trick as their caption. -->
+          <div class="capm-mission">🎩 {captionFor.challenge}</div>
+        {/if}
+        <!-- svelte-ignore a11y-autofocus -->
+        <textarea class="capm-text" rows="2" maxlength={CAPTION_MAX} bind:value={captionDraft} autofocus
+                  placeholder="Something cute, or silly…"></textarea>
+        <div class="capm-row">
+          <span class="capm-left">{CAPTION_MAX - captionDraft.length}</span>
+          {#if captionFor.caption}
+            <!-- Clearing IS saving nothing — same call, empty text. The button exists because
+                 "delete the box out and press Save" is not a thing anyone guesses. -->
+            <button class="btn ghost sm" on:click={() => { captionDraft = ''; void saveCaption(); }} disabled={captionBusy}>Remove</button>
+          {/if}
+          <button class="btn primary sm" on:click={saveCaption} disabled={captionBusy}>{captionBusy ? 'Saving…' : 'Save'}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 {/if}
 
 {#if showFeedback}<FeedbackModal context="Camera ({ev?.joinCode ?? ''})" on:close={() => (showFeedback = false)} />{/if}
@@ -2201,6 +2338,43 @@
   .play { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 1.5rem; text-shadow: 0 1px 4px #000; }
   .snapno { position: absolute; top: 5px; left: 5px; min-width: 18px; padding: 1px 5px; border-radius: 9px;
     background: rgba(0,0,0,0.6); color: #fff; font-size: 0.7rem; font-weight: 700; line-height: 1.4; pointer-events: none; }
+
+  /* ── Captions ───────────────────────────────────────────────────────────── */
+  /* Overlaid on the bottom of the tile rather than placed under it: the roll is a flush 3-across
+     grid and a text row beneath each tile would push the grid into a list. A sibling of .pcell, not
+     a child — a <button> inside a <button> is invalid and behaves unpredictably on touch, the same
+     reason the bin sits outside it. .pcell-wrap is line-height:0 for the image, so text in here has
+     to set its own. */
+  .capstrip {
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 1;
+    display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+    padding: 12px 6px 5px; border: none; cursor: pointer; text-align: left;
+    background: linear-gradient(to top, rgba(0,0,0,.72), rgba(0,0,0,0));
+    color: #fff; line-height: 1.25;
+  }
+  /* Nothing written yet: a small speech bubble in the corner, not a caption-shaped placeholder
+     over every photo. The roll should read as photos. */
+  .capstrip.blank { background: none; padding: 6px; right: auto; }
+  .capstrip.blank .capadd { font-size: .8rem; opacity: .75; text-shadow: 0 1px 3px #000; }
+  .captext { font-size: .7rem; font-weight: 700; text-shadow: 0 1px 3px #000;
+    display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; word-break: break-word; }
+  /* The trick, demoted: still there, visibly secondary to whatever the guest wrote. */
+  .capmission { font-size: .62rem; opacity: .8; text-shadow: 0 1px 3px #000;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .capback { position: fixed; inset: 0; z-index: 320; background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center; padding: 20px; }
+  .capmodal { width: 100%; max-width: 340px; background: rgba(20,20,20,0.97);
+    border: 1px solid rgba(255,255,255,0.15); border-radius: 16px; padding: 6px 16px 16px;
+    color: #fff; box-shadow: 0 16px 50px rgba(0,0,0,0.6); }
+  .capm-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 0 10px;
+    border-bottom: 1px solid rgba(255,255,255,0.12); font-weight: 800; font-size: 0.95rem; }
+  .capm-mission { font-size: .75rem; opacity: .75; padding: 8px 0 0; }
+  .capm-text { width: 100%; box-sizing: border-box; margin-top: 10px; resize: none;
+    background: rgba(255,255,255,0.06); color: #fff; border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 10px; padding: 9px 10px; font: inherit; font-size: 0.9rem; }
+  .capm-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .capm-left { flex: 1; font-size: .72rem; opacity: .55; font-variant-numeric: tabular-nums; }
 
   /* ── Photo missions ─────────────────────────────────────────────────────── */
   /* The pill sits beside the shot counter and borrows its shape, so the topbar still reads as one

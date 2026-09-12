@@ -41,3 +41,6 @@ CLAUDE.md
 
 # scratch fixtures written by test runs
 /testsuite/tmp/
+
+# scratch browser harness for camera work (not a deliverable)
+/web/.camtest/
