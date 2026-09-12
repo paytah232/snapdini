@@ -28,9 +28,22 @@ export function modalFocus(node: HTMLElement) {
  *  sensor sat full-frame beside square photos and the grid read as untidy.
  *  'full' has no fixed shape at all, so it falls back to square — the same fallback the camera
  *  itself uses for its own roll. */
+/** The one shape every tile in a grid is drawn at.
+ *
+ *  "The event's shape" is a real thing only when the host enabled exactly ONE. With several, the
+ *  roll genuinely contains a mixture — each photo is cropped at capture to whatever was selected
+ *  then — and taking ratios[0] was an arbitrary pick dressed up as an answer (for the demo, which
+ *  enables everything, that first entry is 'full', which is not even a ratio).
+ *
+ *  So: one shape enabled, use it — the tiles then match the photos exactly and nothing is cropped.
+ *  Several, and we commit to a square and crop to fill, which is what every photo grid does. A grid
+ *  is an index, not a viewer: the lightbox shows the whole photo, uncropped, so nothing is lost.
+ *  Padding to fit was the alternative and it is worse here — letterbox bars at 150px give each card
+ *  a different visual weight, which is the raggedness we just removed wearing a different hat. */
 export function tileAspect(ratios: string[] | null | undefined): number {
-  const a = ratios && ratios.length ? ratios[0] : '1:1';
-  if (a === 'full') return 1;
-  const [w, h] = a.split(':').map(Number);
+  // 'full' means "don't crop", so it describes no particular shape and cannot be a tile.
+  const shapes = (ratios ?? []).filter((r) => r && r !== 'full');
+  if (shapes.length !== 1) return 1;
+  const [w, h] = shapes[0].split(':').map(Number);
   return w > 0 && h > 0 ? w / h : 1;
 }

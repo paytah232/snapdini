@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
   import { lensName, lensFacing } from '$lib/lensName';
+  import { tileAspect } from '$lib/ui';
   import { goto, replaceState } from '$app/navigation';
   // Aliased: this component already has a `track` for the MediaStreamTrack.
   import { track as trackEvent } from '$lib/analytics';
@@ -2162,8 +2163,12 @@
       </div>
     {/if}
     {#if shownPhotos.length}
+      <!-- --tile-ar is the EVENT's shape, not the guest's current one. The shape control changes
+           what the NEXT photo is cropped to; it is not a statement about how the roll should be
+           drawn. Letting it redraw the grid meant the same photos were square in the gallery and
+           9:16 in the roll on any event with more than one shape enabled — which is every demo. -->
       <div class="pgrid" class:has-meta={shownPhotos.some((p) => p.caption || p.challenge)}
-         style={`--tile-ar:${aspectValue(aspect) ?? 1}`}>
+           style={`--tile-ar:${tileAspect(allowedAspects)}`}>
         {#each shownPhotos as p, i}
           <!-- The card itself is PhotoCard; the only thing this roll adds is the delete bin, which
                goes in the tile slot because the bin belongs ON the photo. Own photos only for the
