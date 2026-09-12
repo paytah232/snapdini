@@ -2,7 +2,7 @@
 // NOT to guess: a confidently wrong "Telephoto" is worse than a neutral "Back camera 2", especially
 // on a device whose lenses we already know misbehave.
 import { describe, it, expect } from 'vitest';
-import { lensName } from './lensName';
+import { lensName, lensFacing } from './lensName';
 
 describe('naming a camera the way a person would', () => {
   it('reads the descriptive labels iOS Safari actually gives', () => {
@@ -51,6 +51,14 @@ describe('naming a camera the way a person would', () => {
   it('shortens an unwieldy vendor string rather than overflowing the picker', () => {
     const long = 'Integrated RGB and Infrared Rear Facing Camera Module (1bcf:2c99)';
     expect(lensName(long, 1, 3)).toBe('Back camera 2');
+  });
+
+  it('reads which way a lens points, and admits when it cannot', () => {
+    expect(lensFacing('Back Ultra Wide Camera')).toBe('environment');
+    expect(lensFacing('camera2 1, facing front')).toBe('user');
+    expect(lensFacing('FaceTime HD Camera')).toBe('user');
+    expect(lensFacing('Logitech BRIO')).toBe('');
+    expect(lensFacing('')).toBe('');
   });
 
   it('never returns an empty name', () => {

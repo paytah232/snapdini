@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
-  import { lensName } from '$lib/lensName';
+  import { lensName, lensFacing } from '$lib/lensName';
   import { goto, replaceState } from '$app/navigation';
   // Aliased: this component already has a `track` for the MediaStreamTrack.
   import { track as trackEvent } from '$lib/analytics';
@@ -50,7 +50,7 @@
   let videoEl: HTMLVideoElement;
   let stream: MediaStream | null = null;
   let facing: 'environment' | 'user' = 'environment';
-  let cameras: { id: string; label: string }[] = [];   // available video inputs (for the picker)
+  let cameras: { id: string; label: string; facing: 'user' | 'environment' | '' }[] = [];   // available video inputs (for the picker)
   // Why the last EXACT lens request failed. A phone lists lenses it cannot always open, and
   // without the reason "it doesn't work" is all anyone — guest or operator — ever learns.
   let lastLensError = '';
@@ -122,6 +122,9 @@
   // Set when the CAMERA is fine but the microphone was refused. Tracked separately because the two
   // are separate permissions and conflating them produced a screen that could not be dismissed.
   let micDenied = false;
+  /** The DOMException name behind it, so the note can say WHICH problem this is rather than
+   *  guessing. Empty when we never got one. */
+  let micReason = '';
   // WHY the mic failed, which decides whether retrying can possibly work.
   //
   // 'blocked' is the case that matters and the one that looks like a broken app: once a browser has
@@ -437,7 +440,12 @@
     focusSupported = 'pointsOfInterest' in caps || 'focusMode' in caps;
     // Hardware torch (back camera on Android Chrome). iOS Safari never exposes it.
     torchSupported = 'torch' in caps && !!caps.torch;   // a fresh stream always starts with the torch physically off
-    cameraError = ''; cameraDenied = false; micDenied = false;
+    cameraError = ''; cameraDenied = false;
+    // Clear the microphone verdict only when we actually GOT a microphone. Clearing it on every
+    // successful attach wiped what askForMic() had just learned — the camera comes up fine without
+    // audio, so the note about the missing mic was erased a moment after being set, and the guest
+    // recorded silent clips with nothing on screen to say why.
+    if (stream.getAudioTracks().length > 0) { micDenied = false; micReason = ''; }
     // The grant side of the ratio. Denials already reach client_errors; without this the denial
     // count has no denominator and cannot tell you whether permission is a real problem.
     if (!permissionReported) { permissionReported = true; trackEvent('camera_permission_granted', undefined, ev?.joinCode); }
@@ -580,18 +588,22 @@
             // "allow the microphone" is useless advice to someone who already has.
             const name = err2 instanceof DOMException ? err2.name : '';
             micDenied = true;
-            void diagnoseMic();                      // decides whether a retry can even prompt
-            videoMode = false;                       // photos still work; do not strand them on a dead screen
+            micReason = name;
+            // STAY in video mode. Forcing photos here meant a guest whose microphone we could not
+            // get was refused video entirely — they could not record at all, silent or otherwise,
+            // and had no way to find out whether the mic was really the problem. MediaRecorder is
+            // perfectly happy with a stream that has no audio track: a silent clip beats no clip,
+            // and the note below says plainly that it will be silent.
             cameraStarting = false;
             cameraDenied = false; cameraError = '';
-            showToast(
-              name === 'NotAllowedError' || name === 'SecurityError'
-                ? 'Video needs your microphone too. Photos are working — allow the mic to record clips.'
-                : name === 'NotReadableError' || name === 'AbortError' || name === 'TrackStartError'
-                ? 'Your microphone is busy — another app or browser tab may be using it. Close it and try video again. Photos are working.'
-                : 'Couldn’t get the microphone for video, so photos are on instead. Try video again in a moment.',
-              true);
-            reportClientError(`camera: microphone unavailable for video (${name || 'unknown'})`, 'camera-denied', ev?.joinCode);
+            // No toast: the note that appears at the top says all of this and stays put. Saying it
+            // twice, in two places, with one of them vanishing, reads as two different problems.
+            // Report what the PERMISSIONS API says alongside the exception. NotAllowedError alone
+            // cannot distinguish "the site is blocked" from "the browser app has no mic permission
+            // from the OS" — and on Android those are different screens to go and fix.
+            void diagnoseMic().then(() =>
+              reportClientError(`camera: microphone unavailable for video (${name || 'unknown'}; permission=${micState})`,
+                                'camera-denied', ev?.joinCode));
             return;
           } catch (err3) {
             // Keep THIS error to judge by. It is the only attempt that did not ask for a microphone,
@@ -637,7 +649,7 @@
     try {
       const devs = await navigator.mediaDevices.enumerateDevices();
       const vids = devs.filter((d) => d.kind === 'videoinput');
-      cameras = vids.map((d, i) => ({ id: d.deviceId, label: lensName(d.label, i, vids.length) }));
+      cameras = vids.map((d, i) => ({ id: d.deviceId, label: lensName(d.label, i, vids.length), facing: lensFacing(d.label) }));
       // Track the live camera so the picker reflects reality (e.g. after a facing flip).
       const live = track?.getSettings?.().deviceId;
       if (live) deviceId = live;
@@ -681,7 +693,16 @@
   }
 
   // Quick front/back toggle. Clears any specific device pick so it follows facing again.
-  function flip() { if (recording) return; deviceId = null; facing = facing === 'environment' ? 'user' : 'environment'; startCamera(); }
+  function flip() {
+    if (recording) return;
+    facing = facing === 'environment' ? 'user' : 'environment';
+    // Land on the favourite for the side we are heading to, when there is one and it still exists
+    // (a favourite saved on another phone names a lens this one has never heard of). Otherwise let
+    // facingMode choose, which is the behaviour everyone else gets.
+    const fav = lensFavs[facing];
+    deviceId = fav && cameras.some((c) => c.id === fav) ? fav : null;
+    startCamera();
+  }
 
   // Press-and-hold the flip button to jump straight to the lens picker. The hold must SUPPRESS the
   // tap that follows it, or the guest gets the picker and a flip they did not ask for.
@@ -711,6 +732,27 @@
     } catch { /* ignore */ }
   }
 
+  // A favourite lens per DIRECTION. A phone with three rear lenses flips to whichever one the
+  // browser feels like; someone who prefers the ultra-wide for the look of it had to open the
+  // picker every single time. One favourite per side, so flip stays a single tap and lands where
+  // they want it. Kept on the device — it is about this phone's lenses, not about any event.
+  const LENS_FAVS = 'snap_lensfav';
+  let lensFavs: { user?: string; environment?: string } = {};
+  try { lensFavs = JSON.parse(localStorage.getItem(LENS_FAVS) || '{}') || {}; } catch { lensFavs = {}; }
+  // Only worth offering where there is a choice: one lens on a side has nothing to be preferred over.
+  $: sideCounts = cameras.reduce((a, c) => { if (c.facing) a[c.facing] = (a[c.facing] || 0) + 1; return a; },
+                                 {} as Record<string, number>);
+  const canFavourite = (c: { facing: string }) => !!c.facing && (sideCounts[c.facing] || 0) > 1;
+  // Reactive so the star repaints when a favourite changes — and it narrows `facing` away from '',
+  // which is not a side and so can never have a favourite.
+  $: isFav = (c: { id: string; facing: 'user' | 'environment' | '' }) =>
+    !!c.facing && lensFavs[c.facing] === c.id;
+  function toggleFav(c: { id: string; facing: 'user' | 'environment' | '' }) {
+    if (!c.facing) return;
+    lensFavs = { ...lensFavs, [c.facing]: isFav(c) ? undefined : c.id };
+    try { localStorage.setItem(LENS_FAVS, JSON.stringify(lensFavs)); } catch { /* ignore */ }
+  }
+
   // Holding opens a sheet with ONLY the lenses on it. Sending the guest into the full settings menu
   // to pick a camera is the long way round — the point of the gesture is that it is the short one.
   let lensSheet = false;
@@ -726,10 +768,55 @@
 
   // Photo ↔ Video. Re-acquires the stream so each mode runs at its own resolution
   // (max-res stills vs smooth 1080p30 recording) and only grabs the mic for video.
+  /** Ask for the MICROPHONE on its own, and do it inside the tap that wants it.
+   *
+   *  A browser only shows a permission prompt while the user gesture is still live. Camera
+   *  acquisition is a CHAIN — exact lens, then any lens, then no audio — with awaits and a settle
+   *  timer between attempts, so by the time a request that wants audio actually runs, the gesture
+   *  has expired and Chrome answers NotAllowedError WITHOUT PROMPTING. The guest is then told to
+   *  allow a microphone they were never asked about, and resetting site permissions does not help,
+   *  because there is still no prompt to answer.
+   *
+   *  So: a bare audio request, cheap, first, and the only thing on screen when the prompt appears —
+   *  which also means the question makes sense when it does. The track is stopped straight away; we
+   *  are after the GRANT, and the real stream is acquired separately.
+   *
+   *  Must be called directly from a user gesture (a tap), and before any await that could outlive
+   *  it. That is the whole point of it. */
+  async function askForMic(): Promise<boolean> {
+    try {
+      const probe = await navigator.mediaDevices.getUserMedia({ audio: true });
+      probe.getTracks().forEach((t) => t.stop());
+      micDenied = false; micReason = '';
+      return true;
+    } catch (e) {
+      // Genuinely refused, or no microphone. Not fatal — video still records, silently — but it
+      // does have to be SAID, or the guest gets a silent clip and no idea why. This is the only
+      // place that learns it now that the prompt happens here rather than inside the camera chain.
+      micReason = e instanceof DOMException ? e.name : '';
+      micDenied = true;
+      void diagnoseMic();
+      return false;
+    }
+  }
+
   async function setMode(v: boolean) {
     if (recording || v === videoMode) return;
     // First time on video for this device: offer the capability check before they shoot anything
     // they cannot re-take. Measured once per event — see benchKey.
+    // Ask for the MICROPHONE first, on its own, right here inside the tap.
+    //
+    // A browser only shows a permission prompt while the user gesture is still live. The camera
+    // acquisition below is a chain — exact lens, then any lens, then no audio — with awaits and a
+    // settle timer between the attempts, so by the time a request that wants audio actually runs,
+    // the gesture has expired and Chrome answers NotAllowedError WITHOUT PROMPTING. The guest is
+    // then told to allow a microphone they were never asked about, and resetting site permissions
+    // does not help because there is still no prompt to answer.
+    //
+    // A bare audio request is cheap, happens in the gesture, and is the only thing on screen when
+    // the prompt appears — so the question makes sense. We stop the track immediately; the grant is
+    // what we are after, and the real stream is acquired below.
+    if (v && videoMaxSecs !== 0 && videoQuality !== 'phone') await askForMic();
     videoMode = v;
     // In phone mode, switching to video means "open the phone's camera" — that is the whole point
     // of picking it, and re-acquiring a browser stream we are not going to record from is waste.
@@ -773,7 +860,10 @@
   async function tapFocus(e: MouseEvent) {
     const host = e.currentTarget as HTMLElement;
     const rect = host.getBoundingClientRect();
-    const nx = (e.clientX - rect.left) / rect.width;
+    // Mirrored preview means the tap's x is mirrored too: without this, tapping someone's left
+    // cheek focuses on their right. The ring itself is drawn in SCREEN space, so it is unaffected.
+    const rawNx = (e.clientX - rect.left) / rect.width;
+    const nx = facing === 'user' ? 1 - rawNx : rawNx;
     const ny = (e.clientY - rect.top) / rect.height;
     focusRing = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     clearTimeout(focusTimer);
@@ -1603,7 +1693,11 @@
   <div id="cam-root" class="cam">
     <div class="viewfinder">
       <!-- svelte-ignore a11y-media-has-caption -->
-      <video bind:this={videoEl} autoplay playsinline muted></video>
+      <!-- Mirrored on the front camera, because that is what a phone does and what people expect
+           when they look at themselves. It was not mirrored at all, while CAPTURE mirrors for
+           'user' facing — so the preview and the photo you got back disagreed, which is the
+           "it's flipped again" feeling. Now what you see is what is saved. -->
+      <video bind:this={videoEl} class:mirrored={facing === 'user'} autoplay playsinline muted></video>
       <!-- svelte-ignore a11y-no-static-element-interactions -->
       <div class="gesture-layer"
         on:pointerdown={onGesturePointerDown}
@@ -1654,24 +1748,45 @@
         <div class="counter" class:low={photosRemaining <= 5}>{photosRemaining}<small>left</small></div>
       </div>
       {#if micDenied}
+        <!-- A headline, the consequence, then the steps — instead of one paragraph of prose that
+             nobody reads standing in a room full of people. The fix is behind a summary because it
+             is long, browser-specific, and only wanted by someone who has decided to go and do it. -->
         <div class="micnote">
-          <span class="micnote-t">
-            {#if micState === 'missing'}
-              No microphone on this device, so clips can’t record. Photos are working fine.
-            {:else if micState === 'blocked'}
-              Your browser is blocking the microphone here, so it won’t ask again. Tap the icon just
-              to the <b>left of the web address</b> → <b>Permissions</b> → <b>Microphone</b> →
-              <b>Allow</b>, then reload.
-              <b>On Android</b>, also check your phone’s Settings → Apps → your browser → Microphone:
-              a site can be allowed while the browser itself is not. Photos are working fine meanwhile.
-            {:else}
-              Video needs your microphone. Photos are working fine.
+          <div class="micnote-t">
+            <p class="micnote-h">
+              {#if micState === 'missing'}No microphone on this device
+              {:else if micReason === 'NotReadableError' || micReason === 'AbortError' || micReason === 'TrackStartError'}Your microphone is busy
+              {:else if micState === 'blocked'}Your browser is blocking the microphone
+              {:else}Couldn’t reach your microphone{/if}
+            </p>
+            <p class="micnote-s">Video still works — your clips will be silent.</p>
+            {#if micState === 'blocked'}
+              <details class="micnote-d">
+                <summary>How to allow it</summary>
+                <ol>
+                  <li>Tap the icon to the <b>left of the web address</b>.</li>
+                  <li>Open <b>Permissions</b> → <b>Microphone</b> → <b>Allow</b>.</li>
+                  <li>Reload the page.</li>
+                  <li><b>On Android</b>, also check Settings → Apps → your browser → Microphone. A site can be allowed while the browser itself is not.</li>
+                </ol>
+              </details>
+            {:else if micReason === 'NotReadableError' || micReason === 'AbortError' || micReason === 'TrackStartError'}
+              <details class="micnote-d">
+                <summary>How to free it up</summary>
+                <ol>
+                  <li>Close any other app using the mic — a call, a voice note, a recorder.</li>
+                  <li>Close other browser tabs on this site or a meeting page.</li>
+                  <li>Then tap <b>Try again</b>.</li>
+                </ol>
+              </details>
             {/if}
-          </span>
+          </div>
           <!-- Offered only when a retry can actually produce a prompt. A button that cannot work is
                worse than no button: it is the thing that makes the app look broken. -->
-          {#if micState !== 'blocked' && micState !== 'missing'}
-            <button class="micnote-a" on:click={() => { videoMode = true; startCamera(); }}>Try again</button>
+          {#if micState !== 'missing'}
+            <!-- Ask FIRST, in this tap. Re-running the camera chain alone can never raise a prompt
+                 (see askForMic), which is why this button used to look like it did nothing. -->
+            <button class="micnote-a" on:click={async () => { await askForMic(); micDenied = false; videoMode = true; await startCamera(); }}>Try again</button>
           {/if}
           <button class="micnote-x" on:click={() => (micDenied = false)} aria-label="Dismiss">✕</button>
         </div>
@@ -1893,10 +2008,21 @@
         <div class="lens-sheet">
           <div class="lens-head">Choose a lens</div>
           {#each cameras as c}
-            <button class="lens-opt" class:on={c.id === deviceId} on:click={() => chooseLens(c.id)}>
-              <span class="lens-name">{c.label}</span>
-              {#if c.id === deviceId}<span class="lens-now" aria-label="Currently in use">●</span>{/if}
-            </button>
+            <div class="lens-row">
+              <button class="lens-opt" class:on={c.id === deviceId} on:click={() => chooseLens(c.id)}>
+                <span class="lens-name">{c.label}</span>
+                {#if c.id === deviceId}<span class="lens-now" aria-label="Currently in use">●</span>{/if}
+              </button>
+              {#if canFavourite(c)}
+                <button class="lens-fav" class:on={isFav(c)}
+                        on:click|stopPropagation={() => toggleFav(c)}
+                        aria-pressed={isFav(c)}
+                        title={isFav(c) ? 'Flip lands here for this side' : 'Make this the lens flip goes to'}
+                        aria-label={isFav(c) ? `${c.label} is where flip lands` : `Make ${c.label} where flip lands`}>
+                  {isFav(c) ? '★' : '☆'}
+                </button>
+              {/if}
+            </div>
           {/each}
           <button class="lens-cancel" on:click={() => (lensSheet = false)}>Cancel</button>
         </div>
@@ -2008,7 +2134,12 @@
           <!-- The bin is a SIBLING of the tile, not a child: a <button> inside a <button> is
                invalid HTML and behaves unpredictably on touch. The wrapper positions it. -->
           <div class="pcell-wrap">
-            <button class="pcell" on:click={() => { lbIndex = i; lbOpen = true; }}>
+            <!-- The tile takes the shape of the PHOTO. It was pinned to a square, so an event shot
+                 at 4:3 or 16:9 had every thumbnail centre-cropped — the host picks a frame shape and
+                 then cannot see it in the roll. Falls back to square when we have no dimensions,
+                 which is the case for rows predating the width/height columns. -->
+            <button class="pcell" style={p.width && p.height ? `aspect-ratio:${p.width}/${p.height}` : undefined}
+                    on:click={() => { lbIndex = i; lbOpen = true; }}>
               {#if p.mediaType === 'video'}<img src={p.thumbUrl} alt="" loading="lazy" on:error={hidePoster} /><span class="play">▶</span>{:else}<img src={p.thumbUrl ?? p.url} alt="" loading="lazy" on:error={(e) => imgFallback(e, p.url)} />{/if}
             </button>
             {#if canDelete(p, nowTick) || confirmingDeleteId === p.id}
@@ -2202,6 +2333,7 @@
      'full' aspect is truly edge-to-edge and fixed ratios sit behind the floating controls. */
   .viewfinder { position: absolute; inset: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; }
   video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .mirrored { transform: scaleX(-1); }
   .fill { position: absolute; inset: 0; background: #fff; z-index: 5; }
   /* The shutter blink: black in, quick fade out, never in the way of a tap. Kept under the control
      rail's z-index so the shutter button itself stays visible through it — the blink is about the
@@ -2312,9 +2444,11 @@
      Only drawn when there IS more than one lens: advertising a gesture that does nothing is worse
      than not advertising it. */
   .round.has-more::after {
-    content: ''; position: absolute; right: 5px; bottom: 5px; width: 5px; height: 5px;
-    border-radius: 50%; background: rgba(255,255,255,.8); box-shadow: 0 0 3px rgba(0,0,0,.7);
-    pointer-events: none;
+    /* An ellipsis, not a single dot. A lone dot is not a recognised affordance for anything; "…"
+       is the long-standing convention for "there is more behind this". */
+    content: '\2026'; position: absolute; right: 6px; bottom: 1px;
+    font-size: .8rem; line-height: 1; color: rgba(255,255,255,.9);
+    text-shadow: 0 1px 3px rgba(0,0,0,.8); pointer-events: none;
   }
   .lens-back { position: absolute; inset: 0; z-index: 12; display: flex; align-items: flex-end;
     justify-content: center; padding: 0 12px 96px; pointer-events: auto; background: rgba(0,0,0,.34); }
@@ -2322,6 +2456,11 @@
     border-radius: 16px; color: #fff; background: rgba(0,0,0,.86); border: 1px solid rgba(255,255,255,.22);
     backdrop-filter: blur(6px); }
   .lens-head { font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; opacity: .72; padding: 2px 6px 6px; }
+  .lens-row { display: flex; align-items: stretch; gap: 6px; }
+  .lens-row .lens-opt { flex: 1; min-width: 0; }
+  .lens-fav { flex: none; width: 44px; border-radius: 11px; border: 1px solid rgba(255,255,255,.16);
+    background: rgba(255,255,255,.06); color: rgba(255,255,255,.55); font-size: 1rem; cursor: pointer; }
+  .lens-fav.on { color: #f0b429; border-color: rgba(240,180,41,.6); background: rgba(240,180,41,.12); }
   .lens-opt { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
     padding: 12px 14px; border-radius: 11px; border: 1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.06);
     color: #fff; font: inherit; font-size: .92rem; cursor: pointer; text-align: left; }
@@ -2429,10 +2568,12 @@
      belongs beside the photo, not on it — and it also lets the cards breathe, which is what the
      galleries people compare us to actually look like. Two-up on a phone rather than three: a
      140px tile cannot hold a sentence. */
-  .pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; padding: 10px; }
+  .pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; padding: 10px;
+    align-items: start; }   /* start, not stretch: a portrait shot must not pad out the card beside it */
   .pcell-wrap { position: relative; display: flex; flex-direction: column; line-height: normal;
     background: var(--surface-2); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
   .pcell { position: relative; aspect-ratio: 1; border: none; padding: 0; cursor: pointer; background: var(--surface-2); }
+  .pcell img { object-fit: cover; }
   .pcell img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .play { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 1.5rem; text-shadow: 0 1px 4px #000; }
 
@@ -2540,14 +2681,23 @@
   .home-btn.quiet:hover { opacity: 1; }
   /* Sits where the armed strip does, and clears the control rail the same way. */
   .micnote {
-    position: absolute; left: 12px; right: 66px; max-width: 460px; top: 58px; z-index: 7;
+    /* Clear of the topbar rather than level with it: at 58px this sat straight over the trick-list
+       pill and its caption. The pill is the thing a guest is mid-way through using when a mic note
+       appears, so the note is the one that moves. */
+    position: absolute; left: 12px; right: 66px; max-width: 460px; top: 104px; z-index: 7;
     display: flex; align-items: flex-start; gap: 8px;
     padding: 8px 8px 9px 12px; border-radius: 12px;
     background: rgba(0, 0, 0, .68); border: 1px solid rgba(245, 197, 24, .5);
     -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
     color: #fff; font-size: .78rem; pointer-events: auto;
   }
-  .micnote-t { flex: 1; min-width: 0; line-height: 1.4; }
+  .micnote-t { flex: 1; min-width: 0; line-height: 1.45; }
+  .micnote-h { margin: 0; font-weight: 700; font-size: .82rem; }
+  .micnote-s { margin: 2px 0 0; opacity: .82; }
+  .micnote-d { margin-top: 6px; }
+  .micnote-d summary { cursor: pointer; font-size: .74rem; opacity: .9; text-decoration: underline; }
+  .micnote-d ol { margin: 6px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+  .micnote-d li { line-height: 1.45; }
   .micnote-a { flex: none; border: 1px solid rgba(255,255,255,.3); background: rgba(255,255,255,.12);
     color: #fff; border-radius: 8px; padding: 4px 9px; font: inherit; font-size: .74rem; cursor: pointer; }
   .micnote-x { flex: none; width: 22px; height: 22px; border-radius: 50%; border: none;

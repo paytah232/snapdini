@@ -26,3 +26,14 @@ export function lensName(rawLabel: string, i: number, total: number): string {
   if (side && l.length > 28) return total > 2 ? `${side} camera ${i + 1}` : `${side} camera`;
   return l;   // a real, human name the device gave us — keep it
 }
+
+/** Which way a lens points, as far as its label admits. '' when the label does not say — iOS names
+ *  its lenses clearly, Android's "camera2 0, facing back" says only the side, and some desktop
+ *  webcams say neither. Used to group the picker and to decide which lens a flip should land on, so
+ *  an unknown side simply never participates in either. */
+export function lensFacing(rawLabel: string): 'user' | 'environment' | '' {
+  const l = (rawLabel || '').trim();
+  if (/back|rear|environment|world/i.test(l)) return 'environment';
+  if (/front|user|selfie|face/i.test(l)) return 'user';
+  return '';
+}

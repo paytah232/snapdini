@@ -15,6 +15,18 @@
   const dispatch = createEventDispatcher<{ close: void; caption: Photo }>();
   $: photo = photos[index];
 
+  /** When it was taken, said the way a person would. Seconds are noise on a photo, and so is the
+   *  date when it was this afternoon. */
+  function shotAt(ts: number): string {
+    const d = new Date(ts);
+    const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    const today = new Date();
+    const sameDay = d.toDateString() === today.toDateString();
+    if (sameDay) return time;
+    const sameYear = d.getFullYear() === today.getFullYear();
+    return `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', ...(sameYear ? {} : { year: 'numeric' }) })}, ${time}`;
+  }
+
   // Move focus into the dialog on open and restore it to the trigger on close.
   let lbEl: HTMLElement;
   let prevFocus: HTMLElement | null = null;
@@ -60,7 +72,19 @@
     <!-- Whatever the grid captioned this with must not vanish on the way into the photo. The
          written caption leads; the mission follows it, demoted, so a captioned trick shot still
          says which trick it was. -->
-    <div class="cap">{#if photo.caption}<span class="written">{photo.caption}</span> · {/if}{#if photo.challenge}<span class="mission" class:secondary={!!photo.caption}>{photo.challenge}</span> · {/if}{photo.participantName} · {new Date(photo.takenAt).toLocaleString()}{#if mediaMeta(photo)} · {mediaMeta(photo)}{/if} · {index + 1}/{photos.length}</div>
+    <!-- Three tiers, not one run. Everything used to be the same size on one full-width line, so
+         the words somebody wrote sat level with the pixel dimensions and the caption was bold at
+         0.82rem — small AND bold, which is the least legible pairing there is. -->
+    <div class="cap">
+      {#if photo.caption}<p class="cap-written">{photo.caption}</p>{/if}
+      {#if photo.challenge}<p class="cap-mission" class:secondary={!!photo.caption}>{photo.challenge}</p>{/if}
+      <p class="cap-meta">
+        <span class="who">{photo.participantName}</span>
+        <span class="sep" aria-hidden="true">·</span>{shotAt(photo.takenAt)}
+        {#if mediaMeta(photo)}<span class="sep" aria-hidden="true">·</span>{mediaMeta(photo)}{/if}
+        <span class="sep" aria-hidden="true">·</span>{index + 1} of {photos.length}
+      </p>
+    </div>
   {/if}
   {#if index > 0}<button class="nav l" on:click={prev} aria-label="Previous">‹</button>{/if}
   {#if index < photos.length - 1}<button class="nav r" on:click={next} aria-label="Next">›</button>{/if}
@@ -72,16 +96,24 @@
   img, video { max-width: 100%; max-height: 86vh; border-radius: 8px; }
   .close { position: absolute; top: 16px; right: 16px; background: rgba(0,0,0,0.5); color: #fff;
     border: none; width: 40px; height: 40px; border-radius: 50%; font-size: 1.2rem; cursor: pointer; }
-  .cap { position: absolute; bottom: 18px; left: 0; right: 0; text-align: center; color: #fff;
-    font-size: 0.82rem; text-shadow: 0 1px 3px #000; }
-  .cap .written { font-weight: 700; }
-  .cap .mission { font-weight: 700; }
+  /* Held to a readable measure and kept clear of the nav arrows, rather than run edge to edge. The
+     scrim does the legibility work a text-shadow was being asked to do alone over a bright photo. */
+  .cap { position: absolute; bottom: 0; left: 0; right: 0; padding: 48px 64px 18px; color: #fff;
+    text-align: center; pointer-events: none;
+    background: linear-gradient(to top, rgba(0,0,0,.72) 0%, rgba(0,0,0,.45) 45%, transparent 100%); }
+  .cap > * { max-width: 56ch; margin: 0 auto; }
+  .cap-written { font-size: 1rem; line-height: 1.45; font-weight: 500; overflow-wrap: anywhere; }
+  .cap-mission { margin-top: 4px; font-size: .84rem; line-height: 1.4; font-weight: 700; }
+  .cap-meta { margin-top: 7px; font-size: .74rem; line-height: 1.5; color: rgba(255,255,255,.72);
+    display: flex; flex-wrap: wrap; align-items: baseline; justify-content: center; gap: 0 6px; }
+  .cap-meta .who { font-weight: 600; color: rgba(255,255,255,.9); }
+  .cap-meta .sep { opacity: .45; }
   .lb-cap { position: absolute; left: 12px; top: 12px; z-index: 3; padding: 8px 12px; border-radius: 999px;
     border: 1px solid rgba(255,255,255,.28); background: rgba(0,0,0,.5); color: #fff; font: inherit;
     font-size: .82rem; cursor: pointer; -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
   .lb-cap:hover { border-color: rgba(255,255,255,.5); }
   /* Demoted, not dropped: with a caption present the mission is attribution, not the headline. */
-  .cap .mission.secondary { font-weight: 400; opacity: .75; }
+  .cap-mission.secondary { font-weight: 400; opacity: .78; }
   .nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(0,0,0,0.4);
     color: #fff; border: none; width: 44px; height: 64px; font-size: 2rem; cursor: pointer; }
   .nav.l { left: 8px; border-radius: 0 8px 8px 0; } .nav.r { right: 8px; border-radius: 8px 0 0 8px; }
