@@ -1099,9 +1099,17 @@
     reportClientError(`camera: aspectRatio not honoured for video (${aspect})`, 'camera', ev?.joinCode);
   }
 
-  async function cycleAspect() {
-    const i = allowedAspects.indexOf(aspect);
-    aspect = allowedAspects[(i + 1) % allowedAspects.length];
+  // A sheet, not a cycle. With five shapes enabled — which every demo has — reaching Square from
+  // Full meant four taps and a guess at what came next, each one re-cutting the camera track. The
+  // shapes are a short, known list, so show them and let the guest pick the one they want.
+  let shapeSheet = false;
+  async function pickAspect(a: string) {
+    shapeSheet = false;
+    if (a === aspect) return;
+    await setAspect(a);
+  }
+  async function setAspect(a: string) {
+    aspect = a;
     // A photo crops in the canvas, so the new framing is true the instant it is picked. In video the
     // camera has to agree first — drop the framing until applyRecordShape has read the answer back,
     // rather than flicking to the new shape and possibly away from it again.
@@ -1598,7 +1606,10 @@
       // ticks it again above — but until then the server has no record of it and a reload would
       // show it unticked. Better to agree with the truth than to flatter the guest.
       untickMission(item.challengeId);
-      photosRemaining = Math.min(photosRemaining + 1, ev?.maxPhotos || 99);
+      // NOTE: there was a `photosRemaining = photosRemaining + 1` here. It was dead — photosRemaining
+      // is a reactive declaration over pendingUploads, so `queue = queue` below recomputed straight
+      // over it — and it would have been wrong if it had landed: moving this item to 'error' already
+      // drops it out of pendingUploads, so the shot comes back on its own and the bump double-counted.
       showToast('Still can’t upload — your photo is saved; open the queue to retry when you’re back online', true);
     }
     queue = queue; uploading = false;
@@ -1974,7 +1985,7 @@
              again, and a control that cannot do what it says is worse than no control. Disabled
              while recording because resizing the track mid-clip is a resolution change the recorder
              never agreed to. -->
-        {#if allowedAspects.length > 1 && (!videoMode || videoShapeSupported)}<button class="ctrl" on:click={cycleAspect} disabled={recording} title={videoMode ? 'Clip shape' : 'Photo shape'} aria-label="Change {videoMode ? 'clip' : 'photo'} shape (currently {aspect})">{aspect === 'full' ? 'Full' : aspect}</button>{/if}
+        {#if allowedAspects.length > 1 && (!videoMode || videoShapeSupported)}<button class="ctrl" on:click={() => (shapeSheet = true)} disabled={recording} title={videoMode ? 'Clip shape' : 'Photo shape'} aria-label="Choose {videoMode ? 'clip' : 'photo'} shape (currently {ASPECT_LABELS[aspect] || aspect})">{aspect === 'full' ? 'Full' : aspect}</button>{/if}
         <button class="ctrl" on:click={() => (settingsOpen = !settingsOpen)} class:active={settingsOpen} title="Settings" aria-label="Camera settings">
           <!-- Drawn rather than typed: the ⚙ character is rendered by whatever font the device has
                and frequently is not recognisably a cog, which is the one icon users navigate by. -->
@@ -2176,6 +2187,21 @@
     <!-- The phone-camera fallback already existed, but only inside the settings sheet. Someone
          whose clip just stuttered is not going to go looking for it, so put it in front of them
          at the moment it becomes relevant. -->
+    {#if shapeSheet}
+      <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
+      <div class="lens-back" on:click|self={() => (shapeSheet = false)} role="dialog" aria-modal="true" aria-label="Choose a shape">
+        <div class="lens-sheet">
+          <div class="lens-head">{videoMode ? 'Clip shape' : 'Photo shape'}</div>
+          {#each allowedAspects as a}
+            <button class="lens-opt" class:on={a === aspect} on:click={() => pickAspect(a)}>
+              <span class="lens-name">{ASPECT_LABELS[a] || a}{#if a !== 'full'}<span class="lens-sub"> · {a}</span>{/if}</span>
+              {#if a === aspect}<span class="lens-now" aria-label="Currently chosen">●</span>{/if}
+            </button>
+          {/each}
+          <button class="lens-cancel" on:click={() => (shapeSheet = false)}>Cancel</button>
+        </div>
+      </div>
+    {/if}
     {#if lensSheet}
       <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
       <div class="lens-back" on:click|self={() => (lensSheet = false)} role="dialog" aria-modal="true" aria-label="Choose a lens">
@@ -2615,8 +2641,10 @@
      Only drawn when there IS more than one lens: advertising a gesture that does nothing is worse
      than not advertising it. */
   .round.has-more::after {
-    /* An ellipsis, not a single dot. A lone dot is not a recognised affordance for anything; "…"
-       is the long-standing convention for "there is more behind this". */
+    /* An ellipsis, not a single dot or a word. "…" is the long-standing convention for "there is
+       more behind this", and it is the only thing that fits: the rail is 52px buttons on a 320px
+       phone, so "tap or hold" either shrinks to unreadable or pushes the rail off the screen. The
+       one-time tip spells the gesture out in words once; this is the reminder afterwards. */
     content: '\2026'; position: absolute; right: 6px; bottom: 1px;
     font-size: .8rem; line-height: 1; color: rgba(255,255,255,.9);
     text-shadow: 0 1px 3px rgba(0,0,0,.8); pointer-events: none;
@@ -2637,6 +2665,7 @@
     color: #fff; font: inherit; font-size: .92rem; cursor: pointer; text-align: left; }
   .lens-opt.on { border-color: rgba(240,180,41,.75); background: rgba(240,180,41,.14); }
   .lens-now { color: #f0b429; font-size: .7rem; }
+  .lens-sub { opacity: .55; font-size: .82em; }
   .lens-cancel { margin-top: 4px; padding: 11px 14px; border-radius: 11px; border: 1px solid rgba(255,255,255,.16);
     background: transparent; color: #fff; font: inherit; font-size: .9rem; cursor: pointer; }
   .bench-panel {
@@ -2778,6 +2807,11 @@
        collide at any width. */
     position: absolute; left: 12px; right: 66px; max-width: 460px;
     top: 58px; z-index: 6;
+    /* The strip is a LABEL, not a surface. It sits above the gesture layer, so while it was
+       tappable it swallowed any brightness drag that began under it — arming a trick quietly took
+       a band across the viewfinder out of service. Same trick as .topbar: the container lets
+       pointers through and the one thing in here that IS a control opts back in. */
+    pointer-events: none;
     display: flex; align-items: center; gap: 8px;
     padding: 6px 8px 6px 12px; border-radius: 999px;
     background: rgba(0, 0, 0, .55); border: 1px solid rgba(255, 255, 255, .22);
@@ -2788,7 +2822,9 @@
   /* The mission itself can be 48 characters, so it has to be allowed to shrink rather than push the
      cancel button off the strip. */
   .armed-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  /* …the cancel button being that one control. */
   .armed-x {
+    pointer-events: auto;
     flex: none; width: 22px; height: 22px; border-radius: 50%; cursor: pointer;
     border: none; background: rgba(255, 255, 255, .16); color: #fff; font-size: .72rem; line-height: 1;
   }

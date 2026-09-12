@@ -202,7 +202,9 @@
     {#if event?.isDemo}
       <a class="btn ghost demo" href={dlinks.camera}>📷 Camera</a>
       {#if dlinks.host}<a class="btn ghost demo" href={dlinks.host}>🎛 Host view</a>{/if}
-      <a class="btn ghost demo quiet" href="/">✕ Exit demo</a>
+      <!-- No "Exit demo" here: the Snapdini logo to the left of this row already goes home, and on
+           a revealed gallery this bar can hold Highlights, Select and Download all as well. A
+           third pill that duplicates the logo is the one that pushes it over. -->
     {/if}
     {#if revealed && hasHighlights}
       <button class="btn ghost" on:click={toggleHighlights}>
@@ -322,7 +324,10 @@
 <style>
   nav {
     position: sticky; top: 0; z-index: 50; display: flex; align-items: center; justify-content: space-between;
-    height: 62px; padding: 0 16px; gap: 12px;
+    /* min-height, not height: .nav-right wraps, and a fixed 62px meant the second row spilled out
+       of the bar instead of making it taller. On a revealed demo gallery this row can hold five
+       controls, which is exactly when it wraps. */
+    min-height: 62px; padding: 9px 16px; gap: 12px; flex-wrap: wrap;
     backdrop-filter: blur(10px); background: color-mix(in srgb, var(--bg) 78%, transparent);
     border-bottom: 1px solid var(--border);
   }
@@ -354,7 +359,8 @@
   .ghost { border-color: var(--border); color: var(--text); background: transparent; }
   /* The exit is the one link here that is not part of the tour, so it recedes — same reasoning as
      the camera's .home-btn.quiet. */
-  .demo.quiet { opacity: .8; }
+  /* The tour's links are context, not the point of this page — the gallery's own actions lead. */
+  .demo { opacity: .85; }
   .ghost:hover { border-color: var(--accent); }
 
   .hero { position: relative; width: 100%; min-height: clamp(200px, 36vw, 360px); display: flex; align-items: flex-end;

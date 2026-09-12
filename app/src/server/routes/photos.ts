@@ -278,7 +278,19 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
   // it runs against the thumbnail after this response, and a slow or dead ML container must
   // never hold up a guest's upload.
   void matchNewPhoto(p.eventId, photoId, storedName);
-  return { success: true, photoId, status, pendingModeration: status === 'pending', photosRemaining: Math.max(0, effectiveMaxPhotos(p) - p.photosTaken - 1) };
+  // Every photo is STORED 'pending' on purpose: visibility is decided at read time against the
+  // event's current setting, which is what lets a host switch moderation on later and have the
+  // shots already taken go through it. That is a feature, and the column must keep working that way.
+  //
+  // What must NOT leak out of that is the word "pending" when moderation is off. It said
+  // pendingModeration: true on an event with no moderation at all, so a guest was told their photo
+  // was waiting for approval while it was already in the gallery. Report the event's answer, not
+  // the column's.
+  return {
+    success: true, photoId, status,
+    pendingModeration: !!p.moderationEnabled && status === 'pending',
+    photosRemaining: Math.max(0, effectiveMaxPhotos(p) - p.photosTaken - 1),
+  };
 }
 
 // ── POST /api/photos — single-shot upload (photos + videos under the chunk threshold) ──────────

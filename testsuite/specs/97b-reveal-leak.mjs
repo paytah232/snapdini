@@ -98,12 +98,17 @@ await spec('97b-reveal-leak', async () => {
     const ev = await createEvent({ revealMode: 'manual', moderationEnabled: true });
     const g = await join(ev.joinCode, 'Guest');
     const token = g.json?.sessionToken;
-    await shoot(token);
+    const up2 = await shoot(token);
     const filename = dbq(`SELECT p.filename FROM photos p JOIN events e ON e.id = p.event_id
                           WHERE e.join_code = '${ev.joinCode}' LIMIT 1`).trim();
     const status = dbq(`SELECT p.status FROM photos p JOIN events e ON e.id = p.event_id
                         WHERE e.join_code = '${ev.joinCode}' LIMIT 1`).trim();
     ok('a moderated upload starts pending', status === 'pending', status);
+    // What the guest is TOLD must match the event they are in. Every photo is stored 'pending' so
+    // that switching moderation on later still vets the shots already taken — but on an event with
+    // moderation off that column must not surface as "waiting for approval", because it is not.
+    ok('…and the guest is told it is waiting', up2.json?.pendingModeration === true,
+      String(up2.json?.pendingModeration));
     // Reveal it — the photos are now "out", but an unapproved one must stay held back.
     await api('POST', `/api/events/${ev.joinCode}/reveal`, { headers: org(ev.organizerCode) });
     const pub = await bare(`/api/photos/${ev.joinCode}?gallery=true`);
@@ -113,5 +118,20 @@ await spec('97b-reveal-leak', async () => {
       !pub.text.includes(filename.split('/').pop() ?? 'x'), pub.text.slice(0, 90));
     ok('and its file name leaked nowhere in that response', (pj.photos || []).length === 0,
       `${(pj.photos || []).length} photos`);
+  }
+
+  group('An unmoderated event does not claim a photo is waiting');
+  {
+    const ev = await createEvent({ revealMode: 'instant' });
+    const g = await join(ev.joinCode, 'Guest');
+    const up = await shoot(g.json?.sessionToken);
+    ok('the photo is stored pending, as every photo is',
+      dbq(`SELECT p.status FROM photos p JOIN events e ON e.id = p.event_id
+           WHERE e.join_code = '${ev.joinCode}' LIMIT 1`).trim() === 'pending');
+    ok('but the guest is NOT told it is waiting for approval',
+      up.json?.pendingModeration === false, String(up.json?.pendingModeration));
+    const pub = await bare(`/api/photos/${ev.joinCode}?gallery=true`);
+    ok('because it is already in the gallery', (JSON.parse(pub.text || '{}').photos || []).length === 1,
+      pub.text.slice(0, 70));
   }
 });
