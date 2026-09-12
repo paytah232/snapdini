@@ -29,9 +29,15 @@ export async function missionsFor(eventChallenges: string | null, setKey: string
   if (!set) return { challenges: [], challengesDone: [] as string[], challengeSet: null as string | null, challengeTick: null as string | null };
   const rows = await db.selectDistinct({ id: photos.challengeId }).from(photos)
     .where(and(eq(photos.participantId, participantId), isNotNull(photos.challengeId)));
+  // Progress is only ever counted against the card the guest is HOLDING. A host who edits the list
+  // mid-event leaves behind ticks for tricks that are no longer on it, and those were still being
+  // returned — a guest who had done one of three saw "1/6" after the list was replaced, where that
+  // 1 was not any of the 6. The photo keeps its challenge_id either way, so nothing is destroyed:
+  // restore the trick and it counts again.
+  const offered = new Set(set.items.map((i) => i.id));
   return {
     challenges: set.items,
-    challengesDone: rows.map((r) => r.id).filter((x): x is string => !!x),
+    challengesDone: rows.map((r) => r.id).filter((x): x is string => !!x && offered.has(x)),
     challengeSet: set.key,
     challengeTick: readTick(eventChallenges),
   };

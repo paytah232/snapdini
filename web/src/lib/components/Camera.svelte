@@ -355,12 +355,36 @@
   // When the tab is backgrounded, release the camera entirely so it isn't left running in the
   // background draining the battery (and the "camera in use" indicator clears). Stop any
   // in-progress recording first so the clip is saved. Re-open it when the user returns to the camera.
+  // Re-read the trick list from the server.
+  //
+  // It was fetched once, at join, and never again — so a host who edited the list mid-event left
+  // every guest holding the old one. The count went wrong too: progress was returned for tricks no
+  // longer on the card, so a guest who had done one of three saw "1/6" after a replacement, where
+  // that 1 was none of the 6. The server now scopes progress to the card being held; this is the
+  // other half, which is noticing that the card changed at all.
+  //
+  // Quiet on failure: a guest whose signal dropped should keep the list they have rather than watch
+  // it empty itself. The next attempt will pick the change up.
+  async function refreshMissions() {
+    if (!sessionToken) return;
+    try {
+      const me = await getMe(sessionToken);
+      if (Array.isArray(me.challenges)) missions = me.challenges;
+      if (Array.isArray(me.challengesDone)) missionsDone = me.challengesDone;
+      if (me.challengeTick) missionTick = me.challengeTick;
+    } catch { /* keep what we have */ }
+  }
+
   function onVisibility() {
     if (document.hidden) {
       if (recording) toggleRecord();   // saves the clip; iOS would otherwise corrupt it
       if (screen === 'camera') stopCamera();
-    } else if (screen === 'camera' && !stream && !cameraError && !cameraPaused) {
-      startCamera();   // auto-resume on return — unless the user manually turned the camera off
+    } else {
+      if (screen === 'camera' && !stream && !cameraError && !cameraPaused) {
+        startCamera();   // auto-resume on return — unless the user manually turned the camera off
+      }
+      // Returning to the app is exactly when a host's edit has most likely happened behind you.
+      if (screen === 'camera') void refreshMissions();
     }
   }
 
@@ -1870,7 +1894,7 @@
                notice about something that is not on screen is just noise. -->
           <div class="mwrap">
             <button class="mbadge" class:alldone={!missionsLeft.length}
-                    on:click={() => { missionsOpen = true; trackEvent('mission_list_opened', undefined, ev?.joinCode); }}
+                    on:click={() => { missionsOpen = true; void refreshMissions(); trackEvent('mission_list_opened', undefined, ev?.joinCode); }}
                     aria-label="Trick list, {missionsDone.length} of {missions.length} pulled off">
               {missionsDone.length}/{missions.length}
             </button>
