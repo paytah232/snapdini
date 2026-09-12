@@ -152,7 +152,9 @@ export const updateShare = (code: string, organizerCode: string, id: string, bod
 export const deleteShare = (code: string, organizerCode: string, id: string) =>
   api(`/api/events/${code}/shares/${id}`, { method: 'DELETE', headers: org(organizerCode) });
 export interface ShareView {
-  event: { name: string; theme: EventTheme | null; allowDownloads: boolean };
+  /** `aspectRatios` is optional so an older API (or a cached response) simply falls back to the
+   *  square tiles this page has always drawn. */
+  event: { name: string; theme: EventTheme | null; allowDownloads: boolean; aspectRatios?: string[] };
   kind: 'all' | 'selected';
   revealed: boolean;
   revealMode: string;

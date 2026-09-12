@@ -10,7 +10,8 @@
   import Lightbox from '$lib/components/Lightbox.svelte';
   import OgHead from '$lib/components/OgHead.svelte';
   import Logo from '$lib/components/Logo.svelte';
-  import { imgFallback, hidePoster } from '$lib/ui';
+  import PhotoCard from '$lib/components/PhotoCard.svelte';
+  import { tileAspect } from '$lib/ui';
   import StartYourOwn from '$lib/components/StartYourOwn.svelte';
   import { trackGalleryView, trackPhotos } from '$lib/referral';
   import type { PageData } from './$types';
@@ -268,26 +269,22 @@
     {#if meOnly && !shownPhotos.length}
       <div class="state">You weren't matched in any of these photos.</div>
     {/if}
-    <div class="grid">
+    <!-- The same card as the guest's roll, the share links and the host's review screen — see
+         PhotoCard.svelte. The words used to sit in a gradient over the bottom of the photo, where
+         a caption of any length fought the picture and then ran off it. --tile-ar is the event's
+         frame setting, so the whole grid is one shape rather than one shape per file. -->
+    <div class="pgrid" class:has-meta={shownPhotos.some((p) => p.caption || p.challenge)}
+         style={`--tile-ar:${tileAspect(event?.aspectRatios)}`}>
       {#each shownPhotos as p, i (p.id)}
-        <button class="thumb" class:selected={selecting && selected.has(p.id)} on:click={() => onThumb(p, i)}
-          aria-label={selecting ? `Select photo by ${p.participantName}` : `Open photo by ${p.participantName}`}>
-          {#if p.mediaType === 'video'}
-            <img src={p.thumbUrl} alt="" loading="lazy" on:error={hidePoster} />
-            <span class="play" aria-hidden="true">▶</span>
-          {:else}
-            <img src={p.thumbUrl ?? p.url} alt="" loading="lazy" on:error={(e) => imgFallback(e, p.url)} />
-          {/if}
-          {#if p.isHighlighted}<span class="star" aria-hidden="true">⭐</span>{/if}
-          {#if selecting}<span class="check" class:on={selected.has(p.id)} aria-hidden="true">{selected.has(p.id) ? '✓' : ''}</span>{/if}
-          <span class="cap">
-            <!-- The written caption is THE caption; the mission stays on as a smaller label so a
-                 captioned trick shot keeps saying which trick it was. -->
-            {#if p.caption}<span class="written">{p.caption}</span>{/if}
-            {#if p.challenge}<span class="mission" class:secondary={!!p.caption}>{p.challenge}</span>{/if}
-            <span class="who">{p.participantName} · {fmtTime(p.takenAt)}</span>
-          </span>
-        </button>
+        <PhotoCard photo={p} selected={selecting && selected.has(p.id)}
+                   meta={`${p.participantName} · ${fmtTime(p.takenAt)}`}
+                   tileLabel={selecting ? `Select photo by ${p.participantName}` : `Open photo by ${p.participantName}`}
+                   on:open={() => onThumb(p, i)}>
+          <svelte:fragment slot="tile">
+            {#if p.isHighlighted}<span class="star" aria-hidden="true">⭐</span>{/if}
+            {#if selecting}<span class="check" class:on={selected.has(p.id)} aria-hidden="true">{selected.has(p.id) ? '✓' : ''}</span>{/if}
+          </svelte:fragment>
+        </PhotoCard>
       {/each}
     </div>
   {/if}
@@ -369,39 +366,11 @@
     color: var(--accent); letter-spacing: .04em;
   }
 
-  .grid {
-    display: grid; gap: 6px;
-    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-  }
-  .thumb {
-    position: relative; aspect-ratio: 1; overflow: hidden; border-radius: 6px;
-    padding: 0; border: none; cursor: pointer; background: var(--surface); display: block;
-  }
-  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .thumb.selected { outline: 3px solid var(--accent); outline-offset: -3px; }
+  /* The grid and the card itself are PhotoCard's (.pgrid / .pcell-wrap). All that belongs to this
+     page is what it overlays on the tile. */
   .check { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 800;
     background: rgba(0,0,0,.45); color: #fff; border: 2px solid #fff; }
   .check.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); }
-  .play {
-    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-    font-size: 2rem; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,.6); pointer-events: none;
-  }
   .star { position: absolute; top: 6px; left: 6px; font-size: .9rem; filter: drop-shadow(0 1px 2px rgba(0,0,0,.6)); }
-  .cap {
-    position: absolute; left: 0; right: 0; bottom: 0; padding: 12px 6px 5px;
-    font-size: .68rem; line-height: 1.35; color: #fff; text-align: left;
-    background: linear-gradient(transparent, rgba(0,0,0,.72));
-  }
-  /* Each line clips on its own, so a long mission cannot push the shooter line out of the tile. The
-     caption is absolutely positioned, so a second line grows up over the photo and a photo without
-     a mission is unchanged — no reserved gap. */
-  .cap > span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .cap .written { font-weight: 700; }
-  .cap .mission { font-weight: 700; }
-  .cap .mission.secondary { font-weight: 400; opacity: .82; font-size: .92em; }
-  .cap .who { opacity: .82; }
-  @media (min-width: 640px) {
-    .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
-  }
 </style>

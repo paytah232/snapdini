@@ -12,9 +12,9 @@
   import { applyEventTheme } from '$lib/theme';
   import { showToast, hideToast } from '$lib/toast';
   import { reportClientError } from '$lib/report';
-  import { imgFallback, hidePoster } from '$lib/ui';
   import { putCapture, delCapture, listCaptures, saveProgress, getProgress } from '$lib/captureStore';
   import Lightbox from '$lib/components/Lightbox.svelte';
+  import PhotoCard from '$lib/components/PhotoCard.svelte';
   import StartYourOwn from '$lib/components/StartYourOwn.svelte';
   import GuestFeedback from '$lib/components/GuestFeedback.svelte';
   import Logo from '$lib/components/Logo.svelte';
@@ -825,6 +825,15 @@
     // that is true of a photo — leaving it up makes it read as a fault with the camera itself. It
     // comes back on the next switch to video, because by then it is true again.
     if (!v) { micDenied = false; }
+    // A trick is a PHOTO prompt, so going into video puts the whole feature away: nothing armed,
+    // no open list. The server is what actually enforces this — finalizeUpload drops the challenge
+    // on any video upload, so a clip is kept but ticks nothing — and the camera hiding the option
+    // is only the courtesy of not offering something that cannot count.
+    // The reason it is photo-only at all: the feature runs on the roll being FINITE, so spending
+    // one of a fixed number of shots on a trick is a real decision. A clip is a different currency
+    // (seconds, usually paid) and one ten-second clip plausibly holds several tricks at once,
+    // which would make ticking any one of them arbitrary.
+    if (v) { armed = null; missionsOpen = false; }
     videoMode = v;
     // In phone mode, switching to video means "open the phone's camera" — that is the whole point
     // of picking it, and re-acquiring a browser stream we are not going to record from is waste.
@@ -1740,11 +1749,14 @@
         {:else}
           <div class="evname"><Logo word={false} color={ev?.theme?.accent ?? ''} /> {ev?.name}</div>
         {/if}
-        {#if missions.length}
+        {#if missions.length && !videoMode}
           <!-- One small pill is the whole affordance. The camera screen has to stay a camera: a
                permanent list would compete with the viewfinder, so the list lives behind this. -->
           <!-- The count alone read as decoration — nobody could tell it was tappable, let alone
                what it opened. A two-word caption under it names the thing and invites the tap. -->
+          <!-- Gone entirely in video mode, because a trick is a photo prompt (see setMode). No
+               note explaining the absence: it comes straight back on the switch to Photo, and a
+               notice about something that is not on screen is just noise. -->
           <div class="mwrap">
             <button class="mbadge" class:alldone={!missionsLeft.length}
                     on:click={() => { missionsOpen = true; trackEvent('mission_list_opened', undefined, ev?.joinCode); }}
@@ -1837,7 +1849,10 @@
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
         </button>
       </div>
-      {#if missionsOpen}
+      <!-- !videoMode as well as the flag: setMode already closes the sheet on the way in, but the
+           list must not be reachable from video by any route, and a guard on the render is the
+           one place that covers all of them. -->
+      {#if missionsOpen && !videoMode}
         <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
         <div class="settings-back" on:click|self={() => (missionsOpen = false)} role="dialog" aria-modal="true" aria-label="Trick list">
           <div class="settings-modal">
@@ -2104,7 +2119,7 @@
         <div class="oos-title">That's your roll</div>
         <div class="oos-actions">
           {#if canAskHost}
-            <button class="btn ghost sm" on:click={askHostForMore} disabled={askedHost}>
+            <button class="btn soft sm" on:click={askHostForMore} disabled={askedHost}>
               {askedHost ? '✓ Host asked' : 'Ask the host for more'}
             </button>
           {/if}
@@ -2150,50 +2165,29 @@
       <div class="pgrid" class:has-meta={shownPhotos.some((p) => p.caption || p.challenge)}
          style={`--tile-ar:${aspectValue(aspect) ?? 1}`}>
         {#each shownPhotos as p, i}
-          <!-- The bin is a SIBLING of the tile, not a child: a <button> inside a <button> is
-               invalid HTML and behaves unpredictably on touch. The wrapper positions it. -->
-          <div class="pcell-wrap">
-            <!-- ONE shape for every tile, taken from the event's frame setting rather than from
-                 each file. Per-photo shapes were faithful to the data and wrong to the product: a
-                 clip is recorded straight off the sensor and never cropped (only photos go through
-                 cropRect), so a roll shot "1:1" showed square photos beside full-frame video. And a
-                 grid of mixed heights simply reads as untidy. -->
-            <button class="pcell" on:click={() => { lbIndex = i; lbOpen = true; }}>
-              {#if p.mediaType === 'video'}<img src={p.thumbUrl} alt="" loading="lazy" on:error={hidePoster} /><span class="play">▶</span>{:else}<img src={p.thumbUrl ?? p.url} alt="" loading="lazy" on:error={(e) => imgFallback(e, p.url)} />{/if}
-            </button>
-            {#if canDelete(p, nowTick) || confirmingDeleteId === p.id}
-              <button class="pcell-bin" class:confirm={confirmingDeleteId === p.id}
-                      on:click|stopPropagation={() => (confirmingDeleteId === p.id ? deletePhoto(p.id) : (confirmingDeleteId = p.id))}
-                      title={confirmingDeleteId === p.id ? 'Tap again to delete' : `Delete this shot — ${secsLeft(p, nowTick)}s left`}
-                      aria-label={confirmingDeleteId === p.id ? 'Tap again to confirm deleting this shot' : `Delete this shot, ${secsLeft(p, nowTick)} seconds left`}>
-                {#if confirmingDeleteId === p.id}
-                  Sure?
-                {:else}
-                  🗑<span class="bin-secs">{secsLeft(p, nowTick)}</span>
-                {/if}
-              </button>
-            {/if}
-            <!-- Caption strip. Tap to write or change it; the trick this shot was for rides
-                 underneath in smaller type so captioning a trick shot never costs the attribution.
-                 Own photos only — this roll holds nothing else, but the guard is the rule, not the
-                 filter that happens to be upstream of it. -->
-            <div class="pmeta">
-              <span class="pno">#{shownPhotos.length - i}</span>
-              {#if p.isOwn}
-                <button class="capstrip" class:blank={!p.caption} on:click|stopPropagation={() => openCaption(p)}
-                        aria-label={p.caption ? `Edit your caption: ${p.caption}` : 'Add a caption to this photo'}>
-                  {#if p.caption}
-                    <span class="captext">{p.caption}</span>
+          <!-- The card itself is PhotoCard; the only thing this roll adds is the delete bin, which
+               goes in the tile slot because the bin belongs ON the photo. Own photos only for the
+               editable caption — this roll holds nothing else, but the guard is the rule, not the
+               filter that happens to be upstream of it. -->
+          <PhotoCard photo={p} shotNumber={shownPhotos.length - i}
+                     captionMode={p.isOwn ? 'edit' : 'static'}
+                     on:open={() => { lbIndex = i; lbOpen = true; }}
+                     on:caption={() => openCaption(p)}>
+            <svelte:fragment slot="tile">
+              {#if canDelete(p, nowTick) || confirmingDeleteId === p.id}
+                <button class="pcell-bin" class:confirm={confirmingDeleteId === p.id}
+                        on:click|stopPropagation={() => (confirmingDeleteId === p.id ? deletePhoto(p.id) : (confirmingDeleteId = p.id))}
+                        title={confirmingDeleteId === p.id ? 'Tap again to delete' : `Delete this shot — ${secsLeft(p, nowTick)}s left`}
+                        aria-label={confirmingDeleteId === p.id ? 'Tap again to confirm deleting this shot' : `Delete this shot, ${secsLeft(p, nowTick)} seconds left`}>
+                  {#if confirmingDeleteId === p.id}
+                    Sure?
                   {:else}
-                    <span class="capadd">💬 Add a caption</span>
+                    🗑<span class="bin-secs">{secsLeft(p, nowTick)}</span>
                   {/if}
-                  {#if p.challenge}<span class="capmission">🎩 {p.challenge}</span>{/if}
                 </button>
-              {:else if p.challenge}
-                <span class="capmission standalone">🎩 {p.challenge}</span>
               {/if}
-            </div>
-          </div>
+            </svelte:fragment>
+          </PhotoCard>
         {/each}
       </div>
     {:else}
@@ -2219,7 +2213,7 @@
         <div class="oos-title">That's your roll</div>
         <div class="oos-actions">
           {#if canAskHost}
-            <button class="btn ghost sm" on:click={askHostForMore} disabled={askedHost}>
+            <button class="btn soft sm" on:click={askHostForMore} disabled={askedHost}>
               {askedHost ? '✓ Host asked' : 'Ask the host for more'}
             </button>
           {/if}
@@ -2309,6 +2303,13 @@
   .btn { display: inline-block; font-weight: 700; border-radius: var(--radius-sm); padding: 12px 18px; border: 1px solid transparent; cursor: pointer; text-decoration: none; font-size: 0.95rem; }
   .btn.primary { background: var(--accent); color: var(--accent-ink, #111); width: 100%; }
   .btn.ghost { border-color: var(--border); color: var(--text); background: transparent; }
+  /* Between ghost and primary. A ghost button on the out-of-shots card reads as a line of text
+     rather than as something to press — and that card is a DARK overlay in both themes, so in the
+     light theme a --text label on it is nearly invisible. A light wash of the accent gives it a
+     button's shape without letting it compete with the solid primary beside it; the wash is the
+     same one .roll-note already uses on the join screen for the same job. */
+  .btn.soft { border-color: var(--accent); color: var(--text);
+    background: color-mix(in srgb, var(--accent) 12%, transparent); }
   .btn.sm { padding: 7px 12px; font-size: 0.82rem; }
 
   /* Event poster image as the sign-in backdrop, with the join form in a readable card. */
@@ -2548,6 +2549,10 @@
     border-color: var(--border, #3a3630); box-shadow: none; backdrop-filter: none;
   }
   .oos-panel.oos-inline .oos-title { color: var(--text, #f2ece0); }
+  /* Same split as the title above: over the viewfinder the card is dark whatever the theme, so
+     its label is white; in the gallery it is ordinary page content and follows the theme. */
+  .oos-panel .btn.soft { color: #fff; }
+  .oos-panel.oos-inline .btn.soft { color: var(--text, #f2ece0); }
   .oos-title { color: #fff; font-size: .9rem; font-weight: 600; }
   .oos-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
   .shutter { width: 76px; height: 76px; border-radius: 50%; border: 4px solid #fff; background: transparent;
@@ -2582,42 +2587,9 @@
     background: color-mix(in srgb, var(--accent) 14%, var(--surface)); border: 1px solid var(--border);
     border-radius: var(--radius-sm); color: var(--text); font-size: 0.85rem; }
   .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 64px 24px; text-align: center; }
-  /* The roll is a CARD grid: photo on top, number and caption underneath in flow. The caption used
-     to be absolutely positioned over the bottom of the image, which meant it sat on top of the
-     picture and, with anything longer than a few words, ran past it. Text that describes a photo
-     belongs beside the photo, not on it — and it also lets the cards breathe, which is what the
-     galleries people compare us to actually look like. Two-up on a phone rather than three: a
-     140px tile cannot hold a sentence. */
-  .pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; padding: 10px;
-    align-items: start; }
-  /* Every card the same height. The foot is what varies — a caption, a trick, both, neither — so it
-     reserves the room instead of letting each card find its own size, which made the grid look
-     ragged. Reserved only when something in this roll actually has words under it; on a roll with
-     none, there is nothing to line up and the space would just be empty. */
-  .pgrid.has-meta .pmeta { min-height: 64px; }
-  .pcell-wrap { position: relative; display: flex; flex-direction: column; line-height: normal;
-    background: var(--surface-2); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
-  .pcell { position: relative; aspect-ratio: var(--tile-ar, 1); border: none; padding: 0; cursor: pointer; background: var(--surface-2); }
-  .pcell img { object-fit: cover; }
-  .pcell img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .play { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 1.5rem; text-shadow: 0 1px 4px #000; }
-
-  /* ── Card foot: number, caption, and the trick it was for ───────────────── */
-  .pmeta { display: flex; flex-direction: column; gap: 3px; padding: 7px 9px 9px; min-width: 0; }
-  .pno { font-size: .66rem; font-weight: 700; color: var(--text-muted); letter-spacing: .03em; }
-  .capstrip { display: flex; flex-direction: column; gap: 2px; width: 100%; min-width: 0;
-    padding: 0; border: none; background: none; color: var(--text); font: inherit;
-    text-align: left; cursor: pointer; }
-  /* Two lines, then ellipsis: a long caption must not make one card twice the height of its
-     neighbours. The full text is in the lightbox and in the editor. */
-  .captext { font-size: .76rem; line-height: 1.35; color: var(--text);
-    display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
-    overflow: hidden; overflow-wrap: anywhere; }
-  .capstrip.blank .capadd { font-size: .72rem; color: var(--text-muted); }
-  .capmission { font-size: .64rem; line-height: 1.3; color: var(--text-muted);
-    display: -webkit-box; -webkit-line-clamp: 1; line-clamp: 1; -webkit-box-orient: vertical;
-    overflow: hidden; overflow-wrap: anywhere; }
-  .capmission.standalone { display: block; }
+  /* The roll is a CARD grid — photo on top, number and caption underneath in flow — and the card
+     itself now lives in PhotoCard.svelte, shared with the gallery, shares and host review. What
+     stays here is only what this screen adds: the delete bin. */
   .capback { position: fixed; inset: 0; z-index: 320; background: rgba(0,0,0,0.6);
     display: flex; align-items: center; justify-content: center; padding: 20px; }
   .capmodal { width: 100%; max-width: 340px; background: rgba(20,20,20,0.97);

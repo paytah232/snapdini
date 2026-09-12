@@ -13,7 +13,8 @@
   import { api } from '$lib/api';
   import { firePurchase, purchaseTracked } from '$lib/adtracking';
   import { showToast, showSuccess } from '$lib/toast';
-  import { imgFallback, hidePoster } from '$lib/ui';
+  import { tileAspect } from '$lib/ui';
+  import PhotoCard from '$lib/components/PhotoCard.svelte';
   import SlideshowPanel from '$lib/components/SlideshowPanel.svelte';
   import ShareModal from '$lib/components/ShareModal.svelte';
 
@@ -466,42 +467,31 @@
     <div class="state">Nothing here</div>
   {:else if view === 'cards'}
     <!-- ── Cards view ── -->
-    <div class="grid">
+    <!-- The same card as the guest's roll, the gallery and a share link — see PhotoCard.svelte.
+         This screen is the one with the most furniture: badges, a favourite, a select checkbox and
+         the approve/reject row, all of which ride in on slots. In Select mode the caption goes
+         static: a click on a card there means "pick this", not "edit this". -->
+    <div class="pgrid" class:has-meta={filtered.some((p) => p.caption || p.challenge)}
+         style={`--tile-ar:${tileAspect(ev.aspectRatios)}`}>
       {#each filtered as p, i (p.id)}
-        <div class="card" class:sel={selecting && selected.has(p.id)}>
-          <div class="thumb-wrap">
-            <button class="thumb" on:click={(e) => onCardClick(p, i, e)} aria-label={selecting ? 'Select photo' : 'Open photo'}>
-              {#if p.mediaType === 'video'}
-                <img src={p.thumbUrl} alt="" loading="lazy" on:error={hidePoster} />
-                <div class="play">▶</div>
-              {:else}
-                <img src={p.thumbUrl ?? p.url} alt="" loading="lazy" on:error={(e) => imgFallback(e, p.url)} />
-              {/if}
-              {#if p.status === 'pending' && moderationOn}<div class="pending-badge">Pending</div>{/if}
-              {#if p.status === 'approved' && moderationOn}<div class="ok-badge" title="Approved">✓</div>{/if}
-              {#if selecting && p.rating >= 5}<span class="fav-flag" title="Favourite">★</span>{/if}
-              {#if selecting}<span class="check" class:on={selected.has(p.id)}>{selected.has(p.id) ? '✓' : ''}</span>{/if}
-            </button>
+        <PhotoCard photo={p} selected={selecting && selected.has(p.id)}
+                   captionMode={selecting ? 'static' : 'edit'} addCaptionLabel="💬 Caption"
+                   meta={`${p.participantName} · ${fmtTime(p.takenAt)}`}
+                   tileLabel={selecting ? 'Select photo' : 'Open photo'}
+                   on:open={(e) => onCardClick(p, i, e.detail)}
+                   on:caption={() => openCaption(p)}>
+          <svelte:fragment slot="tile">
+            {#if p.status === 'pending' && moderationOn}<div class="pending-badge">Pending</div>{/if}
+            {#if p.status === 'approved' && moderationOn}<div class="ok-badge" title="Approved">✓</div>{/if}
+            {#if selecting && p.rating >= 5}<span class="fav-flag" title="Favourite">★</span>{/if}
+            {#if selecting}<span class="check" class:on={selected.has(p.id)}>{selected.has(p.id) ? '✓' : ''}</span>{/if}
             {#if !selecting}
               <button class="fav-corner" class:on={p.rating >= 5} on:click={() => onFavouriteClick(p)} aria-label="Favourite">{p.rating >= 5 ? '★' : '☆'}</button>
             {/if}
-          </div>
-
-          <!-- The written caption leads; the mission it was shot for stays on underneath, demoted,
-               so captioning a trick shot never costs the attribution. -->
-          {#if !selecting}
-            <button class="capline" class:blank={!p.caption} on:click={(e) => openCaption(p, e)}
-                    title={p.caption ? 'Edit this caption' : 'Write a caption'}
-                    aria-label={p.caption ? `Edit caption: ${p.caption}` : 'Write a caption for this photo'}>
-              {p.caption ?? '💬 Caption'}
-            </button>
-          {:else if p.caption}
-            <div class="capline blank-none" title={p.caption}>{p.caption}</div>
-          {/if}
-          {#if p.challenge}<div class="mission" class:secondary={!!p.caption} title={p.challenge}>{p.challenge}</div>{/if}
-          <div class="meta">{p.participantName} · {fmtTime(p.takenAt)}</div>
-          {#if mediaMeta(p)}<div class="media-meta">{p.mediaType === 'video' ? '🎥' : '🖼'} {mediaMeta(p)}</div>{/if}
-
+          </svelte:fragment>
+          <svelte:fragment slot="foot">
+            {#if mediaMeta(p)}<span class="media-meta">{p.mediaType === 'video' ? '🎥' : '🖼'} {mediaMeta(p)}</span>{/if}
+          </svelte:fragment>
           {#if !selecting}
             <div class="mod">
               {#if p.status === 'rejected'}
@@ -514,7 +504,7 @@
               {/if}
             </div>
           {/if}
-        </div>
+        </PhotoCard>
       {/each}
     </div>
   {:else if current}
@@ -669,17 +659,14 @@
   .grow { flex: 1; }
 
   .ss-wrap { max-width: 560px; margin: 0 auto; padding: 12px 16px 80px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; max-width: 980px; margin: 0 auto; padding: 0 16px 80px; }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; display: flex; flex-direction: column; }
-  .card.sel { outline: 3px solid var(--accent); outline-offset: -3px; }
-  .thumb-wrap { position: relative; }
-  .thumb { position: relative; display: block; width: 100%; padding: 0; border: none; background: var(--surface-2); cursor: pointer; line-height: 0; }
+  /* The grid and the card are PhotoCard's (.pgrid / .pcell-wrap); this page only bounds and
+     positions the grid, and styles what it hangs on the card. The bottom padding keeps the last
+     row clear of the sticky furniture. */
+  .pgrid { max-width: 980px; margin: 0 auto; padding-bottom: 80px; }
   .fav-corner { position: absolute; top: 6px; right: 6px; width: 38px; height: 38px; border-radius: 50%; border: none; cursor: pointer; font-size: 1.15rem; line-height: 1; color: #fff; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; backdrop-filter: blur(2px); }
   .fav-corner.on { color: var(--accent); }
   .check { position: absolute; bottom: 6px; right: 6px; width: 26px; height: 26px; border-radius: 50%; background: rgba(0,0,0,.5); border: 2px solid #fff; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 0.9rem; font-weight: 800; }
   .check.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); }
-  .thumb img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
-  .play { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 1.6rem; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,.6); pointer-events: none; }
   .pending-badge { position: absolute; top: 6px; left: 6px; font-size: 0.62rem; font-weight: 800; background: rgba(0,0,0,.6); color: #fff; padding: 3px 8px; border-radius: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
   /* Approved tick (bottom-left) — clear at a glance which photos are live under moderation. */
   .ok-badge { position: absolute; bottom: 6px; left: 6px; width: 22px; height: 22px; border-radius: 50%; background: var(--success, #2ecc71); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 800; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
@@ -689,23 +676,6 @@
     display: flex; align-items: center; justify-content: center; font-size: 0.85rem; line-height: 1;
     color: var(--accent); background: rgba(0,0,0,.5); box-shadow: 0 1px 4px rgba(0,0,0,.4); }
 
-  /* The mission this shot was for, above the shooter line because it says what the photo IS. Full
-     text on hover, since a card is far narrower than the 48 characters a mission may run to. */
-  .mission { font-size: 0.72rem; font-weight: 700; color: var(--text); padding: 8px 10px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* Demoted beside a caption: still the attribution, no longer the headline. */
-  .mission.secondary { font-weight: 400; color: var(--text-muted); }
-  /* The caption line doubles as its own edit button, so the whole line is the target rather than a
-     pencil the host has to aim at on a phone. Styled as text, not as a button. */
-  .capline { display: block; width: 100%; box-sizing: border-box; text-align: left;
-    background: none; border: none; cursor: pointer; font: inherit;
-    font-size: 0.74rem; font-weight: 700; color: var(--text); padding: 8px 10px 0;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .capline.blank { font-weight: 400; color: var(--text-muted); opacity: .7; }
-  .capline:hover { text-decoration: underline; }
-  /* Select mode: the same line, inert — clicking a card there means "select", not "edit". */
-  .capline.blank-none { cursor: default; }
-  .capline + .mission { padding-top: 2px; }
-  .capline + .meta, .capline + .mission + .meta { padding-top: 2px; }
   .capbtn { white-space: nowrap; }
   .single-meta .scap { color: var(--text); font-weight: 700; }
   .single-meta .smission.secondary { color: var(--text-muted); font-weight: 400; }
@@ -724,9 +694,10 @@
   .capm-left { flex: 1; font-size: .72rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
   /* The full-screen close button, borrowed for the modal head — it is fixed-positioned there. */
   .fs-x.static { position: static; }
-  .meta { font-size: 0.7rem; color: var(--text-muted); padding: 8px 10px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .mission + .meta { padding-top: 2px; }
-  .media-meta { font-size: 0.64rem; color: var(--text-muted); font-family: var(--font-mono); padding: 2px 10px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.85; }
+  /* Dimensions/length · size, in the card foot under the shooter line. It is a slot child, so the
+     foot's own flex column supplies the spacing — no padding of its own. */
+  .media-meta { font-size: 0.64rem; color: var(--text-muted); font-family: var(--font-mono);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.85; }
   .mod { display: flex; gap: 6px; padding: 8px; flex-wrap: nowrap; }
   /* Keep mod-button labels on one line so a narrow (2-button) row never grows taller than a
      single-button row — cards stay the same height regardless of how many actions show. Tighter
@@ -760,6 +731,6 @@
   .single-meta .smission { color: var(--text); font-weight: 700; }
 
   @media (min-width: 640px) {
-    .grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+    .pgrid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
   }
 </style>

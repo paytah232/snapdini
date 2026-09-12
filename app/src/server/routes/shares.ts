@@ -14,6 +14,14 @@ function revealAtMs(event: { revealMode: string; expiresAt: number; revealDelayH
   return null;
 }
 
+// The event's enabled frame shapes, stored as a JSON array in one TEXT column.
+function parseAspects(raw: string | null): string[] {
+  try {
+    const a = JSON.parse(raw || '["1:1"]');
+    return Array.isArray(a) && a.length ? a.map(String) : ['1:1'];
+  } catch { return ['1:1']; }
+}
+
 // Resolve a share token OR pretty slug → its event + a ready-to-use photo WHERE condition (visible
 // set, narrowed to the favourites or the hand-picked ids per the share's kind). Null → caller 404s.
 async function resolveShare(tokenOrSlug: string) {
@@ -66,6 +74,11 @@ router.get('/:token', async (req: Request, res: Response) => {
       name: event.name,
       theme: event.theme ? JSON.parse(event.theme) : null,
       allowDownloads: !!event.allowDownloads,
+      // The frame the event was shot in. The share grid draws every tile in ONE shape and takes it
+      // from here, the same as the gallery does — without it a share had to assume square, which
+      // is wrong for any event on the frame pack. Tolerant of a bad column: a share that cannot
+      // parse its event's frames is still a share.
+      aspectRatios: parseAspects(event.aspectRatios),
     },
     kind: r.share.kind,
     label: r.share.label || null,

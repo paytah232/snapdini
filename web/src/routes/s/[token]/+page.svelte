@@ -4,8 +4,9 @@
   import { getShare, type Photo } from '$lib/events';
   import { applyEventTheme } from '$lib/theme';
   import { showToast } from '$lib/toast';
-  import { imgFallback, hidePoster } from '$lib/ui';
+  import { tileAspect } from '$lib/ui';
   import Lightbox from '$lib/components/Lightbox.svelte';
+  import PhotoCard from '$lib/components/PhotoCard.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import OgHead from '$lib/components/OgHead.svelte';
   import StartYourOwn from '$lib/components/StartYourOwn.svelte';
@@ -27,6 +28,10 @@
   let revealAt: number | null = null;
   let photoCount = 0;
   let allowDownloads = true;
+  // The event's frame setting, so the grid is ONE shape. Defaulted rather than required: an older
+  // API (or a cached response) simply doesn't send it and the tiles stay square, which is what
+  // this page always drew.
+  let aspectRatios: string[] = ['1:1'];
 
   // Selection + download
   let selecting = false;
@@ -54,6 +59,7 @@
     eventName = s.event.name;
     applyEventTheme(s.event.theme);
     allowDownloads = s.event.allowDownloads !== false;
+    if (s.event.aspectRatios?.length) aspectRatios = s.event.aspectRatios;
     revealed = s.revealed;
     revealMode = s.revealMode ?? '';
     revealAt = s.revealAt ?? null;
@@ -123,25 +129,20 @@
   {:else if !photos.length}
     <div class="state"><span class="big">📷</span><p>No photos in this share.</p></div>
   {:else}
-    <div class="grid">
+    <!-- A share is the copy that leaves the event, so the words under a photo travel with it: the
+         written caption leads and the mission is demoted underneath when a shot has the two. Same
+         card as everywhere else — see PhotoCard.svelte. -->
+    <div class="pgrid" class:has-meta={photos.some((p) => p.caption || p.challenge)}
+         style={`--tile-ar:${tileAspect(aspectRatios)}`}>
       {#each photos as p, i (p.id)}
-        <button class="cell" class:sel={selecting && selected.has(p.id)} on:click={() => onThumb(p, i)} aria-label="Photo by {p.participantName}">
-          {#if p.mediaType === 'video'}
-            <img src={p.thumbUrl} alt="" loading="lazy" on:error={hidePoster} /><span class="play">▶</span>
-          {:else}
-            <img src={p.thumbUrl ?? p.url} alt="" loading="lazy" on:error={(e) => imgFallback(e, p.url)} />
-          {/if}
-          {#if p.isHighlighted}<span class="star" aria-label="Favourite">★</span>{/if}
-          {#if selecting}<span class="check" class:on={selected.has(p.id)}>{selected.has(p.id) ? '✓' : ''}</span>{/if}
-          <!-- A share is the copy that leaves the event, so it carries both: the written caption,
-               with the mission demoted underneath it when a shot has the two. -->
-          {#if p.caption || p.challenge}
-            <span class="cap">
-              {#if p.caption}<span class="written">{p.caption}</span>{/if}
-              {#if p.challenge}<span class="mission" class:secondary={!!p.caption}>{p.challenge}</span>{/if}
-            </span>
-          {/if}
-        </button>
+        <PhotoCard photo={p} selected={selecting && selected.has(p.id)}
+                   tileLabel={`Photo by ${p.participantName}`}
+                   on:open={() => onThumb(p, i)}>
+          <svelte:fragment slot="tile">
+            {#if p.isHighlighted}<span class="star" aria-label="Favourite">★</span>{/if}
+            {#if selecting}<span class="check" class:on={selected.has(p.id)}>{selected.has(p.id) ? '✓' : ''}</span>{/if}
+          </svelte:fragment>
+        </PhotoCard>
       {/each}
     </div>
   {/if}
@@ -176,11 +177,8 @@
   .reveal-wall .msg { font-size: 1.15rem; font-weight: 700; max-width: 28ch; }
   .reveal-wall .count { color: var(--text-muted); font-size: .9rem; }
   .countdown { font-family: var(--font-mono); font-size: clamp(1.6rem, 8vw, 2.6rem); font-weight: 800; color: var(--accent); letter-spacing: .04em; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 4px; padding: 4px; }
-  .cell { position: relative; padding: 0; border: none; background: var(--surface-2); cursor: pointer; line-height: 0; }
-  .cell img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
-  .cell.sel { outline: 3px solid var(--accent); outline-offset: -3px; }
-  .play { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 1.6rem; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,.6); }
+  /* The grid and the card itself are PhotoCard's (.pgrid / .pcell-wrap). All that belongs to this
+     page is what it overlays on the tile. */
   /* Favourite marker — same dark-chip + gold-★ as the favourite button; top-left to clear the
      select checkbox (top-right), and a shadow/chip so it clearly sits on the photo. */
   .star { position: absolute; top: 6px; left: 6px; width: 24px; height: 24px; border-radius: 50%;
@@ -190,18 +188,7 @@
     display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 800;
     background: rgba(0,0,0,.45); color: #fff; border: 2px solid #fff; line-height: 1; }
   .check.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); }
-  /* What a shot is annotated with: the caption someone wrote, the mission it was for, or both. A
-     share is the copy that gets sent around, so the annotation travels with it. Rendered only when
-     there is one — a plain shot keeps a clean tile. line-height is set because .cell zeroes it for
-     the image. Each line clips on its own, so a long caption cannot push the mission off the tile. */
-  .cap { position: absolute; left: 0; right: 0; bottom: 0; padding: 14px 7px 5px;
-    font-size: .68rem; line-height: 1.35; font-weight: 700; color: #fff; text-align: left;
-    background: linear-gradient(transparent, rgba(0,0,0,.72)); }
-  .cap .written, .cap .mission { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* Demoted, not dropped: beside a caption the mission is attribution, not the headline. */
-  .cap .mission.secondary { font-weight: 400; opacity: .82; font-size: .92em; }
   footer { text-align: center; font-size: 0.78rem; color: var(--text-muted); padding: 28px 18px; }
   footer a { color: var(--text-muted); }
   footer a:hover { color: var(--accent); }
-  @media (min-width: 640px) { .grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 6px; padding: 6px; } }
 </style>
