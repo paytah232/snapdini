@@ -817,6 +817,10 @@
     // the prompt appears — so the question makes sense. We stop the track immediately; the grant is
     // what we are after, and the real stream is acquired below.
     if (v && videoMaxSecs !== 0 && videoQuality !== 'phone') await askForMic();
+    // Going back to photos puts the note away. It is about clips being silent, which is not a thing
+    // that is true of a photo — leaving it up makes it read as a fault with the camera itself. It
+    // comes back on the next switch to video, because by then it is true again.
+    if (!v) { micDenied = false; }
     videoMode = v;
     // In phone mode, switching to video means "open the phone's camera" — that is the whole point
     // of picking it, and re-acquiring a browser stream we are not going to record from is waste.
@@ -1784,9 +1788,18 @@
           <!-- Offered only when a retry can actually produce a prompt. A button that cannot work is
                worse than no button: it is the thing that makes the app look broken. -->
           {#if micState !== 'missing'}
-            <!-- Ask FIRST, in this tap. Re-running the camera chain alone can never raise a prompt
-                 (see askForMic), which is why this button used to look like it did nothing. -->
-            <button class="micnote-a" on:click={async () => { await askForMic(); micDenied = false; videoMode = true; await startCamera(); }}>Try again</button>
+            <!-- Two different buttons, because the two situations need different things.
+                 BLOCKED means the browser will not prompt however politely we ask — asking again
+                 does nothing, which is what made this button look broken. A browser also only
+                 notices a permission you changed in its settings when the page RELOADS, so after
+                 someone follows the steps above, reloading is the thing that actually helps.
+                 Otherwise the mic can still be asked for, so ask — inside this tap (see
+                 askForMic), since re-running the camera chain alone can never raise a prompt. -->
+            {#if micState === 'blocked'}
+              <button class="micnote-a" on:click={() => location.reload()}>Reload</button>
+            {:else}
+              <button class="micnote-a" on:click={async () => { if (await askForMic()) { videoMode = true; await startCamera(); } }}>Try again</button>
+            {/if}
           {/if}
           <button class="micnote-x" on:click={() => (micDenied = false)} aria-label="Dismiss">✕</button>
         </div>
