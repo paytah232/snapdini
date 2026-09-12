@@ -12,7 +12,7 @@
   export let captionMode: 'none' | 'own' | 'any' = 'none';
   $: canCaption = captionMode === 'any' || (captionMode === 'own' && !!photo?.isOwn);
 
-  const dispatch = createEventDispatcher<{ close: void; caption: Photo }>();
+  const dispatch = createEventDispatcher<{ close: void; caption: Photo; photochange: number }>();
   $: photo = photos[index];
 
   /** When it was taken, said the way a person would. Seconds are noise on a photo, and so is the
@@ -33,8 +33,10 @@
   onMount(() => { prevFocus = document.activeElement as HTMLElement; lbEl?.focus(); });
   onDestroy(() => prevFocus?.focus?.());
 
-  function prev() { if (index > 0) index--; }
-  function next() { if (index < photos.length - 1) index++; }
+  // Tell the parent when the subject changes, so anything it is showing ABOUT this photo — a
+  // "Caption saved" confirmation, say — goes with it rather than hanging over the next one.
+  function prev() { if (index > 0) { index--; dispatch('photochange', index); } }
+  function next() { if (index < photos.length - 1) { index++; dispatch('photochange', index); } }
   function onKey(e: KeyboardEvent) {
     // Someone typing has the keyboard, not the viewer. Without this, writing a caption over the
     // lightbox pages the album out from under the half-typed text, and Escape closes the photo

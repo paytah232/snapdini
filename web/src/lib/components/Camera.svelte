@@ -10,7 +10,7 @@
   import { getSession, saveSession, clearSession } from '$lib/session';
   import { getConfig } from '$lib/api';
   import { applyEventTheme } from '$lib/theme';
-  import { showToast } from '$lib/toast';
+  import { showToast, hideToast } from '$lib/toast';
   import { reportClientError } from '$lib/report';
   import { imgFallback, hidePoster } from '$lib/ui';
   import { putCapture, delCapture, listCaptures, saveProgress, getProgress } from '$lib/captureStore';
@@ -1500,6 +1500,7 @@
   let captionBusy = false;
 
   function openCaption(p: Photo) {
+    hideToast();   // a previous "Caption saved" is not about the edit being started now
     captionFor = p;
     captionDraft = p.caption ?? '';
   }
@@ -2146,17 +2147,18 @@
       </div>
     {/if}
     {#if shownPhotos.length}
-      <div class="pgrid">
+      <div class="pgrid" class:has-meta={shownPhotos.some((p) => p.caption || p.challenge)}
+         style={`--tile-ar:${aspectValue(aspect) ?? 1}`}>
         {#each shownPhotos as p, i}
           <!-- The bin is a SIBLING of the tile, not a child: a <button> inside a <button> is
                invalid HTML and behaves unpredictably on touch. The wrapper positions it. -->
           <div class="pcell-wrap">
-            <!-- The tile takes the shape of the PHOTO. It was pinned to a square, so an event shot
-                 at 4:3 or 16:9 had every thumbnail centre-cropped — the host picks a frame shape and
-                 then cannot see it in the roll. Falls back to square when we have no dimensions,
-                 which is the case for rows predating the width/height columns. -->
-            <button class="pcell" style={p.width && p.height ? `aspect-ratio:${p.width}/${p.height}` : undefined}
-                    on:click={() => { lbIndex = i; lbOpen = true; }}>
+            <!-- ONE shape for every tile, taken from the event's frame setting rather than from
+                 each file. Per-photo shapes were faithful to the data and wrong to the product: a
+                 clip is recorded straight off the sensor and never cropped (only photos go through
+                 cropRect), so a roll shot "1:1" showed square photos beside full-frame video. And a
+                 grid of mixed heights simply reads as untidy. -->
+            <button class="pcell" on:click={() => { lbIndex = i; lbOpen = true; }}>
               {#if p.mediaType === 'video'}<img src={p.thumbUrl} alt="" loading="lazy" on:error={hidePoster} /><span class="play">▶</span>{:else}<img src={p.thumbUrl ?? p.url} alt="" loading="lazy" on:error={(e) => imgFallback(e, p.url)} />{/if}
             </button>
             {#if canDelete(p, nowTick) || confirmingDeleteId === p.id}
@@ -2245,7 +2247,8 @@
   </div>
   {#if lbOpen}<Lightbox photos={shownPhotos} index={lbIndex} captionMode="own"
                         on:caption={(e) => openCaption(e.detail)}
-                        on:close={() => (lbOpen = false)} />{/if}
+                        on:photochange={hideToast}
+                        on:close={() => { hideToast(); lbOpen = false; }} />{/if}
   {#if captionFor}
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
     <div class="capback" on:click|self={() => (captionFor = null)} role="dialog" aria-modal="true" aria-label="Caption this photo">
@@ -2586,10 +2589,15 @@
      galleries people compare us to actually look like. Two-up on a phone rather than three: a
      140px tile cannot hold a sentence. */
   .pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; padding: 10px;
-    align-items: start; }   /* start, not stretch: a portrait shot must not pad out the card beside it */
+    align-items: start; }
+  /* Every card the same height. The foot is what varies — a caption, a trick, both, neither — so it
+     reserves the room instead of letting each card find its own size, which made the grid look
+     ragged. Reserved only when something in this roll actually has words under it; on a roll with
+     none, there is nothing to line up and the space would just be empty. */
+  .pgrid.has-meta .pmeta { min-height: 64px; }
   .pcell-wrap { position: relative; display: flex; flex-direction: column; line-height: normal;
     background: var(--surface-2); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
-  .pcell { position: relative; aspect-ratio: 1; border: none; padding: 0; cursor: pointer; background: var(--surface-2); }
+  .pcell { position: relative; aspect-ratio: var(--tile-ar, 1); border: none; padding: 0; cursor: pointer; background: var(--surface-2); }
   .pcell img { object-fit: cover; }
   .pcell img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .play { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 1.5rem; text-shadow: 0 1px 4px #000; }
