@@ -836,6 +836,7 @@
     // which would make ticking any one of them arbitrary.
     if (v) { armed = null; missionsOpen = false; }
     videoMode = v;
+    applyViewfinderAspect();   // the framing differs by mode; do not make them wait for a re-attach
     // In phone mode, switching to video means "open the phone's camera" — that is the whole point
     // of picking it, and re-acquiring a browser stream we are not going to record from is waste.
     if (v && videoQuality === 'phone') { nativeVideoInput?.click(); return; }
@@ -963,11 +964,17 @@
     // Always fill the screen width. 'full' fills the whole viewport; fixed ratios
     // are pinned to full width and centre-cropped vertically (taller ratios overflow
     // and are clipped by the viewfinder, shorter ones letterbox) — matching capture.
+    //
+    // VIDEO IS NEVER CROPPED. Only photos go through cropRect; MediaRecorder records the stream as
+    // it comes off the sensor. Framing the viewfinder to a shape while recording therefore promises
+    // a crop that never happens — a guest lines a shot up in a square and gets a wide clip back.
+    // The frame shape is a PHOTO setting (the control says so), so video mode shows the frame that
+    // will actually be recorded.
     s.objectFit = 'cover';
     s.width = '100%';
     s.maxWidth = '100%';
     s.maxHeight = '';
-    if (aspect === 'full') { s.aspectRatio = ''; s.height = '100%'; }
+    if (videoMode || aspect === 'full') { s.aspectRatio = ''; s.height = '100%'; }
     else { s.aspectRatio = aspect.replace(':', ' / '); s.height = 'auto'; }
   }
   function cycleAspect() {
@@ -1834,7 +1841,9 @@
       <div class="rail">
         {#if facing === 'user'}<button class="ctrl" on:click={() => (screenFlash = !screenFlash)} class:active={screenFlash} title="Flash" aria-label="Flash">⚡</button>{/if}
         {#if torchSupported && !ev?.noFlash}<button class="ctrl" on:click={() => (flashArmed = !flashArmed)} class:active={flashArmed} title="Flash" aria-label="Flash">⚡</button>{/if}
-        {#if allowedAspects.length > 1}<button class="ctrl" on:click={cycleAspect} title="Photo shape" aria-label="Change photo shape (currently {aspect})">{aspect === 'full' ? 'Full' : aspect}</button>{/if}
+        <!-- Photo-only, like the trick list: a clip is never cropped to it, so offering it while
+             recording is offering a control that does nothing. It returns on switching back. -->
+        {#if allowedAspects.length > 1 && !videoMode}<button class="ctrl" on:click={cycleAspect} title="Photo shape" aria-label="Change photo shape (currently {aspect})">{aspect === 'full' ? 'Full' : aspect}</button>{/if}
         <button class="ctrl" on:click={() => (settingsOpen = !settingsOpen)} class:active={settingsOpen} title="Settings" aria-label="Camera settings">
           <!-- Drawn rather than typed: the ⚙ character is rendered by whatever font the device has
                and frequently is not recognisably a cog, which is the one icon users navigate by. -->
