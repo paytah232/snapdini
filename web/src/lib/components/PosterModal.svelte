@@ -250,6 +250,19 @@
     footer: readableOn(cFooter, posterBg, INK_BODY),   // the smallest type on the page
     code: readableOn(cCode, '#ffffff', INK_BODY),
   };
+  // Ink lighter than the paper it sits on, with the colour left off the print.
+  //
+  // Ordinary CMYK can only ever DARKEN the stock — there is no white ink in a four-colour process,
+  // so light type on dark card is not something a home printer or an ordinary digital press can do.
+  // It is entirely possible with white toner, screen printing or foil, which sign shops and print
+  // shops have; it just has to be ASKED for, and it costs more. So this is a heads-up, never a
+  // block: the design is legitimate and the host may well know exactly where they are taking it.
+  //
+  // Only meaningful when the colour is standing in for paper. With the background printed, the
+  // press lays the colour down itself and any ink on top of it works normally.
+  $: lightOnStock = !printBg && bgMode === 'plain'
+    && [ink.headline, ink.message, ink.steps, ink.footer].some((c) => lum(c) > lum(cBg) + 12);
+
   // ── Undo / redo ───────────────────────────────────────────────────────────
   // The editor writes straight to the live design and auto-saves, so a mis-drag or a colour picked
   // by accident is immediately real with nothing to step back to. cfg is already the complete
@@ -1549,6 +1562,12 @@
               <span class="sub">Off: the colour is your card stock — shown here while you design, left off what prints.</span>
             </span>
           </label>
+          {#if lightOnStock}
+            <p class="stock-note">
+              Your text is lighter than the card. That needs a printer that can lay down white —
+              white toner, screen printing or foil. A sign or print shop can; a home printer can’t.
+            </p>
+          {/if}
         {/if}
       </div>
 
@@ -1639,6 +1658,13 @@
   .sub { color: var(--text-muted); font-size: 0.72rem; }
   /* The element's footprint IS the move handle — drag anywhere on it. The outline only appears on
      hover or while active, so it doesn't clutter the preview; its true size shows when resizing. */
+  /* A heads-up, not a warning: nothing here is wrong, it just needs the right press. Styled as a
+     note rather than an error for exactly that reason. */
+  .stock-note {
+    margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; font-size: .74rem; line-height: 1.45;
+    color: var(--text-muted); background: color-mix(in srgb, var(--accent) 9%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+  }
   .safe-area {
     position: absolute; pointer-events: none; z-index: 0;
     border: 1px dashed rgba(255, 255, 255, .28); border-radius: 2px;

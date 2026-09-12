@@ -2030,7 +2030,10 @@
                          row is that it is finished. -->
                     <span class="m-tick" aria-hidden="true">{isDone(m.id) ? '✓' : armed === m.id ? '◉' : missionTick}</span>
                     <span class="m-text">{m.text}</span>
-                    {#if !isDone(m.id)}<span class="m-go">{armed === m.id ? 'Armed' : 'Shoot'}</span>{/if}
+                    <!-- "Snap", not "Shoot" — it is the word the whole product is named after, and
+                         the one a guest is already thinking in. Styled as a pill because a bare
+                         uppercase word at 60% opacity reads as a status, not as the thing to tap. -->
+                    {#if !isDone(m.id)}<span class="m-go">{armed === m.id ? 'Armed' : 'Snap'}</span>{/if}
                   </button>
                 </li>
               {/each}
@@ -2846,8 +2849,13 @@
   .m-item.done .m-text { text-decoration: line-through; }
   .m-tick { flex: none; width: 1.1em; text-align: center; }
   .m-text { flex: 1; min-width: 0; }
-  .m-go { flex: none; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; opacity: .6; }
-  .m-item.armed .m-go { opacity: 1; color: #7fb3a3; }
+  /* The row is the button, so this is a label — but it has to LOOK like the thing you press, or the
+     row reads as a list item with a status on the end of it. A pill says "tap"; 60% opacity said
+     "for information". */
+  .m-go { flex: none; font-size: .68rem; text-transform: uppercase; letter-spacing: .06em;
+    padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, .3);
+    background: rgba(255, 255, 255, .1); color: #fff; }
+  .m-item.armed .m-go { color: #0f1a16; background: #7fb3a3; border-color: #7fb3a3; font-weight: 700; }
 
   @media (prefers-reduced-motion: reduce) {
     .m-prog-fill { transition: none; }

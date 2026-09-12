@@ -439,7 +439,7 @@
     font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
   .lh-hint { text-transform: none; letter-spacing: 0; }
   /* Scrolls rather than growing: 24 options plus the host's own would push Save off a phone. */
-  .opts { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 5px;
+  .opts { list-style: none; margin: 0 0 14px; padding: 0 4px 0 0; display: flex; flex-direction: column; gap: 5px;
     max-height: 42vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
   .opt { width: 100%; display: flex; align-items: center; gap: 9px; text-align: left; cursor: pointer;
     padding: 9px 10px; border-radius: 9px; font: inherit; font-size: .87rem;
