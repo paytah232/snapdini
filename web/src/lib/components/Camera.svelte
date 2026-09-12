@@ -5,7 +5,7 @@
   // Aliased: this component already has a `track` for the MediaStreamTrack.
   import { track as trackEvent } from '$lib/analytics';
   import { fade } from 'svelte/transition';
-  import { getEvent, getMe, joinEvent, getPhotosBySession, savePhotoCaption, CAPTION_MAX,
+  import { getEvent, getMe, joinEvent, getPhotosBySession, savePhotoCaption, CAPTION_MAX, clampCaption,
            type PublicEvent, type Photo } from '$lib/events';
   import { getSession, saveSession, clearSession } from '$lib/session';
   import { getConfig } from '$lib/api';
@@ -98,6 +98,18 @@
   let torchSupported = false;    // hardware torch (back camera, Android Chrome)
   let flashArmed = false;        // when armed, the torch fires for the shot (and lights video)
   let fillActive = false;
+  // Every phone camera blinks the screen when the shutter fires, and without it there was almost
+  // nothing to say a photo had been taken — the roll counter drops and a thumbnail appears behind a
+  // button you are not looking at. A brief blackout is the one piece of feedback people already
+  // know how to read. Timed off rather than animation-ended so an interrupted animation cannot
+  // leave the viewfinder covered.
+  let blinking = false;
+  let blinkTimer: ReturnType<typeof setTimeout> | undefined;
+  function shutterBlink() {
+    clearTimeout(blinkTimer);
+    blinking = true;
+    blinkTimer = setTimeout(() => (blinking = false), 180);
+  }
   let gridOn = false;
   let brightness = 1;            // preview/photo brightness (CSS filter), 1 = normal
   let track: MediaStreamTrack | null = null;
@@ -686,6 +698,19 @@
   }
   function holdEnd() { clearTimeout(holdTimer); }
   function flipTap() { if (heldOpen) { heldOpen = false; return; } flip(); }
+  // Said once per device, and only to someone who has more than one lens. A tour on join would delay
+  // the camera for everybody to teach a gesture most guests will never want; a single line at the
+  // moment it is true costs nothing and is ignorable.
+  const LENS_HINT = 'snap_lenshint';
+  $: if (screen === 'camera' && cameras.length > 1 && typeof localStorage !== 'undefined') {
+    try {
+      if (!localStorage.getItem(LENS_HINT)) {
+        localStorage.setItem(LENS_HINT, '1');
+        showToast('Tip: hold the flip button to pick a lens');
+      }
+    } catch { /* ignore */ }
+  }
+
   // Holding opens a sheet with ONLY the lenses on it. Sending the guest into the full settings menu
   // to pick a camera is the long way round — the point of the gesture is that it is the short one.
   let lensSheet = false;
@@ -863,6 +888,7 @@
       if (facing === 'user') { ctx.translate(canvas.width, 0); ctx.scale(-1, 1); }
       ctx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
       fillActive = false;
+      shutterBlink();   // the frame is grabbed: this is the moment the photo exists
       // Maximum quality — capture at native resolution with JPEG quality 1.0 (no perceptible
       // compression). We don't downscale; big files are fine per product direction.
       const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/jpeg', 1.0));
@@ -1370,6 +1396,9 @@
   // — a tile is ~110px wide on a phone, which is not somewhere you can type.
   let captionFor: Photo | null = null;
   let captionDraft = '';
+  // Enforced here as well as via maxlength — see clampCaption() for why the attribute alone is
+  // not enough on a phone. Reactive so it holds however the value arrives: typing, paste, or IME.
+  $: if (captionDraft.length > CAPTION_MAX) captionDraft = clampCaption(captionDraft);
   let captionBusy = false;
 
   function openCaption(p: Photo) {
@@ -1591,6 +1620,7 @@
         </div>
       {/if}
       {#if fillActive}<div class="fill"></div>{/if}
+      {#if blinking}<div class="blink" aria-hidden="true"></div>{/if}
       <Confetti bind:this={confetti} colors={ev?.theme?.accent ? [ev.theme.accent, '#f4e4c1', '#e8825a', '#7fb3a3'] : undefined} />
       <div class="topbar">
         {#if ev?.isDemo}
@@ -1841,7 +1871,7 @@
       {#if !recording}
         <!-- Tap flips; press and hold opens the lens picker. The picker otherwise lives only in
              settings, which is a long way to go on a phone with four lenses. -->
-        <button class="round" on:click={flipTap}
+        <button class="round" class:has-more={cameras.length > 1} on:click={flipTap}
                 on:pointerdown={holdStart} on:pointerup={holdEnd} on:pointercancel={holdEnd}
                 on:pointerleave={holdEnd} on:contextmenu|preventDefault
                 title="Flip camera (hold to choose a lens)"
@@ -2171,6 +2201,17 @@
   .viewfinder { position: absolute; inset: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; }
   video { width: 100%; height: 100%; object-fit: cover; display: block; }
   .fill { position: absolute; inset: 0; background: #fff; z-index: 5; }
+  /* The shutter blink: black in, quick fade out, never in the way of a tap. Kept under the control
+     rail's z-index so the shutter button itself stays visible through it — the blink is about the
+     viewfinder, not the whole app. */
+  .blink { position: absolute; inset: 0; background: #000; z-index: 6; pointer-events: none;
+    animation: blinkout 180ms ease-out forwards; }
+  @keyframes blinkout { 0% { opacity: 1; } 55% { opacity: .92; } 100% { opacity: 0; } }
+  /* Photosensitivity: a hard full-screen flash is exactly the thing to avoid. Keep the confirmation
+     but make it a gentle dim rather than a blackout. */
+  @media (prefers-reduced-motion: reduce) {
+    .blink { animation: none; background: rgba(0,0,0,.35); opacity: 0; transition: opacity 160ms linear; }
+  }
   .cam-error { position: absolute; inset: 0; z-index: 12; display: flex; flex-direction: column; align-items: center;
     justify-content: center; gap: 14px; text-align: center; padding: 32px; background: rgba(0,0,0,0.85); color: #fff; }
   /* z-index 3: above the video + gesture layer, but below the controls (z 6) — so the black
@@ -2209,7 +2250,6 @@
   .home-btn { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px;
     background: rgba(0,0,0,0.5); color: #fff; text-decoration: none; font-weight: 700; font-size: 0.8rem;
     padding: 8px 14px; border-radius: 999px; backdrop-filter: blur(4px); }
-  .pcell-wrap { position: relative; line-height: 0; }
   .pcell-bin {
     position: absolute; top: 6px; right: 6px; min-width: 30px; height: 26px; padding: 0 7px;
     display: inline-flex; align-items: center; justify-content: center; gap: 3px;
@@ -2266,6 +2306,14 @@
   .round { width: 52px; height: 52px; border-radius: 50%; border: none; background: rgba(255,255,255,0.15); color: #fff; font-size: 1.3rem; cursor: pointer; position: relative; }
   .badge { position: absolute; top: -4px; right: -4px; background: var(--accent); color: var(--accent-ink, #111); border-radius: 999px; min-width: 18px; height: 18px; font-size: 0.65rem; font-weight: bold; display: flex; align-items: center; justify-content: center; padding: 0 4px; }
   .badge.error { background: #c0392b; color: #fff; }
+  /* A hold-for-more marker, the same idea as the dot iOS puts on a control that has a long press.
+     Only drawn when there IS more than one lens: advertising a gesture that does nothing is worse
+     than not advertising it. */
+  .round.has-more::after {
+    content: ''; position: absolute; right: 5px; bottom: 5px; width: 5px; height: 5px;
+    border-radius: 50%; background: rgba(255,255,255,.8); box-shadow: 0 0 3px rgba(0,0,0,.7);
+    pointer-events: none;
+  }
   .lens-back { position: absolute; inset: 0; z-index: 12; display: flex; align-items: flex-end;
     justify-content: center; padding: 0 12px 96px; pointer-events: auto; background: rgba(0,0,0,.34); }
   .lens-sheet { width: min(340px, 92vw); display: flex; flex-direction: column; gap: 6px; padding: 12px;
@@ -2479,9 +2527,12 @@
     .m-prog-fill { transition: none; }
   }
   /* Stacked so the caption sits under the pill without widening the topbar row. */
-  .mwrap { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; pointer-events: none; }
+  /* Centred on each other, not right-aligned. The caption is wider than the count it labels, so
+     aligning their right edges left it hanging off to one side — which only looked acceptable while
+     the pill still carried a glyph padding it out. A label belongs under the middle of its control. */
+  .mwrap { display: flex; flex-direction: column; align-items: center; gap: 3px; pointer-events: none; }
   .mcap { font-size: .62rem; text-transform: uppercase; letter-spacing: .08em; color: rgba(255,255,255,.72);
-    text-shadow: 0 1px 3px rgba(0,0,0,.6); }
+    text-shadow: 0 1px 3px rgba(0,0,0,.6); text-align: center; white-space: nowrap; }
   /* The exit is the one thing here that is not part of the tour, so it recedes. */
   .home-btn.quiet { background: rgba(0,0,0,.32); font-weight: 600; opacity: .82; }
   .home-btn.quiet:hover { opacity: 1; }

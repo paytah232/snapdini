@@ -5,7 +5,7 @@
   import { goto } from '$app/navigation';
   import {
     getAdmin, getPhotosByOrganizer, ratePhoto, moderate, setHighlights, createShare, mediaMeta,
-    savePhotoCaption, CAPTION_MAX,
+    savePhotoCaption, CAPTION_MAX, clampCaption,
     type Photo, type AdminEvent, type ShareKind
   } from '$lib/events';
   import { applyEventTheme } from '$lib/theme';
@@ -221,6 +221,9 @@
   // host-written line reads the same as a guest's — intended: the caption is about the photo.
   let captionFor: Photo | null = null;
   let captionDraft = '';
+  // Enforced here as well as via maxlength — see clampCaption() for why the attribute alone is
+  // not enough on a phone. Reactive so it holds however the value arrives: typing, paste, or IME.
+  $: if (captionDraft.length > CAPTION_MAX) captionDraft = clampCaption(captionDraft);
   let captionBusy = false;
 
   function openCaption(photo: Photo, e?: Event) {
