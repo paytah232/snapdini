@@ -105,6 +105,11 @@
   const dispatch = createEventDispatcher<{ close: void }>();
 
   const W = 1080, H = 1527;                 // A4 portrait
+  // The slice of paper a printer cannot reach. Consumer inkjets and lasers lose 3–5mm on every edge
+  // (more at the bottom on some), and a print shop wants a margin for trimming, so 5mm is the floor
+  // for "this will come out whole". W maps to 210mm, so this is that in design pixels.
+  const SAFE_MM = 5;
+  const PAGE_PAD = Math.round((W / 210) * SAFE_MM);
   let canvas: HTMLCanvasElement;
   let busy = true;
   let mounted = false;
@@ -118,6 +123,17 @@
   let message = blurb.trim() || "You're invited — scan to join the camera";
   let stepsText = '①  Scan to join     ②  Snap your roll     ③  Revealed when it ends';
   let bgMode: 'event' | 'custom' | 'plain' = themeImageUrl ? 'event' : 'plain';
+  // Is the plain background INK, or is it the PAPER?
+  //
+  // Nobody floods a home printer with a full-bleed colour, and for anything that matters a host
+  // orders card stock that is already the colour — often textured. With this off the colour stands
+  // in for that stock: shown the whole time you are designing, so the ink is chosen against what it
+  // will really sit on, and left off the thing that actually prints. Defaults ON, which is what the
+  // poster has always done. Only offered for a plain colour — an image background IS the design.
+  let printBg = true;
+  // True only while rendering for an export; the preview never sets it. Preview and export share
+  // one canvas, so this cannot be a flag read at paint time — it has to be a redraw either side.
+  let renderingForPrint = false;
   let customBgUrl: string | null = null;
   // "Match theme" uses the event's SURFACE colour (what the app modals use) rather than the very
   // dark page bg, so the poster reads like the rest of the themed UI.
@@ -215,7 +231,7 @@
   // ── Persistence (auto-save on every change) ──
   // The server stores this as a bounded JSON blob, so it stays deliberately compact: drag values are
   // rounded (see roundBox) rather than carrying fifteen decimal places of pointer noise.
-  $: cfg = { headline, message, stepsText, bgMode, cBg, codeDisplay, showFooterUrl, layout, colorsLocked, cHeadline, cMessage, cSteps, cCode, cFooter,
+  $: cfg = { headline, message, stepsText, bgMode, cBg, printBg, codeDisplay, showFooterUrl, layout, colorsLocked, cHeadline, cMessage, cSteps, cCode, cFooter,
              cardTitle, cardInkSaver, cardsPerSheet, cardRound, cardIds, cardSkip, cardShowQr, cardShowLink, cardCaption,
              cardCTitle, cardCBody, cardCCode, cardCBg, cardLayout, decorKind, decorPos, decorScale, decorColour };
   // Keep the default text colours readable as the background changes — until the organizer edits a
@@ -263,6 +279,7 @@
   function applyCfg(c: Record<string, any>) {
     headline = c.headline; message = c.message; stepsText = c.stepsText;
     bgMode = c.bgMode; cBg = c.cBg; codeDisplay = c.codeDisplay; showFooterUrl = c.showFooterUrl;
+    printBg = c.printBg ?? true;   // absent in designs saved before the option existed
     layout = cloneLayout(c.layout);
     colorsLocked = c.colorsLocked;
     cHeadline = c.cHeadline; cMessage = c.cMessage; cSteps = c.cSteps; cCode = c.cCode; cFooter = c.cFooter;
@@ -391,7 +408,19 @@
   }
   // Plain background = a solid colour (default white; the organizer can recolour it or match the theme).
   function paintPlain(ctx: CanvasRenderingContext2D) {
-    ctx.fillStyle = cBg || '#ffffff'; ctx.fillRect(0, 0, W, H);
+    // See printBg: with it off the colour is the PAPER, so it is drawn while designing and left off
+    // what prints. The ink is deliberately NOT recomputed — it was chosen to read on that colour,
+    // and the real stock is that colour, so the print matches the preview once it is on the card.
+    ctx.fillStyle = renderingForPrint ? '#ffffff' : (cBg || '#ffffff');
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  /** Hand `fn` a canvas showing what will actually be printed, then put the preview back. */
+  async function asPrinted(fn: () => void | Promise<void>): Promise<void> {
+    const swap = !printBg && bgMode === 'plain';
+    if (swap) { renderingForPrint = true; await draw(); }
+    try { await fn(); }
+    finally { if (swap) { renderingForPrint = false; void draw(); } }
   }
   // The Snapdini brand mark punched into the centre of the QR: a white safety ring (so the QR stays
   // readable), the gold chip, and a black top-hat — matching the <Logo> component. Safe because the
@@ -552,6 +581,8 @@
   type Surface = {
     stage: () => HTMLElement | undefined;
     w: number; h: number;                              // the surface's design-space size
+    /** Print-safe inset, in the same design space. Nothing may be dragged inside it. */
+    pad?: number;
     rects: () => Record<string, Rect>;                 // measured footprints, in that same space
     box: (key: string) => Box;                         // the stored position/size being dragged
     limits: (key: string) => [number, number];         // size clamp for a resize
@@ -586,8 +617,20 @@
         const b = surf.rects()[key];
         const hw = b ? Math.min(0.5, b.w / 2 / surf.w) : 0.02;
         const hh = b ? Math.min(0.5, b.h / 2 / surf.h) : 0.02;
-        const x = clamp(box0.x + (ev.clientX - start.x) / rect.width, hw, 1 - hw);
-        const y = surf.lockY?.(key) ? box0.y : clamp(box0.y + (ev.clientY - start.y) / rect.height, hh, 1 - hh);
+        // Keep everything inside the printable area. The clamp used to be the element's own half
+        // width, so its edge could sit flush against the paper's — measured at 0.0mm — and we print
+        // with @page margin:0, which means a home printer simply cuts that off. Almost no consumer
+        // printer reaches within 3–5mm of an edge.
+        //
+        // An element too large to fit between the margins is centred rather than clamped to an
+        // inverted range, which would pin it to one side.
+        const px = (surf.pad ?? 0) / surf.w, py = (surf.pad ?? 0) / surf.h;
+        const loX = hw + px, hiX = 1 - hw - px;
+        const loY = hh + py, hiY = 1 - hh - py;
+        const rawX = box0.x + (ev.clientX - start.x) / rect.width;
+        const rawY = box0.y + (ev.clientY - start.y) / rect.height;
+        const x = loX > hiX ? 0.5 : clamp(rawX, loX, hiX);
+        const y = surf.lockY?.(key) ? box0.y : (loY > hiY ? 0.5 : clamp(rawY, loY, hiY));
         surf.move(key, r4(x), r4(y));
       } else {
         const dpx = ((ev.clientX - start.x) / rect.width) * surf.w;
@@ -602,6 +645,7 @@
     window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp);
   }
   const posterSurface: Surface = {
+    pad: PAGE_PAD,
     stage: () => stageEl,
     w: W, h: H,
     rects: () => bounds,
@@ -707,17 +751,22 @@
     const href = URL.createObjectURL(blob); const a = document.createElement('a');
     a.href = href; a.download = `${slug}-${kind}.${ext}`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(href);
   }
-  function exportPng() { canvas.toBlob((b) => b && download(b, 'png'), 'image/png'); }
-  function exportJpg() { canvas.toBlob((b) => b && download(b, 'jpg'), 'image/jpeg', 0.92); }
+  const blobFrom = (type: string, q?: number) =>
+    new Promise<void>((res) => canvas.toBlob((b) => { if (b) download(b, type === 'image/png' ? 'png' : 'jpg'); res(); }, type, q));
+  function exportPng() { void asPrinted(() => blobFrom('image/png')); }
+  function exportJpg() { void asPrinted(() => blobFrom('image/jpeg', 0.92)); }
   async function exportPdf() {
     try {
       const { jsPDF } = await import('jspdf');
       const pdf = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
-      pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, pdf.internal.pageSize.getWidth(), pdf.internal.pageSize.getHeight());
+      await asPrinted(() => {
+        pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, pdf.internal.pageSize.getWidth(), pdf.internal.pageSize.getHeight());
+      });
       pdf.save(`${slug}-poster.pdf`);
     } catch { showToast('Could not build the PDF', true); }
   }
-  function printPoster() {
+  function printPoster() { void asPrinted(printPosterNow); }
+  function printPosterNow() {
     const url = canvas.toDataURL('image/png'); const w = window.open('', '_blank');
     if (!w) { showToast('Allow pop-ups to print', true); return; }
     // Three things this fixes, all of them the browser's defaults rather than our design:
@@ -1085,6 +1134,10 @@
   $: cardGeomBox = (void cardMeasure, cardBoxAt(0, 0));
   $: cardBounds = (void cardMeasure, measureCardBounds());
   const cardSurface: Surface = {
+    // The card already clamps to this at DRAW time (placeOnCard); giving the drag the same number
+    // means the outline you are moving and the thing that gets printed agree while you move it,
+    // rather than the block snapping back after you let go.
+    pad: CARD_PAD,
     stage: () => cardStageEl,
     // The stage covers one card, and a card Box's fractions are of the card — so the surface's
     // design space IS the card, whichever of the three sizes it currently is.
@@ -1310,6 +1363,12 @@
              it to move; drag the corner to resize. Click empty space to deselect. -->
         <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
         <div class="poster-stage" bind:this={stageEl} on:pointerdown|self={() => (selectedKey = null)}>
+          <!-- The slice of paper a printer cannot reach. Drawn rather than merely enforced, because
+               "why won't it go any further" is a worse experience than seeing the line it stops at.
+               Purely decorative — it never takes a pointer. -->
+          <!-- Two percentages, not one: in `inset` the vertical pair resolves against HEIGHT and the
+               horizontal against WIDTH, so the same 5mm is a different percentage on each axis. -->
+          <div class="safe-area" style="inset:{(PAGE_PAD / H) * 100}% {(PAGE_PAD / W) * 100}%" aria-hidden="true"></div>
           {#each elements as el (el.key)}
             {#if bounds[el.key]}
               {@const b = bounds[el.key]}
@@ -1482,6 +1541,14 @@
             <button class="seg" class:on={cBg.toLowerCase() === '#ffffff'} on:click={() => (cBg = '#ffffff')}>White</button>
             <button class="seg" class:on={cBg.toLowerCase() === matchBg.toLowerCase()} on:click={() => (cBg = matchBg)}>Match theme</button>
           </div>
+          <!-- Offered only for a plain colour: an image background IS the design, so there is
+               nothing sensible to mean by not printing it. -->
+          <label class="chk" style="margin-top:8px">
+            <input type="checkbox" bind:checked={printBg} />
+            <span>Print this colour
+              <span class="sub">Off: the colour is your card stock — shown here while you design, left off what prints.</span>
+            </span>
+          </label>
         {/if}
       </div>
 
@@ -1572,6 +1639,10 @@
   .sub { color: var(--text-muted); font-size: 0.72rem; }
   /* The element's footprint IS the move handle — drag anywhere on it. The outline only appears on
      hover or while active, so it doesn't clutter the preview; its true size shows when resizing. */
+  .safe-area {
+    position: absolute; pointer-events: none; z-index: 0;
+    border: 1px dashed rgba(255, 255, 255, .28); border-radius: 2px;
+  }
   .el-box { position: absolute; box-sizing: border-box; border: 1px dashed transparent; border-radius: 5px;
     pointer-events: auto; cursor: move; touch-action: none; user-select: none; -webkit-user-select: none; z-index: 1; }
   .el-box.lock-x { cursor: ew-resize; }
