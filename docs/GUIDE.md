@@ -124,6 +124,9 @@ The organizer control panel (owners and co-hosts; accessed by your account or th
 - **Shared links:** every link you've made — **Copy**, **Edit** (rename / change the `/s/` URL), or
   **Delete** (existing links keep working until deleted).
 - **Participants:** **Remove** a guest (also deletes their photos — useful for a duplicate join).
+  With more than one trick card in play, each guest also has a **Card** picker — for the guest who
+  scanned the wrong table's card by mistake. Moving them destroys nothing: their ticks for the old
+  card simply stop counting, and come back if you move them back.
 
 #### Poster editor (in Manage)
 A printable A4 poster. Editable **Title / Message / How-to** lines; choose what shows under the QR
@@ -187,6 +190,11 @@ the same camera.
   "2/5" count, captioned *trick list* — opens the list of shots to hunt for. Shoot one and it
   ticks itself off — one go per trick — with confetti when you finish the lot.
   It's a suggestion, never a requirement; you can ignore it and just shoot.
+- **Saving a photo:** open any photo and tap **⤓ Save**. On a phone this opens your own share
+  sheet, so you can put it straight into **Photos** — on an iPhone a plain download would land in
+  *Files*, where nobody ever looks for a picture. Only offered when the host has allowed downloads.
+- **Captions:** tap a photo — yours, or any of them if you're the host — and write a line under it.
+  Editable afterwards. A photo that was a trick keeps saying which trick it was, underneath.
 - **Gallery (🖼):** before reveal you always see your own shots (with "#N" snap numbers); after reveal,
   **Mine / All / Others** filters. Downloads appear only if the host allowed them.
 

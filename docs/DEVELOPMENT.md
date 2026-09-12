@@ -205,6 +205,42 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   while being absent from the app container that reads it, which left internal accounts
   un-excluded from the lifecycle emails in production. The check is now service-scoped.
 
+- **Clip shape comes from the CAMERA, not from cropping.** Photos are cropped to the chosen frame in
+  a canvas (`cropRect`); `MediaRecorder` records the stream exactly as the sensor gives it, so an
+  event set to 1:1 used to produce square photos and wide clips. `applyConstraints({aspectRatio})`
+  on the LIVE track fixes it for free — 1ms, no re-encode, no quality loss, and the recorder needs
+  no help. Measured against the alternatives: a canvas redraw costs 16.7ms a frame against a 33ms
+  budget at 30fps, and an ffmpeg crop costs 19–114 CPU-seconds a clip plus ~0.985 SSIM on the file
+  people download.
+  - The constraint goes on the live track, never into `getUserMedia` — an `OverconstrainedError`
+    there falls into the retry chain and costs the guest their lens.
+  - The ask is **never trusted**: `getSettings()` is read back and only a ratio that actually
+    arrived turns the viewfinder framing on. A camera that refuses keeps the honest behaviour —
+    no framing, no shape control in video — and reports it, which is the only way we learn what
+    real devices do.
+  - Verified square end to end on real Android hardware (a 2160×2160 file with audio). **iOS Safari
+    is unverified** — it does not implement `resizeMode` at all — which is exactly why the refusal
+    path exists.
+- **Saving a photo on iOS goes through the SHARE SHEET, not a download.** Safari has no API that
+  writes to the camera roll, so `<a download>` lands in Files and the guest never finds it.
+  `navigator.share({files})` opens the sheet, which has "Save Image" on it. Two rules in
+  `shared`-adjacent `web/src/lib/saveImage.ts`: it needs a real tap (so it lives on a button, not on
+  the capture path, where a sheet after every shutter press would be intolerable), and a cancelled
+  sheet throws `AbortError` and must NOT fall through to a download.
+- **`/api/contact` is bot-checked, so every form that posts to it needs a token.** The contact page
+  had one; the in-app feedback modal and the refund request did not, so from 2026-08-30 until it was
+  found, every bug report, piece of feedback and refund request sent from inside the app died on the
+  bot check and the words were thrown away — production received zero of them. A Turnstile token is
+  single-use, so a failed submit must `reset()` the widget or the retry fails for a second reason.
+- **`shared/` holds the rules the server and the browser must agree about**, imported directly by
+  both — see `shared/README.md`. Agreeing by copy does not work: captions counted one way in the box
+  and another on the server, and the difference was silent truncation.
+- **A guest's trick card can be reassigned by the HOST.** `participants.challenge_set` is written
+  once, at join, and a returning guest deliberately keeps the card they were given (that is what
+  stops them shopping for easier tricks) — which left a genuine mis-scan with no way out. The host
+  moves them from the Participants list. Nothing is destroyed: progress is derived from photos and
+  scoped to the card held, so ticks stop counting and come back if they are moved back.
+
 - **`Permissions-Policy` must permit the features the app itself uses.** It shipped as
   `microphone=()` on 2026-09-07. In that header `()` disables a feature for EVERY origin,
   including our own — the browser refuses it at the document level and never shows a prompt, so
