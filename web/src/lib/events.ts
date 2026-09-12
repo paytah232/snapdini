@@ -188,24 +188,8 @@ export const deleteEvent = (code: string, organizerCode: string) =>
   api(`/api/events/${code}`, { method: 'DELETE', headers: org(organizerCode) });
 /** Hard cap the server applies (after trimming and collapsing whitespace). Mirrored here so an
  *  input stops the typing instead of silently losing the tail when it saves. */
-export const CAPTION_MAX = 140;
-
-/** Hard-stop a caption at the limit as it is typed.
- *
- *  `maxlength` on the textarea is not enough: Android keyboards with autocorrect or swipe-to-type
- *  routinely push past it while composing, and the remaining-character count then goes NEGATIVE and
- *  the server quietly cuts the overflow on save. Letting someone keep typing words that are already
- *  destined for the bin is the wrong way round — stop at the limit instead.
- *
- *  Cuts on a code point, never through one: slicing UTF-16 at a fixed offset can land in the middle
- *  of an emoji and leave a lone surrogate, which renders as a replacement glyph. */
-export function clampCaption(text: string): string {
-  if (text.length <= CAPTION_MAX) return text;
-  const cut = text.slice(0, CAPTION_MAX);
-  const last = cut.charCodeAt(cut.length - 1);
-  // A high surrogate with nothing after it means the cut split a pair — drop the orphan.
-  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
-}
+// Caption length rules live in caption.ts — see it for why they are counted in graphemes.
+export { CAPTION_MAX, CAPTION_MAX_RAW, clampCaption, captionLength, captionRemaining } from './caption';
 
 /** Write, edit or clear the caption on one photo. Exactly one credential: a guest's session token
  *  (their OWN photos only) or the organizer code (anything in their event). An empty string clears

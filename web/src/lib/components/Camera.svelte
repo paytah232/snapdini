@@ -5,7 +5,7 @@
   // Aliased: this component already has a `track` for the MediaStreamTrack.
   import { track as trackEvent } from '$lib/analytics';
   import { fade } from 'svelte/transition';
-  import { getEvent, getMe, joinEvent, getPhotosBySession, savePhotoCaption, CAPTION_MAX, clampCaption,
+  import { getEvent, getMe, joinEvent, getPhotosBySession, savePhotoCaption, CAPTION_MAX, clampCaption, captionLength, captionRemaining,
            type PublicEvent, type Photo } from '$lib/events';
   import { getSession, saveSession, clearSession } from '$lib/session';
   import { getConfig } from '$lib/api';
@@ -1398,7 +1398,7 @@
   let captionDraft = '';
   // Enforced here as well as via maxlength — see clampCaption() for why the attribute alone is
   // not enough on a phone. Reactive so it holds however the value arrives: typing, paste, or IME.
-  $: if (captionDraft.length > CAPTION_MAX) captionDraft = clampCaption(captionDraft);
+  $: if (captionLength(captionDraft) > CAPTION_MAX) captionDraft = clampCaption(captionDraft);
   let captionBusy = false;
 
   function openCaption(p: Photo) {
@@ -2110,10 +2110,10 @@
           <div class="capm-mission">🎩 {captionFor.challenge}</div>
         {/if}
         <!-- svelte-ignore a11y-autofocus -->
-        <textarea class="capm-text" rows="2" maxlength={CAPTION_MAX} bind:value={captionDraft} autofocus
+        <textarea class="capm-text" rows="2" bind:value={captionDraft} autofocus
                   placeholder="Describe the scene…"></textarea>
         <div class="capm-row">
-          <span class="capm-left">{CAPTION_MAX - captionDraft.length}</span>
+          <span class="capm-left">{captionRemaining(captionDraft)}</span>
           {#if captionFor.caption}
             <!-- Clearing IS saving nothing — same call, empty text. The button exists because
                  "delete the box out and press Save" is not a thing anyone guesses. -->

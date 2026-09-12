@@ -1,3 +1,4 @@
+import { clampCaption, CAPTION_MAX, CAPTION_MAX_RAW } from '../caption';
 import { Router, type Request, type Response } from 'express';
 import multer from 'multer';
 import path from 'path';
@@ -342,7 +343,6 @@ router.delete('/:id', async (req: Request, res: Response) => {
 // Length is a hard cap rather than a rejection: a caption is one line typed on a phone at a party,
 // and bouncing someone's sentence back at them because it ran four characters long is a worse
 // product than keeping the first 140. Blank clears.
-const CAPTION_MAX = 140;
 
 // Normalise what a phone keyboard produces into what a gallery can render on one line: collapse
 // every run of whitespace (newlines included — a caption is not a paragraph), trim, then cut.
@@ -350,11 +350,15 @@ const CAPTION_MAX = 140;
 // clearing is the same action as saving nothing, so the UI needs no separate delete call.
 export function normalizeCaption(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
-  const collapsed = raw.replace(/\s+/g, ' ').trim();
+  // A raw ceiling first, so a contrived payload cannot make us segment megabytes of text. This is
+  // not the limit anyone writing a sentence will meet — see CAPTION_MAX_RAW.
+  const collapsed = raw.slice(0, CAPTION_MAX_RAW).replace(/\s+/g, ' ').trim();
   if (!collapsed) return null;
-  // trimEnd after the cut so a caption sliced mid-space does not keep a dangling one. It cannot
-  // empty the string: `collapsed` starts with a non-space character.
-  return collapsed.slice(0, CAPTION_MAX).trimEnd();
+  // Cut by GRAPHEME, not by code unit. Slicing UTF-16 at 140 both disagreed with the count the
+  // writer was shown and could land inside an emoji, leaving a lone surrogate on the card.
+  // trimEnd after the cut so a caption sliced mid-space does not keep a dangling one; it cannot
+  // empty the string, because `collapsed` starts with a non-space character.
+  return clampCaption(collapsed).trimEnd();
 }
 
 router.put('/:id/caption', async (req: Request, res: Response) => {

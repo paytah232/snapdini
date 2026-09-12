@@ -5,7 +5,7 @@
   import { goto } from '$app/navigation';
   import {
     getAdmin, getPhotosByOrganizer, ratePhoto, moderate, setHighlights, createShare, mediaMeta,
-    savePhotoCaption, CAPTION_MAX, clampCaption,
+    savePhotoCaption, CAPTION_MAX, clampCaption, captionLength, captionRemaining,
     type Photo, type AdminEvent, type ShareKind
   } from '$lib/events';
   import { applyEventTheme } from '$lib/theme';
@@ -223,7 +223,7 @@
   let captionDraft = '';
   // Enforced here as well as via maxlength — see clampCaption() for why the attribute alone is
   // not enough on a phone. Reactive so it holds however the value arrives: typing, paste, or IME.
-  $: if (captionDraft.length > CAPTION_MAX) captionDraft = clampCaption(captionDraft);
+  $: if (captionLength(captionDraft) > CAPTION_MAX) captionDraft = clampCaption(captionDraft);
   let captionBusy = false;
 
   function openCaption(photo: Photo, e?: Event) {
@@ -583,10 +583,10 @@
         <div class="capm-mission">🎩 {captionFor.challenge}</div>
       {/if}
       <!-- svelte-ignore a11y-autofocus -->
-      <textarea class="capm-text" rows="2" maxlength={CAPTION_MAX} bind:value={captionDraft} autofocus
+      <textarea class="capm-text" rows="2" bind:value={captionDraft} autofocus
                 placeholder="Describe the scene…"></textarea>
       <div class="capm-row">
-        <span class="capm-left">{CAPTION_MAX - captionDraft.length}</span>
+        <span class="capm-left">{captionRemaining(captionDraft)}</span>
         {#if captionFor.caption}
           <!-- Clearing IS saving nothing — the same call with empty text. The button exists because
                "empty the box and press Save" is not a thing anyone guesses. -->
