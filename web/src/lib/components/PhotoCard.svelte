@@ -94,7 +94,13 @@
      caption reserve below is what actually levels the cards, but if anything ever does grow a card
      the rest of its row follows rather than one card sticking out. */
   :global(.pgrid) {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    /* Two across on a phone, said outright rather than left to arithmetic. `minmax(150px, 1fr)`
+       alone decided the column count by whatever width survived the ancestors' padding, and on a
+       360px phone — which is most Android — the gallery's `main` takes 16px a side and this grid
+       another 10px, leaving 308px. Two columns want 149px each. One pixel under the minimum, so it
+       fell back to ONE card per row at 308×341px: a poster, not a grid. A layout should not hinge
+       on a magic number colliding with someone else's padding. */
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px; padding: 10px; align-items: stretch;
     /* Every card the same height, sized to the TALLEST CARD THAT EXISTS — not to the tallest one
        that could exist.
@@ -108,6 +114,12 @@
        whatever is really there, and a grid with nothing under any photo reserves nothing at all.
        No JS, no measuring, and no `has-meta` class to keep in sync with the content. */
     grid-auto-rows: 1fr;
+  }
+  /* Past phone width, go back to fitting as many as the space allows. 560px is where three 150px
+     cards plus their gaps and the page's padding genuinely fit, so the first extra column appears
+     because there is room for it, not because a threshold was crossed. */
+  @media (min-width: 560px) {
+    :global(.pgrid) { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
   }
 
   .pcell-wrap {
