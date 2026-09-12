@@ -24,6 +24,10 @@ export interface LifecycleView {
                                      // pre-flight into the welcome and skip the standalone check-in
   /** Optional post-event thank-you discount for the host's NEXT event. */
   hostReward?: { code: string; percentOff: number; expiresAt: number };
+  /** Where to make a slideshow, and how long the photos it needs will still be there. Set only when
+   *  the event still HAS photos — an empty or already-purged event must never be sent to a feature
+   *  that cannot work, which would read as spam rather than a tip. */
+  slideshow?: { url: string; photoCount: number; photosUntil: number };
 }
 
 // The 3-point pre-flight, shared by the check-in and the short-notice welcome.
@@ -219,6 +223,26 @@ export function surveyEmail(v: LifecycleView): { subject: string; preheader: str
          </div>
        </div>`
     : '';
+  // A slideshow is the thing most hosts don't know we do, and this is the moment it makes sense:
+  // the photos are in, they're looking back at the day, and the files are on a clock. Deliberately
+  // placed AFTER the survey ask and the reward — it is a discovery, not a third thing to do — and
+  // it leads with the deadline, because that is the part that is actually useful to them.
+  const slideshowBlock = v.slideshow
+    ? `<div style="padding:22px 0 0">
+         <div style="border-top:1px solid ${C.line};padding-top:20px">
+           <div style="font-size:13px;color:${C.subtle};text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Before they go</div>
+           <p style="margin:0 0 6px;font-size:15px;line-height:1.6;color:${C.ink}">
+             Did you know Snapdini can turn the photos from ${esc(v.eventName)} into a
+             <b style="color:${C.head}">slideshow</b>? All ${v.slideshow.photoCount} of them, set to music,
+             as one video you can keep and send on.
+           </p>
+           <p style="margin:0;font-size:13px;line-height:1.6;color:${C.subtle}">
+             The photos are here until ${new Date(v.slideshow.photosUntil).toLocaleDateString('en-AU', { day: 'numeric', month: 'long' })}, so make it before then.
+           </p>
+           ${btn('Make the slideshow', v.slideshow.url, true)}
+         </div>
+       </div>`
+    : '';
   const subject = `How did ${v.eventName} go? (2 mins) 🎩`;
   const preheader = `Two minutes to tell us how Snapdini did — it shapes what we build next.`;
   const base = v.surveyUrl || v.manageUrl;
@@ -238,6 +262,7 @@ export function surveyEmail(v: LifecycleView): { subject: string; preheader: str
     `<p style="font-size:13px;color:${C.subtle};margin:6px 0 0">Then a handful of quick questions — comments optional, skip any you like.</p>`,
     btn('Take the 2-minute survey', base),
     rewardBlock,
+    slideshowBlock,
     sign('Thank you — truly.'),
   ].join('');
 

@@ -229,6 +229,14 @@ filters and paging.
 
 ---
 
+## Lifecycle emails
+What Snapdini sends a host, all of it skippable via the unsubscribe link in the footer.
+**Welcome** on payment · **Check-in** a few days before the event · **Account welcome** and a one-off
+**nudge** for accounts that haven't made an event yet · **Post-event survey** 3 days after it ends,
+carrying the thank-you discount for the next event and — when there are still photos to make one
+from — a prompt to turn them into a **slideshow**, with the date they're deleted. Internal and admin
+accounts are excluded from all of it.
+
 ## Guest referrals & gallery stats
 
 Every guest who sees a gallery is a plausible next customer, so three surfaces carry a referral link

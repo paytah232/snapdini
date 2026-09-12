@@ -28,8 +28,10 @@ await spec('99-poster-config', async () => {
       && back.json?.posterConfig?.cardsPerSheet === 2 && back.json?.posterConfig?.cardRound === false,
       JSON.stringify(back.json?.posterConfig || null).slice(0, 100));
 
-    // Far past any real design. The old code stored a broken half of this.
-    const huge = { ...design, junk: 'x'.repeat(40_000) };
+    // Far past any real design — a maxed-out one is about 2kB, because every text field in the
+    // designer is maxlength-capped. Kept under express.json()'s 100kB so it reaches OUR check and
+    // gets our message, rather than an opaque body-parser rejection.
+    const huge = { ...design, junk: 'x'.repeat(80_000) };
     const big = await api('PUT', `/api/events/${ev.joinCode}/poster`, { body: { config: huge }, headers: h });
     ok('an impossible design is refused, not trimmed', big.status === 413, `status ${big.status}`);
 
@@ -38,7 +40,7 @@ await spec('99-poster-config', async () => {
       JSON.stringify(after.json?.posterConfig || null).slice(0, 80));
 
     const stored = dbq(`SELECT length(poster_config) FROM events WHERE id='${ev.id}'`);
-    ok('nothing oversized reached the column', Number(stored) < 4000, `${stored} chars`);
+    ok('nothing oversized reached the column', Number(stored) < 2000, `${stored} chars`);
 
     // Now the row prod might already hold: valid JSON chopped in half.
     dbq(`UPDATE events SET poster_config='{"title":"Ruby & S' WHERE id='${ev.id}'`);

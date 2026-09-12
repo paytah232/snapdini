@@ -1,7 +1,7 @@
 import { and, eq, isNull, isNotNull, lte, gte, ne, or, sql } from 'drizzle-orm';
 import { randomBytes } from 'crypto';
 import { db } from './db';
-import { events, users } from './schema';
+import { events, photos, users } from './schema';
 import * as email from './email';
 import { welcomeEmail, checkinEmail, surveyEmail, accountWelcomeEmail, activationNudgeEmail, type LifecycleView } from './lifecycle-emails';
 import { ensureHostReward } from './host-reward';
@@ -19,6 +19,7 @@ const CHECKIN_CUTOFF_MS = 12 * 60 * 60 * 1000; // …but not inside the last 12h
 const CHECKIN_MIN_LEAD_MS = 3 * DAY;           // only if booked ≥3 days before the event (else the welcome covered it)
 const MIN_SINCE_CREATE_MS = 36 * 60 * 60 * 1000; // never email within 36h of the booking (no barrage)
 const SURVEY_DELAY_MS = 3 * DAY;               // survey goes 3 days after the event ends
+const SLIDESHOW_MIN_PHOTOS = 8;                // below this there is no slideshow worth making
 
 const enabled = () => process.env.LIFECYCLE_EMAILS === '1';
 const BASE = () => (process.env.BASE_URL || 'https://snapdini.com').replace(/\/$/, '');
@@ -177,8 +178,22 @@ async function sweep(): Promise<void> {
     // objects for events that were cancelled or never happened. Optional by design — a Stripe
     // failure must not stop the survey going out.
     const reward = await ensureHostReward(ev.id).catch(() => null);
+    // Only mention the slideshow when there is something to make one FROM. An event that was purged,
+    // or that nobody shot anything at, must not be pointed at a feature that cannot work for it —
+    // that reads as spam, not as a tip. The date is the event's own purge deadline, so the nudge is
+    // useful rather than invented: on the common 7-day retention the host has about four days left.
+    let slideshow: { url: string; photoCount: number; photosUntil: number } | undefined;
+    if (!info.ev.purgedAt && info.ev.purgeAt && info.ev.purgeAt > Date.now()) {
+      const [pc] = await db.select({ n: sql<number>`count(*)` }).from(photos).where(eq(photos.eventId, ev.id));
+      const n = Number(pc?.n ?? 0);
+      // No organizer code in the link — the other lifecycle emails don't put one in a URL either,
+      // and their session resolves it. An emailed code is a bearer credential.
+      // A floor, not just "> 0": a slideshow of three photos is not a slideshow, and suggesting one
+      // for an event that barely happened is worse than saying nothing.
+      if (n >= SLIDESHOW_MIN_PHOTOS) slideshow = { url: `${BASE()}/admin/${info.ev.joinCode}/review?view=slideshow`, photoCount: n, photosUntil: info.ev.purgeAt };
+    }
     const view = buildView(info.ev, info.ownerName, { surveyUrl: `${BASE()}/survey/${token}` });
-    const mail = surveyEmail({ ...view, hostReward: reward ?? undefined });
+    const mail = surveyEmail({ ...view, hostReward: reward ?? undefined, slideshow });
     try { await email.sendMail({ to: info.ownerEmail, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com' }); }
     catch (e) { await db.update(events).set({ feedbackSentAt: null }).where(eq(events.id, ev.id)); console.error(`[lifecycle] survey ${ev.id} failed: ${(e as Error).message}`); }
   }

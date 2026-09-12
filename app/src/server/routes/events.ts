@@ -650,9 +650,14 @@ router.put('/:joinCode/challenges', requireOrganizer, async (req: Request, res: 
   res.json({ success: true, sets, tick: parseTick(body.tick), max: MAX_CHALLENGES, maxSets: MAX_SETS });
 });
 
-// The poster designer's saved settings. Generous next to a full design (~1kB) so hosts never meet
-// the ceiling, small enough that the column stays a setting and not a document store.
-const MAX_POSTER_CONFIG = 16000;
+// The poster designer's saved settings. This is NOT a budget the host spends — every text field in
+// the designer is maxlength-capped, so a design with all of them full is about 2kB and a real one is
+// nearer 1kB. The ceiling exists only so a client bug cannot turn a settings column into a document
+// store that the organizer payload then parses on every load. express.json() caps the request at
+// 100kB anyway; staying under that means an oversized design gets OUR error instead of an opaque
+// body-parser rejection. If a host should be able to put MORE on a poster, the lever is the
+// maxlength on the inputs and whether the layout can fit it — not this number.
+const MAX_POSTER_CONFIG = 64000;
 
 // Never let a bad row take the event page down with it. Anything unparseable — a blob truncated by
 // the old .slice(), a hand-edited row — reads as "no saved design", which is recoverable: the host

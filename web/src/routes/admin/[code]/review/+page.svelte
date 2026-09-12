@@ -36,7 +36,11 @@
   let photos: Photo[] = [];
 
   type ViewMode = 'cards' | 'single' | 'slideshow';
-  let view: ViewMode = 'cards';
+  // ?view=slideshow lets the post-event email drop the host straight on the slideshow panel instead
+  // of on a page where they still have to find it. Read once, at init, so it seeds the view without
+  // fighting the buttons afterwards.
+  let view: ViewMode = (typeof location !== 'undefined'
+    && new URLSearchParams(location.search).get('view') === 'slideshow') ? 'slideshow' : 'cards';
 
   type Tab = 'pending' | 'all' | 'favourites' | 'rejected';
   let tab: Tab = 'all';
