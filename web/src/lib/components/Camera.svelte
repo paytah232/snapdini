@@ -2133,9 +2133,19 @@
             <li>We only ever receive the shots you actually take here.</li>
           </ul>
           <button class="btn primary" on:click={startCamera}>Allow camera</button>
+          <!-- Two different problems wear the same error. A camera already held by something else
+               is not a permission at all, and a guest who has definitely granted access is left
+               going round the settings again looking for a switch that is already on — so say the
+               other cause first, because it is the one they can fix in a second. -->
           <p class="cd-hint">
-            If nothing happens, your browser is remembering an earlier “don't allow”. On iPhone tap
-            <b>aA</b> in the address bar → <b>Website Settings</b> → <b>Camera</b> → <b>Allow</b>, then tap above again.
+            <b>Already open somewhere else?</b> A camera can only be used by one thing at a time —
+            close any other tab, video call or camera app, then tap above.
+          </p>
+          <p class="cd-hint">
+            If nothing happens at all, your browser is remembering an earlier “don't allow”. On
+            iPhone tap <b>aA</b> in the address bar → <b>Website Settings</b> → <b>Camera</b> →
+            <b>Allow</b>. On Android tap the icon to the left of the address → <b>Permissions</b>.
+            Then tap above again.
           </p>
         </div>
       {:else if cameraError}
@@ -2413,7 +2423,10 @@
       </StartYourOwn>
     {/if}
   </div>
+  <!-- After the reveal this roll can show OTHER people's photos too (Mine / All / Others), so
+       saving follows the host's download setting rather than "it is in my gallery". -->
   {#if lbOpen}<Lightbox photos={shownPhotos} index={lbIndex} captionMode="own"
+                        allowSave={allowDownloads}
                         on:caption={(e) => openCaption(e.detail)}
                         on:photochange={hideToast}
                         on:close={() => { hideToast(); lbOpen = false; }} />{/if}

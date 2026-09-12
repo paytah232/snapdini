@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher, onMount, onDestroy } from 'svelte';
+  import { savePhotoByUrl } from '$lib/saveImage';
   import { mediaMeta, type Photo } from '$lib/events';
 
   export let photos: Photo[] = [];
@@ -10,6 +11,8 @@
    *  the grid uses, rather than a second one, is the whole point: a caption written full-screen and
    *  a caption written on a tile have to behave identically. */
   export let captionMode: 'none' | 'own' | 'any' = 'none';
+  /** Offer "Save to Photos". Off where the host has not allowed downloads. */
+  export let allowSave = false;
   $: canCaption = captionMode === 'any' || (captionMode === 'own' && !!photo?.isOwn);
 
   const dispatch = createEventDispatcher<{ close: void; caption: Photo; photochange: number }>();
@@ -35,6 +38,26 @@
 
   // Tell the parent when the subject changes, so anything it is showing ABOUT this photo — a
   // "Caption saved" confirmation, say — goes with it rather than hanging over the next one.
+  let saving = false;
+  let savedMsg = '';
+  async function saveThis() {
+    if (saving || !photo) return;
+    saving = true; savedMsg = '';
+    try {
+      const stamp = new Date(photo.takenAt).toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      const ext = photo.mediaType === 'video' ? 'mp4' : 'jpg';
+      const out = await savePhotoByUrl(photo.url, `snapdini-${stamp}.${ext}`);
+      // A cancelled share is the guest's decision, so it says nothing at all.
+      if (out === 'shared') savedMsg = '✓ Saved';
+      else if (out === 'downloaded') savedMsg = '✓ Downloaded';
+      else if (out === 'failed') savedMsg = 'Couldn’t save';
+    } catch { savedMsg = 'Couldn’t save'; }
+    finally {
+      saving = false;
+      if (savedMsg) setTimeout(() => (savedMsg = ''), 2500);
+    }
+  }
+
   function prev() { if (index > 0) { index--; dispatch('photochange', index); } }
   function next() { if (index < photos.length - 1) { index++; dispatch('photochange', index); } }
   function onKey(e: KeyboardEvent) {
@@ -54,6 +77,17 @@
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
 <div class="lb" bind:this={lbEl} on:click|self={() => dispatch('close')} role="dialog" aria-modal="true" aria-label="Photo viewer" tabindex="-1">
   <button class="close" on:click={() => dispatch('close')} aria-label="Close">✕</button>
+  {#if allowSave}
+    <!-- On iOS an `<a download>` puts the photo in FILES, not the camera roll — there is no web API
+         that writes to Photos. The share sheet has "Save Image" on it, which does. So this asks the
+         OS rather than downloading, and falls back to a download where there is no sheet.
+         It lives here, on a tap, because the Share API needs a real gesture — and because a share
+         sheet after every shutter press would be intolerable. -->
+    <button class="lb-save" on:click|stopPropagation={saveThis} disabled={saving}
+            aria-label="Save this photo to your device">
+      {saving ? '…' : savedMsg || '⤓ Save'}
+    </button>
+  {/if}
   {#if canCaption}
     <!-- Looking at a photo full-screen is when someone actually thinks of what to say about it;
          making them close it and find the tile again is the wrong way round. -->
@@ -110,6 +144,11 @@
     display: flex; flex-wrap: wrap; align-items: baseline; justify-content: center; gap: 0 6px; }
   .cap-meta .who { font-weight: 600; color: rgba(255,255,255,.9); }
   .cap-meta .sep { opacity: .45; }
+  .lb-save { position: absolute; right: 58px; top: 12px; z-index: 3; padding: 8px 12px;
+    border-radius: 999px; border: 1px solid rgba(255,255,255,.28); background: rgba(0,0,0,.5);
+    color: #fff; font: inherit; font-size: .82rem; cursor: pointer;
+    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+  .lb-save:disabled { opacity: .6; cursor: default; }
   .lb-cap { position: absolute; left: 12px; top: 12px; z-index: 3; padding: 8px 12px; border-radius: 999px;
     border: 1px solid rgba(255,255,255,.28); background: rgba(0,0,0,.5); color: #fff; font: inherit;
     font-size: .82rem; cursor: pointer; -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }

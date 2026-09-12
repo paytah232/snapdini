@@ -318,7 +318,8 @@
 </main>
 
 {#if lbOpen}
-  <Lightbox photos={shownPhotos} index={lbIndex} on:close={() => (lbOpen = false)} />
+  <!-- Only when the host has allowed downloads: this is everyone's album, not the guest's own roll. -->
+  <Lightbox photos={shownPhotos} index={lbIndex} allowSave={allowDownloads} on:close={() => (lbOpen = false)} />
 {/if}
 
 <style>

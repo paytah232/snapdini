@@ -155,7 +155,7 @@
   <footer>© 2026 Snapdini · <a href={referralLink(`s:${token}`)}>Make your own event →</a></footer>
 </main>
 
-{#if lbOpen}<Lightbox photos={photos} index={lbIndex} on:close={() => (lbOpen = false)} />{/if}
+{#if lbOpen}<Lightbox photos={photos} index={lbIndex} allowSave={allowDownloads} on:close={() => (lbOpen = false)} />{/if}
 
 <style>
   main { min-height: 100dvh; background: var(--bg); color: var(--text); }

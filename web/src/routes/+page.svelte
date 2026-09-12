@@ -269,14 +269,20 @@
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
   <div class="modal" on:click|self={() => (qr = null)} role="dialog" aria-modal="true" aria-label="Demo QR code">
     <div class="modal-card" tabindex="-1" use:modalFocus>
-      <h3>Try it on your phone</h3>
-      <p>The camera works best on mobile — scan to open the live demo.</p>
+      <h3>Best on your phone</h3>
+      <p>It is a camera, so a phone shows it at its best — scan to open the live demo.</p>
       <img src={qr.src} alt="Demo QR code" />
       <p class="url">{qr.url}</p>
       {#if demoLinks}
-        <p class="or-explore">…or explore it here:</p>
+        <!-- The demo works perfectly well on a laptop with a webcam, and someone reading this on a
+             desktop should not have to find a phone to see anything. The QR stays the headline
+             because a phone IS better, but carrying on here is offered plainly rather than hidden
+             behind a button labelled "Camera" that reads like one of three equal side-trips. -->
+        <p class="or-explore">No phone to hand? Carry on right here:</p>
         <div class="demo-explore">
-          <a class="btn ghost sm" href={demoLinks.camera}>📷 Camera</a>
+          <a class="btn primary sm" href={demoLinks.camera}>💻 Open the camera here</a>
+        </div>
+        <div class="demo-explore">
           <a class="btn ghost sm" href={demoLinks.host}>🎛 Host view</a>
           <a class="btn ghost sm" href={demoLinks.gallery}>🖼 Gallery</a>
         </div>
