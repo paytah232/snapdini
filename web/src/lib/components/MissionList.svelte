@@ -5,7 +5,7 @@
   // page shows wedding missions and the baby-shower page shows baby-shower ones. That is the
   // point: the landing pages are meant to differ from each other, and a single shared example
   // list would be the thin duplicate content usecases.ts exists to avoid.
-  import { packFor, tickFor } from '$lib/challenges';
+  import { offeredChallenges, packFor, tickFor } from '$lib/challenges';
 
   /** A pack key from challenges.ts: 'wedding', 'baby-shower', 'christmas', … */
   export let eventType: string;
@@ -16,7 +16,10 @@
   const SHOWN = 6;
 
   $: pack = packFor(eventType);
-  $: items = pack.challenges.slice(0, SHOWN);
+  // Through offeredChallenges, not the raw pack: a marketing page must never advertise a trick the
+  // picker will not offer. Clip tricks are currently hidden (CLIP_TRICKS_ENABLED), and several
+  // packs carry one inside the first six.
+  $: items = offeredChallenges(pack).slice(0, SHOWN);
   $: tick = tickFor(eventType);
 </script>
 

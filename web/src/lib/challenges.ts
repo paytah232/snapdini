@@ -30,7 +30,9 @@ export type Challenge = {
   /** What the guest reads. Kept short enough to sit on one line of a printed card. */
   text: string;
   moods: Mood[];
-  /** Asks for a clip. Excluded automatically when the event allows no video — see pickChallenges. */
+  /** Asks for a clip. Hidden product-wide at the moment — see CLIP_TRICKS_ENABLED — and excluded
+   *  automatically when the event allows no video. The flag stays on the challenge rather than the
+   *  challenge being deleted: ids are stored on photos, so the wording has to remain resolvable. */
   video?: true;
 };
 
@@ -53,6 +55,32 @@ export type Pack = {
   /** Ordered as a host would most likely want them: the default pick is simply the first N. */
   challenges: Challenge[];
 };
+
+/**
+ * THE SWITCH: are clip tricks offered at all?
+ *
+ * A trick is a PHOTO prompt. The server enforces it — finalizeUpload drops challengeId from any
+ * video upload — so a clip-tagged trick was a promise the app would not keep: the guest shoots the
+ * clip the card asked for and nothing ticks off. Until we decide whether a clip trick list is its
+ * own thing, they are hidden everywhere a host or a visitor can see them.
+ *
+ * FLIP THIS TO `true` AND CLIP TRICKS COME BACK — nothing else needs changing. That is why the
+ * `video: true` content and the allowVideo/maxVideo machinery are all still here rather than
+ * deleted: ids are stable for the life of the product (they are stored on photos), and an event
+ * saved while clips were on still references them.
+ */
+export const CLIP_TRICKS_ENABLED = false;
+
+/**
+ * The challenges a host may actually be offered from a pack. Every picker and every rendered list
+ * goes through here, so the switch above has exactly ONE place to take effect.
+ *
+ * Two independent rules, both of which have to say yes: `allowVideo` is the per-EVENT one (an event
+ * with videoSeconds === 0 allows no video at all), CLIP_TRICKS_ENABLED is the product-wide one.
+ */
+export function offeredChallenges(pack: Pack, allowVideo = true): Challenge[] {
+  return pack.challenges.filter((c) => !c.video || (CLIP_TRICKS_ENABLED && allowVideo));
+}
 
 const C = (id: string, text: string, moods: Mood[], video?: true): Challenge =>
   video ? { id, text, moods, video } : { id, text, moods };
@@ -401,7 +429,8 @@ export type PickOpts = {
   /** Null/absent ⇒ the curated order, which is what a host who just wants a sensible list gets. */
   mood?: Mood | null;
   /** False strips clip prompts entirely. Events can be configured with no video at all, and a
-   *  mission a guest physically cannot complete is worse than one fewer mission. */
+   *  mission a guest physically cannot complete is worse than one fewer mission. NB true is not
+   *  enough on its own while CLIP_TRICKS_ENABLED is off — both gates are in offeredChallenges. */
   allowVideo?: boolean;
   rng?: Rng;
   /** Draw from the WHOLE pack at random rather than its curated order. Without this, "shuffle"
@@ -424,7 +453,7 @@ export function pickChallenges(pack: Pack, opts: PickOpts = {}): Challenge[] {
   const { count = DEFAULT_COUNT, mood = null, allowVideo = true, rng = Math.random, maxVideo = 2, shuffle = false } = opts;
   const n = Math.max(1, Math.min(MAX_COUNT, Math.floor(count)));
 
-  const usable = pack.challenges.filter((c) => allowVideo || !c.video);
+  const usable = offeredChallenges(pack, allowVideo);
   const preferred = mood ? shuffled(usable.filter((c) => c.moods.includes(mood)), rng)
                   : shuffle ? shuffled(usable, rng) : usable;
   const rest = mood ? usable.filter((c) => !c.moods.includes(mood)) : [];
@@ -478,7 +507,7 @@ export function varySets(pack: Pack, opts: PickOpts & { sets?: number; shared?: 
   const per = Math.max(1, Math.min(MAX_COUNT, Math.floor(count)));
   const shared = Math.max(0, Math.min(per, opts.shared ?? Math.max(1, Math.round(per / 3))));
 
-  const usable = pack.challenges.filter((c) => allowVideo || !c.video);
+  const usable = offeredChallenges(pack, allowVideo);
   const core = usable.slice(0, shared);
   const coreIds = new Set(core.map((c) => c.id));
   // Everything not in the core, shuffled once and then DEALT round-robin, so each card gets its own
@@ -538,7 +567,7 @@ export function varyOne(pack: Pack, existing: Challenge[][], opts: PickOpts & { 
   const per = Math.max(1, Math.min(MAX_COUNT, Math.floor(count)));
   const shared = Math.max(0, Math.min(per, opts.shared ?? Math.max(1, Math.round(per / 3))));
 
-  const usable = pack.challenges.filter((c) => allowVideo || !c.video);
+  const usable = offeredChallenges(pack, allowVideo);
   const byId = new Map(usable.map((c) => [c.id, c]));
 
   let core: Challenge[] = [];

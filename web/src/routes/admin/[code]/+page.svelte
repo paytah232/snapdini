@@ -42,6 +42,10 @@
 
   let ev: AdminEvent | null = null;
   let missionsOpen = false;
+  // The trick-list editor closes the moment Save is pressed and finishes the write behind itself.
+  // If that write fails it hands the host’s drafts back here, and this holds them so the editor can
+  // reopen on THEIR list rather than on the last one the server actually stored.
+  let missionsRetry: { key: string; label: string; items: { id: string; text: string }[] }[] | null = null;
   let options: AppOptions | null = null;
   let billing: BillingConfig | null = null;
   let shapeNotice = '';
@@ -1371,12 +1375,13 @@
     joinCode={code}
     orgCode={orgCode}
     eventType={ev.eventType ?? null}
-    savedSets={ev.challengeSets ?? []}
+    savedSets={missionsRetry ?? ev.challengeSets ?? []}
     savedTick={ev.challengeTick ?? null}
     maxPhotos={ev.maxPhotos}
     videoSeconds={ev.videoSeconds ?? 0}
     onClose={() => (missionsOpen = false)}
-    onSaved={(sets) => { if (ev) ev.challengeSets = sets; }}
+    onSaved={(sets) => { missionsRetry = null; if (ev) ev.challengeSets = sets; }}
+    onSaveFailed={(sets) => { missionsRetry = sets; missionsOpen = true; }}
   />
 {/if}
 

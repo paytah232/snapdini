@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   PACKS, MOODS, ALL_BY_ID, CHALLENGE_MAX_LEN, DEFAULT_COUNT, MAX_COUNT,
   packFor, pickChallenges, customChallenge, isCustomId, type Mood,
+  CLIP_TRICKS_ENABLED, offeredChallenges,
   TICKS_OUTLINE, TICKS_EMOJI, DEFAULT_TICK, tickFor, cleanTick, varySets, varyOne, MAX_SETS,
 } from './challenges';
 
@@ -73,6 +74,60 @@ describe('the library itself', () => {
       const vids = p.challenges.filter((c) => c.video).length;
       expect(vids / p.challenges.length).toBeLessThan(0.35);
     }
+  });
+});
+
+describe('clip tricks are hidden', () => {
+  // A trick is a PHOTO prompt: finalizeUpload drops challengeId from any video upload, so a
+  // clip-tagged trick on a host’s card promises something the app then refuses. The content stays
+  // (ids live on photos for the life of the product) and only the OFFER is switched off.
+  it('ships with the switch off — flip CLIP_TRICKS_ENABLED to offer them again', () => {
+    // The single place that fails if someone turns clip tricks back on. That is a product
+    // decision, and this is where it gets recorded.
+    expect(CLIP_TRICKS_ENABLED).toBe(false);
+  });
+  it('keeps the content, so an event saved when they were on can still resolve its ids', () => {
+    const clips = Object.values(ALL_BY_ID).filter((c) => c.video);
+    expect(clips.length).toBeGreaterThan(0);
+    for (const p of PACKS) expect(p.challenges.some((c) => c.video), p.key).toBe(true);
+  });
+  it('offers no clip prompt from any pack, whatever the event allows', () => {
+    for (const p of PACKS) {
+      expect(offeredChallenges(p, true).some((c) => c.video), p.key).toBe(false);
+      expect(offeredChallenges(p, false).some((c) => c.video), p.key).toBe(false);
+    }
+  });
+  it('no picker can hand a host one either — the gate is in offeredChallenges, not the callers', () => {
+    for (const p of PACKS) {
+      const one = pickChallenges(p, { count: MAX_COUNT, allowVideo: true, maxVideo: 99, rng: seeded(71) });
+      expect(one.some((c) => c.video), p.key).toBe(false);
+      for (const set of varySets(p, { sets: 3, count: MAX_COUNT, allowVideo: true, maxVideo: 99, rng: seeded(72) })) {
+        expect(set.items.some((c) => c.video), p.key).toBe(false);
+      }
+      const more = varyOne(p, [one], { count: MAX_COUNT, allowVideo: true, maxVideo: 99, rng: seeded(73) });
+      expect(more.some((c) => c.video), p.key).toBe(false);
+    }
+  });
+  it('leaves every pack with more than a host can pick, so nothing is thinned out', () => {
+    // The reason hiding is safe at all: the thinnest pack still has more stills than MAX_COUNT.
+    for (const p of PACKS) expect(offeredChallenges(p).length, p.key).toBeGreaterThanOrEqual(MAX_COUNT);
+  });
+  it('leaves every mood usable in every pack — no quick pick comes back empty', () => {
+    for (const p of PACKS) {
+      for (const m of MOODS.map((x) => x.key)) {
+        const n = offeredChallenges(p).filter((c) => c.moods.includes(m)).length;
+        expect(n, `${p.key} has no still "${m}" tricks`).toBeGreaterThan(0);
+        expect(pickChallenges(p, { mood: m, count: MAX_COUNT, rng: seeded(74) }), `${p.key}/${m}`)
+          .toHaveLength(MAX_COUNT);
+      }
+    }
+  });
+  it('still honours the per-event rule underneath, so flipping the switch back is enough', () => {
+    // offeredChallenges ANDs the two gates. Proven on the non-video side: allowVideo false must
+    // strip clips no matter what the product switch says.
+    const wedding = packFor('wedding');
+    expect(offeredChallenges(wedding, false).every((c) => !c.video)).toBe(true);
+    expect(offeredChallenges(wedding, false).length).toBe(wedding.challenges.filter((c) => !c.video).length);
   });
 });
 

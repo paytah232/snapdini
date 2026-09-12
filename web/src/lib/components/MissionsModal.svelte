@@ -9,6 +9,7 @@
   // thorough one, but a planner who wants fifteen gets fifteen — with a warning, not a refusal, when
   // the list outruns the roll.
   import { EVENT_TYPES, MOODS, PACKS, packFor, pickChallenges, varySets, varyOne, customChallenge,
+           offeredChallenges, isCustomId, ALL_BY_ID,
            CHALLENGE_MAX_LEN, DEFAULT_COUNT, MAX_COUNT, MAX_SETS, tickFor, cleanTick,
            TICKS_OUTLINE, TICKS_EMOJI,
            type Challenge, type Mood, type MissionSet } from '$lib/challenges';
@@ -24,10 +25,14 @@
   export let savedTick: string | null = null;
   /** The guest's roll size, so we can say when a list outruns it. */
   export let maxPhotos = 10;
-  /** 0 means the event allows no video at all, so clip prompts must not be offered. */
+  /** 0 means the event allows no video at all, so clip prompts must not be offered. Not the only
+   *  gate any more — CLIP_TRICKS_ENABLED hides them for every event — but still the per-event one. */
   export let videoSeconds = 0;
   export let onClose: () => void = () => {};
   export let onSaved: (sets: MissionSet[]) => void = () => {};
+  /** A save that had already closed the modal turned out to fail. Hands back exactly what the host
+   *  had so the parent can reopen the editor on THEIR work, not on the stored list. */
+  export let onSaveFailed: (sets: { key: string; label: string; items: { id: string; text: string }[] }[]) => void = () => {};
 
   let type = eventType ?? 'general';
   let count = DEFAULT_COUNT;
@@ -53,6 +58,11 @@
 
   $: pack = packFor(type);
   $: allowVideo = videoSeconds > 0;
+  // What this event type actually offers. Note allowVideo is not the only gate: clip tricks are
+  // currently hidden product-wide (CLIP_TRICKS_ENABLED in challenges.ts), so an event WITH video
+  // still gets a stills-only list. offeredChallenges owns both rules — never filter here.
+  $: offered = offeredChallenges(pack, allowVideo);
+  $: offeredIds = new Set(offered.map((c) => c.id));
 
   // Working state: one editable list per card. Seeded from what is saved, or from the pack's
   // curated order for a host opening this for the first time.
@@ -74,6 +84,18 @@
   // spend the whole roll trying. Said plainly, not enforced — a host may have a reason.
   $: outrunsRoll = (current?.items.length ?? 0) > maxPhotos;
 
+  // Everything on the card that the list below does NOT show, so nothing a host chose can go
+  // invisible while still printing: their own wording, a clip trick saved before clips were
+  // hidden, and a trick from another pack if they changed the event type after saving.
+  $: extras = (current?.items ?? []).filter((i) => !offeredIds.has(i.id));
+  /** What to call a trick that is on the card but not in the list. */
+  const extraTag = (c: { id: string }) =>
+    isCustomId(c.id) ? 'yours' : ALL_BY_ID[c.id]?.video ? 'clip' : 'kept';
+  // A clip trick already saved on a card is NOT silently dropped. The host may have printed it, and
+  // a line disappearing off a list on the table is worse than a line we would no longer offer. It
+  // is shown, flagged, and one tap from being removed — their call, not ours.
+  $: strandedClips = extras.filter((i) => !isCustomId(i.id) && !!ALL_BY_ID[i.id]?.video).length;
+
   /** The number field and the tick list were two views of one thing that could disagree — a host
    *  could ask for 6 and tick 9, and nothing reconciled them or said which one the card would use.
    *  Now there is a single number: ticking moves it, and typing it tops up from the pack or trims
@@ -83,9 +105,9 @@
     const want = Math.max(1, Math.min(MAX_COUNT, Math.floor(n || 1)));
     const items = [...current.items];
     if (items.length > want) items.length = want;
-    else for (const c of pack.challenges) {
+    else for (const c of offered) {
       if (items.length >= want) break;
-      if ((allowVideo || !c.video) && !items.some((i) => i.id === c.id)) items.push(c);
+      if (!items.some((i) => i.id === c.id)) items.push(c);
     }
     current.items = items;
     count = items.length;
@@ -156,33 +178,54 @@
     active = 0;
   }
 
-  async function save() {
+  /**
+   * Save, and close the modal WITHOUT waiting for the server.
+   *
+   * Awaiting the round trip first left the host staring at a disabled "Saving…" button for however
+   * long the request took — about 100ms on an idle box, but seconds on a loaded one or a thin
+   * connection — with nothing useful to do in the meantime. The list is already finished in
+   * `drafts`; the request only writes it down.
+   *
+   * The hazard that buys is a save that fails once the modal has gone, so two rules hold here:
+   *  • the admin card is updated ONLY from what the server says it stored — never optimistically,
+   *    or the host would be shown a list that does not exist;
+   *  • a failure is loud AND gives the work back, via onSaveFailed, so the editor reopens on the
+   *    host’s own drafts rather than on the last saved list.
+   */
+  function save() {
+    // Guards a double tap within the same frame. Never reset, because the modal is gone a line
+    // later and the failure path remounts a fresh one.
+    if (busy) return;
     busy = true;
-    try {
-      const body = {
-        eventType: type === 'general' ? null : type,
-        tick,
-        challenges: { sets: drafts.filter((d) => d.items.length).map((d) => ({
-          key: d.key, label: d.label, items: d.items.map((i) => ({ id: i.id, text: i.text })),
-        })) },
-      };
-      const r = await fetch(`/api/events/${encodeURIComponent(joinCode)}/challenges`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'x-organizer-code': orgCode },
-        credentials: 'same-origin',
-        body: JSON.stringify(body),
-      });
-      const d = await r.json().catch(() => null);
-      if (!r.ok) throw new Error(d?.error || 'Could not save');
-      onSaved(d.sets ?? []);
-      track('missions_saved', { cards: (d.sets ?? []).length, per: count, type }, joinCode);
-      showToast(d.sets?.length ? `Saved — ${d.sets.length} card${d.sets.length === 1 ? '' : 's'} ready to print` : 'Trick list cleared');
-      onClose();
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : 'Could not save', true);
-    } finally {
-      busy = false;
-    }
+    const sets = drafts.filter((d) => d.items.length).map((d) => ({
+      key: d.key, label: d.label, items: d.items.map((i) => ({ id: i.id, text: i.text })),
+    }));
+    const body = { eventType: type === 'general' ? null : type, tick, challenges: { sets } };
+    // Started BEFORE the teardown so the request is already on the wire while the modal unmounts.
+    // Nothing here touches component state afterwards, so being destroyed mid-flight is harmless.
+    const pending = fetch(`/api/events/${encodeURIComponent(joinCode)}/challenges`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'x-organizer-code': orgCode },
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+    });
+    const per = count;
+    onClose();
+    void (async () => {
+      try {
+        const r = await pending;
+        const d = await r.json().catch(() => null);
+        if (!r.ok) throw new Error(d?.error || 'Could not save');
+        // Echo what was STORED, not what we sent: the server drops malformed rows, so this is the
+        // only honest thing to put on the admin card.
+        onSaved(d.sets ?? []);
+        track('missions_saved', { cards: (d.sets ?? []).length, per, type }, joinCode);
+        showToast(d.sets?.length ? `Saved — ${d.sets.length} card${d.sets.length === 1 ? '' : 's'} ready to print` : 'Trick list cleared');
+      } catch (e) {
+        showToast(`${e instanceof Error ? e.message : 'Could not save'} — your trick list is back open, nothing was lost`, true);
+        onSaveFailed(sets);
+      }
+    })();
   }
 </script>
 
@@ -254,7 +297,9 @@
       <label class="fld" for="m-count">Tricks on this card</label>
       <input id="m-count" type="number" min="1" max={MAX_COUNT} value={count}
              on:change={(e) => setCount(+e.currentTarget.value)} />
-      <span class="of">of {pack?.challenges.length ?? 0} to choose from</span>
+      <!-- The OFFERED count, not the pack size: with clip tricks hidden the two differ, and a host
+           told "of 24" while looking at 23 rows would reasonably think one had gone missing. -->
+      <span class="of">of {offered.length} to choose from</span>
     </div>
     {#if outrunsRoll}
       <p class="warn">
@@ -276,27 +321,35 @@
       <span class="lh-hint">Tick the ones you want</span>
     </div>
     <ul class="opts">
-      {#each pack?.challenges ?? [] as c (c.id)}
-        {#if allowVideo || !c.video}
-          <li>
-            <button class="opt" class:on={chosenIds.has(c.id)} on:click={() => toggle(c)}>
-              <span class="obox" aria-hidden="true">{chosenIds.has(c.id) ? '✓' : ''}</span>
-              <span class="otext">{c.text}</span>
-              {#if c.video}<span class="ovid" title="Asks for a short clip">clip</span>{/if}
-            </button>
-          </li>
-        {/if}
+      {#each offered as c (c.id)}
+        <li>
+          <button class="opt" class:on={chosenIds.has(c.id)} on:click={() => toggle(c)}>
+            <span class="obox" aria-hidden="true">{chosenIds.has(c.id) ? '✓' : ''}</span>
+            <span class="otext">{c.text}</span>
+            {#if c.video}<span class="ovid" title="Asks for a short clip">clip</span>{/if}
+          </button>
+        </li>
       {/each}
-      {#each (current?.items ?? []).filter((i) => /^own-\d+$/.test(i.id)) as c (c.id)}
+      {#each extras as c (c.id)}
         <li>
           <button class="opt on own" on:click={() => toggle(c)}>
             <span class="obox" aria-hidden="true">✓</span>
             <span class="otext">{c.text}</span>
-            <span class="ovid">yours</span>
+            <span class="ovid">{extraTag(c)}</span>
           </button>
         </li>
       {/each}
     </ul>
+    {#if strandedClips}
+      <p class="warn">
+        {strandedClips === 1
+          ? 'One trick on this card asks for a clip.'
+          : `${strandedClips} tricks on this card ask for a clip.`}
+        Tricks are photos now, so shooting a clip won’t tick {strandedClips === 1 ? 'it' : 'them'} off.
+        Left on the card in case you’ve already printed it — select {strandedClips === 1 ? 'it' : 'them'}
+        above to take {strandedClips === 1 ? 'it' : 'them'} off.
+      </p>
+    {/if}
 
     <div class="ctl">
       <label class="fld" for="m-own">Write your own</label>
@@ -352,10 +405,22 @@
   /* On the selected tab the accent is already the background, so the badge inverts to stay visible. */
   .tab.on .tcount { background: var(--surface); color: var(--text); }
 
-  .ctl { display: flex; align-items: end; gap: 8px; margin-bottom: 10px; }
-  .ctl .fld { flex: 1; margin: 0 0 5px; }
-  .ctl input { flex: none; width: 92px; }
-  .ctl input#m-own { flex: 1; width: auto; }
+  /* The label takes its own full-width row and the controls sit under it, which is how every other
+     field in this sheet already reads. It used to be a flex ITEM beside the input, and the row then
+     could not shrink: an <input> has an intrinsic min-width (~210px here) and min-width:auto stops a
+     flex item going under it, so label + box + Add measured a fixed ~354px whatever the viewport
+     was. Measured: that hangs past the sheet’s own edge at 360px and off the screen entirely below
+     ~344px — sooner still on a device whose default input font is a shade larger, which is what the
+     host was looking at. The label got whatever was left, which was 47px for a 14-character phrase.
+     flex-basis 100% on the label plus min-width:0 on the field is the whole fix, and it is not
+     behind a media query because the stacked version reads better at every width. */
+  .ctl { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; margin-bottom: 10px; }
+  .ctl .fld { flex: 1 0 100%; margin: 0 0 1px; }
+  /* Fields take the row by default. min-width:0 because a flex item will not shrink below its
+     intrinsic input width otherwise, which is the other half of how Add got pushed off screen. */
+  .ctl input { flex: 1 1 160px; width: auto; min-width: 0; }
+  /* Only the count is a fixed narrow box — it holds two digits. */
+  .ctl input#m-count { flex: none; width: 92px; }
   .of { flex: none; font-size: .78rem; color: var(--text-muted); padding-bottom: 10px; }
 
   .quick { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 4px 0 16px; }
@@ -367,7 +432,10 @@
   .chip:hover { border-color: var(--accent); }
   .chip.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); font-weight: 700; }
 
-  .listhead { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 7px;
+  /* Wraps rather than squashing: at 360px "Every trick Hens / bachelorette offers" and the hint
+     cannot share a line. */
+  .listhead { display: flex; flex-wrap: wrap; gap: 2px 10px; justify-content: space-between;
+    align-items: baseline; margin-bottom: 7px;
     font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
   .lh-hint { text-transform: none; letter-spacing: 0; }
   /* Scrolls rather than growing: 24 options plus the host's own would push Save off a phone. */
