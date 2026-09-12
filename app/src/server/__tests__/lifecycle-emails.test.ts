@@ -35,12 +35,27 @@ describe('the post-event email', () => {
     assert.ok(html.includes('All 84 of them'), 'did not say how many photos');
   });
 
-  test('leads with the deadline, because that is the useful part', () => {
-    const html = surveyEmail(view({ slideshow })).html;
+  test('always states the date the photos go', () => {
     // Derived, not spelled out: a hard-coded "31 October" passes here and fails on a machine an
     // hour the other side of UTC, which is a flake rather than a finding.
-    const expected = new Date(slideshow.photosUntil).toLocaleDateString('en-AU', { day: 'numeric', month: 'long' });
+    const soon = Date.now() + 4 * 86_400_000;
+    const html = surveyEmail(view({ slideshow: { ...slideshow, photosUntil: soon } })).html;
+    const expected = new Date(soon).toLocaleDateString('en-AU', { day: 'numeric', month: 'long' });
     assert.ok(html.includes(expected), `no date the photos go (expected ${expected})`);
+  });
+
+  test('hurries the host only when the photos really are about to go', () => {
+    // A week's retention: the survey lands with about four days left, so the nudge is honest.
+    const html = surveyEmail(view({ slideshow: { ...slideshow, photosUntil: Date.now() + 4 * 86_400_000 } })).html;
+    assert.ok(/worth doing before they go/i.test(html), 'did not nudge with four days left');
+  });
+
+  test('does not invent urgency on a month of retention', () => {
+    // Half of real events keep their photos a month. "Make it before then" with 27 days left is a
+    // lie the host notices, and then discounts everything else we tell them.
+    const html = surveyEmail(view({ slideshow: { ...slideshow, photosUntil: Date.now() + 27 * 86_400_000 } })).html;
+    assert.ok(/no rush/i.test(html), 'pressured a host who has a month');
+    assert.ok(!/worth doing before they go/i.test(html), 'still nudged a host who has a month');
   });
 
   test('names the event the photos came from, not the couple', () => {

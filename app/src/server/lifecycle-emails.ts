@@ -208,6 +208,18 @@ export function activationNudgeEmail(v: { ownerName: string; createUrl: string; 
   return { subject, preheader, html: shell(preheader, inner, v.unsubUrl) };
 }
 
+// Retention is the host's choice, not a constant: about half of real events keep their photos a
+// week and about half keep them a month. Reading the survey with 27 days left, "so make it before
+// then" is invented urgency and the host learns to discount what we tell them — so the nudge is
+// only added when the deadline is actually near. The date itself is always stated, because it is
+// useful either way.
+function slideshowDeadline(photosUntil: number, now = Date.now()): string {
+  const on = new Date(photosUntil).toLocaleDateString('en-AU', { day: 'numeric', month: 'long' });
+  const daysLeft = Math.ceil((photosUntil - now) / 86_400_000);
+  if (daysLeft <= 10) return `The photos are here until ${on} — worth doing before they go.`;
+  return `Your photos are here until ${on}, so there's no rush.`;
+}
+
 // ── 3. POST-EVENT SURVEY (3 days after) ──────────────────────────────────────
 export function surveyEmail(v: LifecycleView): { subject: string; preheader: string; html: string } {
   // Thank-you discount for their NEXT event. Rendered only when one was minted (paid, unrefunded).
@@ -230,14 +242,14 @@ export function surveyEmail(v: LifecycleView): { subject: string; preheader: str
   const slideshowBlock = v.slideshow
     ? `<div style="padding:22px 0 0">
          <div style="border-top:1px solid ${C.line};padding-top:20px">
-           <div style="font-size:13px;color:${C.subtle};text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Before they go</div>
+           <div style="font-size:13px;color:${C.subtle};text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">One more thing</div>
            <p style="margin:0 0 6px;font-size:15px;line-height:1.6;color:${C.ink}">
              Did you know Snapdini can turn the photos from ${esc(v.eventName)} into a
              <b style="color:${C.head}">slideshow</b>? All ${v.slideshow.photoCount} of them, set to music,
              as one video you can keep and send on.
            </p>
            <p style="margin:0;font-size:13px;line-height:1.6;color:${C.subtle}">
-             The photos are here until ${new Date(v.slideshow.photosUntil).toLocaleDateString('en-AU', { day: 'numeric', month: 'long' })}, so make it before then.
+             ${slideshowDeadline(v.slideshow.photosUntil)}
            </p>
            ${btn('Make the slideshow', v.slideshow.url, true)}
          </div>
