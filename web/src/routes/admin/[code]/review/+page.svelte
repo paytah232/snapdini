@@ -581,7 +581,7 @@
       {/if}
       <!-- svelte-ignore a11y-autofocus -->
       <textarea class="capm-text" rows="2" maxlength={CAPTION_MAX} bind:value={captionDraft} autofocus
-                placeholder="Something cute, or silly…"></textarea>
+                placeholder="Describe the scene…"></textarea>
       <div class="capm-row">
         <span class="capm-left">{CAPTION_MAX - captionDraft.length}</span>
         {#if captionFor.caption}

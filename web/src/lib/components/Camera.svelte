@@ -471,6 +471,9 @@
   const benchKey = (joinCode: string) => `snap_vidbench_${joinCode}`;
   // Keep localStorage from growing an entry per event forever.
   const BENCH_PRUNE_MS = 90 * 24 * 3600 * 1000;
+  // Set when the guest says "no thanks" — never prompt on this device again. They can still run the
+  // check on demand from camera settings, which is where someone who changes their mind will look.
+  const BENCH_NEVER = 'snap_vidbench_never';
   function pruneBenchmarks() {
     try {
       // The old global key from when this was once-per-device. The chosen quality already persists
@@ -678,19 +681,15 @@
     heldOpen = false;
     clearTimeout(holdTimer);
     holdTimer = setTimeout(() => {
-      if (cameras.length > 1) { heldOpen = true; settingsOpen = true; lensFocus = true; }
+      if (cameras.length > 1) { heldOpen = true; lensSheet = true; }
     }, HOLD_MS);
   }
   function holdEnd() { clearTimeout(holdTimer); }
   function flipTap() { if (heldOpen) { heldOpen = false; return; } flip(); }
-  // Set when the picker was reached by holding, so it can be scrolled to rather than hunted for.
-  let lensFocus = false;
-  let lensRow: HTMLDivElement | undefined;
-  // Wait for the modal to exist before scrolling to the row inside it.
-  $: if (settingsOpen && lensFocus && lensRow) {
-    lensFocus = false;
-    tick().then(() => lensRow?.scrollIntoView({ block: 'center', behavior: 'smooth' }));
-  }
+  // Holding opens a sheet with ONLY the lenses on it. Sending the guest into the full settings menu
+  // to pick a camera is the long way round — the point of the gesture is that it is the short one.
+  let lensSheet = false;
+  async function chooseLens(id: string) { lensSheet = false; await pickCamera(id); }
 
   // Drive the hardware torch on/off (where supported). Used as a flash pulse for photos and a
   // continuous light for video.
@@ -718,9 +717,13 @@
     if (v && videoMode) {
       try {
         pruneBenchmarks();
+        // "No thanks" is a decision about this DEVICE, not about this party. Keeping it per-event
+        // meant anyone who joins a second event — or who is trying the demo repeatedly — gets asked
+        // again every time, which is how a helpful offer turns into something in the way.
+        const never = localStorage.getItem(BENCH_NEVER) === '1';
         const raw = ev ? localStorage.getItem(benchKey(ev.joinCode)) : null;
         benchStored = !!raw;
-        if (!raw) benchPrompt = true;
+        if (!raw && !never) benchPrompt = true;
       } catch { /* ignore */ }
     }
   }
@@ -1544,6 +1547,10 @@
               {#if showShapes}<div class="ei-row"><span class="ei-k">Photo shapes</span><span class="chips">{#each shapeLabels as s}<span class="chip">{s}</span>{/each}</span></div>{/if}
               {#if videoMaxSecs > 0}<div class="ei-row"><span class="ei-k">Video</span><span class="chip vid">🎬 clips up to {videoMaxSecs}s</span></div>{/if}
               <div class="ei-row"><span class="ei-k">Reveal</span><span>{ev.revealMode === 'at_end' ? 'When the event ends' : 'Live as you shoot'}</span></div>
+              <!-- How many, never which. The tricks are the surprise, and this screen is public. -->
+              {#if (ev.challengeCount ?? 0) > 0}
+                <div class="ei-row"><span class="ei-k">Trick list</span><span class="chip trick">🎩 {ev.challengeCount} to pull off</span></div>
+              {/if}
             </div>
           </details>
         {/if}
@@ -1592,7 +1599,9 @@
                  gallery look like before they are offered the way out. "Home" was ambiguous — it
                  read as "my dashboard" as easily as "leave" — so the exit says what it does. -->
             {#if demoHostHref}<a class="home-btn" href={demoHostHref} aria-label="See the host's view of this demo">🎛 Host view</a>{/if}
-            <a class="home-btn" href={demoGalleryHref} aria-label="See the gallery for this demo">🖼 Gallery</a>
+            <!-- "Gallery" alone collided with the guest's OWN roll button at the bottom left, which
+                 is also a 🖼. Name this one for whose photos it holds. -->
+            <a class="home-btn" href={demoGalleryHref} aria-label="See the whole event's gallery, everyone's photos">🖼 Event gallery</a>
             <a class="home-btn quiet" href="/" aria-label="Leave the demo and go back to the Snapdini home page">✕ Exit demo</a>
           </div>
         {:else}
@@ -1725,7 +1734,7 @@
             </div>
 
             {#if cameras.length > 1}
-              <div class="sm-row col" bind:this={lensRow}>
+              <div class="sm-row col">
                 <span class="sm-labelwrap">
                   <span class="sm-label">Camera</span>
                   <span class="sm-desc">Switch between the cameras on this device.{#if recording} Stop recording to change.{/if}</span>
@@ -1751,7 +1760,7 @@
                 <!-- The benchmark used to exist ONLY as a one-time prompt keyed on a localStorage
                      flag, so once it had been run or skipped there was no way back to it on any
                      event, ever. It measures the device, so re-running is the useful thing. -->
-                <button class="sm-link" on:click={() => { settingsOpen = false; benchResult = null; void runVideoBenchmark(); }}>
+                <button class="sm-link" on:click={() => { settingsOpen = false; benchResult = null; try { localStorage.removeItem(BENCH_NEVER); } catch { /* ignore */ } void runVideoBenchmark(); }}>
                   {benchStored ? 'Re-check my camera' : 'Check my camera'}
                 </button>
               </div>
@@ -1848,6 +1857,21 @@
     <!-- The phone-camera fallback already existed, but only inside the settings sheet. Someone
          whose clip just stuttered is not going to go looking for it, so put it in front of them
          at the moment it becomes relevant. -->
+    {#if lensSheet}
+      <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
+      <div class="lens-back" on:click|self={() => (lensSheet = false)} role="dialog" aria-modal="true" aria-label="Choose a lens">
+        <div class="lens-sheet">
+          <div class="lens-head">Choose a lens</div>
+          {#each cameras as c}
+            <button class="lens-opt" class:on={c.id === deviceId} on:click={() => chooseLens(c.id)}>
+              <span class="lens-name">{c.label}</span>
+              {#if c.id === deviceId}<span class="lens-now" aria-label="Currently in use">●</span>{/if}
+            </button>
+          {/each}
+          <button class="lens-cancel" on:click={() => (lensSheet = false)}>Cancel</button>
+        </div>
+      </div>
+    {/if}
     {#if benchPrompt || benchRunning || benchResult}
       <div class="bench-panel">
         {#if benchRunning}
@@ -1887,7 +1911,7 @@
           <div class="bench-title">Check what your phone can record?</div>
           <div class="bench-sub">A few seconds. Phones vary a lot, and it's better to find out now than halfway through a clip.</div>
           <div class="bench-actions">
-            <button class="btn ghost sm" on:click={() => { benchPrompt = false; try { if (ev) localStorage.setItem(benchKey(ev.joinCode), JSON.stringify({ skipped: true, at: Date.now() })); } catch { /* ignore */ } }}>Skip</button>
+            <button class="btn ghost sm" on:click={() => { benchPrompt = false; try { if (ev) localStorage.setItem(benchKey(ev.joinCode), JSON.stringify({ skipped: true, at: Date.now() })); localStorage.setItem(BENCH_NEVER, '1'); } catch { /* ignore */ } }}>Skip — don’t ask again</button>
             <button class="btn primary sm" on:click={() => { benchPrompt = false; void runVideoBenchmark(); }}>Check my camera</button>
           </div>
         {/if}
@@ -1956,7 +1980,6 @@
           <div class="pcell-wrap">
             <button class="pcell" on:click={() => { lbIndex = i; lbOpen = true; }}>
               {#if p.mediaType === 'video'}<img src={p.thumbUrl} alt="" loading="lazy" on:error={hidePoster} /><span class="play">▶</span>{:else}<img src={p.thumbUrl ?? p.url} alt="" loading="lazy" on:error={(e) => imgFallback(e, p.url)} />{/if}
-              <span class="snapno">#{shownPhotos.length - i}</span>
             </button>
             {#if canDelete(p, nowTick) || confirmingDeleteId === p.id}
               <button class="pcell-bin" class:confirm={confirmingDeleteId === p.id}
@@ -1974,17 +1997,22 @@
                  underneath in smaller type so captioning a trick shot never costs the attribution.
                  Own photos only — this roll holds nothing else, but the guard is the rule, not the
                  filter that happens to be upstream of it. -->
-            {#if p.isOwn}
-              <button class="capstrip" class:blank={!p.caption} on:click|stopPropagation={() => openCaption(p)}
-                      aria-label={p.caption ? `Edit your caption: ${p.caption}` : 'Add a caption to this photo'}>
-                {#if p.caption}
-                  <span class="captext">{p.caption}</span>
-                {:else}
-                  <span class="capadd" aria-hidden="true">💬</span>
-                {/if}
-                {#if p.challenge}<span class="capmission">{p.challenge}</span>{/if}
-              </button>
-            {/if}
+            <div class="pmeta">
+              <span class="pno">#{shownPhotos.length - i}</span>
+              {#if p.isOwn}
+                <button class="capstrip" class:blank={!p.caption} on:click|stopPropagation={() => openCaption(p)}
+                        aria-label={p.caption ? `Edit your caption: ${p.caption}` : 'Add a caption to this photo'}>
+                  {#if p.caption}
+                    <span class="captext">{p.caption}</span>
+                  {:else}
+                    <span class="capadd">💬 Add a caption</span>
+                  {/if}
+                  {#if p.challenge}<span class="capmission">🎩 {p.challenge}</span>{/if}
+                </button>
+              {:else if p.challenge}
+                <span class="capmission standalone">🎩 {p.challenge}</span>
+              {/if}
+            </div>
           </div>
         {/each}
       </div>
@@ -2053,7 +2081,7 @@
         {/if}
         <!-- svelte-ignore a11y-autofocus -->
         <textarea class="capm-text" rows="2" maxlength={CAPTION_MAX} bind:value={captionDraft} autofocus
-                  placeholder="Something cute, or silly…"></textarea>
+                  placeholder="Describe the scene…"></textarea>
         <div class="capm-row">
           <span class="capm-left">{CAPTION_MAX - captionDraft.length}</span>
           {#if captionFor.caption}
@@ -2238,6 +2266,19 @@
   .round { width: 52px; height: 52px; border-radius: 50%; border: none; background: rgba(255,255,255,0.15); color: #fff; font-size: 1.3rem; cursor: pointer; position: relative; }
   .badge { position: absolute; top: -4px; right: -4px; background: var(--accent); color: var(--accent-ink, #111); border-radius: 999px; min-width: 18px; height: 18px; font-size: 0.65rem; font-weight: bold; display: flex; align-items: center; justify-content: center; padding: 0 4px; }
   .badge.error { background: #c0392b; color: #fff; }
+  .lens-back { position: absolute; inset: 0; z-index: 12; display: flex; align-items: flex-end;
+    justify-content: center; padding: 0 12px 96px; pointer-events: auto; background: rgba(0,0,0,.34); }
+  .lens-sheet { width: min(340px, 92vw); display: flex; flex-direction: column; gap: 6px; padding: 12px;
+    border-radius: 16px; color: #fff; background: rgba(0,0,0,.86); border: 1px solid rgba(255,255,255,.22);
+    backdrop-filter: blur(6px); }
+  .lens-head { font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; opacity: .72; padding: 2px 6px 6px; }
+  .lens-opt { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
+    padding: 12px 14px; border-radius: 11px; border: 1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.06);
+    color: #fff; font: inherit; font-size: .92rem; cursor: pointer; text-align: left; }
+  .lens-opt.on { border-color: rgba(240,180,41,.75); background: rgba(240,180,41,.14); }
+  .lens-now { color: #f0b429; font-size: .7rem; }
+  .lens-cancel { margin-top: 4px; padding: 11px 14px; border-radius: 11px; border: 1px solid rgba(255,255,255,.16);
+    background: transparent; color: #fff; font: inherit; font-size: .9rem; cursor: pointer; }
   .bench-panel {
     position: absolute; left: 50%; bottom: 190px; transform: translateX(-50%); z-index: 8;
     pointer-events: auto; display: flex; flex-direction: column; align-items: center; gap: 10px;
@@ -2332,36 +2373,35 @@
     background: color-mix(in srgb, var(--accent) 14%, var(--surface)); border: 1px solid var(--border);
     border-radius: var(--radius-sm); color: var(--text); font-size: 0.85rem; }
   .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 64px 24px; text-align: center; }
-  .pgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; padding: 3px; }
+  /* The roll is a CARD grid: photo on top, number and caption underneath in flow. The caption used
+     to be absolutely positioned over the bottom of the image, which meant it sat on top of the
+     picture and, with anything longer than a few words, ran past it. Text that describes a photo
+     belongs beside the photo, not on it — and it also lets the cards breathe, which is what the
+     galleries people compare us to actually look like. Two-up on a phone rather than three: a
+     140px tile cannot hold a sentence. */
+  .pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; padding: 10px; }
+  .pcell-wrap { position: relative; display: flex; flex-direction: column; line-height: normal;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
   .pcell { position: relative; aspect-ratio: 1; border: none; padding: 0; cursor: pointer; background: var(--surface-2); }
   .pcell img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .play { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 1.5rem; text-shadow: 0 1px 4px #000; }
-  .snapno { position: absolute; top: 5px; left: 5px; min-width: 18px; padding: 1px 5px; border-radius: 9px;
-    background: rgba(0,0,0,0.6); color: #fff; font-size: 0.7rem; font-weight: 700; line-height: 1.4; pointer-events: none; }
 
-  /* ── Captions ───────────────────────────────────────────────────────────── */
-  /* Overlaid on the bottom of the tile rather than placed under it: the roll is a flush 3-across
-     grid and a text row beneath each tile would push the grid into a list. A sibling of .pcell, not
-     a child — a <button> inside a <button> is invalid and behaves unpredictably on touch, the same
-     reason the bin sits outside it. .pcell-wrap is line-height:0 for the image, so text in here has
-     to set its own. */
-  .capstrip {
-    position: absolute; left: 0; right: 0; bottom: 0; z-index: 1;
-    display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
-    padding: 12px 6px 5px; border: none; cursor: pointer; text-align: left;
-    background: linear-gradient(to top, rgba(0,0,0,.72), rgba(0,0,0,0));
-    color: #fff; line-height: 1.25;
-  }
-  /* Nothing written yet: a small speech bubble in the corner, not a caption-shaped placeholder
-     over every photo. The roll should read as photos. */
-  .capstrip.blank { background: none; padding: 6px; right: auto; }
-  .capstrip.blank .capadd { font-size: .8rem; opacity: .75; text-shadow: 0 1px 3px #000; }
-  .captext { font-size: .7rem; font-weight: 700; text-shadow: 0 1px 3px #000;
+  /* ── Card foot: number, caption, and the trick it was for ───────────────── */
+  .pmeta { display: flex; flex-direction: column; gap: 3px; padding: 7px 9px 9px; min-width: 0; }
+  .pno { font-size: .66rem; font-weight: 700; color: var(--text-muted); letter-spacing: .03em; }
+  .capstrip { display: flex; flex-direction: column; gap: 2px; width: 100%; min-width: 0;
+    padding: 0; border: none; background: none; color: var(--text); font: inherit;
+    text-align: left; cursor: pointer; }
+  /* Two lines, then ellipsis: a long caption must not make one card twice the height of its
+     neighbours. The full text is in the lightbox and in the editor. */
+  .captext { font-size: .76rem; line-height: 1.35; color: var(--text);
     display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
-    overflow: hidden; word-break: break-word; }
-  /* The trick, demoted: still there, visibly secondary to whatever the guest wrote. */
-  .capmission { font-size: .62rem; opacity: .8; text-shadow: 0 1px 3px #000;
-    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    overflow: hidden; overflow-wrap: anywhere; }
+  .capstrip.blank .capadd { font-size: .72rem; color: var(--text-muted); }
+  .capmission { font-size: .64rem; line-height: 1.3; color: var(--text-muted);
+    display: -webkit-box; -webkit-line-clamp: 1; line-clamp: 1; -webkit-box-orient: vertical;
+    overflow: hidden; overflow-wrap: anywhere; }
+  .capmission.standalone { display: block; }
   .capback { position: fixed; inset: 0; z-index: 320; background: rgba(0,0,0,0.6);
     display: flex; align-items: center; justify-content: center; padding: 20px; }
   .capmodal { width: 100%; max-width: 340px; background: rgba(20,20,20,0.97);

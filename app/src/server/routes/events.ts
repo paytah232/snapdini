@@ -416,6 +416,12 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
     videoSeconds:   billingEnabled ? event.videoSeconds : GLOBAL_VIDEO_SECONDS,
     startsAt:       event.startsAt,
     expiresAt:      event.expiresAt,
+    // How MANY tricks are on a card, never which ones. A guest deciding whether to join wants to
+    // know the game exists and roughly how big it is; the tricks themselves are the surprise, and
+    // this endpoint is public — anyone with a join code could otherwise read the whole list before
+    // the event. Sets can differ in length, so this is the first card's count, which is
+    // representative rather than a promise.
+    challengeCount: readSets(event.challenges)[0]?.items.length ?? 0,
     isDemo:         !event.ownerUserId && event.name === DEMO_NAME,
     isUpcoming:     now < event.startsAt,
     isExpired:      now > event.expiresAt,

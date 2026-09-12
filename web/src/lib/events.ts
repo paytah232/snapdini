@@ -54,6 +54,9 @@ export interface PublicEvent {
    *  simply falls back to the previous time check. */
   canReschedule?: boolean; rescheduleUntil?: number;
   allowDownloads: boolean; noFlash: boolean; theme: EventTheme | null; participantCount: number; photoCount: number;
+  /** How many tricks are on a card — never WHICH ones. This payload is public: a join code
+   *  must not hand someone the whole list before the event. 0 when the host set none. */
+  challengeCount?: number;
 }
 
 export interface MyEvent {
