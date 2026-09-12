@@ -2,6 +2,8 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { lensName, lensFacing } from '$lib/lensName';
   import { tileAspect } from '$lib/ui';
+  import { aspectValue, cropRect, shapeDelivered } from '$lib/frameShape';
+  import { demoLinks } from '$lib/demo';
   import { goto, replaceState } from '$app/navigation';
   // Aliased: this component already has a `track` for the MediaStreamTrack.
   import { track as trackEvent } from '$lib/analytics';
@@ -37,11 +39,16 @@
   $: pendingUploads = queue.filter((q) => q.status === 'pending' || q.status === 'uploading').length;
   $: photosRemaining = Math.max(0, serverRemaining - pendingUploads);
 
-  // Demo showcase: link into the host + gallery views (organizer code stashed at demo start).
-  let demoOrg = '';
-  $: if (ev?.isDemo && typeof localStorage !== 'undefined') demoOrg = localStorage.getItem('demo_org_' + ev.joinCode) || '';
-  $: demoHostHref = demoOrg && ev ? `/admin/${ev.joinCode}#${encodeURIComponent(demoOrg)}` : '';
-  $: demoGalleryHref = ev ? `/gallery/${ev.joinCode}` : '';
+  // Demo showcase: link into the host + gallery views. Shared with the gallery's own nav through
+  // demoLinks(), so the two surfaces cannot drift on where the links point or on how the organizer
+  // code is found. The ORDER inside it is the fix that matters here: the event payload first,
+  // localStorage only as a fallback for a cached older response. The stash was written by whichever
+  // device started the demo, and the ordinary path is starting it on a laptop and scanning the QR
+  // with a PHONE — which has never seen that key, and so was offered no host view at all. The host
+  // view is half of what the demo is selling.
+  $: demoNav = demoLinks(ev?.joinCode, ev?.isDemo ? ev.organizerCode : undefined);
+  $: demoHostHref = ev?.isDemo ? demoNav.host : '';
+  $: demoGalleryHref = ev ? demoNav.gallery : '';
   let joinName = '';
   let joinEmail = '';
   let joining = false;
@@ -165,6 +172,17 @@
   // aspect
   let allowedAspects: string[] = ['1:1'];
   let aspect = '1:1';
+  // Is the CAMERA handing the recorder frames already cropped to `aspect` right now? Set only from
+  // what the camera returned (applyRecordShape), never from what it was asked for. It is what
+  // re-enables the viewfinder's framing in video, and framing to a crop that is not happening is
+  // precisely the bug that took the framing away to begin with.
+  let videoShapeLive = false;
+  // Whether the lens currently attached will crop at all. Tracks reality rather than latching:
+  // a phone's lenses do not all have the same capture pipeline, so a refusal by one is not a
+  // verdict on the next. False puts the control away in video — shapes are a photo setting again
+  // there, exactly as before, because a control that cannot do what it says is worse than none.
+  let videoShapeSupported = true;
+  let videoShapeToldOnce = false;   // said once per visit, not once per tap
 
   // upload queue
   interface QueueItem { id: string; blob: Blob; mediaType: 'photo' | 'video'; source: 'capture' | 'upload'; ext: string; status: 'pending' | 'uploading' | 'done' | 'error'; error?: string; progress?: number; size: number; durationSecs?: number; w?: number; h?: number; retries?: number; uploadId?: string; challengeId?: string; doneChunks?: number[]; }
@@ -452,6 +470,10 @@
     if (!permissionReported) { permissionReported = true; trackEvent('camera_permission_granted', undefined, ev?.joinCode); }
     matchRecBitrate();   // size the recorder to whatever the camera actually gave us
     applyViewfinderAspect();
+    // A fresh track carries no constraints of its own, so every re-acquire — a flip, a lens pick, a
+    // quality change, each leg of the capability check — has to ask for the shape again, and verify
+    // the answer again. Cheap: the call itself measures ~1ms.
+    await applyRecordShape();
   }
 
   // Photos: request the camera's max (soft `ideal` hints — a 4K/1080p sensor returns its best).
@@ -836,6 +858,11 @@
     // which would make ticking any one of them arbitrary.
     if (v) { armed = null; missionsOpen = false; }
     videoMode = v;
+    // Into video, assume nothing: applyRecordShape sets this from what the camera actually returns
+    // once the stream is up. Starting from false means the viewfinder cannot frame to a shape that
+    // has not been proven yet — including in 'phone' quality, which returns below without ever
+    // acquiring a stream because the recording happens in an app we do not control at all.
+    if (v) videoShapeLive = false;
     applyViewfinderAspect();   // the framing differs by mode; do not make them wait for a re-attach
     // In phone mode, switching to video means "open the phone's camera" — that is the whole point
     // of picking it, and re-acquiring a browser stream we are not going to record from is waste.
@@ -950,14 +977,6 @@
     else el?.requestFullscreen?.().catch(() => {});
   }
 
-  function aspectValue(a: string): number | null { if (a === 'full') return null; const [w, h] = a.split(':').map(Number); return w / h; }
-  function cropRect(vw: number, vh: number, ratio: number | null) {
-    if (ratio === null) return { sx: 0, sy: 0, sw: vw, sh: vh };
-    const vr = vw / vh;
-    let sw, sh;
-    if (vr > ratio) { sh = vh; sw = vh * ratio; } else { sw = vw; sh = vw / ratio; }
-    return { sx: (vw - sw) / 2, sy: (vh - sh) / 2, sw, sh };
-  }
   function applyViewfinderAspect() {
     if (!videoEl) return;
     const s = videoEl.style;
@@ -965,22 +984,106 @@
     // are pinned to full width and centre-cropped vertically (taller ratios overflow
     // and are clipped by the viewfinder, shorter ones letterbox) — matching capture.
     //
-    // VIDEO IS NEVER CROPPED. Only photos go through cropRect; MediaRecorder records the stream as
-    // it comes off the sensor. Framing the viewfinder to a shape while recording therefore promises
-    // a crop that never happens — a guest lines a shot up in a square and gets a wide clip back.
-    // The frame shape is a PHOTO setting (the control says so), so video mode shows the frame that
-    // will actually be recorded.
+    // VIDEO IS FRAMED ONLY ONCE THE CROP IS REAL. A photo is always cropped (cropRect, at the
+    // shutter). A clip is cropped by the CAMERA, and only where the browser honours the aspectRatio
+    // constraint — applyRecordShape asks, reads back what turned up, and sets videoShapeLive from
+    // that. Where it did not take, this stays unframed and shows the frame that will actually be
+    // recorded, which is what a guest lining a shot up is entitled to. The framing is drawn from
+    // the verified fact and never from the request: promising a crop nothing performs is the bug
+    // this whole mechanism exists to keep buried.
     s.objectFit = 'cover';
     s.width = '100%';
     s.maxWidth = '100%';
     s.maxHeight = '';
-    if (videoMode || aspect === 'full') { s.aspectRatio = ''; s.height = '100%'; }
+    const framed = aspect !== 'full' && (!videoMode || videoShapeLive);
+    if (!framed) { s.aspectRatio = ''; s.height = '100%'; }
     else { s.aspectRatio = aspect.replace(':', ' / '); s.height = 'auto'; }
   }
-  function cycleAspect() {
+
+  /** Make the CAMERA deliver the chosen shape, so a clip is genuinely cropped to it.
+   *
+   *  Photos are cropped into a canvas at capture. A clip cannot be: MediaRecorder records whatever
+   *  the track hands it, frame for frame. So crop the TRACK instead — `aspectRatio` is a real
+   *  constraint, and where a browser honours it the frames arrive already centre-cropped, with no
+   *  canvas in the path, no second encoder on a phone that is already struggling to run one, and no
+   *  re-encode of the original on the server. Measured on Chromium against a live track: the call
+   *  returns in ~1ms, a 1920×1080 stream becomes 1080×1080, the recorded FILE comes out 1080×1080,
+   *  and the preview frame rate does not move. The crop is a true centre crop, verified against a
+   *  bar pattern — the outer bars are gone, not squeezed in.
+   *
+   *  Nothing here is taken on trust. We ask, then read `getSettings()` back, because a browser may
+   *  honour the constraint, refuse it outright, or accept it and quietly do nothing — and on a
+   *  phone there is no way to know in advance which. Only a ratio that actually arrived turns the
+   *  framing on.
+   *
+   *  Deliberately NOT folded into the getUserMedia constraints in startCamera(): an
+   *  OverconstrainedError there drops into the retry chain and costs the guest their chosen lens,
+   *  and on the last rung their facing. Applied to a live track, a refusal is caught right here and
+   *  changes nothing about the stream they are already looking through.
+   *
+   *  The constraint set is rebuilt IN FULL every time, because applyConstraints REPLACES a track's
+   *  constraints rather than merging into them: leave the resolution ceiling or the frame rate out
+   *  and they go with it. That same replacement is what clears a previous crop back off for 'Full'.
+   */
+  async function applyRecordShape(): Promise<void> {
+    // A photo has its own crop and wants the sensor's biggest frame, so this is a video-mode affair
+    // only. Recording is excluded because resizing a track mid-clip is a resolution change the
+    // recorder never agreed to.
+    if (!videoMode || recording || !track) { videoShapeLive = false; return; }
+    const target = aspectValue(aspect);
+    const q = VQ_RES[videoQuality === 'phone' ? 'standard' : videoQuality];
+    const base: MediaTrackConstraints = { width: { ideal: q.w }, height: { ideal: q.h }, frameRate: { ideal: 30 } };
+    // 'Full' is not a shape to ask for, it is the absence of one — apply the bare set so any crop
+    // left on the track by a previous choice comes off again.
+    if (target === null) {
+      try { await track.applyConstraints(base); } catch { /* it keeps what it has, which is uncropped either way */ }
+      videoShapeLive = false;
+      matchRecBitrate(); applyViewfinderAspect();
+      return;
+    }
+    // `exact` first: it is the only form a browser must either honour or refuse, so a success is
+    // worth something. `ideal` second, for stacks that reject exact but will still crop when asked
+    // nicely — and whose "success" therefore has to be checked rather than believed.
+    for (const aspectRatio of [{ exact: target }, { ideal: target }]) {
+      try { await track.applyConstraints({ ...base, aspectRatio }); } catch { continue; }
+      const got = track.getSettings?.() ?? {};
+      if (shapeDelivered(got.width, got.height, target)) {
+        videoShapeLive = true;
+        videoShapeSupported = true;
+        matchRecBitrate();       // a different-sized frame: the bitrate was sized for the old one
+        applyViewfinderAspect();
+        return;
+      }
+    }
+    // The camera will not do it. Put the track back to a plain frame so that what is recorded and
+    // what is shown are at least the same thing, and stop offering a control that cannot deliver.
+    try { await track.applyConstraints(base); } catch { /* ignore */ }
+    videoShapeLive = false;
+    noteShapeRefused();
+    matchRecBitrate();
+    applyViewfinderAspect();
+  }
+
+  // Said once, and only to a guest who asked for something we could not give them. The report is
+  // also the only way we ever learn whether real phones honour the constraint: a headless browser's
+  // fake camera says nothing about a Samsung, and this is the field evidence that would.
+  function noteShapeRefused() {
+    videoShapeSupported = false;
+    if (videoShapeToldOnce) return;
+    videoShapeToldOnce = true;
+    showToast('This camera records full frame — clips won’t be cropped to a shape.');
+    reportClientError(`camera: aspectRatio not honoured for video (${aspect})`, 'camera', ev?.joinCode);
+  }
+
+  async function cycleAspect() {
     const i = allowedAspects.indexOf(aspect);
     aspect = allowedAspects[(i + 1) % allowedAspects.length];
+    // A photo crops in the canvas, so the new framing is true the instant it is picked. In video the
+    // camera has to agree first — drop the framing until applyRecordShape has read the answer back,
+    // rather than flicking to the new shape and possibly away from it again.
+    if (videoMode) videoShapeLive = false;
     applyViewfinderAspect();
+    await applyRecordShape();
   }
 
   async function capturePhoto() {
@@ -1841,9 +1944,13 @@
       <div class="rail">
         {#if facing === 'user'}<button class="ctrl" on:click={() => (screenFlash = !screenFlash)} class:active={screenFlash} title="Flash" aria-label="Flash">⚡</button>{/if}
         {#if torchSupported && !ev?.noFlash}<button class="ctrl" on:click={() => (flashArmed = !flashArmed)} class:active={flashArmed} title="Flash" aria-label="Flash">⚡</button>{/if}
-        <!-- Photo-only, like the trick list: a clip is never cropped to it, so offering it while
-             recording is offering a control that does nothing. It returns on switching back. -->
-        {#if allowedAspects.length > 1 && !videoMode}<button class="ctrl" on:click={cycleAspect} title="Photo shape" aria-label="Change photo shape (currently {aspect})">{aspect === 'full' ? 'Full' : aspect}</button>{/if}
+        <!-- Offered in BOTH modes now that a clip really is cropped to it: the camera delivers the
+             shape (applyRecordShape) instead of the recorder being handed a wide frame. It is put
+             away only on a camera that has actually refused — there a shape is a photo setting
+             again, and a control that cannot do what it says is worse than no control. Disabled
+             while recording because resizing the track mid-clip is a resolution change the recorder
+             never agreed to. -->
+        {#if allowedAspects.length > 1 && (!videoMode || videoShapeSupported)}<button class="ctrl" on:click={cycleAspect} disabled={recording} title={videoMode ? 'Clip shape' : 'Photo shape'} aria-label="Change {videoMode ? 'clip' : 'photo'} shape (currently {aspect})">{aspect === 'full' ? 'Full' : aspect}</button>{/if}
         <button class="ctrl" on:click={() => (settingsOpen = !settingsOpen)} class:active={settingsOpen} title="Settings" aria-label="Camera settings">
           <!-- Drawn rather than typed: the ⚙ character is rendered by whatever font the device has
                and frequently is not recognisably a cog, which is the one icon users navigate by. -->
@@ -2415,10 +2522,15 @@
   .evname { display: inline-flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: 0.85rem; color: #fff; }
   .demo-nav { display: flex; gap: 6px; flex-wrap: wrap; }
   /* Demo-only escape hatch back to the marketing site. pointer-events:auto re-enables
-     clicks inside the otherwise click-through topbar. */
+     clicks inside the otherwise click-through topbar.
+     This and .mbadge are two writings of ONE idea — a tappable pill on the dark viewfinder overlay
+     — and they sat side by side in the same topbar having drifted apart, one bordered and one not,
+     which read as the demo pills being flat rather than as a deliberate difference. Keep the border,
+     the radius and the blur in step between them until they are properly made one thing. */
   .home-btn { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px;
     background: rgba(0,0,0,0.5); color: #fff; text-decoration: none; font-weight: 700; font-size: 0.8rem;
-    padding: 8px 14px; border-radius: 999px; backdrop-filter: blur(4px); }
+    padding: 8px 14px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, .28);
+    backdrop-filter: blur(4px); }
   .pcell-bin {
     position: absolute; top: 6px; right: 6px; min-width: 30px; height: 26px; padding: 0 7px;
     display: inline-flex; align-items: center; justify-content: center; gap: 3px;
@@ -2687,7 +2799,9 @@
   .mwrap { display: flex; flex-direction: column; align-items: center; gap: 3px; pointer-events: none; }
   .mcap { font-size: .62rem; text-transform: uppercase; letter-spacing: .08em; color: rgba(255,255,255,.72);
     text-shadow: 0 1px 3px rgba(0,0,0,.6); text-align: center; white-space: nowrap; }
-  /* The exit is the one thing here that is not part of the tour, so it recedes. */
+  /* The exit is the one thing here that is not part of the tour, so it recedes. No second, dimmer
+     border needed for that: opacity applies to the border as much as to the fill, so it already
+     comes back the same amount everything else here does. */
   .home-btn.quiet { background: rgba(0,0,0,.32); font-weight: 600; opacity: .82; }
   .home-btn.quiet:hover { opacity: 1; }
   /* Sits where the armed strip does, and clears the control rail the same way. */
