@@ -96,21 +96,19 @@
   :global(.pgrid) {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
     gap: 10px; padding: 10px; align-items: stretch;
+    /* Every card the same height, sized to the TALLEST CARD THAT EXISTS — not to the tallest one
+       that could exist.
+       This used to reserve a fixed floor: two clamped caption lines plus a trick line, on every
+       card, the moment any card in the grid had words. So one short caption like "Nice" cost every
+       card 34px of empty space and grew the grid from 225px to 259px, which is the blank space
+       under a card with nothing to say.
+       `grid-auto-rows: 1fr` in a grid whose own height is content-sized resolves every row to the
+       largest row's max-content, and `align-items: stretch` then fills each card to it. So the
+       cards stay uniform — the thing that made the grid look tidy — while the reserve shrinks to
+       whatever is really there, and a grid with nothing under any photo reserves nothing at all.
+       No JS, no measuring, and no `has-meta` class to keep in sync with the content. */
+    grid-auto-rows: 1fr;
   }
-  /* Every card the same height. The foot is what varies — a caption, a trick, both, neither — so
-     it reserves the room rather than letting each card find its own size, which made the grid look
-     ragged. Reserved only when something in THIS grid actually has words under it; with none there
-     is nothing to line up and the space would just be empty. */
-  :global(.pgrid.has-meta) .pmeta { min-height: 64px; }
-  /* …and the reserve that actually does the levelling sits on the CAPTION AREA, not on the foot.
-     A floor on .pmeta gets the common cases (caption only, trick only) but a card carrying BOTH
-     needs a further ~15px and stood proud of its neighbours by exactly that. Two clamped caption
-     lines plus one clamped trick line is the tallest the area can ever be, so reserving that makes
-     every foot in the grid identical — the other lines (number, shooter, file stats) are already
-     on every card. It has to be here rather than left to the grid row, because `align-items:
-     stretch` only levels cards that share a ROW and the odd one out is usually on the next line
-     down. Written as the same numbers the clamped lines use so the two cannot drift apart. */
-  :global(.pgrid.has-meta) .capstrip { min-height: calc(.76rem * 1.35 * 2 + 2px + .64rem * 1.3); }
 
   .pcell-wrap {
     position: relative; display: flex; flex-direction: column; line-height: normal;

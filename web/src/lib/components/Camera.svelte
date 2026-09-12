@@ -2167,7 +2167,7 @@
            what the NEXT photo is cropped to; it is not a statement about how the roll should be
            drawn. Letting it redraw the grid meant the same photos were square in the gallery and
            9:16 in the roll on any event with more than one shape enabled — which is every demo. -->
-      <div class="pgrid" class:has-meta={shownPhotos.some((p) => p.caption || p.challenge)}
+      <div class="pgrid"
            style={`--tile-ar:${tileAspect(allowedAspects)}`}>
         {#each shownPhotos as p, i}
           <!-- The card itself is PhotoCard; the only thing this roll adds is the delete bin, which

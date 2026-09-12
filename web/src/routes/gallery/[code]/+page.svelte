@@ -273,7 +273,7 @@
          PhotoCard.svelte. The words used to sit in a gradient over the bottom of the photo, where
          a caption of any length fought the picture and then ran off it. --tile-ar is the event's
          frame setting, so the whole grid is one shape rather than one shape per file. -->
-    <div class="pgrid" class:has-meta={shownPhotos.some((p) => p.caption || p.challenge)}
+    <div class="pgrid"
          style={`--tile-ar:${tileAspect(event?.aspectRatios)}`}>
       {#each shownPhotos as p, i (p.id)}
         <PhotoCard photo={p} selected={selecting && selected.has(p.id)}

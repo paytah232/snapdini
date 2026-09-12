@@ -471,7 +471,7 @@
          This screen is the one with the most furniture: badges, a favourite, a select checkbox and
          the approve/reject row, all of which ride in on slots. In Select mode the caption goes
          static: a click on a card there means "pick this", not "edit this". -->
-    <div class="pgrid" class:has-meta={filtered.some((p) => p.caption || p.challenge)}
+    <div class="pgrid"
          style={`--tile-ar:${tileAspect(ev.aspectRatios)}`}>
       {#each filtered as p, i (p.id)}
         <PhotoCard photo={p} selected={selecting && selected.has(p.id)}

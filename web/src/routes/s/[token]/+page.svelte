@@ -132,7 +132,7 @@
     <!-- A share is the copy that leaves the event, so the words under a photo travel with it: the
          written caption leads and the mission is demoted underneath when a shot has the two. Same
          card as everywhere else — see PhotoCard.svelte. -->
-    <div class="pgrid" class:has-meta={photos.some((p) => p.caption || p.challenge)}
+    <div class="pgrid"
          style={`--tile-ar:${tileAspect(aspectRatios)}`}>
       {#each photos as p, i (p.id)}
         <PhotoCard photo={p} selected={selecting && selected.has(p.id)}
