@@ -13,6 +13,10 @@ export interface Photo {
   /** The mission this shot was for, in the host's own wording — the photo's caption. Null when the
    *  guest just took a picture, which is most of them. */
   challenge?: string | null;
+  /** The words written under this photo — by the guest who took it, or by the host. Shown AS the
+   *  caption, with `challenge` demoted to a small label beneath when a photo has both. Null when
+   *  nobody has written one. */
+  caption?: string | null;
   isHighlighted: boolean;
   rating: number; // 0–5; 5 == favourite
   mediaType: 'photo' | 'video';
@@ -179,6 +183,26 @@ export const setReveal = (code: string, organizerCode: string, on: boolean) =>
 export const toggleLock = (code: string, organizerCode: string) => postJson(`/api/events/${code}/lock`, {}, org(organizerCode));
 export const deleteEvent = (code: string, organizerCode: string) =>
   api(`/api/events/${code}`, { method: 'DELETE', headers: org(organizerCode) });
+/** Hard cap the server applies (after trimming and collapsing whitespace). Mirrored here so an
+ *  input stops the typing instead of silently losing the tail when it saves. */
+export const CAPTION_MAX = 140;
+
+/** Write, edit or clear the caption on one photo. Exactly one credential: a guest's session token
+ *  (their OWN photos only) or the organizer code (anything in their event). An empty string clears
+ *  it — there is no separate delete call.
+ *
+ *  Returns what was STORED, not what was sent: the server trims, collapses runs of whitespace and
+ *  cuts at CAPTION_MAX, so render the value that comes back or the caption changes under the
+ *  writer on their next load. A photo they may not touch answers 404, never 403 — the API declines
+ *  to confirm that someone else's photo id exists. */
+export const savePhotoCaption = (photoId: string, caption: string,
+                                 who: { sessionToken: string } | { organizerCode: string }) =>
+  api<{ success: boolean; id: string; caption: string | null }>(`/api/photos/${photoId}/caption`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...('organizerCode' in who ? org(who.organizerCode) : {}) },
+    body: JSON.stringify({ caption, ...('sessionToken' in who ? { sessionToken: who.sessionToken } : {}) }),
+  });
+
 export const setHighlights = (code: string, organizerCode: string, photoIds: string[], highlight: boolean) =>
   postJson(`/api/events/${code}/highlights`, { photoIds, highlight }, org(organizerCode));
 export const moderate = (code: string, organizerCode: string, photoIds: string[], action: 'approve' | 'reject' | 'restore') =>

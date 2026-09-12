@@ -281,7 +281,10 @@
           {#if p.isHighlighted}<span class="star" aria-hidden="true">⭐</span>{/if}
           {#if selecting}<span class="check" class:on={selected.has(p.id)} aria-hidden="true">{selected.has(p.id) ? '✓' : ''}</span>{/if}
           <span class="cap">
-            {#if p.challenge}<span class="mission">{p.challenge}</span>{/if}
+            <!-- The written caption is THE caption; the mission stays on as a smaller label so a
+                 captioned trick shot keeps saying which trick it was. -->
+            {#if p.caption}<span class="written">{p.caption}</span>{/if}
+            {#if p.challenge}<span class="mission" class:secondary={!!p.caption}>{p.challenge}</span>{/if}
             <span class="who">{p.participantName} · {fmtTime(p.takenAt)}</span>
           </span>
         </button>
@@ -394,7 +397,9 @@
      caption is absolutely positioned, so a second line grows up over the photo and a photo without
      a mission is unchanged — no reserved gap. */
   .cap > span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cap .written { font-weight: 700; }
   .cap .mission { font-weight: 700; }
+  .cap .mission.secondary { font-weight: 400; opacity: .82; font-size: .92em; }
   .cap .who { opacity: .82; }
   @media (min-width: 640px) {
     .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }

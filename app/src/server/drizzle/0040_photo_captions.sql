@@ -1,0 +1,20 @@
+-- Photo captions: the "cute message" written under a photo.
+--
+-- Written by the guest who took the shot, or by the event's organizer — the host already curates
+-- the album, so they get the same pen rather than a delete key. Captions carry no author label in
+-- the UI: they read as words about the photo, not as a quote attributed to someone.
+--
+-- A column on `photos` rather than a table of its own, deliberately: a caption has no life apart
+-- from the photo it sits under, so the existing ON DELETE CASCADE takes it with the row when the
+-- guest un-takes a shot, the host removes a participant, or the event is purged. There is no second
+-- place for a deleted photo's words to survive.
+--
+-- SEPARATE from challenge_id, which is the trick-list mission this shot was for. A captioned trick
+-- shot has to show BOTH — the written caption, with the host's mission wording demoted to a small
+-- attribution underneath — so overloading one field would have lost the trick attribution the first
+-- time anyone wrote a caption on a mission photo.
+--
+-- Nullable, and NULL is the only way to say "no caption": the route stores NULL for a blank or
+-- whitespace-only submission rather than ''. That keeps "has a caption" a single test (IS NOT NULL)
+-- everywhere instead of two, and stops an empty caption strip rendering under a photo.
+ALTER TABLE photos ADD COLUMN IF NOT EXISTS caption text;

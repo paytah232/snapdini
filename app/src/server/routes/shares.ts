@@ -45,6 +45,7 @@ router.get('/:token', async (req: Request, res: Response) => {
     .select({
       id: photos.id, filename: photos.filename, takenAt: photos.takenAt,
       mediaType: photos.mediaType, isHighlighted: photos.isHighlighted, challengeId: photos.challengeId,
+      caption: photos.caption,
       sizeBytes: photos.sizeBytes, width: photos.width, height: photos.height, durationMs: photos.durationMs,
       participantName: participants.name,
     })
@@ -79,6 +80,9 @@ router.get('/:token', async (req: Request, res: Response) => {
       takenAt: p.takenAt,
       participantName: p.participantName,
       challenge: (p.challengeId && captions.get(p.challengeId)) || null,
+      // A share is the copy that leaves the event, so the words under a photo travel with it —
+      // alongside the mission, never instead of it.
+      caption: p.caption ?? null,
       isHighlighted: !!p.isHighlighted,
       mediaType: p.mediaType || 'photo',
       sizeBytes: p.sizeBytes ?? undefined,

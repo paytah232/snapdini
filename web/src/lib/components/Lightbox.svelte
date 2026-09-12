@@ -37,9 +37,10 @@
     {:else}
       <img src={photo.url} alt="Photo by {photo.participantName}" decoding="async" />
     {/if}
-    <!-- The mission first when there was one: a caption the grid shows must not vanish on the way
-         into the photo. -->
-    <div class="cap">{#if photo.challenge}<span class="mission">{photo.challenge}</span> · {/if}{photo.participantName} · {new Date(photo.takenAt).toLocaleString()}{#if mediaMeta(photo)} · {mediaMeta(photo)}{/if} · {index + 1}/{photos.length}</div>
+    <!-- Whatever the grid captioned this with must not vanish on the way into the photo. The
+         written caption leads; the mission follows it, demoted, so a captioned trick shot still
+         says which trick it was. -->
+    <div class="cap">{#if photo.caption}<span class="written">{photo.caption}</span> · {/if}{#if photo.challenge}<span class="mission" class:secondary={!!photo.caption}>{photo.challenge}</span> · {/if}{photo.participantName} · {new Date(photo.takenAt).toLocaleString()}{#if mediaMeta(photo)} · {mediaMeta(photo)}{/if} · {index + 1}/{photos.length}</div>
   {/if}
   {#if index > 0}<button class="nav l" on:click={prev} aria-label="Previous">‹</button>{/if}
   {#if index < photos.length - 1}<button class="nav r" on:click={next} aria-label="Next">›</button>{/if}
@@ -53,7 +54,10 @@
     border: none; width: 40px; height: 40px; border-radius: 50%; font-size: 1.2rem; cursor: pointer; }
   .cap { position: absolute; bottom: 18px; left: 0; right: 0; text-align: center; color: #fff;
     font-size: 0.82rem; text-shadow: 0 1px 3px #000; }
+  .cap .written { font-weight: 700; }
   .cap .mission { font-weight: 700; }
+  /* Demoted, not dropped: with a caption present the mission is attribution, not the headline. */
+  .cap .mission.secondary { font-weight: 400; opacity: .75; }
   .nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(0,0,0,0.4);
     color: #fff; border: none; width: 44px; height: 64px; font-size: 2rem; cursor: pointer; }
   .nav.l { left: 8px; border-radius: 0 8px 8px 0; } .nav.r { right: 8px; border-radius: 8px 0 0 8px; }

@@ -21,7 +21,10 @@ const router = Router();
 // Progress is DERIVED from the photos table, never stored beside it: delete the photo and the
 // mission un-ticks on its own, so there is no second copy of the truth to drift. A photo held back
 // by moderation still counts, which is the kinder reading — the guest did the thing.
-async function missionsFor(eventChallenges: string | null, setKey: string | null, participantId: string) {
+// Exported because DELETE /api/photos/:id has to answer with this too: deleting a trick shot
+// un-ticks its mission, and the client cannot work out WHICH one — the gallery payload carries
+// the mission's text, not its id.
+export async function missionsFor(eventChallenges: string | null, setKey: string | null, participantId: string) {
   const set = setByKey(readSets(eventChallenges), setKey);
   if (!set) return { challenges: [], challengesDone: [] as string[], challengeSet: null as string | null, challengeTick: null as string | null };
   const rows = await db.selectDistinct({ id: photos.challengeId }).from(photos)

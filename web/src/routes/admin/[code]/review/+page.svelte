@@ -5,6 +5,7 @@
   import { goto } from '$app/navigation';
   import {
     getAdmin, getPhotosByOrganizer, ratePhoto, moderate, setHighlights, createShare, mediaMeta,
+    savePhotoCaption, CAPTION_MAX,
     type Photo, type AdminEvent, type ShareKind
   } from '$lib/events';
   import { applyEventTheme } from '$lib/theme';
@@ -214,6 +215,37 @@
     } catch (e) { showToast(e instanceof Error ? e.message : 'Failed', true); }
   }
 
+  // ── Captions ────────────────────────────────────────────────────────────
+  // The host writes, edits and clears captions on ANY photo in their event, exactly as the guest
+  // who took it can on their own. Captions carry no author label anywhere in the product, so a
+  // host-written line reads the same as a guest's — intended: the caption is about the photo.
+  let captionFor: Photo | null = null;
+  let captionDraft = '';
+  let captionBusy = false;
+
+  function openCaption(photo: Photo, e?: Event) {
+    // The window click handler that disarms a Reject also fires on this one; stop it here so the
+    // modal does not open with a stale "Sure?" still armed behind it.
+    e?.stopPropagation();
+    captionFor = photo;
+    captionDraft = photo.caption ?? '';
+  }
+
+  async function saveCaption() {
+    if (!captionFor || captionBusy) return;
+    const target = captionFor;
+    captionBusy = true;
+    try {
+      const r = await savePhotoCaption(target.id, captionDraft, { organizerCode: orgCode });
+      // What the server STORED, not the draft — it collapses whitespace and cuts at CAPTION_MAX,
+      // so echoing the draft would show a caption the gallery is not going to show.
+      target.caption = r.caption; photos = photos;
+      captionFor = null;
+      showSuccess(r.caption ? 'Caption saved' : 'Caption removed');
+    } catch (e) { showToast(e instanceof Error ? e.message : 'Could not save that caption', true); }
+    finally { captionBusy = false; }
+  }
+
   // Reject is a two-click confirm: first click arms (shows "Sure?"), second confirms. A click
   // anywhere else (window handler) resets the armed state.
   function requestReject(photo: Photo, e?: Event) {
@@ -336,6 +368,9 @@
   function next() { if (filtered.length) singleIndex = (singleIndex + 1) % filtered.length; }
   let fsOpen = false;   // full-screen view of the current photo/video (works on desktop + mobile)
   function onKeydown(e: KeyboardEvent) {
+    // The caption editor owns the keyboard while it is open: in Single view the arrow keys page
+    // through photos, which would otherwise move the album out from under a half-typed caption.
+    if (captionFor) { if (e.key === 'Escape') captionFor = null; return; }
     // Escape closes the guest filter wherever you are — it is a menu, not part of the photo view.
     if (e.key === 'Escape' && whoOpen) { whoOpen = false; return; }
     if (view !== 'single') return;
@@ -449,7 +484,18 @@
             {/if}
           </div>
 
-          {#if p.challenge}<div class="mission" title={p.challenge}>{p.challenge}</div>{/if}
+          <!-- The written caption leads; the mission it was shot for stays on underneath, demoted,
+               so captioning a trick shot never costs the attribution. -->
+          {#if !selecting}
+            <button class="capline" class:blank={!p.caption} on:click={(e) => openCaption(p, e)}
+                    title={p.caption ? 'Edit this caption' : 'Write a caption'}
+                    aria-label={p.caption ? `Edit caption: ${p.caption}` : 'Write a caption for this photo'}>
+              {p.caption ?? '💬 Caption'}
+            </button>
+          {:else if p.caption}
+            <div class="capline blank-none" title={p.caption}>{p.caption}</div>
+          {/if}
+          {#if p.challenge}<div class="mission" class:secondary={!!p.caption} title={p.challenge}>{p.challenge}</div>{/if}
           <div class="meta">{p.participantName} · {fmtTime(p.takenAt)}</div>
           {#if mediaMeta(p)}<div class="media-meta">{p.mediaType === 'video' ? '🎥' : '🖼'} {mediaMeta(p)}</div>{/if}
 
@@ -487,7 +533,8 @@
         <div class="srow">
           <span class="counter">{singleIndex + 1} / {filtered.length}</span>
           <button class="star" class:on={current.rating >= 5} on:click={() => onFavouriteClick(current)} aria-label="Favourite">{current.rating >= 5 ? '★' : '☆'}</button>
-          <span class="single-meta">{#if current.challenge}<span class="smission">{current.challenge}</span> · {/if}{current.participantName} · {fmtFull(current.takenAt)}{#if mediaMeta(current)} · {mediaMeta(current)}{/if}</span>
+          <span class="single-meta">{#if current.caption}<span class="scap">{current.caption}</span> · {/if}{#if current.challenge}<span class="smission" class:secondary={!!current.caption}>{current.challenge}</span> · {/if}{current.participantName} · {fmtFull(current.takenAt)}{#if mediaMeta(current)} · {mediaMeta(current)}{/if}</span>
+          <button class="btn ghost sm capbtn" on:click={(e) => openCaption(current, e)}>💬 {current.caption ? 'Edit caption' : 'Caption'}</button>
         </div>
         <div class="srow">
           {#if current.status === 'rejected'}
@@ -519,6 +566,32 @@
       <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
       <img class="fs-media" src={current.url} alt="" on:click|stopPropagation />
     {/if}
+  </div>
+{/if}
+
+{#if captionFor}
+  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
+  <div class="capback" on:click|self={() => (captionFor = null)} role="dialog" aria-modal="true" aria-label="Caption this photo">
+    <div class="capmodal">
+      <div class="capm-head"><span>Caption</span><button class="fs-x static" on:click={() => (captionFor = null)} aria-label="Close">✕</button></div>
+      {#if captionFor.challenge}
+        <!-- The trick stays in view while they type: a caption sits ALONGSIDE the mission, not
+             instead of it, and seeing it here is what stops anyone retyping it as the caption. -->
+        <div class="capm-mission">🎩 {captionFor.challenge}</div>
+      {/if}
+      <!-- svelte-ignore a11y-autofocus -->
+      <textarea class="capm-text" rows="2" maxlength={CAPTION_MAX} bind:value={captionDraft} autofocus
+                placeholder="Something cute, or silly…"></textarea>
+      <div class="capm-row">
+        <span class="capm-left">{CAPTION_MAX - captionDraft.length}</span>
+        {#if captionFor.caption}
+          <!-- Clearing IS saving nothing — the same call with empty text. The button exists because
+               "empty the box and press Save" is not a thing anyone guesses. -->
+          <button class="btn ghost sm" on:click={() => { captionDraft = ''; void saveCaption(); }} disabled={captionBusy}>Remove</button>
+        {/if}
+        <button class="btn primary sm" on:click={saveCaption} disabled={captionBusy}>{captionBusy ? 'Saving…' : 'Save'}</button>
+      </div>
+    </div>
   </div>
 {/if}
 
@@ -616,6 +689,38 @@
   /* The mission this shot was for, above the shooter line because it says what the photo IS. Full
      text on hover, since a card is far narrower than the 48 characters a mission may run to. */
   .mission { font-size: 0.72rem; font-weight: 700; color: var(--text); padding: 8px 10px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Demoted beside a caption: still the attribution, no longer the headline. */
+  .mission.secondary { font-weight: 400; color: var(--text-muted); }
+  /* The caption line doubles as its own edit button, so the whole line is the target rather than a
+     pencil the host has to aim at on a phone. Styled as text, not as a button. */
+  .capline { display: block; width: 100%; box-sizing: border-box; text-align: left;
+    background: none; border: none; cursor: pointer; font: inherit;
+    font-size: 0.74rem; font-weight: 700; color: var(--text); padding: 8px 10px 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .capline.blank { font-weight: 400; color: var(--text-muted); opacity: .7; }
+  .capline:hover { text-decoration: underline; }
+  /* Select mode: the same line, inert — clicking a card there means "select", not "edit". */
+  .capline.blank-none { cursor: default; }
+  .capline + .mission { padding-top: 2px; }
+  .capline + .meta, .capline + .mission + .meta { padding-top: 2px; }
+  .capbtn { white-space: nowrap; }
+  .single-meta .scap { color: var(--text); font-weight: 700; }
+  .single-meta .smission.secondary { color: var(--text-muted); font-weight: 400; }
+  .capback { position: fixed; inset: 0; z-index: 260; background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center; padding: 20px; }
+  .capmodal { width: 100%; max-width: 380px; background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius, 12px); padding: 4px 16px 16px;
+    box-shadow: 0 16px 50px rgba(0,0,0,0.5); }
+  .capm-head { display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 0 10px; border-bottom: 1px solid var(--border); font-weight: 800; font-size: 0.95rem; }
+  .capm-mission { font-size: .76rem; color: var(--text-muted); padding-top: 8px; }
+  .capm-text { width: 100%; box-sizing: border-box; margin-top: 10px; resize: none;
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 10px; padding: 9px 10px; font: inherit; font-size: 0.9rem; }
+  .capm-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .capm-left { flex: 1; font-size: .72rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  /* The full-screen close button, borrowed for the modal head — it is fixed-positioned there. */
+  .fs-x.static { position: static; }
   .meta { font-size: 0.7rem; color: var(--text-muted); padding: 8px 10px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .mission + .meta { padding-top: 2px; }
   .media-meta { font-size: 0.64rem; color: var(--text-muted); font-family: var(--font-mono); padding: 2px 10px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.85; }

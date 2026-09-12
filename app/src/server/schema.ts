@@ -194,6 +194,10 @@ export const photos = pgTable('photos', {
   filename: text('filename').notNull(),
   mediaType: text('media_type').notNull().default('photo'),
   challengeId: text('challenge_id'),                        // the photo mission this shot satisfied
+  // A caption written under the photo — the guest's own "cute message", or the host's. Kept apart
+  // from challengeId so a captioned trick shot can show both (see 0040_photo_captions.sql).
+  // NULL, never '', is how "no caption" is stored.
+  caption: text('caption'),
   takenAt: ms('taken_at').notNull(),
   isHighlighted: boolean('is_highlighted').notNull().default(false),
   status: text('status').notNull().default('approved'),

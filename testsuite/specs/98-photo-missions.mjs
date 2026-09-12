@@ -7,7 +7,9 @@
 //  • a guest sees exactly one set, and keeps it when they come back on another device;
 //  • a guest cannot tag a photo with a mission from a card they were never handed, because that
 //    text is shown as the photo's caption;
-//  • progress is DERIVED from photos, so deleting one un-ticks its mission with nothing to drift;
+//  • progress is DERIVED from photos, so deleting one un-ticks its mission with nothing to drift —
+//    and the DELETE answers with the new list, because the client cannot work it out (a gallery row
+//    carries the mission's TEXT, not its id) and was otherwise left showing a tick until a reload;
 //  • the mission becomes the photo's CAPTION everywhere the album is read — which is the whole
 //    payoff of the feature, and is resolved from the event's list rather than the guest's card.
 //
@@ -250,6 +252,39 @@ await spec('98-photo-missions', async () => {
     ok('scanning the B card hands over the B list',
       gb.json?.challengeSet === 'b' && gb.json?.challenges?.[0]?.id === 'wed-band',
       `${gb.json?.challengeSet} ${JSON.stringify(gb.json?.challenges)}`);
+
+    dbq(`DELETE FROM events WHERE join_code='${ev.joinCode}'`);
+  }
+
+  group('Photo missions: taking a shot back un-ticks it in the app, not only on reload');
+  {
+    // The camera ticks a mission at the shutter, optimistically. Deleting that shot inside the undo
+    // window has to take the tick back — and the client CANNOT do it alone: photoRow() gives it the
+    // mission's wording, not the id it would have to remove. So the delete answers with the
+    // authoritative list, derived fresh from the photos table, and the camera adopts it wholesale.
+    const ev = await createEvent({ maxGuests: 10 });
+    await put(ev.joinCode, ev.organizerCode, { challenges: [
+      { id: 'own-1', text: 'Something blue' }, { id: 'own-2', text: 'Something borrowed' }] });
+    const zoe = await joinWith(ev.joinCode, 'Zoe');
+    const tok = zoe.json.sessionToken;
+    const blue = await uploadFor(tok, 'own-1');
+    await uploadFor(tok, 'own-2');
+    const plain = await uploadFor(tok, undefined);
+    const del = (id) => api('DELETE', `/api/photos/${id}`, { body: { sessionToken: tok } });
+    const done = (r) => (r.json?.challengesDone || []).slice().sort().join('|');
+
+    const untagged = await del(plain.json.photoId);
+    ok('deleting an untagged shot answers with the ticks untouched',
+      untagged.status === 200 && done(untagged) === 'own-1|own-2', `status ${untagged.status} ${done(untagged)}`);
+
+    const tagged = await del(blue.json.photoId);
+    ok('deleting a trick shot answers with that mission gone and the others kept',
+      tagged.status === 200 && done(tagged) === 'own-2', `status ${tagged.status} ${done(tagged)}`);
+
+    // Same answer as the endpoint the camera reloads from — if these two ever disagree, the app
+    // would correct itself on refresh, which is exactly the bug this closes.
+    const me = await api('GET', '/api/participants/me', { headers: { 'x-session-token': tok } });
+    ok('and it agrees with what /participants/me derives', done(me) === done(tagged), `${done(me)} vs ${done(tagged)}`);
 
     dbq(`DELETE FROM events WHERE join_code='${ev.joinCode}'`);
   }

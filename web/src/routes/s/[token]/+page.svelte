@@ -133,7 +133,14 @@
           {/if}
           {#if p.isHighlighted}<span class="star" aria-label="Favourite">★</span>{/if}
           {#if selecting}<span class="check" class:on={selected.has(p.id)}>{selected.has(p.id) ? '✓' : ''}</span>{/if}
-          {#if p.challenge}<span class="cap">{p.challenge}</span>{/if}
+          <!-- A share is the copy that leaves the event, so it carries both: the written caption,
+               with the mission demoted underneath it when a shot has the two. -->
+          {#if p.caption || p.challenge}
+            <span class="cap">
+              {#if p.caption}<span class="written">{p.caption}</span>{/if}
+              {#if p.challenge}<span class="mission" class:secondary={!!p.caption}>{p.challenge}</span>{/if}
+            </span>
+          {/if}
         </button>
       {/each}
     </div>
@@ -183,13 +190,16 @@
     display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 800;
     background: rgba(0,0,0,.45); color: #fff; border: 2px solid #fff; line-height: 1; }
   .check.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); }
-  /* The mission a shot was for. A share is the copy that gets sent around, so the annotation travels
-     with it. Rendered only when there is one — a free shot keeps a clean tile. line-height is set
-     because .cell zeroes it for the image. */
+  /* What a shot is annotated with: the caption someone wrote, the mission it was for, or both. A
+     share is the copy that gets sent around, so the annotation travels with it. Rendered only when
+     there is one — a plain shot keeps a clean tile. line-height is set because .cell zeroes it for
+     the image. Each line clips on its own, so a long caption cannot push the mission off the tile. */
   .cap { position: absolute; left: 0; right: 0; bottom: 0; padding: 14px 7px 5px;
     font-size: .68rem; line-height: 1.35; font-weight: 700; color: #fff; text-align: left;
-    background: linear-gradient(transparent, rgba(0,0,0,.72));
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    background: linear-gradient(transparent, rgba(0,0,0,.72)); }
+  .cap .written, .cap .mission { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Demoted, not dropped: beside a caption the mission is attribution, not the headline. */
+  .cap .mission.secondary { font-weight: 400; opacity: .82; font-size: .92em; }
   footer { text-align: center; font-size: 0.78rem; color: var(--text-muted); padding: 28px 18px; }
   footer a { color: var(--text-muted); }
   footer a:hover { color: var(--accent); }

@@ -9,6 +9,7 @@ import { db } from '../db';
 import { readSets, isOfferedChallenge } from '../challenges';
 import { effectiveMaxPhotos, hasShotsLeft, photosRemaining as remainingFor } from '../allowance';
 import { matchNewPhoto } from './faces';
+import { missionsFor } from './participants';
 import { events, participants, photos } from '../schema';
 import { stripImageMetadata, makeThumbnail, makeVideoPoster, makePlaybackProxy, thumbName, playName } from '../images';
 import { probeVideoMeta } from '../slideshow';
@@ -93,6 +94,7 @@ type PhotoRowInput = {
   participantName: string;
   participantId: string;
   challengeId: string | null;
+  caption?: string | null;
   isHighlighted: boolean;
   rating?: number | null;
   mediaType?: string | null;
@@ -132,6 +134,11 @@ function photoRow(p: PhotoRowInput, myParticipantId: string | null, captions: Ma
     // what turns the album into an annotated record instead of a pile of photos. An id the host has
     // since deleted from their list resolves to nothing rather than leaking a raw slug.
     challenge:       (p.challengeId && captions.get(p.challengeId)) || null,
+    // The written caption, if anyone wrote one. Deliberately a SECOND field beside `challenge`
+    // rather than a replacement for it: a captioned trick shot shows the caption as the caption and
+    // keeps the mission as a small label, so the trick attribution is never silently eaten. Always
+    // present (null when absent) so no reader has to feature-detect it.
+    caption:         p.caption ?? null,
     isHighlighted:   !!p.isHighlighted,
     rating:          p.rating ?? 0,
     mediaType:       p.mediaType || 'photo',
@@ -286,7 +293,9 @@ router.delete('/:id', async (req: Request, res: Response) => {
   const [me] = await db
     .select({ id: participants.id, eventId: participants.eventId, photosTaken: participants.photosTaken,
               isLocked: events.isLocked, expiresAt: events.expiresAt, maxPhotos: events.maxPhotos,
-              extraPhotos: participants.extraPhotos })
+              extraPhotos: participants.extraPhotos,
+              // For the mission progress this delete may have just changed (see below).
+              challengeSet: participants.challengeSet, eventChallenges: events.challenges })
     .from(participants)
     .innerJoin(events, eq(events.id, participants.eventId))
     .where(eq(participants.sessionToken, sessionToken));
@@ -314,7 +323,86 @@ router.delete('/:id', async (req: Request, res: Response) => {
     try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch { /* already gone is fine */ }
   }
 
-  res.json({ success: true, photosRemaining: remainingFor({ ...me, photosTaken: remaining }) });
+  // Mission progress is DERIVED from the photos table, so this delete may have just un-ticked a
+  // trick — and the client cannot work that out for itself: the gallery payload carries the
+  // mission's TEXT (`challenge`), not its id. Re-derive it here, after the row is gone, and hand
+  // back the authoritative list so the camera's trick list cannot sit on a tick the server has
+  // already dropped. Costs one small query on an action a guest takes at most a handful of times.
+  const { challengesDone } = await missionsFor(me.eventChallenges, me.challengeSet, me.id);
+
+  res.json({ success: true, photosRemaining: remainingFor({ ...me, photosTaken: remaining }), challengesDone });
+});
+
+// ── PUT /api/photos/:id/caption — write, edit or clear the words under a photo ─────────────────
+// Captions are the one piece of a photo that is TEXT, so they get a tighter hand than a rating:
+// a guest may caption their OWN shots, and the event's organizer may caption anything in their
+// event (they already curate the album, and they are the one who has to answer for what a shared
+// gallery says). Nobody else, including another guest at the same event.
+//
+// Length is a hard cap rather than a rejection: a caption is one line typed on a phone at a party,
+// and bouncing someone's sentence back at them because it ran four characters long is a worse
+// product than keeping the first 140. Blank clears.
+const CAPTION_MAX = 140;
+
+// Normalise what a phone keyboard produces into what a gallery can render on one line: collapse
+// every run of whitespace (newlines included — a caption is not a paragraph), trim, then cut.
+// Returns null for "no caption", which is also what an empty or whitespace-only submission means:
+// clearing is the same action as saving nothing, so the UI needs no separate delete call.
+export function normalizeCaption(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const collapsed = raw.replace(/\s+/g, ' ').trim();
+  if (!collapsed) return null;
+  // trimEnd after the cut so a caption sliced mid-space does not keep a dangling one. It cannot
+  // empty the string: `collapsed` starts with a non-space character.
+  return collapsed.slice(0, CAPTION_MAX).trimEnd();
+}
+
+router.put('/:id/caption', async (req: Request, res: Response) => {
+  const photoId = String(req.params.id);
+  const sessionToken = String(req.body?.sessionToken || '');
+  // Header first, body as the fallback — same shape the rest of the organizer surface uses, and it
+  // keeps the long-lived secret out of access logs when the client can send a header.
+  const organizerCode = String(req.get('x-organizer-code') || req.body?.organizerCode || '');
+
+  const [photo] = await db
+    .select({ id: photos.id, eventId: photos.eventId, participantId: photos.participantId })
+    .from(photos).where(eq(photos.id, photoId));
+  // 404, never 401/403, for anything the caller is not entitled to touch — including a photo that
+  // simply does not exist. Same reasoning as DELETE /:id above: whether a given photo id exists,
+  // and whose roll it is in, is not a stranger's business, and a 403 would answer that for them.
+  if (!photo) return res.status(404).json({ error: 'Photo not found' });
+
+  const caption = normalizeCaption(req.body?.caption);
+
+  // The guest who took it.
+  if (sessionToken) {
+    const [me] = await db.select({ id: participants.id }).from(participants)
+      .where(and(eq(participants.sessionToken, sessionToken), eq(participants.eventId, photo.eventId)));
+    if (me && me.id === photo.participantId) {
+      await db.update(photos).set({ caption }).where(eq(photos.id, photo.id));
+      // Echo what was STORED, not what was sent: the client must show the trimmed, collapsed,
+      // capped text the gallery will show, or the guest sees their caption change on next load.
+      return res.json({ success: true, id: photo.id, caption });
+    }
+  }
+
+  // The organizer of the event this photo belongs to. Resolved from the PHOTO's event, so an
+  // organizer code for some other event is just a stranger here.
+  //
+  // NOTE: this is the organizer-CODE capability only, not the owner-by-identity / co-host paths in
+  // requireOrganizer — that middleware resolves its event from a :joinCode route param and there
+  // isn't one on a photo-id route. The host's Review screen always holds the code, so this covers
+  // the real surface; a co-host who reached Review without a code cannot caption.
+  if (organizerCode) {
+    const [event] = await db.select({ organizerCode: events.organizerCode }).from(events)
+      .where(eq(events.id, photo.eventId));
+    if (event && organizerCode === event.organizerCode) {
+      await db.update(photos).set({ caption }).where(eq(photos.id, photo.id));
+      return res.json({ success: true, id: photo.id, caption });
+    }
+  }
+
+  return res.status(404).json({ error: 'Photo not found' });
 });
 
 router.post('/', upload.single('photo'), async (req: Request, res: Response) => {
@@ -533,6 +621,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
         rating:          photos.rating,
         participantId:   photos.participantId,
         challengeId:     photos.challengeId,
+        caption:         photos.caption,
         mediaType:       photos.mediaType,
         sizeBytes:       photos.sizeBytes,
         width:           photos.width,
@@ -571,6 +660,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
         isHighlighted:   photos.isHighlighted,
         participantId:   photos.participantId,
         challengeId:     photos.challengeId,
+        caption:         photos.caption,
         mediaType:       photos.mediaType,
         sizeBytes:       photos.sizeBytes,
         width:           photos.width,
@@ -614,6 +704,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
         rating:          photos.rating,
         participantId:   photos.participantId,
         challengeId:     photos.challengeId,
+        caption:         photos.caption,
         mediaType:       photos.mediaType,
         sizeBytes:       photos.sizeBytes,
         width:           photos.width,
@@ -639,6 +730,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
       isHighlighted:   photos.isHighlighted,
       participantId:   photos.participantId,
       challengeId:     photos.challengeId,
+      caption:         photos.caption,
       mediaType:       photos.mediaType,
       sizeBytes:       photos.sizeBytes,
       width:           photos.width,
