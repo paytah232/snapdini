@@ -12,6 +12,7 @@
   import Logo from '$lib/components/Logo.svelte';
   import PhotoCard from '$lib/components/PhotoCard.svelte';
   import { tileAspect } from '$lib/ui';
+  import { demoLinks } from '$lib/demo';
   import StartYourOwn from '$lib/components/StartYourOwn.svelte';
   import { trackGalleryView, trackPhotos } from '$lib/referral';
   import type { PageData } from './$types';
@@ -176,6 +177,11 @@
     location.href = zipHref([...selected]);
   }
 
+  // Recomputed when the event loads, because localStorage is only readable in the browser and the
+  // organizer code is not in the page payload — it is put there by the landing page that made the
+  // demo, which is the only place it is ever handed out.
+  $: dlinks = demoLinks(event?.joinCode ?? code);
+
   const modeText = (mode: string) =>
     mode === 'manual'
       ? 'The host will reveal the photos soon'
@@ -189,6 +195,15 @@
 <nav>
   <a class="brand" href="/"><Logo /></a>
   <div class="nav-right">
+    <!-- The demo's own navigation. Arriving here from the demo camera used to be a one-way door:
+         the camera carries these links, this page did not, so there was no way to the host's view
+         and no way out but the back button. Same order as the camera's — see the room, then the
+         host's side of it, and only then the exit. -->
+    {#if event?.isDemo}
+      <a class="btn ghost demo" href={dlinks.camera}>📷 Camera</a>
+      {#if dlinks.host}<a class="btn ghost demo" href={dlinks.host}>🎛 Host view</a>{/if}
+      <a class="btn ghost demo quiet" href="/">✕ Exit demo</a>
+    {/if}
     {#if revealed && hasHighlights}
       <button class="btn ghost" on:click={toggleHighlights}>
         {highlightsOnly ? '📷 All photos' : '⭐ Highlights'}
@@ -337,6 +352,9 @@
   .btn { display: inline-block; font-weight: 700; border-radius: var(--radius-sm); padding: 7px 14px; font-size: .82rem;
     border: 1px solid transparent; cursor: pointer; text-decoration: none; }
   .ghost { border-color: var(--border); color: var(--text); background: transparent; }
+  /* The exit is the one link here that is not part of the tour, so it recedes — same reasoning as
+     the camera's .home-btn.quiet. */
+  .demo.quiet { opacity: .8; }
   .ghost:hover { border-color: var(--accent); }
 
   .hero { position: relative; width: 100%; min-height: clamp(200px, 36vw, 360px); display: flex; align-items: flex-end;
