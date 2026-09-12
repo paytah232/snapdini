@@ -139,6 +139,12 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
     only) because a host can write their own, and stores the host's text rather than resolving an id
     at read time — a printed card cannot be updated, so improving our wording later must not
     silently disagree with the card on the table.
+  - **A trick is a PHOTO.** Every challenge ships worded as a still, the stored shape is
+    `{id,text}` with no notion of a clip, and the tension the feature runs on is that a roll is
+    finite — spending one of a fixed number of shots is a real decision. A clip is a different
+    currency and one of them plausibly contains several tricks at once. The SERVER drops
+    `challengeId` on a video (`98d-tricks-are-photos.mjs`); the camera hiding the option is a
+    courtesy, not the enforcement.
   - `videoSeconds: 0` events must not be offered clip prompts; `pickChallenges({allowVideo:false})`
     strips them and can still fill the maximum for every pack and mood.
   - Guest UI is one pill in the camera topbar (`Camera.svelte`) opening a sheet — the camera has to

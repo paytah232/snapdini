@@ -255,7 +255,13 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
   // event's whole list: the text becomes the photo's caption in the gallery, so an unchecked value
   // would let a guest write arbitrary text under someone else's photo — and would let them tick off
   // a mission from a card they were never handed.
-  const challengeId = isOfferedChallenge(readSets(p.eventChallenges), p.challengeSet, challengeRaw)
+  //
+  // A trick is a PHOTO prompt. Every challenge we ship is worded as a still, the saved shape carries
+  // no notion of a clip, and the point of the list is that a guest's roll is finite — spending one
+  // of a fixed number of shots on a trick is a real decision. A clip is a different currency
+  // (seconds, usually paid) and one ten-second clip plausibly contains several tricks at once, which
+  // makes ticking them arbitrary. So a video never ticks anything, whatever it was tagged with.
+  const challengeId = !isVideo && isOfferedChallenge(readSets(p.eventChallenges), p.challengeSet, challengeRaw)
     ? String(challengeRaw).trim() : null;
 
   const status = 'pending';
