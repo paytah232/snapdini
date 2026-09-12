@@ -799,6 +799,17 @@
     muted: cardDark ? 'rgba(255,255,255,0.72)' : '#6b6b6b',
     rule:  cardDark ? 'rgba(255,255,255,0.30)' : 'rgba(0,0,0,0.16)',
   };
+  // ── The tick's ink ─────────────────────────────────────────────────────────
+  // The tick is the one piece of event branding sitting inside the body text, so it follows the
+  // design's accent-bearing ink — the card's title override, else the poster title, which itself
+  // defaults to (and tracks) the event accent — instead of printing as flat body ink. A host who
+  // has set the trick-list colour has said what that whole column should be, so that override
+  // still wins over the theme. readableOn at the BODY bar rather than the large-type one, because
+  // the tick is set at the trick line's own size and read in the hand: a pale accent on a white
+  // card is walked down until it is legible rather than printed as a ghost.
+  $: cardTickInk = cardCBody
+    ? cardInk.body
+    : readableOn(cardCTitle || cHeadline, cardGround, INK_BODY);
   // The decoration: blank means "not chosen", so the event type picks one — a wedding card starts
   // with birds without the host doing anything, and can still be turned off.
   $: decorUsed = (decorKind || decorFor(eventType)) as DecorKind;
@@ -979,10 +990,14 @@
     ctx.textBaseline = 'middle';
     for (let i = 0; i < n; i++) {
       const cy = ry + rowH / 2;
-      // The tick is drawn in the card's ink; an emoji one is painted in colour by the device font
-      // and ignores this (see tickIsEmoji).
-      ctx.fillStyle = cardInk.body; ctx.font = `400 ${fs}px ${CARD_FAMILY}`;
+      ctx.font = `400 ${fs}px ${CARD_FAMILY}`;
+      // The tick carries the event's accent (cardTickInk); the trick text stays plain body ink, so
+      // the list still reads as a list. An emoji tick is painted in colour by the device's own font
+      // and ignores the fill entirely — see tickIsEmoji, which warns the host up front rather than
+      // letting them discover it at the printer.
+      ctx.fillStyle = cardTickInk;
       ctx.textAlign = 'center'; ctx.fillText(cardGlyph, L + fs * 0.75, cy);
+      ctx.fillStyle = cardInk.body;
       ctx.textAlign = 'left'; ctx.fillText(set.items[i].text, L + fs * 2, cy);
       // A dashed rule between rows, like the on-page card this stands in for.
       if (i < n - 1) {
@@ -1104,11 +1119,34 @@
     { key: 'qr', label: 'QR / join', show: cardBounds.qr.w > 0 },
   ] as { key: CardElKey; label: string; show: boolean }[]).filter((e) => e.show);
 
+  // The editor previews ONE card, not the sheet it will be printed on. Four-up, a card was a
+  // quarter of a 320px-wide thumbnail — far too small to judge a 12px trick line on a phone — and
+  // the other three cards are identical copies of it, so they showed nothing the first one didn't.
+  // PRINTING and every export are unaffected: they go through sheetCanvas()/drawSheet(), which
+  // still tile the sheet 4/2/1-up with the cut guides. Only what the editor shows changed.
   async function drawCards() {
-    if (!cardCanvas || !activeSheet) return;
+    const set = activeSheet;                 // captured: an await below must not swap sheets mid-draw
+    if (!cardCanvas || !set) return;
     const ctx = cardCanvas.getContext('2d'); if (!ctx) return;
-    cardCanvas.width = W * CARD_SCALE; cardCanvas.height = H * CARD_SCALE;
-    await drawSheet(ctx, activeSheet);
+    const g = cardBoxAt(0, 0);
+    cardCanvas.width = Math.round(g.cw * CARD_SCALE);
+    cardCanvas.height = Math.round(g.ch * CARD_SCALE);
+    // drawCard() lays out in SHEET space — a gutter, then the card — so the card's own top-left is
+    // shifted onto the canvas origin and the gutter is simply cropped off.
+    ctx.setTransform(CARD_SCALE, 0, 0, CARD_SCALE, -g.x0 * CARD_SCALE, -g.y0 * CARD_SCALE);
+    // Paper white behind it: the card clips its background to its rounded corners, and without this
+    // those corners are transparent — holes showing the app's surface rather than a cut card.
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(g.x0, g.y0, g.cw, g.ch);
+    let bg: HTMLImageElement | null = null;
+    if (cardUseImage) {
+      const src = bgSrc();
+      if (src) { try { bg = await loadImg(src); } catch { bg = null; } }
+    }
+    // The previewed set's own QR, for the same reason drawSheet uses it: a card carrying the wrong
+    // set sends a guest to somebody else's trick list.
+    const qr = await loadImg(await qrForSet(sheets.length > 1 ? set.key : null));
+    drawCard(ctx, 0, 0, set, qr, bg);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     cardsDrawn = true;
   }
   let cardRaf = 0;
@@ -1119,7 +1157,7 @@
   // inside a reactive block does not register plain state like the selected sheet as a dependency,
   // and the preview would go stale the moment a host switched sheets.
   $: cardSig = mounted && view === 'cards'
-    ? JSON.stringify([cfg, customBgUrl, activeSheet, sheets.length, cardGlyph, cardInk, cardBgHex, cardUseImage, decorUsed, decorInk]) : '';
+    ? JSON.stringify([cfg, customBgUrl, activeSheet, sheets.length, cardGlyph, cardInk, cardTickInk, cardBgHex, cardUseImage, decorUsed, decorInk]) : '';
   $: if (cardSig) scheduleCardRedraw();
 
   /** A sheet on its own canvas, so an export never depends on which one is being previewed. */
@@ -1183,6 +1221,30 @@
     { key: 'cardCode', label: 'Code / link', get: () => cardCCode || cardInk.code },
     { key: 'cardBg', label: 'Card background', get: () => cardCBg || cardBgHex },
   ] as { key: CTarget; label: string; get: () => string }[]);
+  // ── Controls for things that are switched off ──────────────────────────────
+  // A colour picker for an element that is not being printed is dead weight on a phone, so a row
+  // is hidden while its element is off. The stored VALUE is deliberately left alone — nothing here
+  // resets to a default — so switching the element back on brings the host's colour back exactly
+  // as they left it. That is why this filters at the point of display rather than clearing state.
+  $: VISIBLE_COLOR_ROWS = COLOR_ROWS.filter((r) =>
+    r.key === 'message' ? !!message.trim()
+    : r.key === 'steps' ? !!stepsText.trim()
+    : r.key === 'code' ? codeDisplay !== 'none'
+    : r.key === 'footer' ? showFooterUrl
+    : true);
+  // The same rule on the card. Its code/link row paints only the join block's code, which is drawn
+  // just for cardShowLink and only when the design shows a code or a link at all; its background
+  // row is overruled outright by ink-saver's forced white.
+  $: VISIBLE_CARD_COLOR_ROWS = CARD_COLOR_ROWS.filter((r) =>
+    r.key === 'cardCode' ? cardShowLink && codeDisplay !== 'none'
+    : r.key === 'cardBg' ? !cardInkSaver
+    : true);
+  // The image swatches write to whichever row is active, so a row that has just been hidden would
+  // quietly swallow colours with nothing on screen changing. Point it at the first row still
+  // showing on this tab — which also fixes the palette heading reading blank on the poster tab
+  // after a card colour was touched.
+  $: { const rows = view === 'cards' ? VISIBLE_CARD_COLOR_ROWS : VISIBLE_COLOR_ROWS;
+       if (rows.length && !rows.some((r) => r.key === activeTarget)) activeTarget = rows[0].key; }
   $: cardColoursSet = !!(cardCTitle || cardCBody || cardCCode || cardCBg);
   const clearCardColours = () => { cardCTitle = ''; cardCBody = ''; cardCCode = ''; cardCBg = ''; };
   const onDecorColour = (e: Event) => { decorColour = (e.target as HTMLInputElement).value; };
@@ -1219,12 +1281,11 @@
            measured drag bounds; the inactive one is just hidden. -->
       <div class="canvas-wrap" class:hidden={view !== 'cards' || !activeSheet || !cardsDrawn}>
         <canvas bind:this={cardCanvas}></canvas>
-        <!-- The overlay covers the FIRST card only: every card on the sheet is the same design, so
-             arranging one arranges them all — and a handle per card would be four handles fighting
-             over the same value. -->
+        <!-- The canvas IS one card, so the drag stage simply covers it. It used to be positioned
+             over the first card of the sheet; the rects it lays out are still measured in SHEET
+             space and offset by cardGeomBox, which is why that is still the surface's origin. -->
         <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
         <div class="poster-stage card-stage" bind:this={cardStageEl}
-          style="left:{(cardGeomBox.x0 / W) * 100}%; top:{(cardGeomBox.y0 / H) * 100}%; width:{(cardGeomBox.cw / W) * 100}%; height:{(cardGeomBox.ch / H) * 100}%"
           on:pointerdown|self={() => (cardSelectedKey = null)}>
           {#each cardElements as el (el.key)}
             {@const b = cardRects[el.key]}
@@ -1288,11 +1349,11 @@
             <button class="seg" class:on={cardsPerSheet === 2} on:click={() => (cardsPerSheet = 2)}>2 · A5</button>
             <button class="seg" class:on={cardsPerSheet === 1} on:click={() => (cardsPerSheet = 1)}>1 · A4</button>
           </div>
-          <p class="layout-hint" style="margin-top:8px">A4 halves and quarters exactly, so every option fills the sheet. Bigger cards carry the same design at a bigger size — handy for a long trick list or a table sign.</p>
+          <p class="layout-hint" style="margin-top:8px">A4 halves and quarters exactly, so every option fills the sheet. Bigger cards carry the same design at a bigger size — handy for a long trick list or a table sign. The preview shows a single card; the full sheet, with its cut guides, is what prints.</p>
         </div>
 
         <div class="fld"><span>Trick list</span>
-          <p class="layout-hint">Each card ticks with <b>{cardGlyph}</b> — chosen with the trick list itself, so the printed card and the app always agree.</p>
+          <p class="layout-hint">Each card ticks with <b>{cardGlyph}</b> — chosen with the trick list itself, so the printed card and the app always agree. It prints in your event's colour; set <b>Trick list</b> below to override it.</p>
           {#if tickIsEmoji}<p class="warn-note">⚠ Emoji ticks are printed in colour by your device's own font, so they won't match the card's ink colour — an outline tick in the trick-list editor will.</p>{/if}
         </div>
 
@@ -1316,7 +1377,7 @@
               <p class="layout-hint" style="margin-top:8px">One sheet per set. Print the sheet you're looking at, or all {printSets.length} at once — or turn off the card identifiers below, shuffle and hand them out at random.</p>
             </div>
           {/if}
-          <label class="chk"><input type="checkbox" bind:checked={cardIds} /> Print the card identifier ({sheets[0]?.label ?? 'Card A'}, …) on every card</label>
+          <label class="chk"><input type="checkbox" bind:checked={cardIds} /><span>Print the card identifier on every card <span class="sub">({sheets[0]?.label ?? 'Card A'}, …)</span></span></label>
         {/if}
 
         <div class="fld"><span>Layout</span>
@@ -1326,10 +1387,10 @@
             <button class="seg" on:click={undo} disabled={!undoStack.length} title="Undo the last change (Ctrl/⌘+Z)">↶ Undo</button>
             <button class="seg" on:click={redo} disabled={!redoStack.length} title="Redo (Ctrl/⌘+Shift+Z)">↷ Redo</button>
           </div>
-          <label class="chk"><input type="checkbox" bind:checked={cardShowQr} /> Show the QR code</label>
-          <label class="chk"><input type="checkbox" bind:checked={cardShowLink} /> Show the join link / code beside it</label>
-          <label class="chk"><input type="checkbox" bind:checked={cardRound} /> Rounded corners <span class="sub">(off = the card edge matches the cut line)</span></label>
-          <label class="chk"><input type="checkbox" bind:checked={cardInkSaver} /> Plain white cards (saves ink — four to a sheet adds up)</label>
+          <label class="chk"><input type="checkbox" bind:checked={cardShowQr} /><span>Show the QR code</span></label>
+          <label class="chk"><input type="checkbox" bind:checked={cardShowLink} /><span>Show the join link / code beside it</span></label>
+          <label class="chk"><input type="checkbox" bind:checked={cardRound} /><span>Rounded corners <span class="sub">(off = the card edge matches the cut line)</span></span></label>
+          <label class="chk"><input type="checkbox" bind:checked={cardInkSaver} /><span>Plain white cards <span class="sub">(saves ink — four to a sheet adds up)</span></span></label>
         </div>
 
         <label class="fld"><span>Caption under the link</span><input bind:value={cardCaption} maxlength="70" placeholder="(blank to hide)" /></label>
@@ -1363,14 +1424,14 @@
           <div class="c-head">Card colours
             {#if cardColoursSet}<button class="mini-link" on:click={clearCardColours}>↺ Follow the poster</button>{/if}
           </div>
-          {#each CARD_COLOR_ROWS as r}
+          {#each VISIBLE_CARD_COLOR_ROWS as r (r.key)}
             <label class="c-row"><span>{r.label}</span>
               <input type="color" value={r.get()} on:focus={() => (activeTarget = r.key)} on:input={(e) => onColorInput(e, r.key)} />
             </label>
           {/each}
           {#if palette.length}
             <div class="pal">
-              <span class="pal-h">From your image → {CARD_COLOR_ROWS.find((x) => x.key === activeTarget)?.label ?? 'pick a row above'}:</span>
+              <span class="pal-h">From your image → {VISIBLE_CARD_COLOR_ROWS.find((x) => x.key === activeTarget)?.label ?? 'pick a row above'}:</span>
               <div class="swatches">{#each palette as p}<button class="sw" style="background:{p}" title={p} aria-label={`Use ${p}`} on:click={() => applySwatch(p)}></button>{/each}</div>
             </div>
           {/if}
@@ -1389,7 +1450,7 @@
           <option value="none">Nothing (QR only)</option>
         </select>
       </div>
-      <label class="chk"><input type="checkbox" bind:checked={showFooterUrl} /> Show the link along the bottom</label>
+      <label class="chk"><input type="checkbox" bind:checked={showFooterUrl} /><span>Show the link along the bottom</span></label>
 
       <div class="fld"><span>Layout</span>
         <p class="layout-hint">Drag any element to move it; drag the <b>⤡</b> corner to resize — the outline shows its true size. Place text off faces.</p>
@@ -1428,14 +1489,14 @@
         <div class="c-head">Text colours
           {#if colorsLocked}<button class="mini-link" on:click={() => (colorsLocked = false)}>↺ Use theme colours</button>{/if}
         </div>
-        {#each COLOR_ROWS as r}
+        {#each VISIBLE_COLOR_ROWS as r (r.key)}
           <label class="c-row"><span>{r.label}</span>
             <input type="color" value={r.get()} on:focus={() => (activeTarget = r.key)} on:input={(e) => onColorInput(e, r.key)} />
           </label>
         {/each}
         {#if palette.length}
           <div class="pal">
-            <span class="pal-h">From your image → {COLOR_ROWS.find((x) => x.key === activeTarget)?.label}:</span>
+            <span class="pal-h">From your image → {VISIBLE_COLOR_ROWS.find((x) => x.key === activeTarget)?.label ?? 'pick a row above'}:</span>
             <div class="swatches">{#each palette as p}<button class="sw" style="background:{p}" title={p} aria-label={`Use ${p}`} on:click={() => applySwatch(p)}></button>{/each}</div>
           </div>
         {/if}
@@ -1508,8 +1569,6 @@
   .canvas-wrap.hidden { display: none; }
   canvas { width: 100%; height: auto; border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,0.4); display: block; }
   .poster-stage { position: absolute; inset: 0; }
-  /* The card stage is one card inside the sheet, so it is positioned rather than inset:0. */
-  .card-stage { inset: auto; }
   .sub { color: var(--text-muted); font-size: 0.72rem; }
   /* The element's footprint IS the move handle — drag anywhere on it. The outline only appears on
      hover or while active, so it doesn't clutter the preview; its true size shows when resizing. */
@@ -1539,7 +1598,17 @@
   .fld { display: block; margin-top: 10px; font-size: 0.78rem; color: var(--text-muted); }
   .fld > span { display: block; margin-bottom: 4px; }
   .fld input, .fld select { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font: inherit; font-size: 0.85rem; box-sizing: border-box; background: var(--surface); color: var(--text); }
-  .chk { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 0.82rem; }
+  /* A checkbox row is a box plus a label that WILL wrap at 360px, so three things matter:
+     · align-items:flex-start pins the box to the first line instead of floating it halfway down a
+       three-line label;
+     · flex:none + an explicit square stops a long label squashing the box to a sliver;
+     · the label is ONE flex item. It used to be two — the bare text node and the <span class="sub">
+       became separate flex children, which is what sat a sub-note BESIDE its label, each wrapping
+       in its own column, rather than under it. */
+  .chk { display: flex; align-items: flex-start; gap: 10px; margin-top: 10px; font-size: 0.82rem; line-height: 1.35; cursor: pointer; }
+  .chk > input[type="checkbox"] { flex: none; width: 16px; height: 16px; margin: 1px 0 0; accent-color: var(--accent); }
+  .chk > span { flex: 1; min-width: 0; }
+  .chk .sub { display: block; margin-top: 2px; }
   .bg-row { display: flex; gap: 6px; flex-wrap: wrap; }
   .seg { padding: 7px 11px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--text); cursor: pointer; font-size: 0.8rem; }
   .seg.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); font-weight: 700; }
