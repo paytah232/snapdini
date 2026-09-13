@@ -10,11 +10,14 @@
     setHighlights, saveTheme, emailGallery, setAllowDownloads,
     getPhotosByOrganizer, listCohosts, inviteCohost, removeCohost,
     listShares, deleteShare, deleteParticipant,
-    type AdminEvent, type Photo, type EventTheme, type CohostList, type ShareLink, setParticipantCard } from '$lib/events';
+    listGuests, addGuest, updateGuest, removeGuest, previewGuestImport, commitGuestImport, sendInvites,
+    type AdminEvent, type Photo, type EventTheme, type CohostList, type ShareLink, setParticipantCard,
+    type GuestListPayload, type ImportPreview, type GuestField } from '$lib/events';
   import type { AppOptions, BillingConfig } from '$lib/types';
   import UpgradePanel from '$lib/components/UpgradePanel.svelte';
   import HelpTip from '$lib/components/HelpTip.svelte';
   import ShareModal from '$lib/components/ShareModal.svelte';
+  import GuestList from '$lib/components/GuestList.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import { applyEventTheme } from '$lib/theme';
   import { getAdminCode, saveAdminCode } from '$lib/session';
@@ -262,6 +265,7 @@
       saveAdminCode(code, orgCode);
       void loadCohosts();
       void loadShares();
+      void loadGuests();
       return true;
     } catch (e) {
       authed = false;
@@ -632,6 +636,90 @@
     catch (e) { showToast(e instanceof Error ? e.message : 'Could not remove', true); }
   }
 
+  // ── Guest list & invites ─────────────────────────────────────────────────────
+  // All six handlers share one shape: the server answers every mutation with the WHOLE list, and
+  // we assign it. No local patching of a row after a successful call — the server is what decides
+  // whether an address is now suppressed or a duplicate was collapsed, and a locally-patched row
+  // is exactly how a screen ends up disagreeing with the database it is reporting on.
+  let guestData: GuestListPayload | null = null;
+  let guestBusy = false;
+  let importPreview: ImportPreview | null = null;
+  let importText = '';
+
+  async function loadGuests() {
+    try { guestData = await listGuests(code, orgCode); } catch { /* leave the card as it was */ }
+  }
+
+  /** Every guest mutation, wrapped once: busy flag, the server's own error words, and the fresh
+   *  list on the way out. */
+  async function guestAction<T extends GuestListPayload>(run: () => Promise<T>, onOk?: (r: T) => void) {
+    guestBusy = true;
+    try {
+      const r = await run();
+      guestData = r;
+      onOk?.(r);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'That did not work', true);
+    } finally { guestBusy = false; }
+  }
+
+  const onGuestAdd = (e: CustomEvent<{ name: string; email: string; phone: string; notes: string }>) =>
+    guestAction(() => addGuest(code, orgCode, e.detail), () => showSuccess('Added to the guest list'));
+
+  const onGuestUpdate = (e: CustomEvent<{ id: string; name: string; email: string; phone: string; notes: string }>) =>
+    guestAction(() => updateGuest(code, orgCode, e.detail.id, e.detail), () => showSuccess('Guest updated'));
+
+  function onGuestRemove(e: CustomEvent<{ id: string }>) {
+    const g = guestData?.guests.find((x) => x.id === e.detail.id);
+    if (!confirm(`Remove ${g?.name || g?.email || 'this guest'} from the list?`)) return;
+    // Any invite already sent to them keeps its row on the server — a bounce the host still needs
+    // to act on must not disappear along with the typo that caused it.
+    guestAction(() => removeGuest(code, orgCode, e.detail.id));
+  }
+
+  async function onGuestPreview(e: CustomEvent<{ text: string; mapping?: GuestField[] }>) {
+    guestBusy = true;
+    importText = e.detail.text;
+    try {
+      importPreview = await previewGuestImport(code, orgCode, e.detail.text, e.detail.mapping);
+    } catch (err) {
+      importPreview = null;
+      showToast(err instanceof Error ? err.message : 'Could not read that', true);
+    } finally { guestBusy = false; }
+  }
+
+  function onGuestImport(e: CustomEvent<{ text: string; mapping: GuestField[] }>) {
+    // The same text and mapping that produced the preview go back to the server, which re-runs the
+    // identical computation over them. What the host approved is therefore what happens — no
+    // server-side draft to drift out of step with what is on their screen.
+    guestAction(
+      () => commitGuestImport(code, orgCode, e.detail.text, e.detail.mapping),
+      (r) => {
+        importPreview = null;
+        importText = '';
+        showSuccess(`Imported ${r.imported} guest${r.imported === 1 ? '' : 's'}`
+          + (r.skipped ? ` — ${r.skipped} row${r.skipped === 1 ? '' : 's'} skipped` : ''));
+      },
+    );
+  }
+
+  function onGuestSend(e: CustomEvent<{ guestIds?: string[] }>) {
+    guestAction(
+      () => sendInvites(code, orgCode, e.detail.guestIds),
+      (r) => {
+        // The skipped list is reported FIRST and as a warning, not folded into a success count.
+        // "Sent 19" when 20 were asked for reads as success; the one that did not go is the whole
+        // reason this feature records anything at all.
+        if (r.skipped.length)
+          showToast(`Sent ${r.sent} — ${r.skipped.length} blocked (bounced or reported as spam before)`, true);
+        else if (r.failed)
+          showToast(`Sent ${r.sent}, ${r.failed} failed to send`, true);
+        else
+          showSuccess(`Invite${r.sent === 1 ? '' : 's'} sent to ${r.sent} guest${r.sent === 1 ? '' : 's'}`);
+      },
+    );
+  }
+
   // ── Shared links ─────────────────────────────────────────────────────────────
   let sharesList: ShareLink[] = [];
   let editShare: ShareLink | null = null;   // opens the share modal to rename / change the URL
@@ -888,6 +976,28 @@
            They are the opposite of an invite: you send them afterwards, to people who only want to
            see the photos. Both now live in Shared links, which is the after-the-event card. -->
     </div>
+
+    <!-- Guest list: the other half of "Share & invite", and the reason it sits directly under it.
+         The QR and the join link are for handing the event to people you are standing next to;
+         this is for the ones you are not. It is also the only place in the product that can answer
+         "did that actually arrive?" — which is the part a host cannot do from their own inbox. -->
+    {#if guestData}
+      <div class="card">
+        <div class="card-title">Guest list</div>
+        <GuestList
+          data={guestData}
+          busy={guestBusy}
+          bind:preview={importPreview}
+          bind:importText
+          on:add={onGuestAdd}
+          on:update={onGuestUpdate}
+          on:remove={onGuestRemove}
+          on:preview={onGuestPreview}
+          on:import={onGuestImport}
+          on:send={onGuestSend}
+        />
+      </div>
+    {/if}
 
     <!-- Controls -->
     <div class="card">

@@ -6,6 +6,15 @@ const smtpConfigured = !!(process.env.SMTP_HOST && process.env.SMTP_USER && proc
 const mailgunConfigured = !!(process.env.MAILGUN_API_KEY && process.env.MAILGUN_DOMAIN);
 export const enabled = smtpConfigured || mailgunConfigured;
 
+/** Which transport is actually in use, or null when email is off.
+ *
+ *  Recorded against every invite that is sent, because it is what a 'sent' status MEANS. Mailgun
+ *  can tell us later what became of a message; plain SMTP never can. Without this column the same
+ *  word on the screen would stand for "waiting to hear" on one deployment and "we will never know"
+ *  on another, and the host has no way to tell which they are looking at. */
+export const provider: 'mailgun' | 'smtp' | null =
+  mailgunConfigured ? 'mailgun' : smtpConfigured ? 'smtp' : null;
+
 const transporter = smtpConfigured
   ? nodemailer.createTransport({
       host: process.env.SMTP_HOST,
@@ -19,25 +28,68 @@ const FROM = process.env.SMTP_FROM
   || process.env.SMTP_USER
   || (mailgunConfigured ? `Snapdini <postmaster@${process.env.MAILGUN_DOMAIN}>` : 'Snapdini <noreply@snapdini.com>');
 
-interface Mail { to: string; subject: string; html: string; replyTo?: string }
+interface Mail {
+  to: string; subject: string; html: string; replyTo?: string;
+  /** Metadata to attach to the message. Mailgun carries these through to its webhooks as
+   *  `user-variables`, which is the ONLY thing that lets a delivery event arriving hours later be
+   *  tied back to the row that sent it. Ignored by the SMTP transport, which has no such channel —
+   *  and that absence is exactly why SMTP sends never gain a delivery state. */
+  variables?: Record<string, string>;
+  /** A Mailgun tag, so one kind of mail can be told from another in Mailgun's own dashboard. */
+  tag?: string;
+}
 
-async function sendViaMailgun({ to, subject, html, replyTo }: Mail) {
+/** What a send tells us about itself.
+ *
+ *  `messageId` is the provider's id for the message, already stripped of the angle brackets that
+ *  the Mailgun send API wraps it in — Mailgun's webhooks report the same id WITHOUT them, so
+ *  normalising here is what lets the two be compared at all. Compared as sent, they never match.
+ *
+ *  `provider` is recorded against every invite, because it is what decides whether 'sent' means
+ *  "we are waiting to hear" or "we will never hear". */
+export interface SendResult { provider: 'mailgun' | 'smtp'; messageId: string | null }
+
+const unbracket = (id: string | null | undefined): string | null =>
+  (id ? id.replace(/^</, '').replace(/>$/, '') || null : null);
+
+async function sendViaMailgun({ to, subject, html, replyTo, variables, tag }: Mail): Promise<SendResult> {
   const base = process.env.MAILGUN_BASE || 'https://api.mailgun.net'; // EU: https://api.eu.mailgun.net
   const domain = process.env.MAILGUN_DOMAIN as string;
   const form = new URLSearchParams({ from: FROM, to, subject, html });
   if (replyTo) form.set('h:Reply-To', replyTo);
+  // `v:` = custom variable, `o:` = send option. Mailgun caps all o:/h:/v:/t: parameters at 16KB
+  // combined, which the short token and tag used here are nowhere near.
+  for (const [k, v] of Object.entries(variables || {})) form.set(`v:${k}`, v);
+  if (tag) form.set('o:tag', tag);
+  // Open/click tracking is explicitly OFF. Leaving it to the account default risks it being on,
+  // which rewrites every link in the email through a Mailgun redirector and embeds a tracking
+  // pixel — surveillance of the host's guests that this product does not do, and which would also
+  // make the join link unreadable to anyone who looks at where it actually points.
+  form.set('o:tracking', 'no');
   const auth = Buffer.from(`api:${process.env.MAILGUN_API_KEY}`).toString('base64');
   const res = await fetch(`${base}/v3/${domain}/messages`, {
     method: 'POST',
+    // NOTE: Mailgun documents multipart/form-data for this endpoint; urlencoded is undocumented
+    // but works for sends without attachments, and is what this deployment has been sending with
+    // all along. Left alone deliberately — changing the transport of every outbound email in the
+    // product is not a change to make as a side effect of adding a guest list.
     headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
     body: form,
   });
   if (!res.ok) throw new Error(`Mailgun send failed (${res.status}): ${await res.text().catch(() => '')}`);
+  // { id: "<2026...@mg.example.com>", message: "Queued. Thank you." }. A response body we cannot
+  // parse is NOT a failed send — the message is already queued — so this degrades to a null id
+  // rather than throwing and making the caller record a failure that did not happen.
+  const body = await res.json().catch(() => null) as { id?: string } | null;
+  return { provider: 'mailgun', messageId: unbracket(body?.id) };
 }
 
-export async function sendMail({ to, subject, html, replyTo }: Mail) {
-  if (mailgunConfigured) return sendViaMailgun({ to, subject, html, replyTo });
-  if (transporter) return transporter.sendMail({ from: FROM, to, subject, html, replyTo });
+export async function sendMail({ to, subject, html, replyTo, variables, tag }: Mail): Promise<SendResult> {
+  if (mailgunConfigured) return sendViaMailgun({ to, subject, html, replyTo, variables, tag });
+  if (transporter) {
+    const info = await transporter.sendMail({ from: FROM, to, subject, html, replyTo });
+    return { provider: 'smtp', messageId: unbracket(info?.messageId) };
+  }
   throw new Error('Email not configured — set MAILGUN_API_KEY+MAILGUN_DOMAIN, or SMTP_HOST/USER/PASS');
 }
 

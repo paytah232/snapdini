@@ -53,6 +53,13 @@ services:
       - MAILGUN_API_KEY=${MAILGUN_API_KEY:-}
       - MAILGUN_DOMAIN=${MAILGUN_DOMAIN:-}
       - MAILGUN_BASE=${MAILGUN_BASE:-}
+      # Mailgun webhook signing key — NOT the API key. It is a separate secret (Mailgun calls it
+      # the HTTP webhook signing key) that verifies the delivery events POSTed to
+      # /api/webhooks/mailgun. Unset = the webhook endpoint answers 404 and invites still send
+      # perfectly well; their delivery state simply stays "sent", which the host UI says plainly.
+      # Setting the API key here by mistake fails EVERY verification with no visible symptom
+      # beyond delivery state never updating, so it is worth checking twice.
+      - MAILGUN_WEBHOOK_SIGNING_KEY=${MAILGUN_WEBHOOK_SIGNING_KEY:-}
       # System address the contact form emails (e.g. support@snapdini.com).
       - SUPPORT_EMAIL=${SUPPORT_EMAIL:-}
       # Bot check (Cloudflare Turnstile). Unset secret = feature entirely inert, so this is safe
