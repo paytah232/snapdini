@@ -524,6 +524,27 @@
   const QR_WARN_PX = 230;              // ≈ 45mm — warn below this
   $: qrTooSmall = layout.qr.size < QR_WARN_PX;
   const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+
+  // ── Touch feel ─────────────────────────────────────────────────────────────
+  // The stage is a THUMBNAIL of the page. Measured: 316 CSS px wide on a 390px phone and 286 on a
+  // 360px one, for a 1080px-wide design space — so ONE finger-pixel is 3.42 design pixels, 3.78 at
+  // 360px. A move is still 1:1 on SCREEN (the element must stay under the finger, and that is not
+  // negotiable), but everything DERIVED from that delta carries the multiplier:
+  //   · the 2px of jitter in an ordinary tap used to shift an element 6.8–7.6 design px, i.e. the
+  //     act of SELECTING something moved it;
+  //   · a 20px flick of the resize grip changed `size` by 68–76 px, which for a text element
+  //     (limits 16–170) is 44–49% of its entire range in one nudge.
+  // Hence: a dead zone before a drag counts as a drag, and a gain on touch resizes. The mouse keeps
+  // a 2px dead zone — under the browser's own click slop, so desktop drags feel exactly as before —
+  // and full resize gain, because a mouse has the precision the multiplier assumes.
+  const DEAD_TOUCH = 6, DEAD_MOUSE = 2;
+  const TOUCH_RESIZE_GAIN = 0.45;
+  // Alignment-snap threshold, in SCREEN pixels and converted per-surface at drag time. A constant
+  // in design space cannot work — it would be worth 7px of finger travel on this 316px thumbnail
+  // and a fraction of that on the full-screen ⛶ Arrange stage, so the same design would snap
+  // differently depending only on how big the preview happened to be. 7 screen px measured out as
+  // 24 design px at 390 and 26 at 360.
+  const SNAP_PX = 7;
   $: elements = ([
     { key: 'brand', label: 'Logo', show: true, resizable: false, axis: 'x' },
     { key: 'title', label: 'Title', show: true, resizable: true, axis: 'xy' },
@@ -600,6 +621,8 @@
     box: (key: string) => Box;                         // the stored position/size being dragged
     limits: (key: string) => [number, number];         // size clamp for a resize
     lockY?: (key: string) => boolean;
+    /** Can this element be scaled at all? A pinch has no grip to hide behind, so it has to ask. */
+    resizable?: (key: string) => boolean;
     move: (key: string, x: number, y: number) => void;
     size: (key: string, px: number) => void;
     remeasure: () => void;
@@ -612,6 +635,43 @@
   const r4 = (n: number) => Math.round(n * 1e4) / 1e4;
   const r1 = (n: number) => Math.round(n * 10) / 10;
 
+  // ── Alignment guides ───────────────────────────────────────────────────────
+  // The line currently being honoured, as a fraction of the surface being dragged on (0–1), or null
+  // for "this axis isn't snapping". Only ever ONE of each: PowerPoint shows the lines in play, not
+  // every line it could have used, and on a 316px stage a fan of candidates is just noise.
+  // Both stages read these; only one surface can be mid-drag, and pointerup clears them.
+  let snapX: number | null = null;
+  let snapY: number | null = null;
+  const clearGuides = () => { snapX = null; snapY = null; };
+  /**
+   * The nearest alignment on one axis, or null. `raw` is the proposed CENTRE in design px, `half`
+   * the element's half-extent on that axis, `lines` every candidate line from the other elements
+   * (their leading edge, centre and trailing edge), `pageMid` the page's own midline.
+   *
+   * Returns the delta to ADD to `raw`, plus the line it landed on, so the caller can draw it.
+   *
+   * There is deliberately NO hysteresis: every frame recomputes from the raw pointer position, so
+   * dragging on past the threshold simply stops matching and the element escapes under the finger.
+   * A snap you have to fight your way out of is worse than no snap at all.
+   */
+  function snapAxis(raw: number, half: number, lines: number[], pageMid: number, thr: number): { d: number; line: number } | null {
+    let best: { d: number; line: number } | null = null;
+    const take = (line: number, ref: number) => {
+      const d = line - ref;
+      if (Math.abs(d) <= thr && (best === null || Math.abs(d) < Math.abs(best.d))) best = { d, line };
+    };
+    // Page midline pairs with our CENTRE only. An element's left edge sitting on the page's centre
+    // line is a coincidence, not an alignment, and offering it would fight the centre-to-centre snap
+    // that people actually want.
+    take(pageMid, raw);
+    for (const line of lines) {
+      take(line, raw - half);   // our leading edge on theirs
+      take(line, raw);          // centre to centre
+      take(line, raw + half);   // our trailing edge on theirs
+    }
+    return best;
+  }
+
   function dragOn(surf: Surface, key: string, mode: 'move' | 'resize', e: PointerEvent) {
     // Before anything moves, so the whole drag undoes as one action.
     commitBurst();
@@ -620,42 +680,126 @@
     const stage = surf.stage(); if (!stage) return;
     surf.dragging(key); surf.select(key);
     const rect = stage.getBoundingClientRect();
-    const start = { x: e.clientX, y: e.clientY };
+    // Rebased when the dead zone is crossed, so engaging a drag never jumps the element by the slop
+    // that got it there — the element picks up exactly where the finger committed.
+    let start = { x: e.clientX, y: e.clientY };
     const box0 = { ...surf.box(key) };
+    const touch = e.pointerType === 'touch';
+    const deadZone = touch ? DEAD_TOUCH : DEAD_MOUSE;
+    let live = false;
+    // Live touch points, so a second finger can turn this into a pinch-resize. Keyed by pointerId
+    // because a touch's coordinates only ever arrive on ITS OWN move events — there is no single
+    // event carrying both fingers.
+    const pts = new Map<number, { x: number; y: number }>([[e.pointerId, { x: e.clientX, y: e.clientY }]]);
+    let pinch: { d0: number; size0: number } | null = null;
     (e.target as Element).setPointerCapture?.(e.pointerId);
+
+    // A second finger ANYWHERE turns the gesture into a pinch — it does not have to land on the
+    // element, which on a phone would mean pinching a 30px-tall strip of text. Capture phase,
+    // because it may land on another element whose own handler stops the event.
+    const onDown = (ev: PointerEvent) => {
+      if (pinch || ev.pointerType !== 'touch' || pts.size >= 2) return;
+      if (!(surf.resizable?.(key) ?? true)) return;
+      pts.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+      const [a, c] = [...pts.values()];
+      const d0 = Math.hypot(a.x - c.x, a.y - c.y);
+      if (d0 < 1) { pts.delete(ev.pointerId); return; }   // two fingers on one spot: no scale to read
+      // From the CURRENT size, not box0 — the first finger may already have resized it.
+      pinch = { d0, size0: surf.box(key).size };
+      clearGuides();
+      ev.preventDefault();
+    };
     const onMove = (ev: PointerEvent) => {
-      if (mode === 'move') {
-        // Clamp by the element's HALF size so its whole footprint stays inside the surface — the
-        // centre can't go closer to an edge than half the element's width/height.
-        const b = surf.rects()[key];
-        const hw = b ? Math.min(0.5, b.w / 2 / surf.w) : 0.02;
-        const hh = b ? Math.min(0.5, b.h / 2 / surf.h) : 0.02;
-        // Keep everything inside the printable area. The clamp used to be the element's own half
-        // width, so its edge could sit flush against the paper's — measured at 0.0mm — and we print
-        // with @page margin:0, which means a home printer simply cuts that off. Almost no consumer
-        // printer reaches within 3–5mm of an edge.
-        //
-        // An element too large to fit between the margins is centred rather than clamped to an
-        // inverted range, which would pin it to one side.
-        const px = (surf.pad ?? 0) / surf.w, py = (surf.pad ?? 0) / surf.h;
-        const loX = hw + px, hiX = 1 - hw - px;
-        const loY = hh + py, hiY = 1 - hh - py;
-        const rawX = box0.x + (ev.clientX - start.x) / rect.width;
-        const rawY = box0.y + (ev.clientY - start.y) / rect.height;
-        const x = loX > hiX ? 0.5 : clamp(rawX, loX, hiX);
-        const y = surf.lockY?.(key) ? box0.y : (loY > hiY ? 0.5 : clamp(rawY, loY, hiY));
-        surf.move(key, r4(x), r4(y));
-      } else {
-        const dpx = ((ev.clientX - start.x) / rect.width) * surf.w;
+      const p = pts.get(ev.pointerId);
+      if (p) { p.x = ev.clientX; p.y = ev.clientY; }
+      if (pinch) {
+        if (pts.size < 2) return;
+        const [a, c] = [...pts.values()];
+        const d = Math.hypot(a.x - c.x, a.y - c.y);
         const [lo, hi] = surf.limits(key);
-        surf.size(key, r1(clamp(box0.size + dpx, lo, hi)));
+        // Multiplicative, so the element scales with the gap between the fingers exactly as a photo
+        // would. limits(key) still has the last word — that is what keeps the QR above its
+        // scannable floor no matter how hard someone pinches.
+        surf.size(key, r1(clamp(pinch.size0 * (d / pinch.d0), lo, hi)));
+      } else {
+        if (ev.pointerId !== e.pointerId) return;   // a stray pointer not driving this gesture
+        if (!live) {
+          if (Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < deadZone) return;
+          live = true; start = { x: ev.clientX, y: ev.clientY };
+        }
+        if (mode === 'move') {
+          // Clamp by the element's HALF size so its whole footprint stays inside the surface — the
+          // centre can't go closer to an edge than half the element's width/height.
+          const b = surf.rects()[key];
+          const hw = b ? Math.min(0.5, b.w / 2 / surf.w) : 0.02;
+          const hh = b ? Math.min(0.5, b.h / 2 / surf.h) : 0.02;
+          // Keep everything inside the printable area. The clamp used to be the element's own half
+          // width, so its edge could sit flush against the paper's — measured at 0.0mm — and we print
+          // with @page margin:0, which means a home printer simply cuts that off. Almost no consumer
+          // printer reaches within 3–5mm of an edge.
+          //
+          // An element too large to fit between the margins is centred rather than clamped to an
+          // inverted range, which would pin it to one side.
+          const px = (surf.pad ?? 0) / surf.w, py = (surf.pad ?? 0) / surf.h;
+          const loX = hw + px, hiX = 1 - hw - px;
+          const loY = hh + py, hiY = 1 - hh - py;
+          let rawX = box0.x + (ev.clientX - start.x) / rect.width;
+          let rawY = box0.y + (ev.clientY - start.y) / rect.height;
+          // ── Snap, THEN clamp. The print margin outranks the alignment: an element pinned to the
+          //    safe area must not be dragged into it just because a guide line lives there.
+          clearGuides();
+          if (b) {
+            const thrX = SNAP_PX * (surf.w / rect.width), thrY = SNAP_PX * (surf.h / rect.height);
+            const linesX: number[] = [], linesY: number[] = [];
+            const all = surf.rects();
+            for (const k of Object.keys(all)) {
+              if (k === key) continue;
+              const r = all[k];
+              if (!r || r.w <= 0 || r.h <= 0) continue;   // a hidden element has a zero rect
+              linesX.push(r.x, r.x + r.w / 2, r.x + r.w);
+              linesY.push(r.y, r.y + r.h / 2, r.y + r.h);
+            }
+            const sx = snapAxis(rawX * surf.w, b.w / 2, linesX, surf.w / 2, thrX);
+            if (sx) { rawX += sx.d / surf.w; snapX = sx.line / surf.w; }
+            if (!surf.lockY?.(key)) {
+              const sy = snapAxis(rawY * surf.h, b.h / 2, linesY, surf.h / 2, thrY);
+              if (sy) { rawY += sy.d / surf.h; snapY = sy.line / surf.h; }
+            }
+          }
+          const x = loX > hiX ? 0.5 : clamp(rawX, loX, hiX);
+          const y = surf.lockY?.(key) ? box0.y : (loY > hiY ? 0.5 : clamp(rawY, loY, hiY));
+          // If the clamp had to move a snapped centre, the guide is now pointing at a line the
+          // element is NOT on. Drop it rather than draw a lie.
+          if (snapX !== null && Math.abs(x - rawX) > 1e-6) snapX = null;
+          if (snapY !== null && Math.abs(y - rawY) > 1e-6) snapY = null;
+          surf.move(key, r4(x), r4(y));
+        } else {
+          // Touch gets a gain: at 3.4 design px per finger px, an unscaled grip moved `size` by ~68px
+          // in a 20px flick. Coarse scaling on a phone is what the pinch is for.
+          const gain = touch ? TOUCH_RESIZE_GAIN : 1;
+          const dpx = (((ev.clientX - start.x) * gain) / rect.width) * surf.w;
+          const [lo, hi] = surf.limits(key);
+          surf.size(key, r1(clamp(box0.size + dpx, lo, hi)));
+        }
       }
       // Update the outline + canvas immediately so they track the pointer with no lag.
       surf.remeasure();
       surf.redraw();
     };
-    const onUp = () => { surf.dragging(null); window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); };
-    window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp);
+    // Lifting ANY finger ends the whole gesture, pinch included. Falling back to a one-finger move
+    // on the finger that happens to remain would move the element by wherever that finger was
+    // sitting — a jump, right at the moment the user thought they had finished.
+    const onUp = () => {
+      surf.dragging(null); clearGuides();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      window.removeEventListener('pointerdown', onDown, true);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    window.addEventListener('pointerdown', onDown, true);
   }
   const posterSurface: Surface = {
     pad: PAGE_PAD,
@@ -666,6 +810,8 @@
     // The QR floor is what keeps a code with our logo punched into its centre scannable.
     limits: (k) => (k === 'qr' ? [QR_MIN_PX, 760] : [16, 170]),
     lockY: (k) => k === 'brand',      // the brand mark slides left/right along the top only
+    // The brand mark has no resize grip, so a pinch must not give it one by the back door.
+    resizable: (k) => k !== 'brand',
     move: (k, x, y) => { layout = { ...layout, [k]: { ...layout[k as ElKey], x, y } }; },
     size: (k, px) => { layout = { ...layout, [k]: { ...layout[k as ElKey], size: px } }; },
     remeasure: () => { bounds = measureBounds(); },
@@ -1351,8 +1497,10 @@
              over the first card of the sheet; the rects it lays out are still measured in SHEET
              space and offset by cardGeomBox, which is why that is still the surface's origin. -->
         <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
-        <div class="poster-stage card-stage" bind:this={cardStageEl}
+        <div class="poster-stage card-stage" class:dragging={!!cardDragKey} bind:this={cardStageEl}
           on:pointerdown|self={() => (cardSelectedKey = null)}>
+          {#if cardDragKey && snapX !== null}<div class="snap-guide vert" style="left:{snapX * 100}%" aria-hidden="true"></div>{/if}
+          {#if cardDragKey && snapY !== null}<div class="snap-guide horz" style="top:{snapY * 100}%" aria-hidden="true"></div>{/if}
           {#each cardElements as el (el.key)}
             {@const b = cardRects[el.key]}
             {#if b}
@@ -1375,13 +1523,16 @@
         <!-- Click an element to select it → its outline + resize corner ⤡ appear. Drag anywhere on
              it to move; drag the corner to resize. Click empty space to deselect. -->
         <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
-        <div class="poster-stage" bind:this={stageEl} on:pointerdown|self={() => (selectedKey = null)}>
+        <div class="poster-stage" class:dragging={!!dragKey} bind:this={stageEl} on:pointerdown|self={() => (selectedKey = null)}>
           <!-- The slice of paper a printer cannot reach. Drawn rather than merely enforced, because
                "why won't it go any further" is a worse experience than seeing the line it stops at.
                Purely decorative — it never takes a pointer. -->
           <!-- Two percentages, not one: in `inset` the vertical pair resolves against HEIGHT and the
                horizontal against WIDTH, so the same 5mm is a different percentage on each axis. -->
           <div class="safe-area" style="inset:{(PAGE_PAD / H) * 100}% {(PAGE_PAD / W) * 100}%" aria-hidden="true"></div>
+          <!-- Alignment guides: only while a drag is actually snapping, and only the axis in play. -->
+          {#if dragKey && snapX !== null}<div class="snap-guide vert" style="left:{snapX * 100}%" aria-hidden="true"></div>{/if}
+          {#if dragKey && snapY !== null}<div class="snap-guide horz" style="top:{snapY * 100}%" aria-hidden="true"></div>{/if}
           {#each elements as el (el.key)}
             {#if bounds[el.key]}
               {@const b = bounds[el.key]}
@@ -1453,7 +1604,7 @@
         {/if}
 
         <div class="fld"><span>Layout</span>
-          <p class="layout-hint">Drag the title or the QR block on the preview to move it; drag the <b>⤡</b> corner to resize. You are arranging the first card — the rest of the sheet follows it.</p>
+          <p class="layout-hint">Drag the title or the QR block on the preview to move it; drag the <b>⤡</b> corner to resize, or pinch it with two fingers. It snaps to the card’s centre and to the other block — a pink line shows what it lined up with. You are arranging the first card — the rest of the sheet follows it.</p>
           <div class="bg-row">
             <button class="seg" on:click={resetCardLayout}>↺ Reset card layout</button>
             <button class="seg" on:click={undo} disabled={!undoStack.length} title="Undo the last change (Ctrl/⌘+Z)">↶ Undo</button>
@@ -1525,7 +1676,7 @@
       <label class="chk"><input type="checkbox" bind:checked={showFooterUrl} /><span>Show the link along the bottom</span></label>
 
       <div class="fld"><span>Layout</span>
-        <p class="layout-hint">Drag any element to move it; drag the <b>⤡</b> corner to resize — the outline shows its true size. Place text off faces.</p>
+        <p class="layout-hint">Drag any element to move it; drag the <b>⤡</b> corner to resize — or pinch it with two fingers. Elements snap to the page centre and to each other; a pink line shows what lined up, and dragging on past it breaks the snap. Place text off faces.</p>
         {#if qrTooSmall}<p class="warn-note">⚠ The QR code is getting small — keep it larger so guests can scan it reliably (the brand logo in the centre needs room).</p>{/if}
         <div class="bg-row">
           <button class="seg" on:click={() => (fsEdit = true)}>⛶ Full-screen arrange</button>
@@ -1655,6 +1806,13 @@
   .canvas-wrap.hidden { display: none; }
   canvas { width: 100%; height: auto; border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,0.4); display: block; }
   .poster-stage { position: absolute; inset: 0; }
+  /* Only WHILE dragging, never at rest. The stage is a transparent overlay covering the whole
+     preview, so a permanent touch-action:none would stop a finger scrolling the modal by swiping
+     over the poster. It has to be set before the SECOND finger lands, though — touch-action is what
+     stops the browser treating a pinch as a page zoom, and preventDefault() on pointerdown does not
+     (pointer events leave scrolling/zooming to touch-action alone). A drag is already in progress
+     by then, so the class is on in time. */
+  .poster-stage.dragging { touch-action: none; }
   .sub { color: var(--text-muted); font-size: 0.72rem; }
   /* The element's footprint IS the move handle — drag anywhere on it. The outline only appears on
      hover or while active, so it doesn't clutter the preview; its true size shows when resizing. */
@@ -1669,6 +1827,15 @@
     position: absolute; pointer-events: none; z-index: 0;
     border: 1px dashed rgba(255, 255, 255, .28); border-radius: 2px;
   }
+  /* Alignment guides. Deliberately SOLID and magenta: the dashed white line on this same stage
+     already means "print-safe area", and two dashed lines meaning two different things is a puzzle
+     rather than a hint. The dark outer shadow is what keeps a 1px line visible on both a white
+     poster and a photo background. z-index sits above the element outlines but below the resize
+     grip, so the grip you are holding is never hidden by the line it just landed on. */
+  .snap-guide { position: absolute; pointer-events: none; z-index: 2; background: #ff3ea5;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, .38); }
+  .snap-guide.vert { top: 0; bottom: 0; width: 1px; margin-left: -0.5px; }
+  .snap-guide.horz { left: 0; right: 0; height: 1px; margin-top: -0.5px; }
   .el-box { position: absolute; box-sizing: border-box; border: 1px dashed transparent; border-radius: 5px;
     pointer-events: auto; cursor: move; touch-action: none; user-select: none; -webkit-user-select: none; z-index: 1; }
   .el-box.lock-x { cursor: ew-resize; }
