@@ -236,6 +236,13 @@
          the camera carries these links, this page did not, so there was no way to the host's view
          and no way out but the back button. Same order as the camera's — see the room, then the
          host's side of it, and only then the exit. -->
+    <!-- A guest who is IN this event needs the way back, and there wasn't one. Worse, a spent roll
+         is sent here with replaceState, so the browser's own Back button does not go back either —
+         they were simply stranded in the album. Shown only to someone with a session for THIS
+         event: a stranger opening a shared gallery link has no camera to return to. -->
+    {#if guestToken && !event?.isDemo}
+      <a class="btn ghost back-ev" href={`/join/${code}`}>← Back to the event</a>
+    {/if}
     {#if event?.isDemo}
       <a class="btn ghost demo" href={dlinks.camera}>📷 Camera</a>
       {#if dlinks.host}<a class="btn ghost demo" href={dlinks.host}>🎛 Host view</a>{/if}
@@ -401,6 +408,8 @@
      the camera's .home-btn.quiet. */
   /* The tour's links are context, not the point of this page — the gallery's own actions lead. */
   .demo { opacity: .85; }
+  /* The way back is the one thing here a stranded guest is looking for, so it does not recede. */
+  .back-ev { border-color: var(--accent); color: var(--accent); }
   .ghost:hover { border-color: var(--accent); }
 
   .hero { position: relative; width: 100%; min-height: clamp(200px, 36vw, 360px); display: flex; align-items: flex-end;
