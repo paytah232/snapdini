@@ -630,7 +630,13 @@
   .who-menu > summary::-webkit-details-marker { display: none; }
   .who-menu > summary.on { background: var(--accent); color: var(--accent-ink, #111); }
   .who-pop {
-    position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; min-width: 220px;
+    /* Anchored to the menu's RIGHT edge, not its left.
+       With `left: 0` the panel started where the summary starts — x=187 in the filter row — and
+       ran 220px from there, so its right edge landed at 407px on both a 360 and a 390 phone and
+       about fifty pixels of the guest list was off-screen and unreachable. max-width caps how WIDE
+       it is, which never helped: the problem was where it began. Opening leftward from a control
+       that already sits right-of-centre keeps the whole list on screen at every phone width. */
+    position: absolute; top: calc(100% + 6px); right: 0; left: auto; z-index: 30; min-width: 220px;
     /* Never wider than the screen, and never flush against its edge on a narrow phone. */
     max-width: calc(100vw - 16px);
     max-height: 320px; overflow-y: auto; padding: 8px; border-radius: var(--radius-sm);
