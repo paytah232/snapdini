@@ -76,26 +76,34 @@
 
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
 <div class="lb" bind:this={lbEl} on:click|self={() => dispatch('close')} role="dialog" aria-modal="true" aria-label="Photo viewer" tabindex="-1">
-  <button class="close" on:click={() => dispatch('close')} aria-label="Close">✕</button>
-  {#if allowSave}
-    <!-- On iOS an `<a download>` puts the photo in FILES, not the camera roll — there is no web API
-         that writes to Photos. The share sheet has "Save Image" on it, which does. So this asks the
-         OS rather than downloading, and falls back to a download where there is no sheet.
-         It lives here, on a tap, because the Share API needs a real gesture — and because a share
-         sheet after every shutter press would be intolerable. -->
-    <button class="lb-save" on:click|stopPropagation={saveThis} disabled={saving}
-            aria-label="Save this photo to your device">
-      {saving ? '…' : savedMsg || '⤓ Save'}
-    </button>
-  {/if}
-  {#if canCaption}
-    <!-- Looking at a photo full-screen is when someone actually thinks of what to say about it;
-         making them close it and find the tile again is the wrong way round. -->
-    <button class="lb-cap" on:click|stopPropagation={() => dispatch('caption', photo)}
-            aria-label={photo.caption ? 'Edit this caption' : 'Add a caption'}>
-      💬 {photo.caption ? 'Edit caption' : 'Add a caption'}
-    </button>
-  {/if}
+  <!-- One bar, so the controls cannot drift out of line with each other. They were three separately
+       positioned buttons at slightly different tops and heights, which is exactly the sort of thing
+       that only shows up once someone looks at it on a phone. A flex row makes alignment structural
+       rather than three numbers that have to be kept in step by hand. -->
+  <div class="lb-bar">
+    <div class="lb-bar-l">
+      {#if canCaption}
+        <!-- Looking at a photo full-screen is when someone actually thinks of what to say about it;
+             making them close it and find the tile again is the wrong way round. -->
+        <button class="lb-btn" on:click|stopPropagation={() => dispatch('caption', photo)}
+                aria-label={photo.caption ? 'Edit this caption' : 'Add a caption'}>
+          💬 {photo.caption ? 'Edit caption' : 'Add a caption'}
+        </button>
+      {/if}
+    </div>
+    <div class="lb-bar-r">
+      {#if allowSave}
+        <!-- iOS has no API that writes to the camera roll, so a download lands in Files. The share
+             sheet has "Save Image" on it. Android goes straight to a download instead — its sheet
+             only offers apps to send the photo TO, which is not keeping it. See saveImage.ts. -->
+        <button class="lb-btn" on:click|stopPropagation={saveThis} disabled={saving}
+                aria-label="Save this photo to your device">
+          {saving ? '…' : savedMsg || '⤓ Save'}
+        </button>
+      {/if}
+      <button class="lb-btn close" on:click={() => dispatch('close')} aria-label="Close">✕</button>
+    </div>
+  </div>
   {#if photo}
     {#if photo.mediaType === 'video'}
       <!-- svelte-ignore a11y-media-has-caption -->
@@ -130,8 +138,6 @@
   .lb { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.92); z-index: 300;
     display: flex; align-items: center; justify-content: center; padding: 24px; }
   img, video { max-width: 100%; max-height: 86vh; border-radius: 8px; }
-  .close { position: absolute; top: 16px; right: 16px; background: rgba(0,0,0,0.5); color: #fff;
-    border: none; width: 40px; height: 40px; border-radius: 50%; font-size: 1.2rem; cursor: pointer; }
   /* Held to a readable measure and kept clear of the nav arrows, rather than run edge to edge. The
      scrim does the legibility work a text-shadow was being asked to do alone over a bright photo. */
   .cap { position: absolute; bottom: 0; left: 0; right: 0; padding: 48px 64px 18px; color: #fff;
@@ -144,15 +150,20 @@
     display: flex; flex-wrap: wrap; align-items: baseline; justify-content: center; gap: 0 6px; }
   .cap-meta .who { font-weight: 600; color: rgba(255,255,255,.9); }
   .cap-meta .sep { opacity: .45; }
-  .lb-save { position: absolute; right: 58px; top: 12px; z-index: 3; padding: 8px 12px;
-    border-radius: 999px; border: 1px solid rgba(255,255,255,.28); background: rgba(0,0,0,.5);
-    color: #fff; font: inherit; font-size: .82rem; cursor: pointer;
+  .lb-bar { position: absolute; top: 12px; left: 12px; right: 12px; z-index: 3;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    pointer-events: none; }
+  .lb-bar-l, .lb-bar-r { display: flex; align-items: center; gap: 8px; }
+  /* One pill, three uses — same height, same weight, whatever is in it. */
+  .lb-btn { pointer-events: auto; display: inline-flex; align-items: center; justify-content: center;
+    min-height: 36px; padding: 0 13px; border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.28); background: rgba(0,0,0,.5); color: #fff;
+    font: inherit; font-size: .82rem; line-height: 1; cursor: pointer;
     -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
-  .lb-save:disabled { opacity: .6; cursor: default; }
-  .lb-cap { position: absolute; left: 12px; top: 12px; z-index: 3; padding: 8px 12px; border-radius: 999px;
-    border: 1px solid rgba(255,255,255,.28); background: rgba(0,0,0,.5); color: #fff; font: inherit;
-    font-size: .82rem; cursor: pointer; -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
-  .lb-cap:hover { border-color: rgba(255,255,255,.5); }
+  .lb-btn:hover { border-color: rgba(255,255,255,.5); }
+  .lb-btn:disabled { opacity: .6; cursor: default; }
+  /* The close is the one round one: it is an icon, not a phrase. */
+  .lb-btn.close { width: 36px; padding: 0; font-size: 1rem; }
   /* Demoted, not dropped: with a caption present the mission is attribution, not the headline. */
   .cap-mission.secondary { font-weight: 400; opacity: .78; }
   .nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(0,0,0,0.4);

@@ -867,6 +867,16 @@
     // A bare audio request is cheap, happens in the gesture, and is the only thing on screen when
     // the prompt appears — so the question makes sense. We stop the track immediately; the grant is
     // what we are after, and the real stream is acquired below.
+    // Flip the UI FIRST, then do the slow part.
+    //
+    // videoMode was set after the microphone request, so photo→video sat unhighlighted for as long
+    // as the permission check took while video→photo — which asks for nothing — was instant. The
+    // switch felt broken in one direction only, which is the tell.
+    //
+    // Optimistic is safe here: every failure path below already keeps video mode on and explains
+    // itself, because a silent clip beats no clip. Nothing downstream needs the microphone answer
+    // before the pill can move.
+    videoMode = v;
     if (v && videoMaxSecs !== 0 && videoQuality !== 'phone') await askForMic();
     // Going back to photos puts the note away. It is about clips being silent, which is not a thing
     // that is true of a photo — leaving it up makes it read as a fault with the camera itself. It
@@ -881,7 +891,6 @@
     // (seconds, usually paid) and one ten-second clip plausibly holds several tricks at once,
     // which would make ticking any one of them arbitrary.
     if (v) { armed = null; missionsOpen = false; }
-    videoMode = v;
     // Into video, assume nothing: applyRecordShape sets this from what the camera actually returns
     // once the stream is up. Starting from false means the viewfinder cannot frame to a shape that
     // has not been proven yet — including in 'phone' quality, which returns below without ever
