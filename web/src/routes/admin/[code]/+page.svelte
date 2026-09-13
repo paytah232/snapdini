@@ -884,18 +884,9 @@
       <button class="btn primary sm full mt" on:click={() => { posterOpen = true; track('poster_opened', undefined, code); }} disabled={!qrCode}>
         {ev?.posterConfig ? '🎩 Manage poster' : '🎩 Create poster'}
       </button>
-      <button class="btn ghost sm full mt" on:click={() => copy(galleryUrl, 'Gallery link copied!')}>🖼 Copy gallery-only link</button>
-
-      {#if ev.emailEnabled}
-        <div class="email-section">
-          <div class="label-mono">EMAIL GALLERY LINK</div>
-          <div class="email-row">
-            <input type="email" bind:value={emailInput} placeholder="guest@example.com, another@example.com" />
-            <button class="btn ghost sm" on:click={sendEmails} disabled={emailBusy}>{emailBusy ? '…' : 'Send'}</button>
-          </div>
-          <p class="hint">Comma-separated addresses</p>
-        </div>
-      {/if}
+      <!-- The gallery-only link and "email the gallery link" used to sit here, under the join QR.
+           They are the opposite of an invite: you send them afterwards, to people who only want to
+           see the photos. Both now live in Shared links, which is the after-the-event card. -->
     </div>
 
     <!-- Controls -->
@@ -943,11 +934,21 @@
             <div class="t-label">Guests can ask you for more shots</div>
             <div class="t-sub">
               A guest who runs out can send you a request — it costs them nothing and grants nothing
-              on its own. You'll see how many have asked, and you decide by raising
-              <b>Shots per guest</b> in Settings, which lifts the roll for everyone.
+              on its own.
               {#if guestRequests > 0}
                 <strong class="req-flag">{guestRequests} {guestRequests === 1 ? 'guest has' : 'guests have'} asked so far.</strong>
               {/if}
+              <!-- What to DO about a request is a different decision from whether to accept them at
+                   all, and it is only wanted once one has arrived — so it waits to be asked for. -->
+              <details class="disc sub-disc">
+                <summary>What happens when they ask</summary>
+                <div class="disc-body">
+                  <p class="hint">
+                    You'll see how many have asked, and you decide by raising
+                    <b>Shots per guest</b> in Settings, which lifts the roll for everyone.
+                  </p>
+                </div>
+              </details>
             </div>
           </div>
           <label class="switch">
@@ -1191,17 +1192,11 @@
 
     <div class="card">
       <div class="card-title">Trick list</div>
+      <!-- One line of pitch and the current state; the case FOR a list is three more sentences
+           that a host who already has one never needs to read again. Same reasoning as the join
+           screen's "Event info" panel: it is on the page, it is just not in the way. -->
       <p class="hint" style="margin:0 0 10px">
-        <strong>Guests shoot more, and they shoot what you'd have missed.</strong> Left alone,
-        people photograph the obvious — the couple, the cake, whoever's loudest. A list gets you the
-        table you never sat at, someone's gran on the dance floor, and the quiet moment in the
-        corner. It also gives the guest who knows one person in the room a reason to talk to
-        someone else.
-      </p>
-      <p class="hint" style="margin:0 0 10px">
-        Every photo comes back labelled with the trick it was for, so the gallery reads as a story
-        instead of a pile. A few tricks print on cards for the tables, and guests tick them off in
-        the camera as they shoot.
+        <strong>Guests shoot more, and they shoot what you'd have missed.</strong>
       </p>
       {#if ev.challengeSets?.length}
         <div class="mset-list">
@@ -1216,8 +1211,6 @@
           {ev.challengeSets.length > 1
             ? 'Guests are spread evenly across the cards, so different tables hunt for different things.'
             : 'Every guest gets this card.'}
-          Print them from <strong>Create poster</strong>. Guests can still ignore the list and just
-          take photos.
         </p>
       {/if}
       {#if !ev.challengeSets?.length}
@@ -1226,10 +1219,36 @@
              needs printed cards to work properly, so switching it on for them would leave a
              half-finished version of the feature on someone's wedding. -->
         <p class="hint" style="margin:0 0 10px">
-          <strong>Off at the moment.</strong> Your guests just take photos — they won't see a list
-          unless you set one up, and you can turn it off again at any time.
+          <strong>Off at the moment.</strong> Your guests just take photos.
         </p>
       {/if}
+      <details class="disc">
+        <summary>Why a trick list works, and what your guests see</summary>
+        <div class="disc-body">
+          <p class="hint">
+            Left alone, people photograph the obvious — the couple, the cake, whoever's loudest. A
+            list gets you the table you never sat at, someone's gran on the dance floor, and the
+            quiet moment in the corner. It also gives the guest who knows one person in the room a
+            reason to talk to someone else.
+          </p>
+          <p class="hint">
+            Every photo comes back labelled with the trick it was for, so the gallery reads as a
+            story instead of a pile. A few tricks print on cards for the tables, and guests tick
+            them off in the camera as they shoot.
+          </p>
+          {#if ev.challengeSets?.length}
+            <p class="hint">
+              Print them from <strong>Create poster</strong>. Guests can still ignore the list and
+              just take photos.
+            </p>
+          {:else}
+            <p class="hint">
+              They won't see a list unless you set one up, and you can turn it off again at any
+              time.
+            </p>
+          {/if}
+        </div>
+      </details>
       <button class="btn primary" on:click={() => (missionsOpen = true)}>
         {ev.challengeSets?.length ? 'Edit the trick list' : 'Set up a trick list'}
       </button>
@@ -1254,25 +1273,36 @@
 
     <!-- Review & curate (dedicated view) — only once there's something to review -->
     {#if allPhotos.length || pendingPhotos.length}
-      <a class="card review-link" href="/admin/{code}/review#{orgCode}">
-        <div class="review-icon">⭐</div>
-        <div class="review-text">
-          <div class="card-title">Review &amp; curate photos</div>
-          <p class="hint">
-            {#if sModeration && pendingPhotos.length}<strong class="pending-flag">{pendingPhotos.length} pending approval</strong> · {/if}
-            {sModeration ? 'Approve, reject, favourite and rate' : 'Favourite, rate and reject'} — in a focused full-screen view.
-          </p>
-          <!-- Hosts assume the gallery link is all-or-nothing and hand out the lot. Curation plus
-               share links means it never has to be, and this card is where they would find out. -->
-          <p class="hint review-why">
-            You don't have to share everything. Star the ones worth keeping, then create a
-            <strong>share link</strong> for just those — favourites only, or a hand-picked set.
-            Make as many as you like: one for the family, one for work, one for the group chat.
-            Each link is separate, so you can revoke one without touching the others.
-          </p>
-        </div>
-        <div class="review-arrow">→</div>
-      </a>
+      <!-- The whole card used to be the <a>, which left nowhere to put a disclosure: a <details>
+           inside a link is invalid, and tapping its summary would navigate instead of opening. The
+           link is now the top row, so the "why" can sit under it without swallowing the tap. -->
+      <div class="card review-card">
+        <a class="review-link" href="/admin/{code}/review#{orgCode}">
+          <div class="review-icon">⭐</div>
+          <div class="review-text">
+            <div class="card-title">Review &amp; curate photos</div>
+            <p class="hint">
+              {#if sModeration && pendingPhotos.length}<strong class="pending-flag">{pendingPhotos.length} pending approval</strong> · {/if}
+              {sModeration ? 'Approve, reject, favourite and rate' : 'Favourite, rate and reject'} — in a focused full-screen view.
+            </p>
+          </div>
+          <div class="review-arrow">→</div>
+        </a>
+        <!-- Hosts assume the gallery link is all-or-nothing and hand out the lot. Curation plus
+             share links means it never has to be, and this card is where they would find out — so
+             the correction is the summary itself, and only the mechanics wait behind it. -->
+        <details class="disc review-disc">
+          <summary>You don't have to share everything — how share links work</summary>
+          <div class="disc-body">
+            <p class="hint">
+              Star the ones worth keeping, then create a <strong>share link</strong> for just those
+              — favourites only, or a hand-picked set. Make as many as you like: one for the family,
+              one for work, one for the group chat. Each link is separate, so you can revoke one
+              without touching the others.
+            </p>
+          </div>
+        </details>
+      </div>
     {/if}
 
     <!-- Co-hosts: invite people to manage this event with you -->
@@ -1306,9 +1336,34 @@
       </div>
     </div>
 
-    <!-- Shared links: every public link you've created (make them from Review & Curate → Share) -->
+    <!-- Shared links: the standing gallery link, plus every public link you've created (those are
+         made from Review & Curate → Share). Everything here is about sharing the RESULT. -->
     <div class="card">
       <div class="card-title">Shared links</div>
+      <!-- Not one of the rows below it: those are links the host made and can delete, this one
+           simply always exists. Dashed and tagged so it never reads as a created share. -->
+      <div class="cohost-row standing">
+        <div class="cohost-who">
+          <span class="cohost-email">🖼 Gallery-only link</span>
+          <span class="cohost-sub">Send it after the event to people who just want to see the photos</span>
+        </div>
+        <div class="cohost-acts">
+          <span class="cohost-tag standing-tag">Always on</span>
+          <button class="btn ghost sm" on:click={() => copy(galleryUrl, 'Gallery link copied!')}>🔗 Copy</button>
+        </div>
+      </div>
+      {#if ev.emailEnabled}
+        <!-- Emails that same gallery link, so it belongs beside it rather than beside the QR. -->
+        <div class="email-section">
+          <div class="label-mono">EMAIL GALLERY LINK</div>
+          <div class="email-row">
+            <input type="email" bind:value={emailInput} placeholder="guest@example.com, another@example.com" />
+            <button class="btn ghost sm" on:click={sendEmails} disabled={emailBusy}>{emailBusy ? '…' : 'Send'}</button>
+          </div>
+          <p class="hint">Comma-separated addresses</p>
+        </div>
+      {/if}
+      <div class="divider shares-div"></div>
       {#if sharesList.length}
         <div class="cohost-list">
           {#each sharesList as s (s.id)}
@@ -1523,14 +1578,36 @@
   .card-title { font-weight: 800; font-size: 0.95rem; margin-bottom: 14px; }
   .card-title.nomb { margin-bottom: 0; }
 
-  .review-link { display: flex; align-items: center; gap: 14px; text-decoration: none; color: var(--text); transition: border-color 0.15s; }
-  .review-link:hover { border-color: var(--accent); }
+  /* The card is the container now and the link is its top row, so the accent-on-hover moves up to
+     the card — but only when the LINK is hovered, not when the disclosure under it is. */
+  .review-card { transition: border-color 0.15s; }
+  .review-card:has(.review-link:hover) { border-color: var(--accent); }
+  .review-link { display: flex; align-items: center; gap: 14px; text-decoration: none; color: var(--text); }
   .review-link .card-title { margin-bottom: 4px; }
   .review-icon { font-size: 1.5rem; line-height: 1; }
-  .review-text { flex: 1; }
+  .review-text { flex: 1; min-width: 0; }
   .review-text .hint { margin: 0; }
-  .review-why { margin-top: 6px; opacity: .95; }
-  .review-arrow { font-size: 1.3rem; color: var(--text-muted); }
+  .review-arrow { font-size: 1.3rem; color: var(--text-muted); flex: none; }
+  .review-disc { margin: 12px 0 0; }
+
+  /* Progressive disclosure. The key point stays on the page and the long-form reasoning is one tap
+     away — same idiom (and the same native <details>) as the join screen's "Event info" panel. The
+     native marker is suppressed for a chevron of our own so it reads the same in every browser. */
+  .disc { border: 1px solid var(--border); border-radius: var(--radius-sm); margin: 0 0 12px; }
+  .disc > summary { display: flex; align-items: center; gap: 8px; list-style: none; cursor: pointer;
+    padding: 9px 12px; font-size: 0.78rem; font-weight: 700; color: var(--text-muted); }
+  .disc > summary::-webkit-details-marker { display: none; }
+  .disc > summary::before { content: '▸'; flex: none; display: inline-block; width: .8em; text-align: center; }
+  .disc[open] > summary::before { content: '▾'; }
+  .disc > summary:hover { color: var(--text); }
+  .disc-body { padding: 0 12px 11px; display: flex; flex-direction: column; gap: 8px; }
+  .disc-body .hint { margin: 0; line-height: 1.5; }
+  /* Nested inside a toggle row's sub-text. The bordered box that suits a card-level disclosure is
+     heavier than the two lines it hides, so this one borrows the camera's mic-note idiom instead:
+     an underlined summary and nothing else. Same control, a quarter of the furniture. */
+  .sub-disc { margin: 6px 0 0; border: none; }
+  .sub-disc > summary { padding: 0; gap: 5px; font-size: inherit; font-weight: 600; text-decoration: underline; }
+  .sub-disc .disc-body { padding: 6px 0 0; }
   .pending-flag { color: var(--accent); }
 
   .muted { color: var(--text-muted); }
@@ -1547,6 +1624,14 @@
   .cohost-tag.pending { background: transparent; color: var(--text-muted); border: 1px dashed var(--border); }
   .cohost-add { display: flex; gap: 8px; }
   .cohost-add input { flex: 1; padding: 9px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font: inherit; font-size: 0.88rem; }
+  /* The standing gallery link. Dashed rather than solid so it never reads as one of the created
+     shares below it, and allowed to wrap — its sub-line is a sentence, not an email address, so on
+     a 360px phone the buttons drop to their own line instead of crushing it. */
+  .cohost-row.standing { border-style: dashed; flex-wrap: wrap; }
+  .cohost-row.standing .cohost-who { flex: 1 1 190px; }
+  .cohost-row.standing .cohost-acts { margin-left: auto; }
+  .cohost-tag.standing-tag { background: transparent; color: var(--text-muted); border: 1px dashed var(--border); }
+  .shares-div { margin: 14px 0 12px; }
   .mt { margin-top: 12px; }
   .mb { margin-bottom: 12px; }
   .row { display: flex; }
