@@ -4,6 +4,7 @@
   import { tileAspect } from '$lib/ui';
   import { aspectValue, cropRect, shapeDelivered } from '$lib/frameShape';
   import { demoLinks } from '$lib/demo';
+  import { saveMany, isIOS, type SaveManyProgress } from '$lib/saveImage';
   import { goto, replaceState } from '$app/navigation';
   // Aliased: this component already has a `track` for the MediaStreamTrack.
   import { track as trackEvent } from '$lib/analytics';
@@ -365,6 +366,28 @@
   //
   // Quiet on failure: a guest whose signal dropped should keep the list they have rather than watch
   // it empty itself. The next attempt will pick the change up.
+  // Save the whole roll. On iOS this is the only route into Photos that does not mean tapping every
+  // photo: several files go into one share, which offers "Save N Images". Chunked, because every
+  // file has to be in memory to be shared and a full roll at once is a dead tab.
+  $: myShotCount = galleryPhotos.filter((p) => p.isOwn).length;
+  let bulkSaving = false;
+  let bulkProgress = '';
+  async function saveWholeRoll() {
+    const mine = galleryPhotos.filter((p) => p.isOwn);
+    if (!mine.length || bulkSaving) return;
+    bulkSaving = true; bulkProgress = `0/${mine.length}`;
+    try {
+      const items = mine.map((p) => ({
+        url: p.url,
+        filename: `snapdini-${new Date(p.takenAt).toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${p.mediaType === 'video' ? 'mp4' : 'jpg'}`,
+      }));
+      const r = await saveMany(items, (pr: SaveManyProgress) => (bulkProgress = `${pr.done}/${pr.total}`));
+      if (r.cancelled) showToast(r.saved ? `Stopped — ${r.saved} saved` : 'Stopped');
+      else showToast(`${r.saved} photo${r.saved === 1 ? '' : 's'} saved`);
+    } catch { showToast('Could not save those', true); }
+    finally { bulkSaving = false; bulkProgress = ''; }
+  }
+
   async function refreshMissions() {
     if (!sessionToken) return;
     try {
@@ -2115,7 +2138,12 @@
               </div>
             {/if}
 
-            {#if saveNote}<div class="sm-note">Now also saving a copy of each shot to your device.</div>{/if}
+            <!-- On iPhone a download goes to FILES — there is no API that writes to the camera roll,
+                 and a share sheet after every shutter press would be intolerable. So say where they
+                 actually land, and point at the one button that does reach Photos. -->
+            {#if saveNote}<div class="sm-note">{isIOS()
+              ? 'Saving a copy of each shot — on iPhone these go to Files. Use “Save all” in your gallery to put them in Photos.'
+              : 'Now also saving a copy of each shot to your device.'}</div>{/if}
 
             <div class="sm-row">
               <button class="sm-select" type="button" on:click={() => { settingsOpen = false; showFeedback = true; }}>💬 Report a problem / feedback</button>
@@ -2339,6 +2367,16 @@
         {#if queueNeedsAttention}
           <button class="btn ghost sm queue-btn" on:click={() => (drawerOpen = true)} aria-label="Upload queue{pendingCount ? ` (${pendingCount} uploading)` : ''}">
             ⬆ Queue{#if pendingCount}<span class="qbadge" class:error={hasUploadError}>{pendingCount}</span>{/if}
+          </button>
+        {/if}
+        <!-- The whole roll in one go. On iPhone this is the only route into Photos short of tapping
+             every photo — several files go into one share, which offers "Save N Images". Offered
+             only when the host has allowed downloads, and only when there is more than one to save
+             (for a single shot the button on the photo itself is the shorter path). -->
+        {#if allowDownloads && myShotCount > 1}
+          <button class="btn ghost sm" on:click={saveWholeRoll} disabled={bulkSaving}
+                  aria-label="Save all {myShotCount} of your photos to this device">
+            {bulkSaving ? `⤓ ${bulkProgress}` : `⤓ Save all ${myShotCount}`}
           </button>
         {/if}
         <button class="btn ghost sm" on:click={backToCamera}>← Camera</button>

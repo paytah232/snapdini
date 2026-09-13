@@ -90,3 +90,72 @@ export async function savePhotoByUrl(url: string, filename: string): Promise<Sav
   if (!res.ok) throw new Error('Could not fetch that photo');
   return saveBlob(await res.blob(), filename);
 }
+
+// ── Saving a whole roll ──────────────────────────────────────────────────────
+//
+// A zip is right on a desktop and close to useless on a phone: you need an extractor, and the
+// photos never reach the camera roll, which is the only place anyone wants them. iOS will take
+// several files in one share and offer "Save N Images", which puts the lot straight into Photos.
+//
+// The catch is memory. Every file has to be a Blob in RAM before it can be shared, and a 60-shot
+// roll at 4–8MB each is half a gigabyte — a dead tab on a phone. So the roll is CHUNKED: fetch a
+// batch, hand it over, drop the references, fetch the next. The batch is capped by BYTES rather
+// than by count, because ten 300KB thumbnails and ten 8MB originals are not the same ask.
+
+/** Roughly how much to hold in memory at once. Comfortably under what a phone tab will bear, while
+ *  still being several photos per sheet so a roll does not become a dozen prompts. */
+const CHUNK_BYTES = 48 * 1024 * 1024;
+/** And a hard count, so a hundred tiny files do not all land in one share the OS then chokes on. */
+const CHUNK_FILES = 10;
+
+export interface SaveManyProgress { done: number; total: number; }
+
+/** Save many photos the way this platform actually keeps them.
+ *
+ *  Returns how many were saved. A cancelled share stops the whole run — carrying on would keep
+ *  showing sheets to someone who has just said no.
+ *
+ *  Non-iOS callers should prefer the server's zip: one file, one click, no memory ceiling. This is
+ *  for the platform where a zip is a dead end. */
+export async function saveMany(
+  items: { url: string; filename: string }[],
+  onProgress?: (p: SaveManyProgress) => void,
+): Promise<{ saved: number; cancelled: boolean }> {
+  let saved = 0;
+  for (let i = 0; i < items.length; ) {
+    const batch: File[] = [];
+    let bytes = 0;
+    // Fetch until the batch is full by either measure. The first file always goes in, however big,
+    // or a single oversized video would stall the loop forever.
+    while (i < items.length && batch.length < CHUNK_FILES && (bytes < CHUNK_BYTES || batch.length === 0)) {
+      const it = items[i];
+      try {
+        const r = await fetch(it.url, { credentials: 'same-origin' });
+        if (r.ok) {
+          const b = await r.blob();
+          batch.push(new File([b], it.filename, { type: b.type || 'image/jpeg' }));
+          bytes += b.size;
+        }
+      } catch { /* skip the ones that fail; the rest of the roll should still arrive */ }
+      i++;
+    }
+    if (!batch.length) continue;
+    try {
+      if (isIOS() && navigator.canShare?.({ files: batch })) {
+        await navigator.share({ files: batch });
+      } else {
+        for (const f of batch) downloadBlob(f, f.name);
+      }
+      saved += batch.length;
+      onProgress?.({ done: Math.min(i, items.length), total: items.length });
+    } catch (e) {
+      if ((e as DOMException)?.name === 'AbortError') return { saved, cancelled: true };
+      // Anything else: fall back to downloads for this batch rather than losing it.
+      for (const f of batch) downloadBlob(f, f.name);
+      saved += batch.length;
+    }
+    // Let the tab breathe between batches so the memory from the last one is actually released.
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  return { saved, cancelled: false };
+}
