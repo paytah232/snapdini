@@ -216,6 +216,7 @@
   let queue: QueueItem[] = [];
   let uploading = false;
   let capturing = false;          // one capture at a time (guards rapid double-taps)
+  const iosDevice = isIOS();      // decided once: the control it hides must not flicker
   let saveToDevice = false;       // also save a copy of each capture to the user's device
   let saveNote = false;           // transient "saving copies" hint (auto-hides)
   let retryTimer: ReturnType<typeof setInterval> | undefined;
@@ -372,6 +373,7 @@
   $: myShotCount = galleryPhotos.filter((p) => p.isOwn).length;
   let bulkSaving = false;
   let bulkProgress = '';
+  let bulkDone = '';
   async function saveWholeRoll() {
     const mine = galleryPhotos.filter((p) => p.isOwn);
     if (!mine.length || bulkSaving) return;
@@ -382,8 +384,14 @@
         filename: `snapdini-${new Date(p.takenAt).toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${p.mediaType === 'video' ? 'mp4' : 'jpg'}`,
       }));
       const r = await saveMany(items, (pr: SaveManyProgress) => (bulkProgress = `${pr.done}/${pr.total}`));
-      if (r.cancelled) showToast(r.saved ? `Stopped — ${r.saved} saved` : 'Stopped');
-      else showToast(`${r.saved} photo${r.saved === 1 ? '' : 's'} saved`);
+      if (r.cancelled) { showToast(r.saved ? `Stopped — ${r.saved} saved` : 'Stopped'); bulkDone = ''; }
+      else {
+        showToast(`${r.saved} photo${r.saved === 1 ? '' : 's'} saved`);
+        // Saving a roll is slow and batched, and a toast has gone by the time the last batch lands.
+        // The button says so itself for a few seconds, so "did that finish?" has an answer on screen.
+        bulkDone = `✓ Saved ${r.saved}`;
+        setTimeout(() => (bulkDone = ''), 4000);
+      }
     } catch { showToast('Could not save those', true); }
     finally { bulkSaving = false; bulkProgress = ''; }
   }
@@ -468,7 +476,9 @@
     screen = 'camera';
     applyEventTheme(ev?.theme);
     if (ev?.isExpired || ev?.isLocked) { showToast(ev.isLocked ? 'Event is locked' : 'Event has ended'); }
-    if (ev) { try { saveToDevice = localStorage.getItem('savedev_' + ev.joinCode) === '1'; } catch { /* ignore */ } }
+    // …and never restore it on iOS: the control is not shown there, so a value left over from
+    // before would keep writing to Files invisibly with nothing on screen to turn it off.
+    if (ev && !iosDevice) { try { saveToDevice = localStorage.getItem('savedev_' + ev.joinCode) === '1'; } catch { /* ignore */ } }
     try { const q = localStorage.getItem('snap_vidq'); if (q === 'high' || q === 'standard' || q === 'smooth' || q === 'phone') videoQuality = q; } catch { /* ignore */ }
     await startCamera();
     restoreQueue();
@@ -2095,7 +2105,14 @@
                 <span class="sm-label">Save a copy to my device</span>
                 <span class="sm-desc">Also download each shot to your phone as you take it.</span>
               </span>
-              <button class="ctrl" on:click={toggleSaveToDevice} class:active={saveToDevice} aria-pressed={saveToDevice} title="Also save a copy to my device" aria-label="Save copies to my device">💾</button>
+              <!-- Not offered on iOS at all. There is no API that writes to the camera roll, so
+                   every copy landed in Files — duplicates of photos the app already has, in a place
+                   nobody looks for a picture. Explaining that was still explaining a control that
+                   does nothing anyone wants; "Save all" in the gallery is the route that works, and
+                   one honest path beats two of which one is a dead end. -->
+              {#if !iosDevice}
+                <button class="ctrl" on:click={toggleSaveToDevice} class:active={saveToDevice} aria-pressed={saveToDevice} title="Also save a copy to my device" aria-label="Save copies to my device">💾</button>
+              {/if}
             </div>
 
             {#if cameras.length > 1}
@@ -2138,12 +2155,7 @@
               </div>
             {/if}
 
-            <!-- On iPhone a download goes to FILES — there is no API that writes to the camera roll,
-                 and a share sheet after every shutter press would be intolerable. So say where they
-                 actually land, and point at the one button that does reach Photos. -->
-            {#if saveNote}<div class="sm-note">{isIOS()
-              ? 'Saving a copy of each shot — on iPhone these go to Files. Use “Save all” in your gallery to put them in Photos.'
-              : 'Now also saving a copy of each shot to your device.'}</div>{/if}
+            {#if saveNote}<div class="sm-note">Now also saving a copy of each shot to your device.</div>{/if}
 
             <div class="sm-row">
               <button class="sm-select" type="button" on:click={() => { settingsOpen = false; showFeedback = true; }}>💬 Report a problem / feedback</button>
@@ -2376,7 +2388,7 @@
         {#if allowDownloads && myShotCount > 1}
           <button class="btn ghost sm" on:click={saveWholeRoll} disabled={bulkSaving}
                   aria-label="Save all {myShotCount} of your photos to this device">
-            {bulkSaving ? `⤓ ${bulkProgress}` : `⤓ Save all ${myShotCount}`}
+            {bulkSaving ? `Saving ${bulkProgress}…` : bulkDone || `⤓ Save all ${myShotCount}`}
           </button>
         {/if}
         <button class="btn ghost sm" on:click={backToCamera}>← Camera</button>

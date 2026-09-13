@@ -13,6 +13,7 @@
   import PhotoCard from '$lib/components/PhotoCard.svelte';
   import { tileAspect } from '$lib/ui';
   import { demoLinks } from '$lib/demo';
+  import { saveMany, prefersFiles, FILES_MAX, type SaveManyProgress } from '$lib/saveImage';
   import StartYourOwn from '$lib/components/StartYourOwn.svelte';
   import { trackGalleryView, trackPhotos } from '$lib/referral';
   import type { PageData } from './$types';
@@ -155,11 +156,45 @@
     const q = ids && ids.length ? `?ids=${ids.join(',')}` : '';
     return `/api/photos/${code}/download${q}`;
   }
+  // Files on a phone, a zip on a desktop.
+  //
+  // A zip is one tidy file on a laptop and close to a dead end on a phone: you need an extractor,
+  // and what comes out sits in a folder rather than the camera roll, which is where the photos were
+  // wanted. So a touch device gets the actual files — shared on iOS, where that is the only route
+  // into Photos, and downloaded on Android, where the gallery picks them up by itself.
+  //
+  // Above FILES_MAX even a phone is better served by the zip: files mean a share sheet per batch or
+  // a download apiece, which is a good trade for a handful and miserable for a whole event. Select
+  // mode is the way to take a few.
+  let bulkSaving = false;
+  let bulkProgress = '';
+  let bulkDone = '';
+  async function saveAsFiles(list: typeof photos) {
+    bulkSaving = true; bulkProgress = `0/${list.length}`;
+    try {
+      const items = list.map((p) => ({
+        url: p.url,
+        filename: `snapdini-${new Date(p.takenAt).toISOString().slice(0, 19).replace(/[:T]/g, '-')}-${p.id.slice(0, 6)}.${p.mediaType === 'video' ? 'mp4' : 'jpg'}`,
+      }));
+      const r = await saveMany(items, (pr: SaveManyProgress) => (bulkProgress = `${pr.done}/${pr.total}`));
+      if (r.cancelled) { showToast(r.saved ? `Stopped — ${r.saved} saved` : 'Stopped'); bulkDone = ''; }
+      else {
+        showToast(`${r.saved} photo${r.saved === 1 ? '' : 's'} saved`);
+        // Batched saving is slow, and the toast is long gone by the time the last batch lands. The
+        // button holds the answer to "did that finish?" for a few seconds.
+        bulkDone = `✓ Saved ${r.saved}`;
+        setTimeout(() => (bulkDone = ''), 4000);
+      }
+    } catch { showToast('Could not save those', true); }
+    finally { bulkSaving = false; bulkProgress = ''; }
+  }
+
   function downloadAll() {
     if (!allowDownloads) { showToast('Downloads are disabled for this event', true); return; }
     // Counted here, not in zipHref: that builder can be evaluated during render, which would
     // record downloads that never happened.
     trackPhotos(code, photos.map((p) => p.id), 'download');
+    if (prefersFiles() && photos.length <= FILES_MAX) { void saveAsFiles(photos); return; }
     showToast('Preparing your download…');
     location.href = zipHref();
   }
@@ -173,6 +208,8 @@
   function downloadSelected() {
     if (!selected.size) return;
     trackPhotos(code, [...selected], 'download');
+    const picked = photos.filter((p) => selected.has(p.id));
+    if (prefersFiles() && picked.length <= FILES_MAX) { void saveAsFiles(picked); return; }
     showToast('Preparing your download…');
     location.href = zipHref([...selected]);
   }
@@ -214,7 +251,9 @@
     {#if revealed && allowDownloads && photos.length}
       <button class="btn ghost" on:click={toggleSelecting}>{selecting ? 'Cancel' : 'Select'}</button>
       {#if !selecting}
-        <button class="btn ghost" on:click={downloadAll}>⬇ Download all</button>
+        <button class="btn ghost" on:click={downloadAll} disabled={bulkSaving}>
+          {bulkSaving ? `Saving ${bulkProgress}…` : bulkDone || '⬇ Download all'}
+        </button>
       {/if}
     {/if}
   </div>
@@ -229,7 +268,7 @@
       <button class="btn ghost" on:click={toggleSelectAll}>
         {allShownSelected ? 'Clear' : `Select all${shownPhotos.length ? ` (${shownPhotos.length})` : ''}`}
       </button>
-      <button class="btn primary" on:click={downloadSelected} disabled={!selected.size}>
+      <button class="btn primary" on:click={downloadSelected} disabled={!selected.size || bulkSaving}>
         ⬇ Download{selected.size ? ` ${selected.size}` : ''}
       </button>
     </div>

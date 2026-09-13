@@ -159,3 +159,27 @@ export async function saveMany(
   }
   return { saved, cancelled: false };
 }
+
+/** Does this device want FILES rather than a zip?
+ *
+ *  A zip is the right answer on a desktop: one file, no memory ceiling, and unzipping is a
+ *  double-click. On a phone it is close to a dead end — you need an extractor, and what comes out
+ *  sits in a folder rather than in the camera roll, which is the only place anyone was trying to
+ *  get to. So a touch device takes the files.
+ *
+ *  Coarse pointer rather than a width query: a narrow desktop window is still a desktop, and a
+ *  tablet in landscape is still a tablet. */
+export function prefersFiles(): boolean {
+  try {
+    if (typeof window === 'undefined' || !window.matchMedia) return false;
+    return window.matchMedia('(pointer: coarse)').matches;
+  } catch { return false; }
+}
+
+/** Above this many, even a phone is better off with the zip.
+ *
+ *  Files mean one share sheet per batch on iOS and one download apiece on Android. That is a good
+ *  trade for a handful and a miserable one for a whole event — three hundred photos is thirty
+ *  sheets or three hundred notifications. The gallery has a Select mode for exactly this: pick the
+ *  ones you actually want and they come back as files. */
+export const FILES_MAX = 25;
