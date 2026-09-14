@@ -4,15 +4,10 @@ import { db } from '../db';
 import { events, photos, participants, shares } from '../schema';
 import { thumbName } from '../images';
 import { isRevealed } from '../lib';
+import { scheduledRevealAt } from '../../../../shared/reveal';
 import { challengeCaptions, zipPhotosToResponse } from './photos';
 
 const router = Router();
-
-// When does this event's gallery unlock? (for the public countdown) — only meaningful for 'at_end'.
-function revealAtMs(event: { revealMode: string; expiresAt: number; revealDelayHours: number }): number | null {
-  if (event.revealMode === 'at_end') return event.expiresAt + (event.revealDelayHours || 0) * 3_600_000;
-  return null;
-}
 
 // The event's enabled frame shapes, stored as a JSON array in one TEXT column.
 function parseAspects(raw: string | null): string[] {
@@ -84,7 +79,7 @@ router.get('/:token', async (req: Request, res: Response) => {
     label: r.share.label || null,
     revealed,
     revealMode: event.revealMode,
-    revealAt: revealAtMs(event),
+    revealAt: scheduledRevealAt(event),   // for the public countdown; null unless it unlocks itself
     photoCount: Number(photoTotal),
     photos: rows.map((p) => ({
       id: p.id,
@@ -106,7 +101,7 @@ router.get('/:token', async (req: Request, res: Response) => {
   });
 });
 
-// ── GET /api/shares/:token/download[?ids=…] — zip of the share's originals ──
+// ── GET /api/shares/:token/download[?ids=…] — zip of the share's photos ──
 // Gated by reveal + the event's allowDownloads. `ids` (if given) is intersected with the share's
 // allowed set, so a recipient can never pull photos outside what was shared.
 router.get('/:token/download', async (req: Request, res: Response) => {
@@ -127,7 +122,8 @@ router.get('/:token/download', async (req: Request, res: Response) => {
   if (share.kind === 'favourites') conds.push(eq(photos.isHighlighted, true));
   const where = and(...conds);
   const rows = await db
-    .select({ filename: photos.filename, mediaType: photos.mediaType, participantId: photos.participantId, participantName: participants.name })
+    .select({ filename: photos.filename, mediaType: photos.mediaType, captureShape: photos.captureShape,
+              participantId: photos.participantId, participantName: participants.name })
     .from(photos)
     .innerJoin(participants, eq(participants.id, photos.participantId))
     .where(where)

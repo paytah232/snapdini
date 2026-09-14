@@ -9,12 +9,14 @@
     type Photo, type AdminEvent, type ShareKind
   } from '$lib/events';
   import { applyEventTheme } from '$lib/theme';
+  import Loading from '$lib/components/Loading.svelte';
   import { getAdminCode, saveAdminCode } from '$lib/session';
   import { api } from '$lib/api';
   import { firePurchase, purchaseTracked } from '$lib/adtracking';
   import { showToast, showSuccess } from '$lib/toast';
   import { tileAspect } from '$lib/ui';
   import PhotoCard from '$lib/components/PhotoCard.svelte';
+  import ShareScope from '$lib/components/ShareScope.svelte';
   import SlideshowPanel from '$lib/components/SlideshowPanel.svelte';
   import ShareModal from '$lib/components/ShareModal.svelte';
 
@@ -128,6 +130,20 @@
 
   // ── Derived ────────────────────────────────────────────────────────────────
   $: pendingCount = photos.filter((p) => p.status === 'pending').length;
+  // For the share chooser: what each scope would actually contain.
+  //
+  // Two things this has to get right, and the first version got both wrong.
+  // 1. VISIBILITY follows the server's rule, which is not one rule: with moderation on only
+  //    'approved' is visible, with it off anything not rejected is. Counting `!== 'rejected'`
+  //    either way overstated a moderated event by however many were still pending.
+  // 2. VIDEOS are not photos. The slideshow reports 71 where this reported 92 for the same event —
+  //    both correct, counting different things — so the wording says what is actually in there
+  //    rather than calling 21 clips "photos".
+  const shareVisible = (p: Photo) => (moderationOn ? p.status === 'approved' : p.status !== 'rejected');
+  $: shareSet = photos.filter(shareVisible);
+  $: approvedCount = shareSet.length;
+  $: shareVideos = shareSet.filter((p) => p.mediaType === 'video').length;
+  $: favouriteCount = shareSet.filter((p) => p.rating >= 5).length;
   $: rejectedCount = photos.filter((p) => p.status === 'rejected').length;
   // The Pending tab + per-photo Approve only matter when moderation is ON (otherwise pending = live).
   $: moderationOn = !!(ev && ev.moderationEnabled);
@@ -353,8 +369,20 @@
   }
 
   // ── Share ────────────────────────────────────────────────────────────────────
-  // Share the CURRENT filter — the whole gallery, or the favourites if that tab is active.
-  function shareGallery() { openShare(tab === 'favourites' ? 'favourites' : 'all'); }
+  // ONE button, which asks. It used to share "whatever tab you are on" — the gallery from All, the
+  // favourites from Favourites — and a separate button shared a selection. Three behaviours behind
+  // one word, and the only clue which you would get was which tab happened to be underlined.
+  let scopeOpen = false;
+  function pickScope(scope: 'all' | 'favourites' | 'select') {
+    scopeOpen = false;
+    if (scope === 'select') {
+      // Not a share yet: it hands them the tool and the selection bar finishes the job.
+      if (!selecting) toggleSelecting();
+      showToast('Pick your photos, then Share from the bar at the bottom');
+      return;
+    }
+    openShare(scope);
+  }
   function shareSelected() { const ids = [...selected]; if (ids.length) openShare('selected', ids); }
   // Share just the photo currently open in the single view (no need to enter Select mode).
   function shareOne(photo: Photo) { openShare('selected', [photo.id]); }
@@ -383,14 +411,21 @@
     else if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
   }
   function setTab(t: Tab) { tab = t; singleIndex = 0; clearSelection(); }
+  const tabLabel = (t: Tab) =>
+    t === 'pending' ? 'Pending' : t === 'favourites' ? 'Favourites' : t === 'rejected' ? 'Rejected' : 'All';
 </script>
 
 <svelte:head><title>Review — Snapdini</title></svelte:head>
+{#if scopeOpen}
+  <ShareScope action="share" {approvedCount} {favouriteCount} videoCount={shareVideos} canSelect={view !== 'single'}
+              on:pick={(e) => pickScope(e.detail)} on:close={() => (scopeOpen = false)} />
+{/if}
+
 <svelte:window on:keydown={onKeydown} on:popstate={onPopState} on:click={resetRejectConfirm}
                on:pointerdown={closeWhoOnOutside} />
 
 {#if booting}
-  <div class="state">Loading…</div>
+  <Loading />
 {:else if ev}
   <!-- ── Header ── -->
   <header class="hd">
@@ -399,7 +434,12 @@
     <div class="hd-side right">
       <div class="vtoggle">
         <button class="vbtn" class:active={view === 'cards'} on:click={() => (view = 'cards')}>Cards</button>
-        <button class="vbtn" class:active={view === 'single'} on:click={() => (view = 'single')} disabled={!filtered.length}>Single</button>
+        <!-- Disabled with no explanation is a puzzle: it is off because THIS TAB has no photos, and
+             nothing on screen said so. It says so now, and on a tab that can never fill (Rejected,
+             with nothing rejected) it is simply not drawn — a control that can only apologise. -->
+        <button class="vbtn" class:active={view === 'single'} on:click={() => (view = 'single')}
+                disabled={!filtered.length}
+                title={filtered.length ? 'One photo at a time' : `Nothing in ${tabLabel(tab)} to look through yet`}>Single</button>
       </div>
       <button class="ss-btn" class:active={view === 'slideshow'} on:click={() => (view = view === 'slideshow' ? 'cards' : 'slideshow')}>🎬 Slideshow</button>
     </div>
@@ -437,8 +477,9 @@
       </details>
     {/if}
     <span class="tab-spacer"></span>
-    {#if tab === 'all' || tab === 'favourites'}
-      <button class="tab ghost-tab" on:click={shareGallery} disabled={busy} title="Share what's shown">📤 Share {tab === 'favourites' ? 'favourites' : 'gallery'}</button>
+    <!-- Always here, and always the same word, whichever tab is showing. -->
+    {#if photos.length}
+      <button class="tab ghost-tab" on:click={() => (scopeOpen = true)} disabled={busy} title="Share photos">📤 Share</button>
     {/if}
     {#if view !== 'single'}<button class="tab ghost-tab" class:active={selecting} on:click={toggleSelecting}>{selecting ? 'Done' : '☑ Select'}</button>{/if}
   </nav>
@@ -475,6 +516,7 @@
          style={`--tile-ar:${tileAspect(ev.aspectRatios)}`}>
       {#each filtered as p, i (p.id)}
         <PhotoCard photo={p} selected={selecting && selected.has(p.id)}
+                   tileAr={tileAspect(ev.aspectRatios)}
                    captionMode={selecting ? 'static' : 'edit'} addCaptionLabel="💬 Caption"
                    meta={`${p.participantName} · ${fmtTime(p.takenAt)}`}
                    tileLabel={selecting ? 'Select photo' : 'Open photo'}
@@ -497,9 +539,13 @@
               {#if p.status === 'rejected'}
                 <button class="btn ghost sm grow" on:click={() => restore(p)}>↩ Restore</button>
               {:else}
-                {#if p.status === 'pending' && moderationOn}<button class="btn primary sm grow" on:click={() => approve(p)}>✓ Approve</button>{/if}
-                <button class="btn danger sm grow" class:armed={confirmRejectId === p.id} on:click={(e) => requestReject(p, e)}>
-                  {confirmRejectId === p.id ? 'Sure?' : '✕ Reject'}
+                {#if p.status === 'pending' && moderationOn}<button class="btn primary sm grow" on:click={() => approve(p)} aria-label="Approve">✓<span class="mod-t"> Approve</span></button>{/if}
+                <button class="btn danger sm grow" class:armed={confirmRejectId === p.id} on:click={(e) => requestReject(p, e)}
+                        aria-label={confirmRejectId === p.id ? 'Confirm reject' : 'Reject'}>
+                  <!-- "Sure?" keeps its word on every screen: it is a confirmation, and a bare ✕ that
+                       means something different from the ✕ a moment ago is how people delete things
+                       they meant to keep. -->
+                  {#if confirmRejectId === p.id}Sure?{:else}✕<span class="mod-t"> Reject</span>{/if}
                 </button>
               {/if}
             </div>
@@ -709,6 +755,9 @@
      single-button row — cards stay the same height regardless of how many actions show. Tighter
      horizontal padding so "✓ Approve" + "✕ Reject" fit comfortably side by side in a card. */
   .mod .btn { white-space: nowrap; min-width: 0; padding-left: 6px; padding-right: 6px; }
+  /* On a phone the glyphs carry it. Two words squeezed into a 180px card read as cramped, and the
+     tick and cross are not ambiguous — they are the two things this screen does. */
+  @media (max-width: 560px) { .mod-t { display: none; } .mod .btn { font-size: 1rem; padding: 6px 4px; } }
   .star { background: none; border: none; padding: 4px; font-size: 1.4rem; line-height: 1; cursor: pointer; color: var(--text-muted); min-width: 44px; min-height: 44px; }
   .star.on { color: var(--accent); }
 

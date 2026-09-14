@@ -12,6 +12,11 @@
   const dispatch = createEventDispatcher<{ close: void; changed: void }>();
 
   let label = share.label;
+  // What is actually STORED right now, so "changed" can mean something. Updated only by a successful
+  // save. The button looked identical whether you had typed nothing or renamed the link completely,
+  // so the one state that matters — you have edits that are not saved — was the one nothing showed.
+  let savedLabel = share.label;
+  let savedSlug = share.slug ?? '';
   let slug = share.slug ?? '';
   let url = share.url;
   let saving = false;
@@ -35,11 +40,15 @@
     if (nav.share) { try { await nav.share({ title: label, url }); } catch { /* cancelled */ } }
     else copy();
   }
+  // Trimmed on both sides: trailing whitespace nobody can see must not make a link look edited.
+  $: dirty = label.trim() !== savedLabel.trim() || cleanSlug !== savedSlug.trim();
+  function revert() { label = savedLabel; slug = savedSlug; }
   async function save() {
     saving = true;
     try {
       const r = await updateShare(code, orgCode, share.id, { label: label.trim() || undefined, slug: cleanSlug || undefined });
       url = r.url; slug = r.slug ?? ''; label = r.label;
+      savedLabel = r.label; savedSlug = r.slug ?? '';
       showSuccess('Saved');
       dispatch('changed');
     } catch (e) { showToast(e instanceof Error ? e.message : 'Could not save', true); }
@@ -65,7 +74,10 @@
         {#if slug && cleanSlug !== slug.trim()}<span class="sub-hint">→ will save as <b>{cleanSlug || '(default)'}</b></span>{/if}
       </div>
     </div>
-    <button class="btn ghost sm" on:click={save} disabled={saving}>{saving ? 'Saving…' : 'Save name & link'}</button>
+    <button class="btn sm" class:primary={dirty} class:ghost={!dirty} on:click={save} disabled={saving || !dirty}>
+      {saving ? 'Saving…' : dirty ? 'Save changes' : '✓ Saved'}
+    </button>
+    {#if dirty && !saving}<button class="btn ghost sm" on:click={revert}>↩ Undo</button>{/if}
 
     <div class="linkbox"><span class="link">{previewUrl}</span></div>
     <div class="actions">
@@ -101,4 +113,7 @@
   .btn.ghost { background: transparent; color: var(--text); border-color: var(--border); }
   .btn:disabled { opacity: 0.6; cursor: default; }
   .hint { font-size: 0.74rem; color: var(--text-muted); margin: 14px 0 0; }
+  /* An unsaved name should look unsaved. The field carries the state too, not just the button —
+     on a phone the button can be below the fold while the field you just typed in is not. */
+  .fld:has(input) input { transition: border-color .12s; }
 </style>

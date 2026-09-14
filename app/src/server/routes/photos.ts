@@ -12,9 +12,11 @@ import { effectiveMaxPhotos, hasShotsLeft, photosRemaining as remainingFor } fro
 import { matchNewPhoto } from './faces';
 import { missionsFor } from './participants';
 import { events, participants, photos } from '../schema';
-import { stripImageMetadata, makeThumbnail, makeVideoPoster, makePlaybackProxy, thumbName, playName } from '../images';
+import { stripImageMetadata, makeThumbnail, makeVideoPoster, makePlaybackProxy, thumbName, playName,
+         cropClipToShape, cropName, dlName, shapeRatio } from '../images';
 import { probeVideoMeta } from '../slideshow';
 import { isRevealed } from '../lib';
+import { scheduledRevealAt } from '../../../../shared/reveal';
 import { eventByIdentifier } from './events';
 import { billingEnabled } from '../billing';
 
@@ -104,6 +106,10 @@ type PhotoRowInput = {
   width?: number | null;
   height?: number | null;
   durationMs?: number | null;
+  // Optional because the older, narrower selects never asked for it. Absent reads the same as
+  // 'unknown', which is the correct answer for a row nobody recorded it on.
+  captureOrientation?: string | null;
+  captureShape?: string | null;
 };
 
 // Mission id → the wording the host wrote, across EVERY set on the event. Built once per request
@@ -119,15 +125,84 @@ export function challengeCaptions(stored: string | null | undefined): Map<string
   return byId;
 }
 
+const onDisk = (name: string): boolean => {
+  try { return fs.existsSync(path.join(UPLOADS_DIR, name)); } catch { return false; }
+};
+
+/** Did this row ask for a shape the camera may not have given it? */
+const wantsCrop = (p: { mediaType?: string | null; captureShape?: string | null }): boolean =>
+  p.mediaType === 'video' && !!p.captureShape && p.captureShape !== 'full';
+
+/** The cropped sibling's name, but only once the file is really there. Existence IS the flag: the
+ *  crop runs after the upload response and can fail, so a column saying "cropped" could point at a
+ *  file that was never written. */
+function cropped(p: PhotoRowInput): string | null {
+  if (!wantsCrop(p)) return null;
+  const name = cropName(p.filename);
+  return onDisk(name) ? name : null;
+}
+
+/** The file to PLAY.
+ *
+ *  Preference order, and the reasoning for it:
+ *
+ *   _dl.mp4   — the re-encoded true crop. Best thing to play as well as to download: it is real
+ *               H.264, and being an actual re-encode it is ~40% smaller than the lossless copy,
+ *               which is bandwidth saved on every single view. The lossless file's only advantage
+ *               is a generation of quality nobody can see on a phone, and it costs that 40% on
+ *               every play to keep.
+ *   _play.mp4 — a WebM that needed an H.264 proxy before a phone would touch it.
+ *   _crop.mp4 — the lossless crop. This is the INTERIM answer: it exists within about 400ms of the
+ *               upload, while the re-encode takes seconds, so it is what keeps the gallery correct
+ *               in the gap. Also the permanent answer if the re-encode failed.
+ *
+ *  Null means "nothing better than `url`", which is right for an MP4 that needed no crop at all.
+ */
+function playFile(p: PhotoRowInput): string | null {
+  if (p.mediaType !== 'video') return null;
+  if (wantsCrop(p)) {
+    const dl = dlName(p.filename);
+    if (onDisk(dl)) return dl;
+  }
+  const crop = cropped(p);
+  const proxy = playName(crop ?? p.filename);
+  if (onDisk(proxy)) return proxy;
+  return crop;
+}
+
+/** The file to hand over when somebody SAVES this, resolved in one place so that the gallery's
+ *  download button and the whole-event zip cannot disagree — which they did: the zip read
+ *  `filename` straight off the row and handed out the uncropped original of a clip the gallery was
+ *  showing cropped.
+ *
+ *  Preference order, best first:
+ *    _dl.mp4   — re-encoded, the surplus actually removed
+ *    _crop.mp4 — right shape, surplus hidden in the bitstream (or, for a WebM, already a true crop)
+ *    original  — no crop was wanted, or none succeeded
+ */
+export function downloadFile(p: { filename: string; mediaType?: string | null; captureShape?: string | null }): string {
+  if (!wantsCrop(p)) return p.filename;
+  const dl = dlName(p.filename);
+  if (onDisk(dl)) return dl;
+  const crop = cropName(p.filename);
+  return onDisk(crop) ? crop : p.filename;
+}
+
 function photoRow(p: PhotoRowInput, myParticipantId: string | null, captions: Map<string, string>) {
   return {
     id:              p.id,
-    url:             `/uploads/${p.filename}`,                       // full-quality original (download)
-    thumbUrl:        `/uploads/${thumbName(p.filename)}`,            // fast grid thumbnail (photo or video poster)
+    // The clip in the shape the guest chose, when the server managed to cut one; otherwise the file
+    // exactly as it arrived. The uncropped original is never deleted — it stays beside this until
+    // the event's normal purge, so a crop that turns out to be wrong on some device is a thing we
+    // can still put right rather than a thing we have destroyed.
+    url:             `/uploads/${downloadFile(p)}`,
+    thumbUrl:        `/uploads/${thumbName(cropped(p) ?? p.filename)}`,  // grid thumbnail / video poster
     // A phone-decodable H.264 copy, when one has been built. The original stays the download; this
     // is only what a <video> element plays, because the original may be VP8/WebM that phones
     // software-decode (stutter) and Safari may refuse entirely.
-    ...(p.mediaType === 'video' && hasPlayable(p.filename) ? { playUrl: `/uploads/${playName(p.filename)}` } : {}),
+    // Omitted when it would only repeat `url` — which is the common case once the re-encode has
+    // landed, since by then the same file is both the best play and the right download.
+    ...(playFile(p) && playFile(p) !== downloadFile(p) ? { playUrl: `/uploads/${playFile(p)}` } : {}),
     takenAt:         p.takenAt,
     participantName: p.participantName,
     participantId:   p.participantId,
@@ -148,6 +223,10 @@ function photoRow(p: PhotoRowInput, myParticipantId: string | null, captions: Ma
     width:           p.width ?? undefined,
     height:          p.height ?? undefined,
     durationMs:      p.durationMs ?? undefined,
+    // Only ever sent when it is 'landscape'. The gallery's single use is a "shot sideways" mark,
+    // and 'portrait'/null/unknown all mean "say nothing" — shipping those would put three values on
+    // the wire to distinguish states no reader distinguishes.
+    shotSideways:    p.captureOrientation === 'landscape' ? true : undefined,
     isOwn:           myParticipantId ? p.participantId === myParticipantId : undefined,
   };
 }
@@ -196,8 +275,26 @@ function gateUpload(p: UploadParticipant, isVideo: boolean): { status: number; e
 // Move a fully-received staged file into the event folder, process it (strip+thumbnail for images,
 // probe+poster for video), insert the photo row, and bump the participant's count. Returns the
 // success payload. Throws an error tagged { status: 400 } for an invalid image (file cleaned first).
+/** How the phone was held, as reported by the browser at capture. Anything we do not recognise —
+ *  including nothing at all — is stored as NULL and reads as "unknown". The client is the only
+ *  witness to this, so the value is untrusted input like any other and is matched against a fixed
+ *  list rather than written through. */
+function readOrientation(raw: unknown): string | null {
+  return raw === 'portrait' || raw === 'landscape' ? raw : null;
+}
+
+/** The shape the guest chose. Matched against the vocabulary rather than written through — it is
+ *  client-supplied, and it goes on to build an ffmpeg argument. */
+function readShape(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const v = raw.trim();
+  if (v === 'full') return 'full';
+  return shapeRatio(v) ? v : null;
+}
+
 async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo: boolean,
-                              source: 'capture' | 'upload' = 'capture', challengeRaw?: unknown) {
+                              source: 'capture' | 'upload' = 'capture', challengeRaw?: unknown,
+                              orientationRaw?: unknown, shapeRaw?: unknown) {
   const destDir = eventDir(p.eventId);
   fs.mkdirSync(destDir, { recursive: true });
   const baseName = path.basename(stagedPath);                       // <uuid>.ext
@@ -272,12 +369,28 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     challengeId,
     sizeBytes, width: dims.width ?? null, height: dims.height ?? null, durationMs: dims.durationMs ?? null,
     source,
+    captureOrientation: readOrientation(orientationRaw),
+    captureShape: readShape(shapeRaw),
   });
   await db.update(participants).set({ photosTaken: p.photosTaken + 1 }).where(eq(participants.id, p.id));
   // Face matching, if the host enabled it and anyone has enrolled. Deliberately not awaited:
   // it runs against the thumbnail after this response, and a slow or dead ML container must
   // never hold up a guest's upload.
   void matchNewPhoto(p.eventId, photoId, storedName);
+  // Finish the shape the camera would not give us. Not awaited, for the same reason as the face
+  // match: the clip is safely stored by this line, and a guest holding a phone at a party must not
+  // wait on ffmpeg. Until it lands, the gallery serves the original — which is the right answer
+  // whether the crop is still running, or failed, or was never needed.
+  if (isVideo) {
+    const shape = readShape(shapeRaw);
+    if (shape && shape !== 'full') {
+      void cropClipToShape(path.join(destDir, baseName), shape)
+        // The poster is cut from the original, so it shows the uncropped frame. Re-cut it from the
+        // cropped file so the grid thumbnail matches the clip it opens.
+        .then((ok) => { if (ok) return makeVideoPoster(path.join(destDir, cropName(baseName))); })
+        .catch(() => { /* the original still plays */ });
+    }
+  }
   // Every photo is STORED 'pending' on purpose: visibility is decided at read time against the
   // event's current setting, which is what lets a host switch moderation on later and have the
   // shots already taken go through it. That is a feature, and the column must keep working that way.
@@ -301,9 +414,6 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
 // Does a phone-decodable copy exist yet? Only ever called for video rows (the caller
 // short-circuits on mediaType), and a gallery holds few of those, so one stat each is cheaper than
 // carrying a column that can fall out of step with the filesystem.
-const hasPlayable = (filename: string): boolean => {
-  try { return fs.existsSync(path.join(UPLOADS_DIR, playName(filename))); } catch { return false; }
-};
 
 router.delete('/:id', async (req: Request, res: Response) => {
   const sessionToken = String(req.body?.sessionToken || req.query?.sessionToken || '');
@@ -338,7 +448,9 @@ router.delete('/:id', async (req: Request, res: Response) => {
   await db.delete(photos).where(eq(photos.id, photo.id));
   const remaining = Math.max(0, Number(me.photosTaken) - 1);
   await db.update(participants).set({ photosTaken: remaining }).where(eq(participants.id, me.id));
-  for (const f of [photo.filename, photo.filename.replace(/\.[^.]+$/, '_thumb.webp'), playName(photo.filename)]) {
+  const cropFile = cropName(photo.filename);
+  for (const f of [photo.filename, photo.filename.replace(/\.[^.]+$/, '_thumb.webp'), playName(photo.filename),
+                   cropFile, thumbName(cropFile), playName(cropFile), dlName(photo.filename)]) {
     try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch { /* already gone is fine */ }
   }
 
@@ -443,7 +555,7 @@ router.post('/', upload.single('photo'), async (req: Request, res: Response) => 
   if (gate) { fs.unlinkSync(req.file.path); return res.status(gate.status).json({ error: gate.error }); }
 
   try {
-    return res.json(await finalizeUpload(participant, req.file.path, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId));
+    return res.json(await finalizeUpload(participant, req.file.path, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId, req.body?.captureOrientation, req.body?.captureShape));
   } catch (e) {
     return res.status((e as { status?: number }).status || 500).json({ error: (e as Error).message || 'Upload failed' });
   }
@@ -538,13 +650,13 @@ router.post('/complete', async (req: Request, res: Response) => {
   wipe();   // parts no longer needed
 
   try {
-    return res.json(await finalizeUpload(participant, staged, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId));
+    return res.json(await finalizeUpload(participant, staged, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId, req.body?.captureOrientation, req.body?.captureShape));
   } catch (e) {
     return res.status((e as { status?: number }).status || 500).json({ error: (e as Error).message || 'Upload failed' });
   }
 });
 
-// ── GET /api/photos/:joinCode/download — zip of originals (all or a selection) ──
+// ── GET /api/photos/:joinCode/download — zip of the files as the gallery serves them ──
 // Public, gallery-scoped: requires the event revealed + downloads allowed. `?ids=a,b`
 // limits to a selection; omit for everything. Streams a max-compression zip of the
 // FULL-quality originals.
@@ -567,7 +679,10 @@ router.get('/:joinCode/download', async (req: Request, res: Response) => {
   // Visible set: with moderation on, only approved; off, anything not binned (rejected).
   const visible = event.moderationEnabled ? eq(photos.status, 'approved') : ne(photos.status, 'rejected');
   const rows = await db
-    .select({ filename: photos.filename, mediaType: photos.mediaType, participantId: photos.participantId, participantName: participants.name })
+    // captureShape is not decoration here: downloadFile needs it to know a clip wanted a shape, and
+    // without it every clip in the zip silently falls back to the uncropped original.
+    .select({ filename: photos.filename, mediaType: photos.mediaType, captureShape: photos.captureShape,
+              participantId: photos.participantId, participantName: participants.name })
     .from(photos)
     .innerJoin(participants, eq(participants.id, photos.participantId))
     .where(ids.length
@@ -584,7 +699,11 @@ router.get('/:joinCode/download', async (req: Request, res: Response) => {
 export function zipPhotosToResponse(
   res: Response,
   eventName: string,
-  rows: { filename: string; mediaType: string | null; participantId: string; participantName: string | null }[],
+  // captureShape is required, not optional: downloadFile needs it to tell that a clip asked for a
+  // shape, and a caller that forgets it gets uncropped originals in the zip with no error anywhere.
+  // Making it mandatory turns that into a compile failure instead of a silent wrong file.
+  rows: { filename: string; mediaType: string | null; captureShape: string | null;
+          participantId: string; participantName: string | null }[],
 ) {
   const fileSafe = (s: string) => s.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
   const evName = fileSafe(eventName || 'Snapdini').slice(0, 40) || 'Snapdini';
@@ -602,9 +721,12 @@ export function zipPhotosToResponse(
 
   const perPerson = new Map<string, number>();
   for (const r of rows) {
-    const file = path.join(UPLOADS_DIR, r.filename);
+    // The same file the gallery's own download button hands over — see downloadFile. Reading
+    // r.filename here meant a clip the gallery showed cropped came out of the zip uncropped.
+    const rel = downloadFile(r);
+    const file = path.join(UPLOADS_DIR, rel);
     if (!fs.existsSync(file)) continue;
-    const ext = r.mediaType === 'video' ? (r.filename.split('.').pop() || 'mp4') : 'jpg';
+    const ext = r.mediaType === 'video' ? (rel.split('.').pop() || 'mp4') : 'jpg';
     const who = fileSafe(r.participantName || 'Guest') || 'Guest';
     const n = (perPerson.get(r.participantId) || 0) + 1; perPerson.set(r.participantId, n);
     archive.file(file, { name: `${evName} - ${who} - ${n}.${ext}` });
@@ -649,6 +771,8 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
         width:           photos.width,
         height:          photos.height,
         durationMs:      photos.durationMs,
+        captureOrientation: photos.captureOrientation,
+        captureShape: photos.captureShape,
         status:          photos.status,
         participantName: participants.name,
       })
@@ -672,7 +796,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
       const [{ c: photoCount }] = await db.select({ c: count() }).from(photos)
         .where(and(eq(photos.eventId, event.id), visible));
       return res.json({ revealed: false, photoCount, revealMode: event.revealMode,
-        revealAt: event.revealMode === 'at_end' ? event.expiresAt + (event.revealDelayHours || 0) * 3600000 : null });
+        revealAt: scheduledRevealAt(event) });
     }
     const rows = await db
       .select({
@@ -688,6 +812,8 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
         width:           photos.width,
         height:          photos.height,
         durationMs:      photos.durationMs,
+        captureOrientation: photos.captureOrientation,
+        captureShape: photos.captureShape,
         participantName: participants.name,
       })
       .from(photos)
@@ -732,6 +858,8 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
         width:           photos.width,
         height:          photos.height,
         durationMs:      photos.durationMs,
+        captureOrientation: photos.captureOrientation,
+        captureShape: photos.captureShape,
         status:          photos.status,
         participantName: participants.name,
       })
@@ -740,7 +868,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
       .where(and(eq(photos.eventId, event.id), eq(photos.participantId, participant.id)))
       .orderBy(desc(photos.takenAt));   // newest first
     return res.json({ revealed: false, photoCount, revealMode: event.revealMode,
-      revealAt: event.revealMode === 'at_end' ? event.expiresAt + (event.revealDelayHours || 0) * 3600000 : null,
+      revealAt: scheduledRevealAt(event),
       myParticipantId: participant.id, photos: ownRows.map(p => photoRow(p, participant.id, captions)) });
   }
 
@@ -758,6 +886,8 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
       width:           photos.width,
       height:          photos.height,
       durationMs:      photos.durationMs,
+      captureOrientation: photos.captureOrientation,
+      captureShape: photos.captureShape,
       participantName: participants.name,
     })
     .from(photos)

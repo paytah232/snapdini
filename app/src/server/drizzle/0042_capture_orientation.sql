@@ -1,0 +1,24 @@
+-- How the phone was being HELD when the shot was taken.
+--
+-- Not derivable from the pixels, which is the entire reason for the column. With the phone's
+-- rotation lock on, turning it sideways moves nothing: the page stays portrait, the camera track
+-- stays portrait, and a landscape scene is written into a portrait-shaped file. Every later reader
+-- of that file — the gallery, the poster layout, the slideshow, a person scrolling — sees a
+-- portrait photo, because by every measurement available to them it is one. The only moment the
+-- truth exists is at capture, in the browser, from DeviceOrientationEvent. So it is recorded there
+-- or not at all.
+--
+-- Three values, and 'unknown' is a first-class one rather than a gap:
+--   'portrait'  — held upright
+--   'landscape' — held sideways, by either route (the page turned, or the phone turned inside a
+--                 locked page); from the photograph's point of view these are the same event
+--   'unknown'   — we could not tell. iOS gates DeviceOrientationEvent behind a permission prompt
+--                 that we decline to spend on this, and any device can capture before the first
+--                 reading arrives.
+-- Rounding 'unknown' down to 'portrait' would be the one genuinely harmful option: it would put a
+-- confident claim on every iOS photo, and the claim would be wrong for exactly the shots this
+-- column exists to find.
+--
+-- NULL for every row that predates this, which reads as 'unknown' and is left NULL rather than
+-- backfilled — there is nothing to backfill it from.
+ALTER TABLE photos ADD COLUMN IF NOT EXISTS capture_orientation text;

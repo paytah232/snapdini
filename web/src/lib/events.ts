@@ -1,4 +1,5 @@
 import { api, postJson } from './api';
+import type { GuestDelivery, GuestSendScope } from './guestDelivery';
 
 export interface Photo {
   id: string;
@@ -22,6 +23,12 @@ export interface Photo {
   mediaType: 'photo' | 'video';
   status?: 'approved' | 'pending' | 'rejected';
   isOwn?: boolean;
+  /** The phone was held sideways for this one. Only ever true — absent covers portrait, unknown,
+   *  and every row taken before we recorded it, which are one answer as far as the UI goes.
+   *
+   *  Worth having because the picture itself cannot tell you: with rotation lock on, a landscape
+   *  scene is written into a portrait-shaped file and nothing downstream can see the difference. */
+  shotSideways?: boolean;
   sizeBytes?: number;
   width?: number;
   height?: number;
@@ -48,6 +55,10 @@ export interface EventTheme {
 export interface PublicEvent {
   id: string; name: string; blurb: string | null; joinCode: string; slug: string | null;
   maxPhotos: number; revealMode: string; revealDelayHours: number; timezone: string | null;
+  /** The exact instant the host picked, overriding the delay. Optional so an older API (or a
+   *  response already in a cache) simply falls back to the delay this screen has always used;
+   *  null is the same thing said explicitly. */
+  revealAt?: number | null;
   aspectRatios: string[]; videoSeconds: number; startsAt: number; expiresAt: number;
   isDemo: boolean; isUpcoming: boolean; isExpired: boolean; isLocked: boolean; isRevealed: boolean;
   /** Server-side reschedule eligibility (usage-based, not time-based). Optional so an older API
@@ -69,12 +80,15 @@ export interface MyEvent {
   coHost?: boolean;   // true when you co-host (don't own) this event
 }
 
-export interface AdminEvent extends Omit<PublicEvent, 'participantCount'> {
+export interface AdminEvent extends Omit<PublicEvent, 'participantCount'>, GuestDeliveryFields {
   joinUrl: string; galleryUrl: string; revealedAt: number | null;
   moderationEnabled: boolean; ratingMode: RatingMode; pendingCount: number; participantCount: number;
   participants: { id: string; name: string; email: string | null; photosTaken: number; joinedAt: number;
                   /** Which trick card they were handed. Null when the event has no trick list. */
-                  challengeSet?: string | null }[];
+                  challengeSet?: string | null;
+    /** Tricks this guest has pulled off on the card they currently hold. Absent/0 when the event
+     *  has no trick list, or they have not done any. */
+    tricksDone?: number }[];
   emailEnabled: boolean;
   // entitlement (upgrades)
   guestCap: number; videoSeconds: number; retentionDays: number; paid: boolean; amountPaidCents: number;
@@ -110,17 +124,33 @@ export interface SlideshowVersion {
 // Friendly-named download (server sets <event>-<date>-snapdini.mp4); res='1080p' live-transcodes a 4K render.
 export const slideshowDownloadUrl = (code: string, id: string, res?: '1080p') =>
   `/api/events/${code}/slideshow/${id}/download${res ? `?res=${res}` : ''}`;
+/** Event start → end, or shuffled. There is no third option on purpose — see slideshow.ts. */
+export type SlideshowOrder = 'chronological' | 'shuffled';
 export interface SlideshowStatus {
   /** 1080p preview copy of the current render, when one has been built. */
   playUrl?: string;
   status: 'idle' | 'running' | 'done' | 'error';
-  url?: string; error?: string; truncated?: boolean;
+  url?: string; error?: string;
+  label?: string;
   progress?: number; phase?: 'collecting' | 'encoding';
-  music: { id: string; label: string }[];
-  photoCount?: number; favouriteCount?: number; videoCount?: number; hasCustomAudio?: boolean; maxImages?: number; secondsPerDefault?: number;
+  /** Renders waiting behind the running one — a render is queued, never cancelled, by a new one. */
+  queued?: { id: string; label: string; queuedAt: number }[];
+  maxQueue?: number;
+  /** A render that failed and whose slot a queued render has since taken — so it isn't lost. */
+  failed?: { label: string; error: string; at: number };
+  /** secs comes from ffprobe on the server — never from the browser, see listMusic(). */
+  music: { id: string; label: string; secs?: number }[];
+  photoCount?: number; favouriteCount?: number; videoCount?: number; secondsPerDefault?: number;
+  /** Favourites that are video clips — a favourites render drops them unless they're asked for. */
+  favouriteVideoCount?: number;
+  hasCustomAudio?: boolean; customAudioSecs?: number;
+  /** Every source fits inside 1080p, so a 4K render would upscale and buy nothing. */
+  sourcesFitIn1080?: boolean;
   recent?: SlideshowVersion[];
   qualities?: { id: string; label: string; kbps: number }[];
-  resolutions?: { id: string; label: string; sizeScale: number }[];
+  /** renderScale: wall-clock seconds of rendering per second of finished video, learned server-side
+   *  from real renders — what "this will take about six minutes" is actually built from. */
+  resolutions?: { id: string; label: string; sizeScale: number; renderScale?: number; prepPerItem?: number }[];
   brandingRemovable?: boolean;   // can this event remove the Snapdini intro/outro for free (already entitled)?
   brandingPriceCents?: number;   // price to unlock removal otherwise
   billingEnabled?: boolean;
@@ -134,8 +164,8 @@ export const favouriteSlideshow = (code: string, organizerCode: string, id: stri
   postJson<{ ok: boolean; favourite: boolean }>(`/api/events/${code}/slideshow/${id}/favourite`, {}, org(organizerCode));
 export const deleteSlideshowVersion = (code: string, organizerCode: string, id: string) =>
   api(`/api/events/${code}/slideshow/${id}`, { method: 'DELETE', headers: org(organizerCode) });
-export const startSlideshowJob = (code: string, organizerCode: string, body: { favouritesOnly: boolean; track?: string; tracks?: string[]; loopMusic?: boolean; secondsPer?: number; includeVideos?: boolean; keepVideoAudio?: boolean; quality?: string; resolution?: string; branding?: boolean }) =>
-  api<SlideshowStatus>(`/api/events/${code}/slideshow`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify(body) });
+export const startSlideshowJob = (code: string, organizerCode: string, body: { favouritesOnly: boolean; track?: string; tracks?: string[]; loopMusic?: boolean; secondsPer?: number; includeVideos?: boolean; keepVideoAudio?: boolean; quality?: string; resolution?: string; branding?: boolean; order?: SlideshowOrder }) =>
+  api<SlideshowStatus & { queuedCount?: number; queueFull?: boolean }>(`/api/events/${code}/slideshow`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify(body) });
 // Upload the organizer's own backing track (FormData → no JSON content-type).
 export const uploadSlideshowAudio = async (code: string, organizerCode: string, file: File) => {
   const fd = new FormData(); fd.append('audio', file);
@@ -198,6 +228,27 @@ export const deleteEvent = (code: string, organizerCode: string) =>
 // Caption length rules live in caption.ts — see it for why they are counted in graphemes.
 export { CAPTION_MAX, CAPTION_MAX_RAW, clampCaption, captionLength, captionRemaining } from '../../../shared/caption';
 
+// Reveal timing is a rule the server enforces and this side merely displays, so it is imported
+// rather than reimplemented — see shared/reveal.ts for what goes wrong when the two disagree.
+export { REVEAL_TICK_MS, REVEAL_CUSTOM, ceilToRevealTick, zonedWallTimeToMs, msToZonedWallTime, scheduledRevealAt } from '../../../shared/reveal';
+
+/** A reveal instant written the way a host reads a time: "Sat 3 Oct, 7:15 pm AEST".
+ *
+ *  Always with the zone name, and always rendered in the EVENT's zone rather than the browser's.
+ *  A host setting a Perth event's reveal from Sydney needs to see the Perth time they chose echoed
+ *  back — the version of this that dropped the zone label was indistinguishable from a bug. */
+export function revealMomentLabel(ms: number, timeZone: string | null): string {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      weekday: 'short', day: 'numeric', month: 'short',
+      hour: 'numeric', minute: '2-digit',
+      timeZone: timeZone || undefined, timeZoneName: 'short',
+    }).format(new Date(ms));
+  } catch {
+    return '';   // an unknown zone — the caller shows nothing rather than a wrong time
+  }
+}
+
 /** Write, edit or clear the caption on one photo. Exactly one credential: a guest's session token
  *  (their OWN photos only) or the organizer code (anything in their event). An empty string clears
  *  it — there is no separate delete call.
@@ -223,8 +274,16 @@ export const ratePhoto = (code: string, organizerCode: string, photoId: string, 
     `/api/events/${code}/rate`, { photoId, rating }, org(organizerCode));
 export const saveTheme = (code: string, organizerCode: string, theme: EventTheme) =>
   api(`/api/events/${code}/theme`, { method: 'PUT', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify({ theme }) });
-export const emailGallery = (code: string, organizerCode: string, emails: string[]) =>
-  postJson(`/api/events/${code}/email-gallery`, { emails }, org(organizerCode));
+/** Email a link to a list of addresses. Omit shareId for the event's standing gallery link; pass
+ *  one to send a curated share instead. Every attempt is recorded server-side — see linkSends. */
+export const emailLink = (code: string, organizerCode: string, emails: string[], shareId?: string | null) =>
+  postJson<{ sent: number; errors: number }>(
+    `/api/events/${code}/email-link`, { emails, shareId: shareId ?? null }, org(organizerCode));
+
+export interface LinkSend { shareId: string | null; email: string; ok: boolean; sentAt: number; }
+/** Every address this event's links have been emailed to, newest first, across all links. */
+export const linkSends = (code: string, organizerCode: string) =>
+  api<{ sends: LinkSend[] }>(`/api/events/${code}/link-sends`, { headers: org(organizerCode) });
 // Remove a participant (e.g. a duplicate join). Their uploads are deleted too — returns the count.
 export const deleteParticipant = (code: string, organizerCode: string, id: string) =>
   api<{ ok: boolean; removedPhotos: number }>(`/api/events/${code}/participants/${id}`, { method: 'DELETE', headers: org(organizerCode) });
@@ -234,6 +293,52 @@ export const setParticipantCard = (code: string, organizerCode: string, id: stri
   api<{ ok: boolean; challengeSet: string; label: string; tricks: number }>(
     `/api/events/${code}/participants/${id}/card`,
     { method: 'PUT', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify({ set }) });
+/** Attach an email to a roll already in progress, so it survives a move to another browser.
+ *  409 when someone else at the event already uses that address. */
+export const setParticipantEmail = (sessionToken: string, email: string) =>
+  api<{ ok: boolean; email: string }>('/api/participants/email', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionToken, email }),
+  });
+
+/** What the opt-in call answers with. */
+export interface PhotoOptIn {
+  ok: boolean;
+  /** The flag as it now stands on this guest's row — render THIS, never what was asked for. */
+  wantsPhotos: boolean;
+  /** The address stored against the roll afterwards, or null when none is. Null is also what the
+   *  collision below answers with, so it must never be read as "the opt-in did not take". */
+  email: string | null;
+  /** The address given already belongs to another guest at this event. (event_id, lower(email)) is
+   *  UNIQUE, so it cannot be written twice — the server opts THIS guest in and will send there
+   *  anyway, it simply does not store the address. A flag rather than a 409 precisely because it
+   *  is not a failure: the guest gets their photos either way and must not be shown an error. */
+  emailTaken?: boolean;
+  /** They said yes and we have nowhere to send it. The opt-in IS recorded — so this is a prompt for
+   *  an address, never a failure to report. */
+  needsEmail?: boolean;
+}
+
+/** Ask to be emailed the photos when the event ends, or take it back (wantsPhotos: false).
+ *
+ *  Pass `email` only when the guest has just typed one; omit it to use whatever is already on
+ *  their row. Registering an address is folded into this call rather than left to a separate
+ *  setParticipantEmail() because two calls can half-apply on party wifi — opted in with nowhere
+ *  to send to, or an address stored for someone who never got opted in.
+ *
+ *  `needsEmail` is the server telling us they said yes and we have nowhere to send it — the opt-in
+ *  is still recorded, so the UI must ask for an address rather than report a failure. */
+export const setPhotoOptIn = async (sessionToken: string, wantsPhotos: boolean, email?: string): Promise<PhotoOptIn> => {
+  const r = await api<{ ok: boolean; wantsPhotos: boolean; email: string | null;
+                        emailStored: boolean; duplicateEmail: boolean; needsEmail: boolean }>(
+    '/api/participants/wants-photos', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionToken, wantsPhotos, email: email || undefined }),
+    });
+  // `emailTaken` is this client's name for it; the server says `duplicateEmail`. Translated once,
+  // here, so the component's tested vocabulary does not have to move to meet the route.
+  return { ok: r.ok, wantsPhotos: r.wantsPhotos, email: r.email, emailTaken: r.duplicateEmail, needsEmail: r.needsEmail };
+};
 export const setAllowDownloads = (code: string, organizerCode: string, allowDownloads: boolean) =>
   postJson(`/api/events/${code}/allow-downloads`, { allowDownloads }, org(organizerCode));
 
@@ -259,8 +364,54 @@ export type GuestMissions = {
 };
 
 export const joinEvent = (joinCode: string, name: string, email?: string) =>
-  postJson<{ participant: { id: string; name: string }; sessionToken: string; joinCode: string; photosRemaining: number; eventName: string; noFlash?: boolean; recovered?: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; feedbackGiven?: boolean; emailFromPayment?: boolean } & GuestMissions>(
+  postJson<{ participant: { id: string; name: string }; sessionToken: string; joinCode: string; photosRemaining: number; eventName: string; noFlash?: boolean; recovered?: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; feedbackGiven?: boolean; emailFromPayment?: boolean; wantsPhotos?: boolean } & GuestMissions>(
     '/api/participants', { joinCode, name, email: email || undefined });
 export const getMe = (sessionToken: string) =>
-  api<{ participant: { id: string; name: string; photosTaken: number; email: string | null }; photosRemaining: number; eventName: string; joinCode: string; slug: string | null; startsAt: number; expiresAt: number; isLocked: boolean; maxPhotos: number; extraPhotos?: number; allowDownloads: boolean; noFlash: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; feedbackGiven?: boolean; emailFromPayment?: boolean } & GuestMissions>(
+  api<{ participant: { id: string; name: string; photosTaken: number; email: string | null }; photosRemaining: number; eventName: string; joinCode: string; slug: string | null; startsAt: number; expiresAt: number; isLocked: boolean; maxPhotos: number; extraPhotos?: number; allowDownloads: boolean; noFlash: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; feedbackGiven?: boolean; emailFromPayment?: boolean; wantsPhotos?: boolean } & GuestMissions>(
     '/api/participants/me', { headers: { 'X-Session-Token': sessionToken } });
+
+// ── Getting the photos to the guests ────────────────────────────────────────
+//
+// The host decides how and when their guests get the photos. The rules behind the question (the
+// 24-hour reminder gate, the never-before-the-reveal floor) live in ./guestDelivery — this is only
+// the shape the API speaks in.
+
+/** An event's guest-delivery settings as the admin API reports them.
+ *
+ *  Every field is optional so an API that does not serve them yet — or a response already sitting
+ *  in a cache — reads as an event on the defaults, which is exactly what such an event is. */
+export interface GuestDeliveryFields {
+  guestDelivery?: GuestDelivery;
+  guestSendScope?: GuestSendScope;
+  /** The instant a 'scheduled' send goes out, already on the reveal grid. Null on every other
+   *  setting, and on a scheduled one the host has not finished picking. */
+  guestSendAt?: number | null;
+  /** Set once the live email has actually gone. A host who cannot see this has no way to tell a
+   *  send that worked from one that never ran, and the obvious next move is to send it again. */
+  guestsSentAt?: number | null;
+  guestMailThanks?: boolean;
+  guestMailReminder?: boolean;
+  guestMailLive?: boolean;
+  /** Guests who asked for their photos. Deliberately NOT derived from the participant list here:
+   *  an address on a row is not consent to be emailed, and a count built from one would overstate
+   *  what a send will actually do. Absent until the API reports it, and simply not shown. */
+  guestOptInCount?: number;
+}
+
+export interface GuestSendResult {
+  sent: number;
+  /** Opted-in guests who got nothing because there was nothing to send them. */
+  skipped?: number;
+  scope: GuestSendScope;
+  sentAt: number;
+  /** Why nothing went out — present when `sent` is 0, and shown to the host verbatim rather than
+   *  flattened into a cheerful "sent to 0 guests". */
+  reason?: string;
+}
+
+/** Send the gallery link to the opted-in guests right now.
+ *
+ *  The server answers a refusal as a 409 with a `reason` — empty_scope, not_revealed — rather than
+ *  a cheerful "sent to 0". The caller surfaces whichever it gets. */
+export const sendGuestPhotos = (code: string, organizerCode: string, scope: GuestSendScope) =>
+  postJson<GuestSendResult>(`/api/events/${code}/send-guest-link`, { scope }, org(organizerCode));

@@ -14,6 +14,9 @@ export type EventName =
   | 'signup_started' | 'signup_submitted' | 'verify_email_opened' | 'login_submitted'
   | 'event_create_started' | 'event_created' | 'checkout_started' | 'checkout_returned'
   | 'upgrade_panel_opened' | 'poster_opened' | 'slideshow_started' | 'share_link_created'
+  // Which preset a host starts from — and how often they restyle rather than edit — is the only
+  // way to learn whether the gallery is pulling its weight or just adding a tap.
+  | 'poster_preset_picked' | 'poster_scratch_picked' | 'poster_restyle'
   | 'join_opened' | 'joined' | 'camera_permission_granted' | 'camera_permission_denied'
   | 'photo_captured' | 'roll_completed'
   // Photo missions: a guest opening their card, completing one, and a host saving a list. The first

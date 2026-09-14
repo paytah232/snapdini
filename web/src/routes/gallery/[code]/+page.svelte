@@ -13,7 +13,9 @@
   import PhotoCard from '$lib/components/PhotoCard.svelte';
   import { tileAspect } from '$lib/ui';
   import { demoLinks } from '$lib/demo';
-  import { saveMany, prefersFiles, FILES_MAX, type SaveManyProgress } from '$lib/saveImage';
+  import { saveMany, prefersFiles, isIOS, filesLimit, type SaveManyProgress, savePhotoByUrl } from '$lib/saveImage';
+  import { savedSet, markSaved } from '$lib/saved';
+  import ShareScope from '$lib/components/ShareScope.svelte';
   import StartYourOwn from '$lib/components/StartYourOwn.svelte';
   import { trackGalleryView, trackPhotos } from '$lib/referral';
   import type { PageData } from './$types';
@@ -91,6 +93,8 @@
 
   onMount(async () => {
     trackGalleryView(code);
+    saved = savedSet(code);
+    downloadPref = readDownloadPref();
     try {
       event = await getEvent(code);
       document.title = `${event.name} — Snapdini`;
@@ -152,6 +156,26 @@
     }
   }
 
+  // Which photos this device already has. Per-browser and deliberately not server state — see
+  // lib/saved.ts. Only readable in the browser, so it starts empty and fills on mount.
+  let saved: Set<string> = new Set();
+  // Which single photo is mid-save, so its own button can say so. One at a time on purpose: the
+  // button is a per-card control and two in flight would leave the second's outcome landing on a
+  // card the guest has already scrolled past.
+  let savingOne: string | null = null;
+  async function saveOne(p: { id: string; url: string; takenAt: number; mediaType?: string }) {
+    if (savingOne) return;
+    savingOne = p.id;
+    try {
+      const stamp = new Date(p.takenAt).toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      const out = await savePhotoByUrl(p.url, `snapdini-${stamp}.${p.mediaType === 'video' ? 'mp4' : 'jpg'}`);
+      // Only an outcome that actually reached the device marks the card. A cancelled share is the
+      // guest's decision and says nothing; a failure must not claim they have it.
+      if (out === 'shared' || out === 'downloaded') { saved = markSaved(code, [p.id]); trackPhotos(code, [p.id], 'download'); }
+      else if (out === 'failed') showToast('Could not save that one', true);
+    } finally { savingOne = null; }
+  }
+
   function zipHref(ids?: string[]): string {
     const q = ids && ids.length ? `?ids=${ids.join(',')}` : '';
     return `/api/photos/${code}/download${q}`;
@@ -163,9 +187,7 @@
   // wanted. So a touch device gets the actual files — shared on iOS, where that is the only route
   // into Photos, and downloaded on Android, where the gallery picks them up by itself.
   //
-  // Above FILES_MAX even a phone is better served by the zip: files mean a share sheet per batch or
-  // a download apiece, which is a good trade for a handful and miserable for a whole event. Select
-  // mode is the way to take a few.
+  // How many is too many depends on the platform, not on the number — see filesLimit().
   let bulkSaving = false;
   let bulkProgress = '';
   let bulkDone = '';
@@ -173,10 +195,14 @@
     bulkSaving = true; bulkProgress = `0/${list.length}`;
     try {
       const items = list.map((p) => ({
+        id: p.id,
         url: p.url,
         filename: `snapdini-${new Date(p.takenAt).toISOString().slice(0, 19).replace(/[:T]/g, '-')}-${p.id.slice(0, 6)}.${p.mediaType === 'video' ? 'mp4' : 'jpg'}`,
       }));
       const r = await saveMany(items, (pr: SaveManyProgress) => (bulkProgress = `${pr.done}/${pr.total}`));
+      // Only what actually got through — a cancelled share sheet returns the batches before it,
+      // not the whole list.
+      if (r.savedIds.length) saved = markSaved(code, r.savedIds);
       if (r.cancelled) { showToast(r.saved ? `Stopped — ${r.saved} saved` : 'Stopped'); bulkDone = ''; }
       else {
         showToast(`${r.saved} photo${r.saved === 1 ? '' : 's'} saved`);
@@ -189,14 +215,108 @@
     finally { bulkSaving = false; bulkProgress = ''; }
   }
 
-  function downloadAll() {
-    if (!allowDownloads) { showToast('Downloads are disabled for this event', true); return; }
+  // Files or a zip: the guest's call, remembered.
+  //
+  // This started as a silent rule and the rule kept being wrong, because browsers do not agree on
+  // what saving a file even looks like. Chrome on Android downloads a whole roll without asking.
+  // Opera prompts for EVERY file, so fifty files is fifty prompts. iOS has no downloads folder at
+  // all and needs the share sheet, one batch at a time. Safari, Firefox and the in-app browsers
+  // each differ again. No amount of sniffing gets this right, and every wrong guess looks like the
+  // button being broken.
+  //
+  // So we guess once, to pick which option is offered first, and then stop guessing: the choice is
+  // remembered per device and the ⚙ beside the button changes it. filesLimit() still decides
+  // whether to ASK before saving a big roll as files, which is a different question — on iOS that
+  // is a real cost per batch, elsewhere it is not.
+  //
+  // zipIds undefined means "the whole event": the server then streams everything it holds rather
+  // than only the page's loaded set.
+  type DownloadPref = 'files' | 'zip';
+  const DL_PREF = 'snap_dlmode';
+  let downloadPref: DownloadPref | null = null;
+
+  function readDownloadPref(): DownloadPref | null {
+    try {
+      const v = localStorage.getItem(DL_PREF);
+      return v === 'files' || v === 'zip' ? v : null;
+    } catch { return null; }
+  }
+  function writeDownloadPref(v: DownloadPref) {
+    downloadPref = v;
+    try { localStorage.setItem(DL_PREF, v); } catch { /* the choice just will not stick */ }
+  }
+
+  let choosing: { list: typeof photos; zipIds?: string[] } | null = null;
+
+  function offerDownload(list: typeof photos, zipIds?: string[]) {
+    // A stated preference wins outright — including "files" on a desktop, where someone may well
+    // want the actual photos rather than an archive to unpack.
+    if (downloadPref === 'zip') { startZip(zipIds); return; }
+    if (downloadPref === 'files') {
+      if (list.length <= filesLimit()) { void saveAsFiles(list); return; }
+      choosing = { list, zipIds };   // still worth a word before N share sheets on iOS
+      return;
+    }
+    // Nothing chosen yet. On a desktop a zip is right often enough to just do it; on a phone the
+    // answer genuinely depends on the browser, so ask — and remember the answer.
+    if (!prefersFiles()) { startZip(zipIds); return; }
+    choosing = { list, zipIds };
+  }
+  function startZip(zipIds?: string[]) {
+    choosing = null;
+    showToast('Preparing your download…');
+    location.href = zipHref(zipIds);
+  }
+  // The two chooser branches. They record the choice; startZip/saveAsFiles do not, so the code
+  // paths that reach them with a preference already set do not rewrite it.
+  function chooseZip() {
+    const ids = choosing?.zipIds;
+    writeDownloadPref('zip');
+    startZip(ids);
+  }
+  function chooseFiles() {
+    const list = choosing?.list ?? [];
+    writeDownloadPref('files');
+    choosing = null;
+    void saveAsFiles(list);
+  }
+  /** Reopen the chooser deliberately, from the ⚙. Targets the same set the button would. */
+  function changeDownloadMode() {
+    choosing = { list: selecting && selected.size ? photos.filter((p) => selected.has(p.id)) : photos,
+                 zipIds: selecting && selected.size ? [...selected] : undefined };
+  }
+
+  // ── What to download ────────────────────────────────────────────────────────
+  // The same question, and the same three answers, as sharing. "Download all" meant everything on
+  // screen, which quietly depends on whether Highlights happens to be toggled — so the button's
+  // meaning changed with a filter elsewhere on the page. Asking is both clearer and one tap shorter
+  // than finding the filter first.
+  let dlScopeOpen = false;
+  $: dlVideos = photos.filter((p) => p.mediaType === 'video').length;
+  $: dlFavourites = photos.filter((p) => p.isHighlighted).length;
+
+  function startDownload(list: typeof photos, ids?: string[]) {
+    if (!list.length) return;
     // Counted here, not in zipHref: that builder can be evaluated during render, which would
     // record downloads that never happened.
-    trackPhotos(code, photos.map((p) => p.id), 'download');
-    if (prefersFiles() && photos.length <= FILES_MAX) { void saveAsFiles(photos); return; }
-    showToast('Preparing your download…');
-    location.href = zipHref();
+    trackPhotos(code, list.map((p) => p.id), 'download');
+    offerDownload(list, ids);
+  }
+  function pickDownloadScope(scope: 'all' | 'favourites' | 'select') {
+    dlScopeOpen = false;
+    if (scope === 'select') {
+      if (!selecting) toggleSelecting();
+      showToast('Pick your photos, then Download from the bar at the bottom');
+      return;
+    }
+    startDownload(scope === 'favourites' ? photos.filter((p) => p.isHighlighted) : photos);
+  }
+  function downloadAll() {
+    if (!allowDownloads) { showToast('Downloads are disabled for this event', true); return; }
+    // Straight to it when there is nothing to choose between — a chooser whose answers are all the
+    // same set is a tap that teaches nothing.
+    if (!dlFavourites) { startDownload(photos); return; }
+    dlScopeOpen = true;
   }
   // "All" means everything currently on screen, not everything in the event — otherwise the button
   // quietly contradicts whatever filter the viewer is looking through.
@@ -207,11 +327,7 @@
 
   function downloadSelected() {
     if (!selected.size) return;
-    trackPhotos(code, [...selected], 'download');
-    const picked = photos.filter((p) => selected.has(p.id));
-    if (prefersFiles() && picked.length <= FILES_MAX) { void saveAsFiles(picked); return; }
-    showToast('Preparing your download…');
-    location.href = zipHref([...selected]);
+    startDownload(photos.filter((p) => selected.has(p.id)), [...selected]);
   }
 
   // Recomputed when the event loads, because localStorage is only readable in the browser and the
@@ -259,8 +375,14 @@
       <button class="btn ghost" on:click={toggleSelecting}>{selecting ? 'Cancel' : 'Select'}</button>
       {#if !selecting}
         <button class="btn ghost" on:click={downloadAll} disabled={bulkSaving}>
-          {bulkSaving ? `Saving ${bulkProgress}…` : bulkDone || '⬇ Download all'}
+          {bulkSaving ? `Saving ${bulkProgress}…` : bulkDone || '⬇ Download'}
         </button>
+        <!-- Only once a choice has been made. Before that the chooser opens by itself, so a
+             control to reopen it would be offering the thing that is about to happen anyway. -->
+        {#if downloadPref}
+          <button class="btn ghost dlpref" on:click={changeDownloadMode} disabled={bulkSaving}
+                  title="Files or zip?" aria-label="Change how photos are downloaded">⚙</button>
+        {/if}
       {/if}
     {/if}
   </div>
@@ -278,6 +400,42 @@
       <button class="btn primary" on:click={downloadSelected} disabled={!selected.size || bulkSaving}>
         ⬇ Download{selected.size ? ` ${selected.size}` : ''}
       </button>
+    </div>
+  </div>
+{/if}
+
+{#if choosing}
+  <!-- Deliberately not a toast: this is a fork in the road, and the person has to pick a branch
+       before anything downloads. -->
+  <div
+    class="chooser"
+    role="button"
+    tabindex="-1"
+    on:click|self={() => (choosing = null)}
+    on:keydown={(e) => e.key === 'Escape' && (choosing = null)}
+  >
+    <div class="chooser-card" role="dialog" aria-modal="true" aria-labelledby="chooser-title">
+      <h3 id="chooser-title">Save {choosing.list.length} photos</h3>
+      <p class="chooser-sub">
+        Browsers handle this differently — some save quietly, some ask about every file. Pick
+        whichever works on yours; we'll remember it.
+      </p>
+      <button class="chooser-opt" on:click={chooseFiles}>
+        <span class="chooser-opt-t">📷 Save to this device</span>
+        <span class="chooser-opt-d">
+          {#if isIOS()}Goes into Photos, a batch at a time — tap Save on each{:else}Lands in your
+          downloads and your gallery picks them up. {choosing.list.length} separate files.{/if}
+        </span>
+      </button>
+      <button class="chooser-opt" on:click={chooseZip}>
+        <span class="chooser-opt-t">🗜 Download one zip</span>
+        <span class="chooser-opt-d">A single file — quick, but you'll need an app to open it, and
+          the photos won't land in your gallery.</span>
+      </button>
+      <button class="chooser-cancel" on:click={() => (choosing = null)}>Cancel</button>
+      {#if downloadPref}
+        <p class="chooser-foot">Currently set to {downloadPref === 'zip' ? 'one zip' : 'individual files'}.</p>
+      {/if}
     </div>
   </div>
 {/if}
@@ -340,9 +498,14 @@
          style={`--tile-ar:${tileAspect(event?.aspectRatios)}`}>
       {#each shownPhotos as p, i (p.id)}
         <PhotoCard photo={p} selected={selecting && selected.has(p.id)}
+                   saved={saved.has(p.id)}
+                   canDownload={revealed && allowDownloads && !selecting}
+                   saving={savingOne === p.id}
+                   tileAr={tileAspect(event?.aspectRatios)}
                    meta={`${p.participantName} · ${fmtTime(p.takenAt)}`}
                    tileLabel={selecting ? `Select photo by ${p.participantName}` : `Open photo by ${p.participantName}`}
-                   on:open={() => onThumb(p, i)}>
+                   on:open={() => onThumb(p, i)}
+                   on:download={() => saveOne(p)}>
           <svelte:fragment slot="tile">
             {#if p.isHighlighted}<span class="star" aria-hidden="true">⭐</span>{/if}
             {#if selecting}<span class="check" class:on={selected.has(p.id)} aria-hidden="true">{selected.has(p.id) ? '✓' : ''}</span>{/if}
@@ -363,9 +526,17 @@
   {/if}
 </main>
 
+{#if dlScopeOpen}
+  <ShareScope action="download" approvedCount={photos.length} favouriteCount={dlFavourites}
+              videoCount={dlVideos} canSelect={true}
+              on:pick={(e) => pickDownloadScope(e.detail)} on:close={() => (dlScopeOpen = false)} />
+{/if}
+
 {#if lbOpen}
   <!-- Only when the host has allowed downloads: this is everyone's album, not the guest's own roll. -->
-  <Lightbox photos={shownPhotos} index={lbIndex} allowSave={allowDownloads} on:close={() => (lbOpen = false)} />
+  <Lightbox photos={shownPhotos} index={lbIndex} allowSave={allowDownloads}
+            on:saved={(e) => (saved = markSaved(code, [e.detail]))}
+            on:close={() => (lbOpen = false)} />
 {/if}
 
 <style>
@@ -446,4 +617,44 @@
     background: rgba(0,0,0,.45); color: #fff; border: 2px solid #fff; }
   .check.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); }
   .star { position: absolute; top: 6px; left: 6px; font-size: .9rem; filter: drop-shadow(0 1px 2px rgba(0,0,0,.6)); }
+  /* ── Save-or-zip chooser ── */
+  .chooser {
+    position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-end;
+    justify-content: center; padding: 16px;
+    background: color-mix(in srgb, #000 62%, transparent);
+    backdrop-filter: blur(4px);
+    /* It is a click-catching backdrop, not a control: no cursor or focus affordance. */
+    cursor: default;
+  }
+  .chooser-card {
+    width: 100%; max-width: 420px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px 16px 14px;
+    display: flex; flex-direction: column; gap: 10px;
+    /* Clear of the home bar on a phone, where the sheet sits against the bottom edge. */
+    margin-bottom: env(safe-area-inset-bottom, 0);
+    box-shadow: 0 -8px 40px rgb(0 0 0 / 0.5);
+  }
+  .chooser-card h3 { margin: 0; font-size: 1.05rem; }
+  .chooser-sub { margin: 0 0 2px; color: var(--text-muted); font-size: 0.85rem; line-height: 1.4; }
+  .chooser-opt {
+    display: flex; flex-direction: column; gap: 3px; text-align: left; width: 100%;
+    padding: 12px 14px; border-radius: var(--radius-sm); cursor: pointer;
+    background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+    font: inherit;
+  }
+  .chooser-opt:hover { border-color: var(--accent); }
+  .chooser-opt-t { font-weight: 600; font-size: 0.95rem; }
+  .chooser-opt-d { color: var(--text-muted); font-size: 0.8rem; line-height: 1.35; }
+  .chooser-foot { margin: 0; text-align: center; color: var(--text-muted); font-size: 0.72rem; }
+  /* Square, so it reads as an adjunct to the button beside it rather than a third action. */
+  .dlpref { padding-left: 10px; padding-right: 10px; }
+  .chooser-cancel {
+    background: none; border: 0; color: var(--text-muted); font: inherit; padding: 8px;
+    cursor: pointer;
+  }
+  @media (min-width: 560px) { .chooser { align-items: center; } }
+  @media (prefers-reduced-motion: no-preference) {
+    .chooser-card { animation: chooser-in 0.18s ease-out; }
+    @keyframes chooser-in { from { transform: translateY(12px); opacity: 0; } }
+  }
 </style>

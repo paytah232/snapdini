@@ -74,6 +74,11 @@ export const DURATION_TIERS = [
   { maxHours: 48,   amountCents: 0 },     // up to 2 days — included
   { maxHours: 72,   amountCents: 200 },   // 3 days — +$2
   { maxHours: 168,  amountCents: 500 },   // up to 1 week — +$5
+  // NOTE: this tier is a PRICE CUT for the 169–336h band, which previously fell into the 720h tier
+  // and was charged $10 — a fortnight cost the same as a full month, which is why nobody would pick
+  // it even if the option had existed. $7 sits between the week and the month; change the number
+  // freely, it is a product decision and nothing else reads it.
+  { maxHours: 336,  amountCents: 700 },   // 2 weeks — +$7
   { maxHours: 720,  amountCents: 1000 },  // 1 month — +$10
   { maxHours: 2160, amountCents: 2500 },  // 3 months — +$25
 ] as const;

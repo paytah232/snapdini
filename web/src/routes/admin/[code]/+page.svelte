@@ -3,25 +3,34 @@
   import { page } from '$app/stores';
   import { goto, replaceState } from '$app/navigation';
   import { track } from '$lib/analytics';
-  import { getConfig, getMe, api } from '$lib/api';
+  import { getConfig, getMe, api, ApiError } from '$lib/api';
   import { firePurchase, fireLead, purchaseTracked, leadTracked } from '$lib/adtracking';
   import {
     getAdmin, saveSettings, setReveal, toggleLock, deleteEvent,
-    setHighlights, saveTheme, emailGallery, setAllowDownloads,
+    setHighlights, saveTheme, emailLink, linkSends, setAllowDownloads,
     getPhotosByOrganizer, listCohosts, inviteCohost, removeCohost,
     listShares, deleteShare, deleteParticipant,
-    type AdminEvent, type Photo, type EventTheme, type CohostList, type ShareLink, setParticipantCard } from '$lib/events';
+    type AdminEvent, type Photo, type EventTheme, type CohostList, type ShareLink, type LinkSend,
+    setParticipantCard, sendGuestPhotos, REVEAL_CUSTOM, REVEAL_TICK_MS,
+    ceilToRevealTick, zonedWallTimeToMs, msToZonedWallTime, revealMomentLabel } from '$lib/events';
+  import { GUEST_DELIVERY_DEFAULT, GUEST_DELIVERY_OPTIONS, guestReleaseAt, releaseDateKnown,
+           reminderCanFire, reminderFiresAt, revealInstant, scheduledSendIssue, scopeFor,
+           type GuestDelivery, type GuestSendScope } from '$lib/guestDelivery';
   import type { AppOptions, BillingConfig } from '$lib/types';
   import UpgradePanel from '$lib/components/UpgradePanel.svelte';
   import HelpTip from '$lib/components/HelpTip.svelte';
   import ShareModal from '$lib/components/ShareModal.svelte';
+  import ShareLinkRow from '$lib/components/ShareLinkRow.svelte';
   import Logo from '$lib/components/Logo.svelte';
-  import { applyEventTheme } from '$lib/theme';
+  import { applyEventTheme, THEME_PRESETS } from '$lib/theme';
   import { getAdminCode, saveAdminCode } from '$lib/session';
   import { showToast, showSuccess } from '$lib/toast';
   import { imgFallback } from '$lib/ui';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import PosterModal from '$lib/components/PosterModal.svelte';
+  import PosterWizard from '$lib/components/PosterWizard.svelte';
+  import Loading from '$lib/components/Loading.svelte';
+  import { modalFocus } from '$lib/ui';
   import MissionsModal from '$lib/components/MissionsModal.svelte';
   import EventImageEditor from '$lib/components/EventImageEditor.svelte';
   import FeedbackModal from '$lib/components/FeedbackModal.svelte';
@@ -34,6 +43,37 @@
   let authInput = '';
   let authed = false;
   let booting = true;
+  // "Loading…" with no end is the worst state a page can settle into: nothing is wrong on screen,
+  // so there is nothing to act on, and the host waits. booting only clears AFTER every await in
+  // onMount, so one hung request — a dead connection, a slow venue wifi, a request that started
+  // while the server was restarting — leaves this spinner up forever.
+  //
+  // The watchdog does not fix the request. It ends the silence, which is the actual defect, and
+  // offers the one thing that reliably works.
+  let bootStalled = false;
+  let bootWatchdog: ReturnType<typeof setTimeout> | undefined;
+  let bootAttempt = 0;
+  let gone = false;                 // set on destroy, so the retry loop stops when the page does
+
+  /** Give a promise a deadline.
+   *
+   *  Every await in boot was unbounded. A fetch that connects and then never answers — a container
+   *  still waking, a tunnel that dropped the response — leaves the await pending FOREVER, so
+   *  `booting` never clears and the page sits on "Loading…" with nothing wrong that anyone can see.
+   *  That is the hang. The underlying request is left to its fate: an abandoned fetch costs
+   *  nothing, and what matters is that boot has stopped waiting on it. */
+  const withTimeout = <T,>(p: Promise<T>, ms: number, what: string): Promise<T> =>
+    Promise.race([p, new Promise<never>((_, rej) => setTimeout(() => rej(new ApiError(`${what} took too long`, 408)), ms))]);
+
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  /** Is this worth trying again, or is it an answer?
+   *
+   *  status 0 is the api helper's "offline / dropped connection"; 408 is our own timeout above;
+   *  5xx is the server having a moment. A 401/403/404 is the server telling us something true, and
+   *  retrying it just means asking the same question until the host gives up. */
+  const worthRetrying = (e: unknown) =>
+    e instanceof ApiError && (e.status === 0 || e.status === 408 || e.status === 429 || e.status >= 500);
   let authBusy = false;
   let welcome: { title: string; sub: string } | null = null;  // post-create / post-payment celebration modal
   let showFeedback = false;
@@ -55,14 +95,94 @@
   let allPhotos: Photo[] = [];   // approved photos — gates the Review & Curate link card
   let pendingPhotos: Photo[] = []; // status === 'pending'
   let posterOpen = false;
+  // The picker, and what it chose. `posterSeed` is handed to the designer as its initialConfig, so a
+  // preset travels through the SAME restore path a saved design does — there is no second way for a
+  // design to get into the editor.
+  // Offered once per event, on the first visit to this page, and never again.
+  //
+  // The poster is the whole point of the product for a host — it is the thing guests scan — and it
+  // is currently buried in a card halfway down a long page. `poster_opened` fired ONCE in ninety
+  // days of production while the feature sat there. So it gets asked for, once, at the moment the
+  // event exists and there is nothing else to do with it yet.
+  //
+  // Once, and remembered per event per device: an offer that reappears every visit is not an offer,
+  // it is a nag, and the host who said no has a card to do it from whenever they change their mind.
+  let posterAsk = false;
+  const posterAskKey = () => `snap_poster_ask_${code}`;
+  function maybeOfferPoster() {
+    // Never on top of the post-create celebration — that modal already owns the screen, and two
+    // dialogs stacked on the first second of a new event is a worse welcome than none.
+    if (welcome || ev?.posterConfig) return;
+    try { if (localStorage.getItem(posterAskKey()) === '1') return; } catch { return; }
+    posterAsk = true;
+  }
+  // The poster offer is the FIRST thing a new host sees, and it was the one dialog on this page with
+  // no keyboard way out — the backdrop dismissed it, Escape did nothing. A modal that traps focus
+  // and then ignores Escape is worse than one that does neither.
+  function onWindowKey(e: KeyboardEvent) {
+    if (e.key !== 'Escape') return;
+    // "Not now" and Escape mean the same thing, including remembering the answer — otherwise it
+    // reappears on the next visit and the host has to dismiss it twice.
+    if (posterAsk) answerPosterAsk(false);
+  }
+  function answerPosterAsk(run: boolean) {
+    posterAsk = false;
+    try { localStorage.setItem(posterAskKey(), '1'); } catch { /* it will ask once more; harmless */ }
+    if (run) { track('poster_opened', undefined, code); wizardOpen = true; }
+  }
+
+  let wizardOpen = false;
+  // null = "no seed, use whatever is saved". An EMPTY OBJECT is different and deliberate: it means
+  // start from scratch, and it has to be distinguishable from null or `posterSeed ?? posterConfig`
+  // falls straight through to the saved design — so "Start from scratch" reopened the very design
+  // the host was trying to get away from, while the tile promised a blank poster.
+  let posterSeed: Record<string, unknown> | null = null;
+
+  /** The poster button. A host with no design yet gets the gallery; one who already has a design
+   *  goes straight back to it, because "Manage poster" must not throw away their work to show them
+   *  a menu. Starting over is offered from inside the designer instead. */
+  function openPoster() {
+    track('poster_opened', undefined, code);
+    posterSeed = null;
+    if (ev?.posterConfig) { posterOpen = true; return; }
+    wizardOpen = true;
+  }
+  async function pickPreset(p: { key: string; cfg: Record<string, unknown>; theme: EventTheme; themePreset?: string }) {
+    track('poster_preset_picked', { preset: p.key }, code);
+    wizardOpen = false;
+    posterSeed = p.cfg;
+    posterOpen = true;
+    // A design is not just the paper. The same choice themes the guest-facing app — the join
+    // screen, the camera chrome, the gallery — so a host picks a look ONCE and the whole event
+    // carries it, rather than picking a poster and then hunting for the Theme card to make the app
+    // match it.
+    //
+    // Applied live and saved, not queued behind the designer: the host is about to be looking at
+    // the poster, and the app behind it should already have changed.
+    //
+    // Announced, because silently repainting someone's event is not a favour — and the Theme card
+    // is named so they know where to undo it.
+    try {
+      // preset comes along with the colours. Without it the Theme card highlighted nothing after a
+      // design was applied, so a host who had just watched their event change colour was looking at
+      // a palette row with no selection — which reads as "it didn't take".
+      theme = { ...theme, ...p.theme, preset: p.themePreset };
+      selectedPreset = p.themePreset || '';
+      applyEventTheme(theme);
+      syncColorInputs();
+      await saveTheme(code, orgCode, theme);
+      showToast('Design applied — your event’s colours match it too. Change them under Theme.');
+    } catch { /* the poster still opens; the theme just did not take */ }
+  }
   // Participants list: searchable and capped, because a big event puts every guest in this card.
   const PART_PAGE = 25;
   let partQuery = '';
   let partLimit = PART_PAGE;
-  // The cast re-declares the shape, so anything added to AdminEvent.participants has to be added
-  // here too or it is simply invisible to this page.
-  $: partAll = (ev?.participants ?? []) as Array<{ id: string; name: string; email: string | null;
-      photosTaken: number; joinedAt: number; challengeSet?: string | null }>;
+  // Derived from AdminEvent rather than re-typed by hand. The cast that used to be here spelled the
+  // shape out a second time, so a field added to AdminEvent.participants was invisible on this page
+  // until someone remembered to add it in both places — which is exactly what happened to
+  // tricksDone. Indexing the real type means it cannot drift again.
+  $: partAll = (ev?.participants ?? []) as AdminEvent['participants'];
   // The trick cards, narrowed once. Reassignment is only offered when there is more than one card —
   // with a single card there is nowhere to move a guest TO, and with no trick list there are none.
   $: cards = ev?.challengeSets ?? [];
@@ -79,7 +199,122 @@
   let sDate = '';
   let sTime = '';
   let sReveal = 'instant';
-  let sDelay = 0;
+  let sDelay: number | string = 0;
+  // The wall-clock reveal, when the host has chosen an exact moment instead of a delay. Strings,
+  // not an epoch: they mean what they say in the EVENT's timezone, which the server resolves — a
+  // host editing a Perth event from Sydney must not have their phone's zone applied to them.
+  let sRevealDate = '';
+  let sRevealTime = '';
+
+  // ── How the guests get the photos ──
+  // Defaults match an event that has never been asked the question, so a pre-guest-delivery event
+  // hydrates to exactly the behaviour it already has.
+  let sGuestDelivery: GuestDelivery = GUEST_DELIVERY_DEFAULT;
+  let sGuestSendScope: GuestSendScope = 'all';
+  let sGuestSendDate = '';
+  let sGuestSendTime = '';
+  let sGuestMailThanks = true;
+  let sGuestMailReminder = false;
+  let sGuestMailLive = true;
+  let guestSendBusy = false;
+  // What the last manual send actually did, kept on the page rather than shown as a toast: "it went
+  // to eleven people" is the answer to a question the host will ask again in ten seconds, and a
+  // toast has gone by then.
+  let guestSendNote: { text: string; ok: boolean } | null = null;
+
+  $: sWantsCustomReveal = sReveal === 'at_end' && String(sDelay) === REVEAL_CUSTOM;
+  $: sChosenRevealAt = (sWantsCustomReveal && sRevealDate && sRevealTime && sTimezone)
+    ? zonedWallTimeToMs(sRevealDate, sRevealTime, sTimezone) : null;
+  $: sActualRevealAt = sChosenRevealAt === null ? null : ceilToRevealTick(sChosenRevealAt);
+  $: sRevealMoved = sActualRevealAt !== null && sActualRevealAt !== sChosenRevealAt;
+
+  // The end the host is editing TOWARDS, not the one already stored. Duration is not editable here,
+  // so moving the start moves the end with it — and the 24-hour reminder gate has to answer for
+  // what Save is about to write rather than for what is on the server.
+  $: sEndsAt = (() => {
+    if (!ev) return 0;
+    const start = sDate ? (zonedWallTimeToMs(sDate, sTime || '00:00', sTimezone || 'UTC') ?? ev.startsAt) : ev.startsAt;
+    return start + (ev.expiresAt - ev.startsAt);
+  })();
+  $: sGuestRevealAt = revealInstant({
+    revealMode: sReveal, endsAt: sEndsAt,
+    customAt: sWantsCustomReveal ? sActualRevealAt : null,
+    delayHours: sWantsCustomReveal ? 0 : (parseInt(String(sDelay), 10) || 0),
+  });
+  $: sGuestChosenSendAt = (sGuestDelivery === 'scheduled' && sGuestSendDate && sGuestSendTime && sTimezone)
+    ? zonedWallTimeToMs(sGuestSendDate, sGuestSendTime, sTimezone) : null;
+  $: sGuestSendAt = sGuestChosenSendAt === null ? null : ceilToRevealTick(sGuestChosenSendAt);
+  $: sGuestSendMoved = sGuestSendAt !== null && sGuestSendAt !== sGuestChosenSendAt;
+  $: sGuestSendIssue = sGuestDelivery === 'scheduled' ? scheduledSendIssue(sGuestSendAt, sGuestRevealAt) : null;
+  $: sGuestReleaseAt = guestReleaseAt(sGuestDelivery, sGuestRevealAt, sGuestSendAt);
+  $: sGuestReminderOffered = reminderCanFire(sEndsAt, sGuestReleaseAt);
+  $: sGuestThanksDated = releaseDateKnown(sEndsAt, sGuestReleaseAt);
+  // Answered once here because revealMomentLabel takes a number and every one of these can be null
+  // — a manual reveal, a half-typed date — and a fallback epoch at each call site would print 1970.
+  //
+  // The zone is an EXPLICIT argument, not captured: a reactive statement re-runs when its arguments
+  // change, not when something the helper closes over does, so a captured zone would leave every
+  // moment below reading in the previous one after the host edits the Timezone field.
+  const sMoment = (ms: number | null, tz: string) => (ms === null ? '' : revealMomentLabel(ms, tz));
+  $: sGuestRevealLabel = sMoment(sGuestRevealAt, sTimezone);
+  $: sGuestSendLabel = sMoment(sGuestSendAt, sTimezone);
+  $: sGuestReleaseLabel = sMoment(sGuestReleaseAt, sTimezone);
+  $: sGuestReminderLabel = sMoment(reminderFiresAt(sEndsAt, sGuestReleaseAt), sTimezone);
+  $: sGuestReminderWhyNot = sGuestReleaseAt === null
+    ? "you haven't fixed a moment for the photos to go out, so there's nothing to count back from."
+    : 'your photos go out less than a day after the event ends, so there is no day before to send it on.';
+  // The SAVED setting, not the form's. "Send now" acts on the event as it stands on the server, and
+  // quoting an unsaved chip back at the host would promise a scope the send will not use.
+  $: savedSendScope = scopeFor(ev?.guestDelivery ?? GUEST_DELIVERY_DEFAULT, ev?.guestSendScope ?? 'all');
+  $: guestsAlreadySent = ev?.guestsSentAt ?? null;
+
+  $: sGuestDeliveryDesc = GUEST_DELIVERY_OPTIONS.find((o) => o.value === sGuestDelivery)?.desc ?? '';
+
+  /** Seed the send picker from the reveal the first time "At a time I choose" is chosen — see the
+   *  same seeding on the reveal control for why a blank date box is the wrong starting point.
+   *
+   *  Reads the bound value, never a flag derived from it: a reactive statement is recomputed on the
+   *  next flush, so inside a change handler it still describes the option just moved away from. */
+  function onSGuestDeliveryChange() {
+    if (sGuestDelivery !== 'scheduled' || sGuestSendDate) return;
+    const w = msToZonedWallTime(ceilToRevealTick(sGuestRevealAt ?? sEndsAt), sTimezone || 'UTC');
+    if (w) { sGuestSendDate = w.date; sGuestSendTime = w.time; }
+  }
+
+  /** Send the gallery link to the opted-in guests now.
+   *
+   *  Reports what came back rather than what was asked for — the same lesson as sendLink() above,
+   *  where a partial failure used to read as full success. A send that reached nobody is a refusal
+   *  and is shown as one: a host told "sent!" who then hears from nobody assumes we lost the mail. */
+  async function sendGuestsNow() {
+    if (guestSendBusy || !ev) return;
+    const what = savedSendScope === 'favourites' ? 'your favourites' : 'the whole gallery';
+    if (!confirm(`Email ${what} to every guest who asked for their photos?`)) return;
+    guestSendBusy = true;
+    guestSendNote = null;
+    try {
+      const r = await sendGuestPhotos(code, orgCode, savedSendScope);
+      guestSendNote = r.sent > 0
+        ? { ok: true, text: `Sent to ${r.sent} guest${r.sent === 1 ? '' : 's'}`
+              + (r.skipped ? ` · ${r.skipped} had nothing to send` : '') + '.' }
+        : { ok: false, text: r.reason || 'Nothing was sent — no guest has asked for their photos yet.' };
+      await refresh();
+    } catch (e) {
+      guestSendNote = { ok: false, text: e instanceof Error ? e.message : 'Could not send' };
+    } finally {
+      guestSendBusy = false;
+    }
+  }
+
+  // Open the picker on the end of the event rather than on nothing — see the same seeding in the
+  // create wizard.
+  function onSDelayChange() {
+    // The bound value, not the flag derived from it — see the same handler in the create wizard for
+    // why a reactive statement is still one step behind in here.
+    if (String(sDelay) !== REVEAL_CUSTOM || sRevealDate || !ev) return;
+    const w = msToZonedWallTime(ceilToRevealTick(ev.expiresAt), sTimezone || 'UTC');
+    if (w) { sRevealDate = w.date; sRevealTime = w.time; }
+  }
   let sModeration = false;
   let sNoFlash = false;
   let sTimezone = '';
@@ -98,7 +333,8 @@
   // Unsaved settings edits. The Upgrade panel quotes off the SAVED event (e.g. its frame sizes), so
   // an unticked-but-unsaved shape would under-quote — we block upgrading until settings are saved.
   $: settingsDirty = baselineSig !== '' &&
-    baselineSig !== JSON.stringify([sName, sBlurb, sDate, sTime, sReveal, sDelay, sModeration, sNoFlash, sTimezone, sSlug, [...sAspects].sort()]);
+    baselineSig !== JSON.stringify([sName, sBlurb, sDate, sTime, sReveal, sDelay, sRevealDate, sRevealTime, sModeration, sNoFlash, sTimezone, sSlug, [...sAspects].sort(),
+       sGuestDelivery, sGuestSendScope, sGuestSendDate, sGuestSendTime, sGuestMailThanks, sGuestMailReminder, sGuestMailLive]);
 
   // theme editor
   let theme: EventTheme = {};
@@ -115,22 +351,8 @@
   let editorFile: File | null = null;     // image being cropped/positioned in the editor
   let savingTheme = false;
 
-  // email gallery
-  let emailInput = '';
-  let emailBusy = false;
-
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
 
-  // 'warm' is the default and listed first.
-  const THEME_PRESETS: Record<string, Partial<EventTheme>> = {
-    warm:     { bg:'#1a1209', surface:'#231a0e', surface2:'#2c2010', border:'#3d2e18', text:'#f5e8c8', textMuted:'#9c8060', accent:'#e8994a', accentDark:'#c47830' },
-    dark:     { bg:'#0f0f0f', surface:'#1a1a1a', surface2:'#222', border:'#2a2a2a', text:'#f5f5f5', textMuted:'#888', accent:'#a8ff78', accentDark:'#72d52d' },
-    light:    { bg:'#f5f5f0', surface:'#ffffff', surface2:'#f0f0ea', border:'#ddd', text:'#1a1a1a', textMuted:'#777', accent:'#2563eb', accentDark:'#1d4ed8' },
-    ocean:    { bg:'#050d1a', surface:'#0a1628', surface2:'#0e1e36', border:'#162944', text:'#d0e8ff', textMuted:'#6698bb', accent:'#38bdf8', accentDark:'#0ea5e9' },
-    midnight: { bg:'#0a0a14', surface:'#111128', surface2:'#16163a', border:'#222248', text:'#e8e8ff', textMuted:'#6668aa', accent:'#818cf8', accentDark:'#6366f1' },
-    forest:   { bg:'#0a130a', surface:'#111e11', surface2:'#162416', border:'#1e3020', text:'#d8f0d8', textMuted:'#5a8060', accent:'#4ade80', accentDark:'#22c55e' },
-    pink:     { bg:'#1a0a14', surface:'#26101e', surface2:'#331528', border:'#46203a', text:'#ffe4f3', textMuted:'#b06a92', accent:'#f472b6', accentDark:'#ec4899' }
-  };
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -175,7 +397,7 @@
     ? ev.isRevealed
       ? 'Photos are visible to participants'
       : ev.revealMode === 'at_end'
-        ? 'Auto-reveals when event ends'
+        ? (ev.revealAt ? `Auto-reveals ${revealMomentLabel(ev.revealAt, ev.timezone)}` : 'Auto-reveals when event ends')
         : ev.revealMode === 'manual'
           ? 'Manual — reveal when ready'
           : 'Instant — photos visible as taken'
@@ -183,6 +405,11 @@
 
   // ── Bootstrap ──────────────────────────────────────────────────────────────
   onMount(async () => {
+    // FIRST, before anything that can await. It used to be set after the Stripe conversion lookup,
+    // which is an unbounded await on the one path that reaches it — so the single case this page
+    // most needed a watchdog for was the one case the watchdog had not started yet.
+    bootWatchdog = setTimeout(() => { if (booting) bootStalled = true; }, 12_000);
+    try {
     const sp = new URLSearchParams(location.search);
     // Celebrate a fresh create / successful payment / upgrade with a modal (QR + share link).
     const paidReturn = sp.get('paid') === '1';
@@ -191,44 +418,33 @@
     if (createdReturn) welcome = { title: 'Your event is live! 🎉', sub: 'Share the link or QR below with your guests. Customise the theme, reveal mode and more right here whenever you like.' };
     else if (paidReturn) welcome = { title: 'Payment received — your event is active! 🎉', sub: 'Share the link or QR below with your guests. Everything you paid for is unlocked.' };
     else if (upgradedReturn) welcome = { title: 'Upgrade applied! 🎉', sub: 'Your event now includes the extra capacity. Nothing else to do — carry on.' };
-    // "Create event" conversion (Google Ads + Microsoft UET) — fires for every new event (free
-    // ?created or paid ?paid), NOT for upgrades. Keyed by the join code so a revisit doesn't
-    // double-count. Best-effort; no-op unless a platform is configured.
-    if ((createdReturn || paidReturn) && leadTracked($page.data, 'create')) {
-      fireLead($page.data, 'create', $page.params.code);
-    }
-    // Purchase conversion on a successful payment/upgrade return, with the real amount charged
-    // (looked up via the Stripe session, so promos are reflected). The lookup exists only to feed
-    // the conversion, so purchaseTracked() gates it — no platform configured ⇒ no extra request.
-    if ((paidReturn || upgradedReturn) && purchaseTracked($page.data)) {
-      const sid = sp.get('session_id');
-      if (sid) {
-        try {
-          const s = await api<{ paid: boolean; amountTotalCents: number; currency: string; transactionId: string }>(
-            '/api/billing/session/' + encodeURIComponent(sid),
-          );
-          if (s?.paid) {
-            firePurchase($page.data, {
-              amountTotalCents: s.amountTotalCents,
-              currency: s.currency,
-              transactionId: s.transactionId,
-            });
-          }
-        } catch { /* conversion is best-effort */ }
-      }
-    }
+    // ── Marketing conversions ──
+    // Deliberately NOT run here, where they used to be. Every one of these talks to a third party,
+    // and any one of them throwing took the whole page with it: before the boot was wrapped in
+    // try/finally that stranded the host on "Loading…" forever, and after it, on the organizer-code
+    // wall — having just paid us. The host's own event has nothing to do with an ad platform, so it
+    // loads first and these run afterwards, each inside its own guard. See fireConversions().
+    const sessionId = sp.get('session_id');
     // Strip the marker so a refresh doesn't re-show it (keep the #organizer hash).
     // SvelteKit's replaceState. A raw history call leaves the router's bookkeeping stale, and the
     // symptom shows up somewhere else entirely: Back from another page changed the URL to this one
     // without ever rendering it.
     // The other half of checkout_started: what actually came back from Stripe.
     if (sp.has('paid') || sp.has('upgraded')) track('checkout_returned', { paid: true, kind: sp.has('upgraded') ? 'upgrade' : 'new' }, code);
-    if (sp.has('paid') || sp.has('upgraded') || sp.has('created') || sp.has('session_id')) replaceState(location.pathname + location.hash, {});
+    // The URL tidy-up used to happen HERE, and it is why a host who had just paid us landed on the
+    // organizer-code wall. replaceState() at this point runs mid-hydration, before the router is
+    // ready, and SvelteKit throws out of it ("Cannot read properties of undefined") — taking the
+    // rest of boot with it. Every marker did it: ?created, ?paid and ?upgraded alike.
+    //
+    // It is also the least important thing this function does. So it waits until the event is on
+    // screen, and it is guarded — see tidyUrl().
     // Resolve identity first (and independently) so the Site-admin / My-events bar appears
     // promptly even if config is slow — and on every event, not just the viewer's own.
-    try { const me = await getMe(); viewerLoggedIn = !!me.user; viewerIsAdmin = !!me.user?.isAdmin; } catch { /* anon organizer */ }
+    // Both of these are already best-effort — but "best effort" only holds if they can also give
+    // up. Unbounded, either one alone could hold the whole page on "Loading…".
+    try { const me = await withTimeout(getMe(), 6_000, 'Sign-in check'); viewerLoggedIn = !!me.user; viewerIsAdmin = !!me.user?.isAdmin; } catch { /* anon organizer */ }
     try {
-      const _cfg = await getConfig(); options = _cfg.options; billing = _cfg.billing;
+      const _cfg = await withTimeout(getConfig(), 6_000, 'Settings'); options = _cfg.options; billing = _cfg.billing;
     } catch {
       /* offline; dropdowns will be empty */
     }
@@ -242,32 +458,104 @@
     orgCode = resolveOrgCode();
     if (orgCode) {
       authInput = orgCode;
-      await tryLoad();
+      // Keep trying, on our own. The watchdog used to do nothing but put a "Try again" button on
+      // screen and wait to be clicked — which is the page asking the host to perform a retry it
+      // could have performed itself, while their event sat there working perfectly.
+      for (;;) {
+        bootAttempt++;
+        const r = await tryLoad();
+        if (r !== 'unreachable' || gone) break;
+        bootStalled = true;                              // say so, but keep going
+        await sleep(Math.min(1_000 * 2 ** (bootAttempt - 1), 15_000));
+        if (gone) break;
+      }
       // Once authenticated the organizer code is cached in localStorage (saveAdminCode), so we
       // can scrub it (and any ?paid/#hash) from the address bar — no more long code on screen.
       // The organizer code is a bearer credential, so it does not stay in the address bar — but
       // via SvelteKit, for the same reason as above.
-      if (authed) replaceState(location.pathname, {});
+      tidyUrl();
     }
-    booting = false;
+      // The page is up. NOW the ad platforms can be told, and nothing they do can reach the host.
+      fireConversions(createdReturn, paidReturn, upgradedReturn, sessionId);
+    } finally {
+      // Whatever happened above — a throw, a rejected promise nobody caught — the page stops
+      // saying "Loading…". A stuck spinner is the worst failure this page has, because it is the
+      // one the host cannot tell apart from slow.
+      booting = false;
+      clearTimeout(bootWatchdog);
+    }
     refreshTimer = setInterval(refresh, 30_000);
   });
 
-  onDestroy(() => clearInterval(refreshTimer));
+  /** Strip the return markers and the organizer code from the address bar.
+   *
+   *  Cosmetic, and deliberately last: the organizer code is a bearer credential and should not sit
+   *  in the URL, but a tidy URL is worth nothing next to the page actually loading. Via SvelteKit's
+   *  replaceState rather than history.replaceState — a raw history call leaves the router's
+   *  bookkeeping stale, and the symptom turns up somewhere else entirely (Back from another page
+   *  changed the URL to this one without ever rendering it).
+   *
+   *  Only once authenticated: an unauthenticated visitor still needs whatever is in the URL when
+   *  they hit reload. */
+  function tidyUrl() {
+    if (!authed) return;
+    try { replaceState(location.pathname, {}); } catch { /* an untidy URL is not worth a broken page */ }
+  }
 
-  async function tryLoad(): Promise<boolean> {
+  /** Tell the ad platforms, in a way that cannot reach the page.
+   *
+   *  Each call is guarded on its own rather than sharing one try: these are separate reports to
+   *  separate third parties, and one failing is no reason to skip the others. */
+  function fireConversions(created: boolean, paid: boolean, upgraded: boolean, sessionId: string | null) {
+    // Fires for every new event (free ?created or paid ?paid), NOT for upgrades. Keyed by the join
+    // code so a revisit doesn't double-count. No-op unless a platform is configured.
     try {
-      await loadEvent();
+      if ((created || paid) && leadTracked($page.data, 'create')) fireLead($page.data, 'create', $page.params.code);
+    } catch { /* an ad platform is not worth a broken page */ }
+
+    // The real amount charged, looked up via the Stripe session so promos are reflected. The lookup
+    // exists only to feed the conversion, so purchaseTracked() gates it — no platform configured ⇒
+    // no extra request at all.
+    try {
+      if (!((paid || upgraded) && sessionId && purchaseTracked($page.data))) return;
+      void (async () => {
+        try {
+          const s = await withTimeout(
+            api<{ paid: boolean; amountTotalCents: number; currency: string; transactionId: string }>(
+              '/api/billing/session/' + encodeURIComponent(sessionId),
+            ), 8_000, 'Payment lookup');
+          if (s?.paid) {
+            firePurchase($page.data, { amountTotalCents: s.amountTotalCents, currency: s.currency, transactionId: s.transactionId });
+          }
+        } catch { /* conversion is best-effort */ }
+      })();
+    } catch { /* as above */ }
+  }
+
+  onDestroy(() => { gone = true; clearInterval(refreshTimer); clearTimeout(bootWatchdog); });
+
+  /** 'unreachable' is deliberately NOT a failure to authenticate.
+   *
+   *  This used to treat every error the same: a dropped connection cleared the organizer code and
+   *  toasted "Access denied", so a network blip on a perfectly good code dumped the host at the
+   *  login wall being told they had no access. The code was fine; the wifi wasn't. */
+  type LoadResult = 'ok' | 'denied' | 'unreachable';
+  async function tryLoad(): Promise<LoadResult> {
+    try {
+      await withTimeout(loadEvent(), 10_000, 'Your event');
       authed = true;
       saveAdminCode(code, orgCode);
       void loadCohosts();
       void loadShares();
-      return true;
+      void loadSends();
+      maybeOfferPoster();
+      return 'ok';
     } catch (e) {
+      if (worthRetrying(e)) return 'unreachable';     // keep the code; the caller decides when to stop
       authed = false;
       orgCode = '';
       showToast(e instanceof Error ? e.message : 'Access denied', true);
-      return false;
+      return 'denied';
     }
   }
 
@@ -298,20 +586,57 @@
 
   function hydrateFromEvent(e: AdminEvent) {
     // settings form
-    const d = new Date(e.startsAt);
+    // Read in the EVENT's timezone, not the browser's.
+    //
+    // These two lines used to be `new Date(startsAt).getHours()` — the browser's wall clock. So a
+    // host in Sydney opening a Perth event was shown 22:00 for a party that starts at 20:00 there,
+    // and pressing Save without touching anything wrote that 22:00 back as Perth time, moving the
+    // event two hours. Reading and writing in the same zone is what closes that: the stored instant
+    // never changes, and the label it is shown under becomes the true one.
+    const zoned = msToZonedWallTime(e.startsAt, e.timezone || 'UTC');
     sName = e.name || '';
     sBlurb = e.blurb || '';
-    sDate = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-    sTime = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    sDate = zoned?.date ?? '';
+    sTime = zoned?.time ?? '';
     sReveal = e.revealMode || 'instant';
-    sDelay = e.revealDelayHours || 0;
+    // An event carrying an absolute reveal loads the control onto "custom" and the wall time back
+    // IN THE EVENT'S ZONE. Reading it in the browser's would show the host a time they never typed
+    // the moment they opened this page from anywhere but the venue.
+    if (e.revealMode === 'at_end' && e.revealAt) {
+      sDelay = REVEAL_CUSTOM;
+      const w = msToZonedWallTime(e.revealAt, e.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+      sRevealDate = w?.date ?? '';
+      sRevealTime = w?.time ?? '';
+    } else {
+      sDelay = e.revealDelayHours || 0;
+      sRevealDate = '';
+      sRevealTime = '';
+    }
+    sGuestDelivery = e.guestDelivery ?? GUEST_DELIVERY_DEFAULT;
+    sGuestSendScope = e.guestSendScope ?? 'all';
+    if (e.guestSendAt) {
+      // In the EVENT's zone, for the same reason the reveal is: a host editing a Perth event from
+      // Sydney must not be shown a send time they never typed.
+      const g = msToZonedWallTime(e.guestSendAt, e.timezone || 'UTC');
+      sGuestSendDate = g?.date ?? '';
+      sGuestSendTime = g?.time ?? '';
+    } else {
+      sGuestSendDate = '';
+      sGuestSendTime = '';
+    }
+    // `!== false` / `=== true`, not `!!`: these arrive absent from an API that does not serve them
+    // yet, and absent has to mean the column default rather than off.
+    sGuestMailThanks = e.guestMailThanks !== false;
+    sGuestMailReminder = e.guestMailReminder === true;
+    sGuestMailLive = e.guestMailLive !== false;
     sModeration = !!e.moderationEnabled;
     sNoFlash = !!e.noFlash;
     sTimezone = e.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     sSlug = e.slug || '';
     sAspects = new Set(e.aspectRatios && e.aspectRatios.length ? e.aspectRatios : ['1:1']);
     // Snapshot the saved settings so we can detect unsaved edits (gates the Upgrade panel).
-    baselineSig = JSON.stringify([sName, sBlurb, sDate, sTime, sReveal, sDelay, sModeration, sNoFlash, sTimezone, sSlug, [...sAspects].sort()]);
+    baselineSig = JSON.stringify([sName, sBlurb, sDate, sTime, sReveal, sDelay, sRevealDate, sRevealTime, sModeration, sNoFlash, sTimezone, sSlug, [...sAspects].sort(),
+       sGuestDelivery, sGuestSendScope, sGuestSendDate, sGuestSendTime, sGuestMailThanks, sGuestMailReminder, sGuestMailLive]);
 
     // theme editor
     theme = e.theme || {};
@@ -352,7 +677,18 @@
     if (!authed) return;
     try {
       ev = await getAdmin(code, orgCode);
-      hydrateFromEvent(ev);
+      // Do NOT re-fill the Settings form while the host is editing it.
+      //
+      // This poll runs every 30 seconds, and hydrateFromEvent() overwrites every s* field and
+      // resets the baseline it is compared against. So anything typed into Event settings and not
+      // saved within half a minute vanished mid-sentence — name, blurb, reveal time, timezone —
+      // with no error and nothing to undo, and the form then claimed to be clean. Typing a blurb
+      // is easily a thirty-second job.
+      //
+      // The rest of the page still refreshes: photo counts, participants, the QR, everything the
+      // poll exists for. Only the form the host has their hands on is left alone, and it resumes
+      // tracking the server the moment they save or discard.
+      if (!settingsDirty) hydrateFromEvent(ev);
       fetchQr();
       await loadPhotos();
     } catch {
@@ -497,7 +833,9 @@
     if (!rDate) { showToast('Pick a new date first', true); return; }
     reschedBusy = true;
     try {
-      const startsAt = new Date(`${rDate}T${rTime || '00:00'}`).getTime();
+      // Rescheduling is the same rule: the new start is a wall time in the event's own zone.
+      const startsAt = zonedWallTimeToMs(rDate, rTime || '00:00', ev?.timezone || 'UTC')
+        ?? new Date(`${rDate}T${rTime || '00:00'}`).getTime();
       await api(`/api/events/${ev.joinCode}/settings`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'x-organizer-code': orgCode },
@@ -570,10 +908,24 @@
         || framePackOwned);
 
   async function saveSettingsForm() {
+    if (sWantsCustomReveal && sActualRevealAt === null) {
+      showToast('Pick the date and time for the reveal', true);
+      return;
+    }
+    if (sGuestSendIssue === 'missing') {
+      showToast('Pick the date and time to send your guests the photos', true);
+      return;
+    }
+    if (sGuestSendIssue === 'before-reveal') {
+      showToast('Your send time is before the photos are revealed — pick a later one', true);
+      return;
+    }
     savingSettings = true;
     try {
+      // Written in the event's zone too, so what the host typed means what they think it means
+      // wherever they happen to be sitting.
       const startsAt = sDate
-        ? new Date(`${sDate}T${sTime || '00:00'}`).getTime()
+        ? (zonedWallTimeToMs(sDate, sTime || '00:00', sTimezone || 'UTC') ?? new Date(`${sDate}T${sTime || '00:00'}`).getTime())
         : undefined;
       const saved = await saveSettings(code, orgCode, {
         name: sName,
@@ -582,8 +934,22 @@
         startDate: sDate,
         startTime: sTime,
         revealMode: sReveal,
-        revealDelayHours: parseInt(String(sDelay), 10) || 0,
+        // 'custom' tells the server to read the two fields below instead of an hour count.
+        revealDelayHours: sWantsCustomReveal ? REVEAL_CUSTOM : parseInt(String(sDelay), 10) || 0,
+        ...(sWantsCustomReveal ? { revealDate: sRevealDate, revealTime: sRevealTime } : {}),
         moderationEnabled: sModeration,
+        guestDelivery: sGuestDelivery,
+        // Derived rather than the raw chip — two of the four options ARE a scope, and a stored
+        // scope that contradicts the option on screen would make the send disagree with the words
+        // the host chose it by.
+        guestSendScope: scopeFor(sGuestDelivery, sGuestSendScope),
+        ...(sGuestDelivery === 'scheduled' ? { guestSendAt: sGuestSendAt } : {}),
+        guestMailThanks: sGuestMailThanks,
+        // Written off when the gap cannot carry it: the switch was not on screen, so it is not a
+        // choice the host made, and leaving a stored true behind would arm an email that can only
+        // ever fire before the event it is meant to follow.
+        guestMailReminder: sGuestReminderOffered && sGuestMailReminder,
+        guestMailLive: sGuestMailLive,
         noFlash: sNoFlash,
         ratingMode: 'favourite',
         timezone: sTimezone,
@@ -609,6 +975,10 @@
 
   // ── Co-hosts ─────────────────────────────────────────────────────────────────
   let cohostData: CohostList | null = null;
+  // Collapsed by default: see the note on .part-head. Not persisted — a host who opened it once was
+  // looking for one guest, not changing how the page works from then on.
+  let partsOpen = false;
+  let cohostOpen = false;
   let cohostEmail = '';
   let cohostBusy = false;
   async function loadCohosts() {
@@ -711,19 +1081,32 @@
     }
   }
 
-  async function sendEmails() {
-    const input = emailInput.trim();
-    if (!input) { showToast('Enter at least one email address', true); return; }
-    const addresses = input.split(',').map((s) => s.trim()).filter(Boolean);
-    emailBusy = true;
+  // Every link's sends in one list, filtered per row by shareId. One request for the card rather
+  // than one per link: a host with a dozen shares would otherwise fire a dozen requests to render
+  // a section they may never open.
+  let sends: LinkSend[] = [];
+  async function loadSends() {
+    if (!ev?.emailEnabled) return;
+    try { sends = (await linkSends(code, orgCode)).sends; } catch { /* the links still work */ }
+  }
+
+  // Which row is mid-send. A plain boolean would have greyed out every Send button on the card
+  // while one of them worked.
+  let sendingFrom: string | null | undefined = undefined;
+  async function sendLink(emails: string[], shareId: string | null) {
+    sendingFrom = shareId;
     try {
-      await emailGallery(code, orgCode, addresses);
-      showToast(`Sent to ${addresses.length} address${addresses.length !== 1 ? 'es' : ''}!`);
-      emailInput = '';
+      const r = await emailLink(code, orgCode, emails, shareId);
+      // Report what actually happened rather than what was asked for: a partial failure used to
+      // report full success, because the old toast counted the addresses submitted.
+      if (r.errors && !r.sent) showToast(`Could not send to ${r.errors} address${r.errors !== 1 ? 'es' : ''}`, true);
+      else if (r.errors) showToast(`Sent to ${r.sent} — ${r.errors} failed`, true);
+      else showToast(`Sent to ${r.sent} address${r.sent !== 1 ? 'es' : ''}!`);
+      await loadSends();
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'Send failed', true);
     } finally {
-      emailBusy = false;
+      sendingFrom = undefined;
     }
   }
 
@@ -810,7 +1193,9 @@
 
 <!-- Single fixed-height nav bar (consistent across pages): brand left, context links right. -->
 <header class="topnav">
-  <a class="brand" href={viewerLoggedIn ? '/dashboard' : '/'}><Logo /> <small>ADMIN</small></a>
+  <!-- Home, not the dashboard: "← My events" is already in this same bar, so sending the logo there
+       too spends both routes out of here on the same destination and leaves no way back to the site. -->
+  <a class="brand" href="/"><Logo /> <small>ADMIN</small></a>
   <nav class="topnav-right">
     {#if viewerIsAdmin}<a class="nav-link site-admin" href="/siteadmin" title="Back to the platform console">🎩 Site admin</a>{/if}
     {#if viewerLoggedIn}<a class="nav-link" href="/dashboard">← My events</a>{/if}
@@ -818,7 +1203,19 @@
 </header>
 
 {#if booting}
-  <div class="state">Loading…</div>
+  {#if bootStalled}
+    <div class="state">
+      <p>Still trying to reach the server…</p>
+      <p class="hint" style="margin:6px 0 14px">
+        Your event is safe and nothing you have done is lost — this page just cannot get an answer
+        yet. It keeps trying on its own{#if bootAttempt > 1} (attempt {bootAttempt}){/if}, so you can
+        leave it open.
+      </p>
+      <button class="btn primary" on:click={() => location.reload()}>Reload now</button>
+    </div>
+  {:else}
+    <Loading />
+  {/if}
 {:else if !authed}
   <!-- ── Auth wall ── -->
   <div class="auth">
@@ -868,22 +1265,50 @@
     <div class="card">
       <div class="card-title">Share &amp; invite</div>
       <div class="qr-block">
-        {#if qrCode}<img class="qr" src={qrCode} alt="QR code" />{/if}
+        {#if qrCode}
+          <!-- The download sits ON the code rather than in a button below it, because that is where
+               someone looks for it. Safe to overlay: the QR is generated at error-correction level
+               H, which carries about 30% redundancy — the same headroom that lets other people put
+               a logo in the middle of one. This covers a fraction of that.
+               Always visible, never hover-only: half the hosts doing this are on a phone, where
+               there is no hover and a control that only appears on one would simply not exist. -->
+          <div class="qr-wrap">
+            <img class="qr" src={qrCode} alt="QR code" />
+            <button class="qr-dl" on:click={downloadQr} title="Save this QR as a PNG" aria-label="Save QR code as an image">⬇</button>
+          </div>
+        {/if}
+        <div class="cb-group">
         <div class="code-label">EVENT CODE — guests type this to join</div>
-        <div class="join-code">{code}</div>
-        <button class="copy-code" on:click={() => copy(code, 'Event code copied!')}>⧉ Copy code</button>
-        <div class="join-url">{joinUrl}</div>
-      </div>
-      <button class="btn primary sm full" on:click={shareInvite}>📤 Share invite</button>
-      <div class="row gap mt">
-        <button class="btn ghost sm grow" on:click={() => copy(joinUrl, 'Join link copied!')}>Copy join link</button>
-        <button class="btn ghost sm grow" on:click={downloadQr}>Save QR</button>
-      </div>
+        <!-- Two things a host hands out, given one shape: a small card you press, with the value
+             large and what pressing it does written small underneath, inside the card.
+             Both used to be plain text with a separate copy button somewhere below — so each thing
+             appeared twice, once to read and once to act on, and a standalone "Copy code" bar sat
+             between the two values reading as though it belonged to whichever you looked at second. -->
+        <button class="copybox" on:click={() => copy(code, 'Event code copied!')}>
+          <span class="cb-value cb-code">{code}</span>
+          <span class="cb-hint">⧉ copy code</span>
+        </button>
+        </div>
+        <button class="copybox" on:click={() => copy(joinUrl, 'Join link copied!')}>
+          <span class="cb-value cb-url">{joinUrl}</span>
+          <span class="cb-hint">⧉ copy link</span>
+        </button>
+        <button class="btn primary sm full invite-go" on:click={shareInvite}>📤 Share invite</button>
       <!-- "Create" is wrong once one exists — the button reopens a saved design, it does not start
            a new one, and the label was the only thing telling you whether you had saved anything. -->
-      <button class="btn primary sm full mt" on:click={() => { posterOpen = true; track('poster_opened', undefined, code); }} disabled={!qrCode}>
+      <button class="btn primary sm full" on:click={openPoster} disabled={!qrCode}>
         {ev?.posterConfig ? '🎩 Manage poster' : '🎩 Create poster'}
       </button>
+      {#if ev?.posterConfig}
+        <!-- Only once a design exists. Before that the button above already opens the gallery, so
+             this would be a second route to the same screen; after that the button goes straight
+             back to their work — which is right, "Manage poster" must not throw the work away to
+             show a menu — and this is how the gallery stays reachable. -->
+        <button class="btn ghost sm full" on:click={() => { wizardOpen = true; track('poster_restyle', undefined, code); }} disabled={!qrCode}>
+          Start again from a design…
+        </button>
+      {/if}
+      </div>
       <!-- The gallery-only link and "email the gallery link" used to sit here, under the join QR.
            They are the opposite of an invite: you send them afterwards, to people who only want to
            see the photos. Both now live in Shared links, which is the after-the-event card. -->
@@ -1001,7 +1426,7 @@
             <p class="refund-hint">Everything you paid for carries over.</p>
             <div class="row2">
               <div class="field"><label for="r-date">New start date</label><input id="r-date" type="date" bind:value={rDate} min={reschedMinDate} max={reschedMaxDate} /></div>
-              <div class="field"><label for="r-time">New start time</label><input id="r-time" type="time" bind:value={rTime} /></div>
+              <div class="field"><label for="r-time">New start time</label><input id="r-time" type="time" step={REVEAL_TICK_MS / 1000} bind:value={rTime} /></div>
             </div>
             <div class="refund-actions">
               <button class="btn ghost sm" on:click={() => (showResched = false)} disabled={reschedBusy}>Never mind</button>
@@ -1070,7 +1495,9 @@
       </div>
       <div class="field-row">
         <div class="field"><label for="s-date">Start date</label><input id="s-date" type="date" bind:value={sDate} max={reschedMaxDate} disabled={startFieldsLocked} /></div>
-        <div class="field"><label for="s-time">Start time</label><input id="s-time" type="time" bind:value={sTime} disabled={startFieldsLocked} /></div>
+        <!-- The same 15-minute grid the reveal uses. An event ends at start + duration and a reveal
+             is checked on that tick, so minutes finer than it were never actually honoured. -->
+        <div class="field"><label for="s-time">Start time</label><input id="s-time" type="time" step={REVEAL_TICK_MS / 1000} bind:value={sTime} disabled={startFieldsLocked} /></div>
       </div>
       {#if startFieldsLocked}
         <p class="hint" style="margin:-4px 0 10px">
@@ -1120,10 +1547,34 @@
       {#if sReveal === 'at_end'}
         <div class="field">
           <label for="s-delay">Reveal delay after the event ends</label>
-          <select id="s-delay" bind:value={sDelay}>
+          <select id="s-delay" bind:value={sDelay} on:change={onSDelayChange}>
             {#each options?.revealDelays ?? [] as d}<option value={d.value}>{d.label}</option>{/each}
+            <option value={REVEAL_CUSTOM}>Pick an exact date &amp; time…</option>
           </select>
         </div>
+        {#if sWantsCustomReveal}
+          <div class="field-row reveal-custom">
+            <div class="field">
+              <label for="s-reveal-date">Reveal date</label>
+              <input id="s-reveal-date" type="date" bind:value={sRevealDate} />
+            </div>
+            <div class="field">
+              <label for="s-reveal-time">Reveal time</label>
+              <!-- Stepped by the tick so a phone's wheel only offers moments that can be honoured. -->
+              <input id="s-reveal-time" type="time" step={REVEAL_TICK_MS / 1000} bind:value={sRevealTime} />
+            </div>
+          </div>
+          <p class="hint reveal-note">
+            {#if sActualRevealAt === null}
+              Pick the date and time — it's read in the event's timezone{sTimezone ? ` (${sTimezone})` : ''}.
+            {:else}
+              Photos appear from <b>{revealMomentLabel(sActualRevealAt, sTimezone)}</b>.
+              {#if sRevealMoved}
+                Reveals are checked every {REVEAL_TICK_MS / 60000} minutes, so yours moves to the next check.
+              {/if}
+            {/if}
+          </p>
+        {/if}
       {/if}
       {#if sReveal !== 'instant'}
         <div class="toggle-row">
@@ -1147,6 +1598,143 @@
           <span class="track"></span>
         </label>
       </div>
+      <div class="divider gd-div"></div>
+
+      <!-- Getting the photos to the guests. The switches that decide WHAT a send does come first;
+           the one button that actually sends is last, under them, where it reads as the consequence
+           of the settings above rather than as a control of its own. -->
+      <div class="field">
+        <label for="s-guest-delivery">How should your guests get the photos?</label>
+        <select id="s-guest-delivery" bind:value={sGuestDelivery} on:change={onSGuestDeliveryChange}>
+          {#each GUEST_DELIVERY_OPTIONS as o}<option value={o.value}>{o.label}</option>{/each}
+        </select>
+        <p class="hint gd-desc">{sGuestDeliveryDesc}</p>
+      </div>
+
+      {#if sGuestDelivery === 'scheduled' || sGuestDelivery === 'manual'}
+        <!-- Only on the two options that do not already say it — on the other two the words the
+             host chose ARE the answer, and asking twice lets the two disagree. -->
+        <div class="field">
+          <label for="s-guest-scope">Which photos do they get?</label>
+          <select id="s-guest-scope" bind:value={sGuestSendScope}>
+            <option value="all">Everything</option>
+            <option value="favourites">Just my favourites</option>
+          </select>
+        </div>
+      {/if}
+
+      {#if sGuestDelivery === 'scheduled'}
+        <div class="field-row reveal-custom">
+          <div class="field">
+            <label for="s-guest-send-date">Send date</label>
+            <input id="s-guest-send-date" type="date" bind:value={sGuestSendDate} />
+          </div>
+          <div class="field">
+            <label for="s-guest-send-time">Send time</label>
+            <!-- The same 15-minute grid as the reveal — a send is checked on that tick, so finer
+                 minutes are precision we could not honour. -->
+            <input id="s-guest-send-time" type="time" step={REVEAL_TICK_MS / 1000} bind:value={sGuestSendTime} />
+          </div>
+        </div>
+        <p class="hint reveal-note">
+          {#if sGuestSendIssue === 'missing'}
+            Pick the date and time — it's read in the event's timezone{sTimezone ? ` (${sTimezone})` : ''}.
+          {:else if sGuestSendIssue === 'before-reveal'}
+            That's before your photos are revealed ({sGuestRevealLabel}) — your guests would get a
+            link to a gallery that is still shut. Pick that moment or later.
+          {:else}
+            Your guests get the photos from <b>{sGuestSendLabel}</b>.
+            {#if sGuestSendMoved}
+              Sends are checked every {REVEAL_TICK_MS / 60000} minutes, so yours moves to the next check.
+            {/if}
+          {/if}
+        </p>
+      {/if}
+
+      <div class="toggle-row">
+        <div>
+          <!-- Not "email guests when the event ends": that would be a lie when this is off. The
+               email is the guest's own doing — they asked for their photos — and this only decides
+               what else it carries. -->
+          <div class="t-label">Add a thank-you and the release date</div>
+          <div class="t-sub">
+            Guests who asked for their photos will get them either way — this adds a thank-you and
+            tells them when the full gallery opens.{#if !sGuestThanksDated}
+              No release moment is fixed yet, so right now it would be the thank-you on its own.{/if}
+          </div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" bind:checked={sGuestMailThanks} />
+          <span class="track"></span>
+        </label>
+      </div>
+
+      {#if sGuestReminderOffered}
+        <div class="toggle-row">
+          <div>
+            <div class="t-label">Remind them the day before</div>
+            <div class="t-sub">Goes out 24 hours before the gallery opens — {sGuestReminderLabel}.</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" bind:checked={sGuestMailReminder} />
+            <span class="track"></span>
+          </label>
+        </div>
+      {:else}
+        <!-- Said, not silently missing: a switch that is simply absent reads as a bug to a host who
+             has seen it on another event. -->
+        <p class="hint gd-off">No day-before reminder — {sGuestReminderWhyNot}</p>
+      {/if}
+
+      <div class="toggle-row">
+        <div>
+          <div class="t-label">Tell them the photos are live</div>
+          <div class="t-sub">
+            {#if sGuestReleaseLabel}
+              Goes out with the link to the gallery the moment the photos are released — {sGuestReleaseLabel}.
+            {:else}
+              Goes out with the link to the gallery, the moment your photos are released.
+            {/if}
+          </div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" bind:checked={sGuestMailLive} />
+          <span class="track"></span>
+        </label>
+      </div>
+
+      <div class="gd-now">
+        <div class="gd-state">
+          {#if ev.guestOptInCount !== undefined}
+            <div><b>{ev.guestOptInCount}</b> guest{ev.guestOptInCount === 1 ? '' : 's'} asked for their photos</div>
+          {/if}
+          {#if guestsAlreadySent}
+            <!-- Without this a host has no way to tell a send that worked from one that never ran,
+                 and the obvious next move is to send the whole thing again. -->
+            <!-- In the EVENT's zone with its name attached, the same way every other moment in
+                 this feature is written — a host checking from another city must not be shown a
+                 send time that disagrees with the schedule they set. -->
+            <div class="gd-sent">✓ Sent to your guests on {sMoment(guestsAlreadySent, ev.timezone || sTimezone)}</div>
+          {/if}
+        </div>
+        <!-- ghost, not primary: Save settings is this card's primary action, and two filled
+             buttons would leave the one that emails every guest competing with it. -->
+        <button class="btn ghost sm full gd-send" on:click={sendGuestsNow} disabled={guestSendBusy || !ev.emailEnabled}>
+          {guestSendBusy ? 'Sending…' : guestsAlreadySent ? '📨 Send it again now' : '📨 Send the gallery link to guests now'}
+        </button>
+        <p class="hint gd-foot">
+          {#if !ev.emailEnabled}
+            Email isn't switched on for this event, so nothing can be sent from here.
+          {:else}
+            Sends your saved setting — {savedSendScope === 'favourites' ? 'just your favourites' : 'the whole gallery'}
+            — to every guest who asked for their photos.{#if settingsDirty} Save your settings first if you have just changed that.{/if}
+          {/if}
+        </p>
+        {#if guestSendNote}
+          <p class="gd-note" class:bad={!guestSendNote.ok}>{guestSendNote.text}</p>
+        {/if}
+      </div>
+
       <button class="btn primary mt" on:click={saveSettingsForm} disabled={savingSettings}>
         {savingSettings ? 'Saving…' : 'Save settings'}
       </button>
@@ -1160,12 +1748,23 @@
         <p class="hint" style="margin:0 0 8px">The palette sets the colours <em>and</em> light/dark look — no separate appearance switch.</p>
         <div class="presets">
           {#each Object.keys(THEME_PRESETS) as key}
+            <!-- A "Custom" chip sits at the end of this row (below) for the case where the palette
+                 is deliberately not one of these — an empty row otherwise reads as broken. -->
             <button class="preset" class:selected={selectedPreset === key} title={key} on:click={() => applyPreset(key)}
               style="background:{THEME_PRESETS[key].bg};border-color:{selectedPreset === key ? 'var(--accent)' : THEME_PRESETS[key].accent}">
               <span style="color:{THEME_PRESETS[key].text}">{key}</span>
               {#if selectedPreset === key}<span class="preset-check">✓</span>{/if}
             </button>
           {/each}
+          <!-- Shown only when the palette matches none of them, which is a real state rather than a
+               fault: a poster design may carry colours tuned to its paper, and two of them do. It is
+               not clickable — "custom" is something you arrive at by editing, not something you
+               pick. -->
+          {#if !selectedPreset}
+            <div class="preset custom-chip" title="These colours aren't one of the presets">
+              <span>custom</span><span class="preset-check">✓</span>
+            </div>
+          {/if}
         </div>
       </div>
 
@@ -1305,10 +1904,75 @@
       </div>
     {/if}
 
+    <!-- Directly under Review & curate, because that is the order the host works in: curate
+         the photos, then decide who gets to see which of them. It used to sit below Co-hosts,
+         which put an unrelated card between the two halves of one job. -->
+    <!-- Shared links: the standing gallery link, plus every public link you've created (those are
+         made from Review & Curate → Share). Everything here is about sharing the RESULT. -->
+    <div class="card">
+      <div class="card-title">Shared links</div>
+      <!-- Not one of the rows below it: those are links the host made and can delete, this one
+           simply always exists. Dashed and tagged so it never reads as a created share. -->
+      <div class="standing">
+        <ShareLinkRow
+          url={galleryUrl}
+          title="🖼 Gallery-only link"
+          subtitle="Send it after the event to people who just want to see the photos"
+          shareId={null}
+          canEmail={!!ev.emailEnabled}
+          {sends}
+          busy={sendingFrom === null}
+          on:copy={(e) => copy(e.detail.url, 'Gallery link copied!')}
+          on:send={(e) => sendLink(e.detail.emails, e.detail.shareId)}
+        >
+          <span slot="tag" class="cohost-tag standing-tag">Always on</span>
+        </ShareLinkRow>
+      </div>
+      <div class="divider shares-div"></div>
+      {#if sharesList.length}
+        <div class="cohost-list">
+          {#each sharesList as s (s.id)}
+            <ShareLinkRow
+              url={s.url}
+              title={s.label}
+              subtitle={`${shareKindText(s.kind, s.count)} · /s/${s.slug || s.id}`}
+              shareId={s.id}
+              canEmail={!!ev.emailEnabled}
+              {sends}
+              busy={sendingFrom === s.id}
+              on:copy={(e) => copyShare(e.detail.url)}
+              on:send={(e) => sendLink(e.detail.emails, e.detail.shareId)}
+            >
+              <svelte:fragment slot="extra">
+                <button class="btn ghost sm" on:click={() => (editShare = s)}>Edit</button>
+                <button class="btn ghost sm" on:click={() => dropShare(s.id)} aria-label="Delete share">Delete</button>
+              </svelte:fragment>
+            </ShareLinkRow>
+          {/each}
+        </div>
+      {:else}
+        <p class="hint" style="margin:0">No shared links yet. Create one from <b>Review &amp; Curate → 📤 Share</b> — you can rename it or change its link here any time.</p>
+      {/if}
+    </div>
+
     <!-- Co-hosts: invite people to manage this event with you -->
     <div class="card">
-      <div class="card-title">Co-hosts</div>
+      <!-- The action lives in the header, where an action on a card belongs, and opens the field
+           directly beneath itself — so the thing you revealed appears where you were looking rather
+           than below a list you have to scroll past. -->
+      <div class="card-head">
+        <div class="card-title">Co-hosts</div>
+        <button class="btn ghost sm" class:on={cohostOpen} aria-expanded={cohostOpen}
+                on:click={() => (cohostOpen = !cohostOpen)}>✉️ Invite</button>
+      </div>
       <p class="hint" style="margin:0 0 12px">Invite people to help manage this event — they get the same access as you. They can add or remove other co-hosts, but the event owner can never be removed.</p>
+      {#if cohostOpen}
+        <div class="cohost-add">
+          <!-- svelte-ignore a11y-autofocus -->
+          <input type="email" autofocus placeholder="co-host@email.com" bind:value={cohostEmail} on:keydown={(e) => e.key === 'Enter' && addCohost()} />
+          <button class="btn primary sm" on:click={addCohost} disabled={cohostBusy || !cohostEmail.trim()}>{cohostBusy ? 'Inviting…' : 'Invite'}</button>
+        </div>
+      {/if}
       <div class="cohost-list">
         {#if cohostData?.owner}
           <div class="cohost-row">
@@ -1330,68 +1994,38 @@
           <p class="hint" style="margin:0">No co-hosts yet.</p>
         {/if}
       </div>
-      <div class="cohost-add">
-        <input type="email" placeholder="co-host@email.com" bind:value={cohostEmail} on:keydown={(e) => e.key === 'Enter' && addCohost()} />
-        <button class="btn primary sm" on:click={addCohost} disabled={cohostBusy || !cohostEmail.trim()}>{cohostBusy ? 'Inviting…' : 'Invite'}</button>
-      </div>
-    </div>
 
-    <!-- Shared links: the standing gallery link, plus every public link you've created (those are
-         made from Review & Curate → Share). Everything here is about sharing the RESULT. -->
-    <div class="card">
-      <div class="card-title">Shared links</div>
-      <!-- Not one of the rows below it: those are links the host made and can delete, this one
-           simply always exists. Dashed and tagged so it never reads as a created share. -->
-      <div class="cohost-row standing">
-        <div class="cohost-who">
-          <span class="cohost-email">🖼 Gallery-only link</span>
-          <span class="cohost-sub">Send it after the event to people who just want to see the photos</span>
-        </div>
-        <div class="cohost-acts">
-          <span class="cohost-tag standing-tag">Always on</span>
-          <button class="btn ghost sm" on:click={() => copy(galleryUrl, 'Gallery link copied!')}>🔗 Copy</button>
-        </div>
-      </div>
-      {#if ev.emailEnabled}
-        <!-- Emails that same gallery link, so it belongs beside it rather than beside the QR. -->
-        <div class="email-section">
-          <div class="label-mono">EMAIL GALLERY LINK</div>
-          <div class="email-row">
-            <input type="email" bind:value={emailInput} placeholder="guest@example.com, another@example.com" />
-            <button class="btn ghost sm" on:click={sendEmails} disabled={emailBusy}>{emailBusy ? '…' : 'Send'}</button>
-          </div>
-          <p class="hint">Comma-separated addresses</p>
-        </div>
-      {/if}
-      <div class="divider shares-div"></div>
-      {#if sharesList.length}
-        <div class="cohost-list">
-          {#each sharesList as s (s.id)}
-            <div class="cohost-row">
-              <div class="cohost-who"><span class="cohost-email">{s.label}</span><span class="cohost-sub">{shareKindText(s.kind, s.count)} · /s/{s.slug || s.id}</span></div>
-              <div class="cohost-acts">
-                <button class="btn ghost sm" on:click={() => copyShare(s.url)}>🔗 Copy</button>
-                <button class="btn ghost sm" on:click={() => (editShare = s)}>Edit</button>
-                <button class="btn ghost sm" on:click={() => dropShare(s.id)} aria-label="Delete share">Delete</button>
-              </div>
-            </div>
-          {/each}
-        </div>
-      {:else}
-        <p class="hint" style="margin:0">No shared links yet. Create one from <b>Review &amp; Curate → 📤 Share</b> — you can rename it or change its link here any time.</p>
-      {/if}
     </div>
 
     <!-- Slideshow now lives in Review & Curate (🎬) — linked from the card above. -->
 
     <!-- Participants -->
     <div class="card">
-      <div class="card-title">Participants {#if partTotal}<span class="p-count">{partTotal}</span>{/if}</div>
+      <!-- A summary until asked. The list is the longest thing on this page — 150 guests is 150 rows
+           of name, email, shot count and a card selector — and most visits to the admin page are not
+           about any individual guest. The headline number answers the usual question on its own;
+           everything else waits behind the disclosure. -->
+      <button class="part-head" aria-expanded={partsOpen} on:click={() => (partsOpen = !partsOpen)}>
+        <span class="chev" class:open={partsOpen}>›</span>
+        <span class="card-title part-title">Participants</span>
+        {#if partTotal}<span class="p-count">{partTotal}</span>{/if}
+        <span class="part-hint">{partsOpen ? 'hide' : 'show'}</span>
+      </button>
+      {#if partsOpen}
       {#if ev.participants && ev.participants.length}
         <!-- A 150-guest event rendered 150 rows into this card. Search plus a page at a time keeps
              it a card rather than a wall, and search is what you actually want at that size. -->
         {#if partTotal > PART_PAGE}
-          <input class="p-search" placeholder="Search guests — name or email…" bind:value={partQuery} />
+          <!-- Left open rather than hidden behind an icon: it only renders at all once there are
+               more guests than fit on a page, which is precisely when you need it. Making it one
+               more tap away would add friction exactly at the size it exists to rescue. -->
+          <div class="p-search">
+            <span class="p-search-i" aria-hidden="true">🔍</span>
+            <input placeholder="Search guests — name or email…" bind:value={partQuery} aria-label="Search guests" />
+            {#if partQuery}
+              <button class="p-search-x" on:click={() => (partQuery = '')} aria-label="Clear search">✕</button>
+            {/if}
+          </div>
         {/if}
         <div class="participant-list">
           {#each partShown as p (p.id)}
@@ -1399,15 +2033,21 @@
               <div class="avatar">{(p.name?.[0] || '?').toUpperCase()}</div>
               <div class="p-info">
                 <div class="p-name">{p.name}</div>
-                <div class="p-email">{#if p.email}{p.email}{:else}<span class="muted">no email</span>{/if}</div>
+                <!-- Only what this guest actually HAS. A row that spells out "no email" and
+                     "no photos" is mostly a list of absences — and at 150 guests it is a wall of
+                     them, with the few rows that do carry something lost in the middle. -->
+                {#if p.email}<div class="p-email">{p.email}</div>{/if}
                 <div class="p-meta">
                   {#if p.photosTaken}
-                    <!-- Straight to just this guest's photos, rather than hunting through the lot. -->
-                    <a class="p-shots" href="/admin/{code}/review?who={p.id}#{orgCode}">{p.photosTaken} photos</a>
-                  {:else}
-                    no photos
+                    <!-- Straight to just this guest's photos, rather than hunting through the lot.
+                         A new tab, because this is a side trip: you are working down a list of
+                         guests, and following one of these in place loses your place in it —
+                         including the search you typed and how far you had paged. -->
+                    <a class="p-shots" href="/admin/{code}/review?who={p.id}#{orgCode}"
+                       target="_blank" rel="noopener">{p.photosTaken} photo{p.photosTaken === 1 ? '' : 's'} ↗</a> ·
                   {/if}
-                  · joined {fmtTime(p.joinedAt)}
+                  {#if p.tricksDone}<span class="p-tricks">🎩 {p.tricksDone} trick{p.tricksDone === 1 ? '' : 's'}</span> · {/if}
+                  joined {fmtTime(p.joinedAt)}
                 </div>
               </div>
               <!-- Only when there is more than one card: with a single card there is nothing to move
@@ -1430,12 +2070,20 @@
           {/if}
         </div>
         {#if partFiltered.length > partShown.length}
-          <button class="btn ghost sm full mt" on:click={() => (partLimit += PART_PAGE)}>
-            Show more — {partShown.length} of {partFiltered.length}
-          </button>
+          <div class="row gap mt">
+            <button class="btn ghost sm grow" on:click={() => (partLimit += PART_PAGE)}>
+              Show more — {partShown.length} of {partFiltered.length}
+            </button>
+            <!-- Paging 25 at a time is six taps on a 150-guest event when what you wanted was the
+                 whole list — to scroll it, or to search a browser page for a name. -->
+            <button class="btn ghost sm grow" on:click={() => (partLimit = partFiltered.length)}>
+              Show all {partFiltered.length}
+            </button>
+          </div>
         {/if}
       {:else}
         <div class="muted small">No participants yet</div>
+      {/if}
       {/if}
     </div>
 
@@ -1459,8 +2107,45 @@
     qrDataUrl={qrCode}
     themeImageUrl={ev.theme?.headerImage ?? null}
     orgCode={orgCode}
-    initialConfig={ev.posterConfig}
-    on:close={() => (posterOpen = false)}
+    initialConfig={posterSeed ?? ev.posterConfig}
+    on:close={() => { posterOpen = false; posterSeed = null; void loadEvent(); }}
+  />
+{/if}
+
+<svelte:window on:keydown={onWindowKey} />
+
+{#if posterAsk && ev}
+  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
+  <div class="modal" on:click|self={() => answerPosterAsk(false)} role="dialog" aria-modal="true" aria-label="Design your poster">
+    <div class="card welcome-card" use:modalFocus>
+      <div class="welcome-emoji">🎩</div>
+      <h2 class="welcome-title">Make the poster?</h2>
+      <p class="welcome-sub">
+        Guests join by scanning it, so it is the one thing worth getting right. Pick a design and
+        we'll fill in your event's name, code and QR — then change anything you like.
+        {#if (ev.challengeSets?.length ?? 0) > 0}It does your trick cards too.{/if}
+      </p>
+      <div class="row gap">
+        <button class="btn ghost grow" on:click={() => answerPosterAsk(false)}>Not now</button>
+        <button class="btn primary grow" on:click={() => answerPosterAsk(true)}>Design it →</button>
+      </div>
+      <p class="hint" style="margin:10px 0 0">You can start this any time from <b>Share &amp; invite</b>.</p>
+    </div>
+  </div>
+{/if}
+
+{#if wizardOpen && ev}
+  <PosterWizard
+    eventName={ev.name}
+    blurb={ev.blurb ?? ''}
+    joinUrl={joinUrl}
+    joinCode={code}
+    qrDataUrl={qrCode}
+    hasDesign={!!ev.posterConfig}
+    eventType={ev.eventType ?? null}
+    on:pick={(e) => void pickPreset(e.detail)}
+    on:scratch={() => { track('poster_scratch_picked', undefined, code); wizardOpen = false; posterSeed = {}; posterOpen = true; }}
+    on:close={() => (wizardOpen = false)}
   />
 {/if}
 
@@ -1499,24 +2184,62 @@
       <p class="welcome-sub">{welcome.sub}</p>
       {#if qrCode}<img class="welcome-qr" src={qrCode} alt="Join QR code" />{/if}
       <div class="code-label">EVENT CODE — guests type this to join</div>
-      <div class="join-code">{code}</div>
-      <div class="welcome-url">{joinUrl}</div>
+      <!-- The same two copy cards as the invite section. This modal had the identical doubling-up:
+           the link printed as text AND a "Copy share link" button below it. One control each. -->
+      <button class="copybox" on:click={() => copy(code, 'Event code copied!')}>
+        <span class="cb-value cb-code">{code}</span>
+        <span class="cb-hint">⧉ copy code</span>
+      </button>
+      <button class="copybox" on:click={() => copy(joinUrl, 'Join link copied!')}>
+        <span class="cb-value cb-url">{joinUrl}</span>
+        <span class="cb-hint">⧉ copy link</span>
+      </button>
       <div class="row gap">
-        <button class="btn ghost grow" on:click={() => { navigator.clipboard.writeText(joinUrl); showToast('Link copied!'); }}>Copy share link</button>
-        <button class="btn primary grow" on:click={() => (welcome = null)}>Start managing →</button>
+        <!-- Straight into the poster from the celebration, because that IS the next thing to do
+             with a brand-new event. Dismissing to the page instead leaves the host looking at
+             sixteen cards with no idea which one matters. -->
+        <button class="btn ghost grow" on:click={() => (welcome = null)}>Start managing</button>
+        <button class="btn primary grow" on:click={() => { welcome = null; answerPosterAsk(true); }}>🎩 Make the poster →</button>
       </div>
     </div>
   </div>
 {/if}
 
-<button class="fb-fab" type="button" on:click={() => (showFeedback = true)}>💬 Feedback</button>
+{#if !booting}
+  <button class="fb-fab" type="button" on:click={() => (showFeedback = true)}>💬 Feedback</button>
+{/if}
 {#if showFeedback}<FeedbackModal context={`Manage (${$page.params.code})`} on:close={() => (showFeedback = false)} />{/if}
 
 <style>
+  /* On a phone this does not float at all.
+     Fixed at the bottom-right, it sat on top of every full-width primary button the host scrolled
+     to the bottom of the screen — elementFromPoint returned the FAB, not the button, over as much
+     as 1900px² of it. Scrolling a control into view and tapping it is the most common gesture there
+     is on a phone, so the button you had just reached was the one you could not press.
+     Reserving trailing page padding did NOT fix it: that only protects the true end of the
+     document, and the collision happens at every scroll position before it. This was my first fix
+     and it was the wrong diagnosis.
+     A floating button needs a gutter to float in, and a narrow screen has none — the content column
+     IS the width. So below 720px it goes into the flow at the end of the page, where it can cover
+     nothing. Above that there is real margin beside the column and it floats as before. */
+  @media (max-width: 720px) {
+    /* In the flow, but NOT a full-width button.
+       Floating, it covered content on a phone where the column is the width. Full-width at the end
+       of the page it stopped covering anything and started competing: a bar the size of every real
+       action on the page, for the least important thing on it. So it keeps its place at the foot and
+       gives back the row — right-aligned, quiet, sized to its own words. */
+    .fb-fab {
+      position: static; width: auto; margin: 14px 0 4px auto;
+      box-shadow: none; font-size: .76rem; padding: 6px 12px; opacity: .8;
+    }
+    .fb-fab:active { opacity: 1; }
+  }
   .fb-fab { position: fixed; right: 14px; bottom: 14px; z-index: 90; padding: 8px 14px; border-radius: 999px;
+    display: inline-flex; align-items: center; gap: 6px;
     border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); font: inherit;
     font-size: .82rem; cursor: pointer; box-shadow: 0 6px 18px rgba(0,0,0,.18); }
   .fb-fab:hover { color: var(--text); border-color: var(--accent); }
+
   /* Fixed-height nav bar, consistent across pages. */
   .topnav { display: flex; align-items: center; justify-content: space-between; gap: 12px;
     height: 56px; padding: 0 16px; border-bottom: 1px solid var(--border); }
@@ -1533,8 +2256,6 @@
   .welcome-title { margin: 10px 0 6px; font-size: 1.25rem; }
   .welcome-sub { color: var(--text-muted); font-size: 0.88rem; margin: 0 0 16px; }
   .welcome-qr { width: 180px; height: 180px; border-radius: 10px; background: #fff; }
-  .welcome-url { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted);
-    word-break: break-all; margin: 10px 0 16px; }
   .welcome-card .grow { flex: 1; }
   .brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 800; text-decoration: none;
     color: var(--text); }
@@ -1588,7 +2309,10 @@
   .review-text { flex: 1; min-width: 0; }
   .review-text .hint { margin: 0; }
   .review-arrow { font-size: 1.3rem; color: var(--text-muted); flex: none; }
-  .review-disc { margin: 12px 0 0; }
+  /* The hint above has margin:0 (see .review-text .hint), so this margin IS the entire gap between
+     the paragraph and the disclosure's border. 12px read as attached to the link card; 20px was
+     still tight. */
+
 
   /* Progressive disclosure. The key point stays on the page and the long-form reasoning is one tap
      away — same idiom (and the same native <details>) as the join screen's "Event info" panel. The
@@ -1602,6 +2326,12 @@
   .disc > summary:hover { color: var(--text); }
   .disc-body { padding: 0 12px 11px; display: flex; flex-direction: column; gap: 8px; }
   .disc-body .hint { margin: 0; line-height: 1.5; }
+  /* AFTER `.disc`, not before it.
+     This has been "fixed" three times and kept coming back, because `.disc { margin: 0 0 12px }` is
+     declared further down the file at the SAME specificity — so source order won and the gap was
+     always zero, whatever number was written here. Moved below its base rule, and written as
+     margin-top alone so it overrides one property instead of fighting the whole shorthand. */
+  .review-disc { margin-top: 22px; }
   /* Nested inside a toggle row's sub-text. The bordered box that suits a card-level disclosure is
      heavier than the two lines it hides, so this one borrows the camera's mic-note idiom instead:
      an underlined summary and nothing else. Same control, a quarter of the furniture. */
@@ -1612,24 +2342,42 @@
 
   .muted { color: var(--text-muted); }
   .small { font-size: 0.85rem; }
-  .hint { font-size: 0.72rem; color: var(--text-muted); }
+  .hint { font-size: 0.78rem; color: var(--text-muted); }
+  .reveal-note { margin: -4px 0 12px; line-height: 1.5; }
+  /* The two controls a host is most likely to poke at one-handed on a phone; iOS shrinks a bare
+     date/time input below a comfortable tap. */
+  .reveal-custom input { min-height: 44px; }
+  /* A flex item defaults to min-width:auto and Chromium's <input type=date> has a min-content of
+     ~167px, so this pair demanded ~346px plus the card's 36px of padding — 382px inside a 360px
+     phone, which put the second box through the card's right edge. Scoped to this row rather than
+     to every .field-row on the page, so nothing else shifts. */
+  .field-row.reveal-custom { flex-wrap: wrap; }
+  .field-row.reveal-custom > .field { min-width: 0; flex: 1 1 140px; }
   .cohost-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
   .cohost-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
   .cohost-who { display: flex; flex-direction: column; min-width: 0; }
   .cohost-email { font-weight: 600; font-size: 0.86rem; overflow-wrap: anywhere; }
-  .cohost-sub { font-size: 0.72rem; color: var(--text-muted); }
+  /* Truncates instead of painting outside its box. With overflow visible a long address ran clean
+     under the OWNER pill — 34px of overlap at 360px, and real addresses are routinely that long. */
+  .cohost-sub { font-size: 0.78rem; color: var(--text-muted);
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cohost-who { flex: 1 1 auto; }
   .cohost-acts { display: flex; align-items: center; gap: 8px; flex: none; }
-  .cohost-tag { font-size: 0.64rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; padding: 2px 7px; border-radius: 5px; background: var(--accent); color: var(--accent-ink, #111); }
+  .cohost-tag { font-size: 0.7rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; padding: 2px 7px; border-radius: 5px; background: var(--accent); color: var(--accent-ink, #111); }
   .cohost-tag.owner { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
   .cohost-tag.pending { background: transparent; color: var(--text-muted); border: 1px dashed var(--border); }
-  .cohost-add { display: flex; gap: 8px; }
+  /* 12px below, matching the hint above it — the field is revealed BETWEEN two blocks and had
+     spacing on neither side, so it opened flush against the first row of the list. */
+  .cohost-add { display: flex; gap: 8px; margin-bottom: 12px; }
   .cohost-add input { flex: 1; padding: 9px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font: inherit; font-size: 0.88rem; }
   /* The standing gallery link. Dashed rather than solid so it never reads as one of the created
      shares below it, and allowed to wrap — its sub-line is a sentence, not an email address, so on
      a 360px phone the buttons drop to their own line instead of crushing it. */
-  .cohost-row.standing { border-style: dashed; flex-wrap: wrap; }
-  .cohost-row.standing .cohost-who { flex: 1 1 190px; }
-  .cohost-row.standing .cohost-acts { margin-left: auto; }
+  /* The standing gallery link is a ShareLinkRow like any other, so the dashed frame that marks it
+     as "not one you created" lives on the wrapper rather than on the row itself. */
+  .standing {
+    border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 2px 12px;
+  }
   .cohost-tag.standing-tag { background: transparent; color: var(--text-muted); border: 1px dashed var(--border); }
   .shares-div { margin: 14px 0 12px; }
   .mt { margin-top: 12px; }
@@ -1656,20 +2404,76 @@
   .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
     padding: 12px 8px; text-align: center; }
   .stat b { display: block; font-size: 1.3rem; }
-  .stat span { font-size: 0.65rem; color: var(--text-muted); }
+  .stat span { font-size: 0.75rem; color: var(--text-muted); }
 
   /* Invite */
-  .qr-block { text-align: center; }
+  /* ONE rhythm for this whole card. Every gap in here used to come from a different place — the
+     label's own margin-top, the copybox's margin, .invite-go, .mt, .mt-sm — which measured out as
+     12 / 6 / 6 / 16 / 12 / 6 down the card. Six numbers, no idea behind any of them.
+     Now the stack owns the spacing and the children own none of it, so there is one number to
+     change and nothing can drift out of step with anything else. */
+  .qr-block { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
+  /* A label belongs to the thing it names, so it sits closer to its box than the box does to its
+     neighbours. That is the one place tighter spacing says something. */
+  .cb-group { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 100%; }
   .qr { width: 180px; height: 180px; border-radius: var(--radius-sm); background: #fff; }
-  .code-label { font-size: 0.62rem; color: var(--text-muted); font-family: var(--font-mono); letter-spacing: .04em; margin-top: 12px; text-transform: uppercase; }
-  .join-code { font-family: var(--font-mono); font-weight: 800; font-size: 1.5rem; margin-top: 2px; letter-spacing: 0.14em; color: var(--accent); }
-  .copy-code { display: inline-block; margin-top: 6px; background: none; border: 1px solid var(--border); color: var(--text-muted);
-    border-radius: 8px; padding: 3px 10px; font-size: 0.72rem; cursor: pointer; font-family: var(--font); }
-  .copy-code:hover { color: var(--text); }
-  .join-url { font-size: 0.72rem; color: var(--text-muted); word-break: break-all; margin-top: 8px; }
-  .email-section { margin-top: 12px; }
-  .email-row { display: flex; gap: 8px; }
-  .email-row input { flex: 1; }
+  .code-label { font-size: 0.72rem; color: var(--text-muted); font-family: var(--font-mono); letter-spacing: .04em; text-transform: uppercase; }
+  /* One shape for both the code and the link. */
+  /* Same disclosure shape as the email box on a shared link, so the two read as one idea. */
+  .disclose {
+    display: flex; align-items: center; gap: 6px; width: 100%;
+    background: none; border: 0; padding: 7px 0; cursor: pointer;
+    color: var(--text-muted); font: inherit; font-size: 0.82rem; text-align: left;
+  }
+  .disclose:hover { color: var(--text); }
+  .chev { display: inline-block; transition: transform 0.15s ease; }
+  .chev.open { transform: rotate(90deg); }
+  @media (prefers-reduced-motion: reduce) { .chev { transition: none; } }
+
+  /* The whole header is the control, so the number and the word are both targets rather than a
+     chevron you have to aim at. */
+  .part-head {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    background: none; border: 0; padding: 0; cursor: pointer; color: var(--text); font: inherit;
+  }
+  .part-title { margin: 0; }
+  /* Title left, its action right. */
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .card-head .card-title { margin: 0; }
+  .part-hint { margin-left: auto; font-size: 0.78rem; color: var(--text-muted); }
+  .part-head:hover .part-hint { color: var(--text); }
+
+  /* No exception. An 8px "deliberate break" on top of the stack's 10px gap still measures as one
+     odd gap in a column of even ones — the grouping it was meant to signal is already carried by
+     the buttons looking like buttons. */
+  .invite-go { margin-top: 0; }
+  .mt-sm { margin-top: 6px; }
+
+  .copybox {
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    width: 100%; max-width: 300px; margin: 0 auto;
+    padding: 8px 12px; border-radius: var(--radius-sm); cursor: pointer;
+    background: var(--surface-2); border: 1px solid var(--border); font: inherit;
+  }
+  .copybox:hover { border-color: var(--accent); }
+  .copybox:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .cb-value { max-width: 100%; min-width: 0; }
+  .cb-code { font-family: var(--font-mono); font-weight: 800; font-size: 1.5rem; letter-spacing: 0.14em; color: var(--accent); }
+  .cb-url { font-size: 0.78rem; color: var(--text-muted); word-break: break-all; }
+  /* What pressing it does, said quietly and inside the card, so the card is the whole control. */
+  .cb-hint { font-size: 0.75rem; color: var(--text-muted); letter-spacing: .04em; }
+  /* The QR and its download, as one object. */
+  .qr-wrap { position: relative; display: inline-block; line-height: 0; }
+  .qr-dl {
+    position: absolute; right: 6px; bottom: 6px;
+    width: 40px; height: 40px; border-radius: 8px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.9rem; line-height: 1;
+    background: rgba(0,0,0,0.78); color: #fff; border: 1px solid rgba(255,255,255,0.35);
+  }
+  .qr-dl:hover { background: #000; }
+  .qr-dl:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 
   /* Toggle rows */
   .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
@@ -1703,6 +2507,24 @@
   .req-flag { display: block; margin-top: 4px; color: var(--accent, #f0b429); }
   .aspect-options { display: flex; flex-wrap: wrap; gap: 8px; }
   .shape-notice { margin: 8px 0 0; font-size: .82rem; color: var(--accent, #f0b429); }
+  /* Guest delivery. Borrows the card's existing field / toggle-row / hint shapes; only the spacing
+     and the two states below are new. */
+  .gd-div { margin: 14px 0; }
+  .gd-desc { display: block; margin: 6px 0 0; }
+  /* The reminder when it cannot be offered — sits in the run of toggle rows it would have been
+     part of, so it reads as that row's absence rather than as a footnote. */
+  .gd-off { display: block; margin: 8px 0 10px; }
+  .gd-now { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .gd-state { font-size: 0.82rem; margin-bottom: 8px; }
+  .gd-sent { color: var(--text-muted); }
+  /* .btn.sm is ~31px tall, which is fine for the tidy-up buttons beside a row and not fine for the
+     one control on this page that emails every guest at once, tapped one-handed on a phone. */
+  .gd-send { min-height: 44px; }
+  .gd-foot { display: block; margin: 8px 0 0; }
+  /* What the send actually did, kept on the page: the answer to "did that work" is asked again ten
+     seconds later, by which time a toast is gone. */
+  .gd-note { margin: 8px 0 0; font-size: 0.84rem; font-weight: 700; color: var(--accent); }
+  .gd-note.bad { color: var(--danger); }
   .aspect-opt { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; font-size: 0.82rem;
     border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); cursor: pointer; }
   .pro-tag { font-size: 0.6rem; background: var(--accent); color: var(--accent-ink, #111); padding: 1px 5px; border-radius: 4px; font-weight: 700; }
@@ -1714,7 +2536,11 @@
   .presets { display: flex; flex-wrap: wrap; gap: 8px; }
   .preset { position: relative; width: 64px; height: 48px; border-radius: var(--radius-sm); border: 2px solid; cursor: pointer;
     display: flex; align-items: center; justify-content: center; transition: transform .1s, box-shadow .1s; }
-  .preset span { font-size: 0.65rem; font-weight: 700; text-transform: capitalize; }
+  .preset span { font-size: 0.72rem; font-weight: 700; text-transform: capitalize; }
+  .custom-chip {
+    background: var(--surface-2); border-color: var(--accent); color: var(--text-muted);
+    cursor: default; position: relative;
+  }
   .preset.selected { transform: scale(1.06); box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
   .preset-check { position: absolute; top: -7px; right: -7px; width: 18px; height: 18px; border-radius: 50%;
     background: var(--accent); color: var(--accent-ink, #111); font-size: 0.62rem; font-weight: 800;
@@ -1736,8 +2562,30 @@
   .p-card select { font: inherit; font-size: .8rem; padding: 5px 7px; border-radius: 8px;
     border: 1px solid var(--border); background: var(--bg); color: var(--text); max-width: 130px; }
   .p-count { font-weight: 600; opacity: .6; font-size: .85em; }
-  .p-search { width: 100%; margin: 0 0 10px; }
-  .p-shots { color: var(--accent); text-decoration: none; font-weight: 600; }
+  /* A proper field, not a bare thin input: the icon sits inside it and the border belongs to the
+     wrapper, so the whole thing reads as one control at a comfortable height. */
+  .p-search {
+    display: flex; align-items: center; gap: 8px; width: 100%; margin: 0 0 12px;
+    padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--surface-2);
+  }
+  .p-search:focus-within { border-color: var(--accent); }
+  .p-search-i { flex: none; font-size: 0.85rem; opacity: 0.65; }
+  .p-search input {
+    flex: 1; min-width: 0; padding: 9px 0; border: 0; background: none; color: var(--text);
+    font: inherit; font-size: 0.85rem; outline: none;
+  }
+  .p-search-x {
+    flex: none; border: 0; background: none; cursor: pointer; padding: 4px;
+    color: var(--text-muted); font-size: 0.8rem; line-height: 1;
+  }
+  .p-search-x:hover { color: var(--text); }
+  /* Tricks read as an achievement, so they carry the accent the trick list uses elsewhere. */
+  .p-tricks { color: var(--accent); }
+  /* 12px tall was the whole link box. Padding gives a thumb something to land on without moving
+     anything — it sits in a line of small print that already has room around it. */
+  .p-shots { color: var(--accent); text-decoration: none; font-weight: 600;
+    display: inline-block; padding: 6px 2px; margin: -6px 0; }
   .p-shots:hover { text-decoration: underline; }
   .participant-row { display: flex; gap: 12px; align-items: center; }
   .participant-row .p-info { flex: 1; min-width: 0; }
@@ -1746,7 +2594,10 @@
     display: flex; align-items: center; justify-content: center; font-weight: 800; flex-shrink: 0; }
   .p-name { font-weight: 700; font-size: 0.9rem; }
   .p-email { font-size: 0.78rem; color: var(--text); }
-  .p-meta { font-size: 0.72rem; color: var(--text-muted); }
+  .p-meta { font-size: 0.78rem; color: var(--text-muted); }
+  /* Same fix as .cohost-sub, applied before it bites rather than after: this overflows its box by
+     11px at 360 and clears the Remove button by 1.2px. One longer address and it collides. */
+  .p-email { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   @media (max-width: 480px) {
     .stat-grid { grid-template-columns: repeat(2, 1fr); }

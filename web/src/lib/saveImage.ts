@@ -110,6 +110,10 @@ const CHUNK_FILES = 10;
 
 export interface SaveManyProgress { done: number; total: number; }
 
+/** One thing to save. `id` is optional and is only used to report back which items landed, so a
+ *  caller can mark them — see lib/saved.ts. */
+export interface SaveItem { url: string; filename: string; id?: string; }
+
 /** Save many photos the way this platform actually keeps them.
  *
  *  Returns how many were saved. A cancelled share stops the whole run — carrying on would keep
@@ -118,12 +122,18 @@ export interface SaveManyProgress { done: number; total: number; }
  *  Non-iOS callers should prefer the server's zip: one file, one click, no memory ceiling. This is
  *  for the platform where a zip is a dead end. */
 export async function saveMany(
-  items: { url: string; filename: string }[],
+  items: SaveItem[],
   onProgress?: (p: SaveManyProgress) => void,
-): Promise<{ saved: number; cancelled: boolean }> {
+): Promise<{ saved: number; cancelled: boolean; savedIds: string[] }> {
   let saved = 0;
+  // WHICH ones landed, not just how many. A count cannot mark a grid: a roll where three fetches
+  // failed and a share was cancelled halfway needs to tick exactly the ones that got through.
+  const savedIds: string[] = [];
   for (let i = 0; i < items.length; ) {
     const batch: File[] = [];
+    // Kept alongside the batch so an id is only recorded once the batch it belongs to is handed
+    // over — a file that was fetched but never shared must not be ticked.
+    const batchIds: string[] = [];
     let bytes = 0;
     // Fetch until the batch is full by either measure. The first file always goes in, however big,
     // or a single oversized video would stall the loop forever.
@@ -134,6 +144,7 @@ export async function saveMany(
         if (r.ok) {
           const b = await r.blob();
           batch.push(new File([b], it.filename, { type: b.type || 'image/jpeg' }));
+          if (it.id) batchIds.push(it.id);
           bytes += b.size;
         }
       } catch { /* skip the ones that fail; the rest of the roll should still arrive */ }
@@ -147,17 +158,21 @@ export async function saveMany(
         for (const f of batch) downloadBlob(f, f.name);
       }
       saved += batch.length;
+      savedIds.push(...batchIds);
       onProgress?.({ done: Math.min(i, items.length), total: items.length });
     } catch (e) {
-      if ((e as DOMException)?.name === 'AbortError') return { saved, cancelled: true };
+      // A dismissed share sheet is the one case where nothing reached the device, so this batch is
+      // NOT recorded — ticking it would be the exact overstatement the marks exist to avoid.
+      if ((e as DOMException)?.name === 'AbortError') return { saved, cancelled: true, savedIds };
       // Anything else: fall back to downloads for this batch rather than losing it.
       for (const f of batch) downloadBlob(f, f.name);
       saved += batch.length;
+      savedIds.push(...batchIds);
     }
     // Let the tab breathe between batches so the memory from the last one is actually released.
     await new Promise((r) => setTimeout(r, 60));
   }
-  return { saved, cancelled: false };
+  return { saved, cancelled: false, savedIds };
 }
 
 /** Does this device want FILES rather than a zip?
@@ -176,10 +191,23 @@ export function prefersFiles(): boolean {
   } catch { return false; }
 }
 
-/** Above this many, even a phone is better off with the zip.
+/** Above this many, ask before saving as files — but only where the count actually costs anybody
+ *  anything.
  *
- *  Files mean one share sheet per batch on iOS and one download apiece on Android. That is a good
- *  trade for a handful and a miserable one for a whole event — three hundred photos is thirty
- *  sheets or three hundred notifications. The gallery has a Select mode for exactly this: pick the
- *  ones you actually want and they come back as files. */
+ *  These two platforms are not the same ask, and treating them as one is what made "Download all"
+ *  hand back a zip on a 55-shot roll:
+ *
+ *  - Android and desktop: a save is a silent, sequential download. Fifty files is fifty rows in the
+ *    downloads list and not one tap. saveMany() already chunks for memory, so there is no ceiling
+ *    to protect — a cap here would be us inventing a limit the platform does not have.
+ *  - iOS: every chunk is a share sheet somebody has to tap through. Fifty photos is six prompts in
+ *    a row, which is worth warning about before it starts.
+ *
+ *  So the number is real on iOS and absent everywhere else. (Chrome does ask once per site before
+ *  it will auto-download multiple files; that is a single prompt, not one per photo.) */
 export const FILES_MAX = 25;
+
+/** How many files this platform will save before it is worth stopping to ask. */
+export function filesLimit(): number {
+  return isIOS() ? FILES_MAX : Infinity;
+}
