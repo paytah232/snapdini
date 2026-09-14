@@ -1518,8 +1518,21 @@
           </button>
         {/each}
       </div>
-      <p class="field-hint gd-later">Starring favourites, or picking an exact time to send, wait for
-        your event page — once there are photos to look at.</p>
+      {#if moderationEnabled}
+        <!-- The option above says "Nothing for you to do", which stops being true the moment
+             moderation is on: guestSeesPhoto() only counts APPROVED shots, so an unapproved gallery
+             is an empty one. And the sweep does not wait — on an empty scope it claims the event,
+             emails the host and leaves the sending to them, permanently. A host who chose the
+             hands-off option is owed that before the night, not after it. -->
+        <p class="field-hint gd-moderated">
+          <b>Moderate photos is on</b>, so guests only ever see shots you have approved. Approve some
+          before the gallery opens. If none are approved by then, we email you rather than send your
+          guests an empty page — and the link is yours to send after that.
+        </p>
+      {/if}
+
+      <p class="field-hint gd-later">Two more options — send only the ones you star, or schedule an
+        exact time — are on your event page once the photos are in.</p>
 
     </div>
 
@@ -2265,6 +2278,17 @@
 
   /* One line under a page's title saying what this page is FOR — the thing that stops "when do the
      photos appear" and "how do guests get them" reading as two settings for the same job. */
+  /* A consequence of a choice made on the previous page, so it earns a little more weight than the
+     hints around it without becoming a warning — nothing is wrong, there is just something to do. */
+  .gd-moderated {
+    margin-top: 14px;
+    padding: 10px 12px;
+    border-left: 2px solid var(--accent);
+    background: var(--surface-2);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  }
+  .gd-moderated b { color: var(--text); }
+
   .lead-note {
     margin: 0 0 16px;
     font-size: 0.82rem;
