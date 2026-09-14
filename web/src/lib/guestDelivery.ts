@@ -40,7 +40,7 @@ export const GUEST_DELIVERY_OPTIONS: readonly GuestDeliveryOption[] = [
   { value: 'scheduled', label: 'At a time I choose',
     desc: 'Pick the date and time below. It goes out then, whether or not you are near your phone.' },
   { value: 'manual', label: "I'll send it myself",
-    desc: 'No email is ever sent automatically. You press send from your event page when you are ready.' },
+    desc: 'No email is ever sent automatically. You press send from your event page when you are ready, and pick which photos then.' },
 ];
 
 /** How far ahead of the gallery opening the "photos release tomorrow" email goes out.

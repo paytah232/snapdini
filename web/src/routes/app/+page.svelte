@@ -1517,9 +1517,16 @@
         {/each}
       </div>
 
-      {#if guestDelivery === 'scheduled' || guestDelivery === 'manual'}
-        <!-- Only on the two options that do not already say it. On the other two the words the host
-             picked ARE the answer, and asking again would let the two disagree. -->
+      <!-- Asked only where nobody will be there to answer it later.
+           'scheduled' fires on its own at a time the host is not expected to be near their phone,
+           so the scope has to be settled now. 'manual' is the opposite: the host presses the button
+           themselves, with the same "Which photos do they get?" control sitting on the event page
+           beside it — so choosing here is choosing weeks early for a decision they will be standing
+           in front of anyway. It defaults to everything, which is what "send it myself" almost
+           always means, and scopeFor() keeps the stored value honest either way.
+           The other two options ARE a scope in their own words, and asking again would let the two
+           disagree. -->
+      {#if guestDelivery === 'scheduled'}
         <div class="field" style="margin-top:14px">
           <!-- svelte-ignore a11y-label-has-associated-control -->
           <label id="guest-scope-label">Which photos do they get?</label>
