@@ -890,16 +890,6 @@
         </p>
       </div>
 
-      <!-- It changes what a guest's phone DOES, which is this page's subject and not "Other
-           settings" two steps away. -->
-      <div class="field toggle-field">
-        <span class="tf-label">
-          <label for="no-flash">No flash</label>
-          <HelpTip text={`Stops guests' phones firing the bright rear camera flash — handy for ceremonies, dark venues or anywhere a flash would be disruptive. The gentle front-camera selfie flash still works.`} />
-        </span>
-        <Toggle id="no-flash" bind:checked={noFlash} />
-      </div>
-
       {#if eventType && seedMissions}
         <!-- Only once the list exists: a control for varying something that is switched off is a
              question about nothing. -->
@@ -914,6 +904,16 @@
           </p>
         </div>
       {/if}
+
+      <!-- It changes what a guest's phone DOES, which is this page's subject and not "Other
+           settings" two steps away. -->
+      <div class="field toggle-field">
+        <span class="tf-label">
+          <label for="no-flash">No flash</label>
+          <HelpTip text={`Stops guests' phones firing the bright rear camera flash — handy for ceremonies, dark venues or anywhere a flash would be disruptive. The gentle front-camera selfie flash still works.`} />
+        </span>
+        <Toggle id="no-flash" bind:checked={noFlash} />
+      </div>
 
       <div class="field">
         <label for="event-blurb">Welcome blurb <span class="hint">(optional — shown on the join screen)</span></label>
@@ -1496,7 +1496,7 @@
 
       <div class="mail-opt">
         <div class="field toggle-field">
-          <span class="tf-label"><label class="mail-name" for="g-thanks">Thank-you &amp; release date</label></span>
+          <span class="tf-label"><label for="g-thanks">Thank-you &amp; release date</label></span>
           <Toggle id="g-thanks" bind:checked={guestMailThanks} />
         </div>
         <!-- Not "email guests when the event ends": that would be a lie when this is off. The email
@@ -1511,7 +1511,7 @@
            as the answer to a question the host was about to ask. -->
       <div class="mail-opt" class:unavailable={!guestReminderOffered}>
         <div class="field toggle-field">
-          <span class="tf-label"><label class="mail-name" for="g-reminder">Day-before reminder</label></span>
+          <span class="tf-label"><label for="g-reminder">Day-before reminder</label></span>
           <Toggle id="g-reminder" bind:checked={guestMailReminder} disabled={!guestReminderOffered} />
         </div>
         <p class="field-hint">
@@ -1522,7 +1522,7 @@
 
       <div class="mail-opt" class:unavailable={!guestLiveAutomatic}>
         <div class="field toggle-field">
-          <span class="tf-label"><label class="mail-name" for="g-live">The gallery link</label></span>
+          <span class="tf-label"><label for="g-live">The gallery link</label></span>
           <Toggle id="g-live" checked={guestLiveAutomatic} disabled />
         </div>
         <p class="field-hint">
@@ -1732,6 +1732,19 @@
     color: var(--text-muted);
     margin-bottom: 6px;
   }
+  /* A field's label NAMES the control; the hint under it explains it. They were the same weight and
+     the same colour, 0.64px apart, so "Event name" read as another line of explanation rather than
+     as the heading of one. Weight and colour carry it — resizing every label in the form would be a
+     much bigger change than the complaint. */
+  /* Both idioms, HERE rather than only in app.css: a component's own <style> is emitted after the
+     global sheet, so at equal specificity the muted `label` rule above wins and a global fix lands
+     for weight but silently loses on colour — which is how the toggles ended up bold-but-grey
+     beside a bright "Welcome blurb" in the same card. */
+  .field > label,
+  .tf-label > label {
+    font-weight: 700;
+    color: var(--text);
+  }
   .hint {
     color: var(--text-muted);
     font-size: 0.75em;
@@ -1921,9 +1934,8 @@
     border-bottom: 1px solid var(--border);
   }
   .mail-lead + .mail-opt { margin-top: 14px; }
-  .mail-name { font-weight: 700; font-size: 0.92rem; color: var(--text); }
   /* Off and out of reach, but still legible — it is explaining itself, not greyed into nothing. */
-  .mail-opt.unavailable .mail-name { color: var(--text-muted); }
+  .mail-opt.unavailable .tf-label > label { color: var(--text-muted); }
   .mail-off { margin: 0 0 14px; }
 
   /* Which of step 1's pages this is. The strip above counts the five steps and cannot show this,

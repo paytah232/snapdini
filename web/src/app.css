@@ -151,3 +151,22 @@ input[type='radio'] { accent-color: var(--accent); }
     scroll-behavior: auto !important;
   }
 }
+
+/* ── The name of a control is a heading, and must not read like its own explanation ──────────────
+ *
+ * Every settings row in this product is a NAME and a SENTENCE: "Moderate photos" over "Nothing a
+ * guest takes reaches the gallery until you have said yes to it." Set at the same weight and the
+ * same colour, the pair reads as one run of prose with a switch beside it, and a column of them
+ * reads as an essay — you cannot skim for the thing you came to change.
+ *
+ * Global on purpose. These rows are written four different ways across four components
+ * (.tf-label in the wizard, .t-label on the event page, .chk in the poster and slideshow panels),
+ * Svelte scopes styles to their own file, and fixing them one file at a time is exactly how they
+ * came to disagree. The explanation under each keeps .field-hint / .t-sub, which are already muted
+ * and smaller — the contrast is the point. */
+.tf-label > label,
+label.t-label {
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.3;
+}

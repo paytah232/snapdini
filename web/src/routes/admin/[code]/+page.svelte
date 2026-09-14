@@ -2596,7 +2596,9 @@
 
   /* Fields */
   .field { margin-bottom: 12px; }
-  .field > label { display: block; font-size: 0.8rem; font-weight: 600; margin-bottom: 6px; }
+  /* 700 and full text colour, matching the wizard — at 600 and inherited colour these still read
+     as the same voice as the hint underneath. */
+  .field > label { display: block; font-size: 0.8rem; font-weight: 700; color: var(--text); margin-bottom: 6px; }
   .field-row { display: flex; gap: 12px; }
   .field-row .field { flex: 1; }
   input[type='text'], input[type='date'], input[type='email'], input[list],

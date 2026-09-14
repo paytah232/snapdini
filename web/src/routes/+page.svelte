@@ -88,7 +88,7 @@
 
   const features = [
     { ic: '🎞️', t: 'A limited roll', d: 'Each guest gets a set number of shots. No do-overs, no endless scrolling — every frame counts.' },
-    { ic: '🪄', t: 'The grand reveal', d: 'Photos stay up the magician’s sleeve all night, then reappear together the moment your event ends.' },
+    { ic: '🪄', t: 'The grand reveal', d: 'Photos stay up the magician’s sleeve all night, then reappear together the moment your event ends — as one gallery, and as a film you can play at the next one.' },
     { ic: '🔗', t: 'Join in one tap', d: 'Scan a QR or punch in a short code. No app to install — poof, they’re in.' },
     { ic: '🎩', t: 'One shared gallery', d: 'Every guest’s shots land in one gallery to relive and download together.' },
       // Sits here rather than in the hero: the lede already explains the whole product in eight
@@ -98,17 +98,20 @@
   ];
   const steps = [
     { n: '01 / CONJURE', t: 'Set the stage', d: 'Name it, choose how many shots each guest gets, and when the photos reappear.' },
-    { n: '02 / SHARE', t: 'Hand out the code', d: 'Drop the QR on the tables or share the link. Guests join in a tap.' },
+    // "Drop the QR on the tables" is the exact moment a host thinks "…on what?" — and we answer
+    // that in the product and used to say nothing about it here. Every competitor has QR-join;
+    // what we have is the thing that gets the QR onto a table looking like it belongs there.
+    { n: '02 / SHARE', t: 'Put it on the tables', d: 'Design the poster and table cards right here — pick a look, print, done. Or just send the link. Guests join in a tap.' },
     { n: '03 / REVEAL', t: 'Make them reappear', d: 'Everyone shoots through the night — then the whole gallery reappears at once.' }
   ];
 
   // ── SEO ──
   const TITLE = 'Snapdini — Disposable Camera App for Events & Weddings | QR Photo Sharing';
-  const DESC = 'Snapdini is a digital disposable camera for events. Guests scan a QR code to snap a limited roll — no app to install — and the whole gallery reappears when your event ends. Free for up to 10 guests.';
+  const DESC = 'Snapdini is a digital disposable camera for events. Guests scan a QR code to snap a limited roll — no app to install — and the whole gallery reappears when your event ends, as a gallery and as a slideshow film. Design printable posters and table cards in the app. Free for up to 10 guests.';
   const faqs = [
     { q: 'What is Snapdini?', a: 'Snapdini is a digital disposable camera for weddings, parties and events. Guests scan a QR code to open a camera with a limited roll of shots, and every photo lands in one shared gallery that reappears when the event ends.' },
     { q: 'Do guests need to download an app?', a: 'No. Guests scan a QR code or open a link and the camera opens right in their browser — nothing to install.' },
-    { q: 'How much does Snapdini cost?', a: 'It is free for events of up to 10 guests with every feature included. Larger events are a one-off pass starting at A$5, with optional add-ons for extra shots, frame sizes and video clips.' },
+    { q: 'How much does Snapdini cost?', a: 'It is free for events of up to 10 guests with every feature included — including the printable posters and table cards, and the slideshow film of the gallery. Larger events are a one-off pass starting at A$5, with optional add-ons for extra shots, frame sizes and video clips.' },
     { q: 'When do the photos appear?', a: 'You choose: photos can reappear all at once the moment your event ends (the classic disposable-camera reveal), or show up instantly as they are taken.' },
     { q: 'Can I use it for a wedding?', a: 'Yes — Snapdini is ideal for weddings, birthdays, parties and corporate events. Print the QR poster for the tables and guests join in a tap.' },
     { q: 'Can everyone download the photos?', a: 'Yes. All shots collect in one shared gallery you can browse and download together, including a full zip of the event.' },
