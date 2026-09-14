@@ -927,7 +927,8 @@
                       aria-pressed={videoSeconds === v.seconds}
                       aria-label="{v.seconds} second clips, {priceAria(p, money)}"
                       on:click={() => (videoSeconds = v.seconds)}>
-                <span class="fc-t">{v.seconds}s</span><span class="fc-p {tag.cls}">{tag.text}</span>
+                <span class="fc-t">{v.seconds}s</span><span class="fc-p" class:was={tag.cls === 'was'} class:add={tag.cls === 'add'}
+                      class:incl={tag.cls === 'incl'}>{tag.text}</span>
               </button>
             {/each}
           </div>
@@ -962,7 +963,8 @@
                     aria-label={billing?.billingEnabled ? `${sp.label} shots each, ${priceAria(p, money)}` : `${sp.label} shots each`}
                     on:click={() => (maxPhotos = sp.value)}>
               <span class="fc-t">{sp.label}</span>
-              {#if billing?.billingEnabled}<span class="fc-p {tag.cls}">{tag.text}</span>{/if}
+              {#if billing?.billingEnabled}<span class="fc-p" class:was={tag.cls === 'was'} class:add={tag.cls === 'add'}
+                      class:incl={tag.cls === 'incl'}>{tag.text}</span>{/if}
             </button>
           {/each}
         </div>
@@ -998,7 +1000,8 @@
             <button type="button" class="fx-chip" class:on={framePackOn} aria-pressed={framePackOn}
                     aria-label="Every shape, {priceAria(framePrice, money)}"
                     on:click={() => (framePackOn = true)}>
-              <span class="fc-t">Every shape</span><span class="fc-p {frameTag.cls}">{frameTag.text}</span>
+              <span class="fc-t">Every shape</span><span class="fc-p" class:was={frameTag.cls === 'was'} class:add={frameTag.cls === 'add'}
+                    class:incl={frameTag.cls === 'incl'}>{frameTag.text}</span>
             </button>
           </div>
         {:else}
@@ -1054,7 +1057,8 @@
                       aria-label={billing?.billingEnabled ? `Keep photos ${r.label}, ${priceAria(retentionPrice(r), money, r.included ? 'included' : 'free')}` : `Keep photos ${r.label}`}
                       on:click={() => (retentionDays = r.days)}>
                 <span class="fc-t">{r.label}</span>
-                {#if billing?.billingEnabled}<span class="fc-p {tag.cls}">{tag.text}</span>{/if}
+                {#if billing?.billingEnabled}<span class="fc-p" class:was={tag.cls === 'was'} class:add={tag.cls === 'add'}
+                      class:incl={tag.cls === 'incl'}>{tag.text}</span>{/if}
               </button>
             {/each}
           </div>
@@ -1694,16 +1698,6 @@
     font-weight: 700;
   }
 
-  .pro-tag, .pack-tag {
-    background: var(--accent);
-    color: var(--accent-ink, #111);
-    font-size: 0.75rem;
-    font-weight: 800;
-    padding: 1px 5px;
-    border-radius: 4px;
-    text-transform: uppercase;
-    margin-left: 4px;
-  }
   .field-hint { font-size: 0.76rem; color: var(--text-muted); margin: 6px 0 0; }
   /* One email switch and the line that says when it fires, as a single block. The rows are the
      page's existing .toggle-field; this only groups each with its own explanation so the gaps
@@ -1815,7 +1809,6 @@
   .quote-lines .incl { color: var(--success); font-weight: 700; }
   /* Free-at-this-tier price: struck through, green — "you'd pay this, but it's free right now". */
   .was { color: var(--success); font-weight: 700; text-decoration: line-through; }
-  .pack-tag.free { background: var(--success); }
   .quote-allfree { font-size: 0.78rem; color: var(--text-muted); margin: 8px 0 0; }
   .quote-note { font-size: 0.78rem; color: var(--accent-dark); margin-top: 6px; }
 
