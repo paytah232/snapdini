@@ -141,7 +141,7 @@
   import { track } from '$lib/analytics';
   import { createEvent, joinEvent, REVEAL_CUSTOM, REVEAL_TICK_MS,
            ceilToRevealTick, zonedWallTimeToMs, msToZonedWallTime, revealMomentLabel } from '$lib/events';
-  import { GUEST_DELIVERY_DEFAULT, GUEST_DELIVERY_OPTIONS, guestReleaseAt, releaseDateKnown,
+  import { GUEST_DELIVERY_DEFAULT, GUEST_DELIVERY_OPTIONS, GUEST_DELIVERY_AT_CREATION, guestReleaseAt, releaseDateKnown,
            reminderCanFire, reminderFiresAt, revealInstant, scheduledSendIssue, scopeFor,
            type GuestDelivery, type GuestSendScope } from '$lib/guestDelivery';
   import { EVENT_TYPES, DEFAULT_COUNT, packFor, pickChallenges, tickFor, varySets } from '$lib/challenges';
@@ -1503,7 +1503,9 @@
       <!-- The same card shape as Reveal mode: the host has already made one choice that looks
            exactly like this, so this is a decision they recognise rather than a fourth widget. -->
       <div class="reveal-options" role="group" aria-labelledby="guest-delivery-q">
-        {#each GUEST_DELIVERY_OPTIONS as o}
+        <!-- Only the two a host can answer before the event. The other two ask about photographs
+             nobody has taken yet — see GUEST_DELIVERY_AT_CREATION — and both live on the event page. -->
+        {#each GUEST_DELIVERY_OPTIONS.filter((o) => GUEST_DELIVERY_AT_CREATION.includes(o.value)) as o}
           <button
             type="button"
             class="reveal-opt"
@@ -1516,58 +1518,9 @@
           </button>
         {/each}
       </div>
+      <p class="field-hint gd-later">Starring favourites, or picking an exact time to send, wait for
+        your event page — once there are photos to look at.</p>
 
-      <!-- Asked only where nobody will be there to answer it later.
-           'scheduled' fires on its own at a time the host is not expected to be near their phone,
-           so the scope has to be settled now. 'manual' is the opposite: the host presses the button
-           themselves, with the same "Which photos do they get?" control sitting on the event page
-           beside it — so choosing here is choosing weeks early for a decision they will be standing
-           in front of anyway. It defaults to everything, which is what "send it myself" almost
-           always means, and scopeFor() keeps the stored value honest either way.
-           The other two options ARE a scope in their own words, and asking again would let the two
-           disagree. -->
-      {#if guestDelivery === 'scheduled'}
-        <div class="field" style="margin-top:14px">
-          <!-- svelte-ignore a11y-label-has-associated-control -->
-          <label id="guest-scope-label">Which photos do they get?</label>
-          <div class="type-options" role="group" aria-labelledby="guest-scope-label">
-            <button type="button" class="type-opt" class:selected={guestSendScope === 'all'}
-                    aria-pressed={guestSendScope === 'all'}
-                    on:click={() => (guestSendScope = 'all')}>Everything</button>
-            <button type="button" class="type-opt" class:selected={guestSendScope === 'favourites'}
-                    aria-pressed={guestSendScope === 'favourites'}
-                    on:click={() => (guestSendScope = 'favourites')}>Just my favourites</button>
-          </div>
-        </div>
-      {/if}
-
-      {#if guestDelivery === 'scheduled'}
-        <div class="field-row reveal-custom">
-          <div class="field">
-            <label for="guest-send-date">Send date</label>
-            <input id="guest-send-date" type="date" min={todayStr} bind:value={guestSendDate} />
-          </div>
-          <div class="field">
-            <label for="guest-send-time">Send time</label>
-            <!-- The same 15-minute grid as the reveal: a send is checked on that tick, so finer
-                 minutes are precision we could not honour. -->
-            <TimeField id="guest-send-time" bind:value={guestSendTime} snap="up" />
-          </div>
-        </div>
-        <p class="hint reveal-note">
-          {#if guestSendIssue === 'missing'}
-            Pick the date and time — it's read in the event's timezone{timezone ? ` (${timezone})` : ''}.
-          {:else if guestSendIssue === 'before-reveal'}
-            That's before your photos are revealed ({guestRevealLabel}) — your guests would get a link
-            to a gallery that is still shut. Pick that moment or later.
-          {:else}
-            Your guests get the photos from <b>{guestSendLabel}</b>.
-            {#if guestSendMoved}
-              Sends are checked every {REVEAL_TICK_MS / 60000} minutes, so yours moves to the next check.
-            {/if}
-          {/if}
-        </p>
-      {/if}
     </div>
 
     <!-- Collapsed, because three toggles with a paragraph each is more than this step can carry

@@ -4,7 +4,7 @@
 // gallery). Neither raises anything anywhere, so they are pinned here.
 import { describe, it, expect } from 'vitest';
 import {
-  GUEST_DELIVERY_DEFAULT, GUEST_DELIVERY_OPTIONS, REMINDER_LEAD_MS,
+  GUEST_DELIVERY_DEFAULT, GUEST_DELIVERY_OPTIONS, GUEST_DELIVERY_AT_CREATION, REMINDER_LEAD_MS,
   guestReleaseAt, isManualDelivery, releaseDateKnown, reminderCanFire, reminderFiresAt,
   revealInstant, scheduledSendIssue, scopeFor,
 } from './guestDelivery';
@@ -22,6 +22,13 @@ describe('the options a host is offered', () => {
   it('offers all four, worded as outcomes rather than as the stored value', () => {
     expect(GUEST_DELIVERY_OPTIONS.map((o) => o.value))
       .toEqual(['all_on_reveal', 'favourites_manual', 'scheduled', 'manual']);
+    // …and the wizard offers the subset a host can answer before the event exists. The other two
+    // ask about photographs nobody has taken yet, so they belong on the event page.
+    expect(GUEST_DELIVERY_AT_CREATION).toEqual(['all_on_reveal', 'manual']);
+    expect(GUEST_DELIVERY_AT_CREATION).toContain(GUEST_DELIVERY_DEFAULT);
+    for (const v of GUEST_DELIVERY_AT_CREATION) {
+      expect(GUEST_DELIVERY_OPTIONS.some((o) => o.value === v)).toBe(true);
+    }
     for (const o of GUEST_DELIVERY_OPTIONS) {
       expect(o.label).not.toContain('_');
       expect(o.desc.length).toBeGreaterThan(0);

@@ -40,8 +40,21 @@ export const GUEST_DELIVERY_OPTIONS: readonly GuestDeliveryOption[] = [
   { value: 'scheduled', label: 'At a time I choose',
     desc: 'Pick the date and time below. It goes out then, whether or not you are near your phone.' },
   { value: 'manual', label: "I'll send it myself",
-    desc: 'No email is ever sent automatically. You press send from your event page when you are ready, and pick which photos then.' },
+    desc: 'Nothing goes out until you say so. Send from your event page whenever you like — everything, or just the ones you starred.' },
 ];
+
+/**
+ * The two a host can honestly answer BEFORE the event.
+ *
+ * All four are real settings and all four live on the event page. But two of them ask a question
+ * nobody can answer yet: "just my favourites, when I've picked them" is a choice about photographs
+ * that do not exist, and "at a time I choose" asks for a moment before the host knows how the night
+ * went. Offering them at creation invites a decision that has to be revisited anyway.
+ *
+ * So the wizard asks the one thing that IS knowable on the way in — does this happen on its own, or
+ * do I want to look first — and the finer grain waits until there is something to look at.
+ */
+export const GUEST_DELIVERY_AT_CREATION: readonly GuestDelivery[] = ['all_on_reveal', 'manual'];
 
 /** How far ahead of the gallery opening the "photos release tomorrow" email goes out.
  *  Re-exported from the shared rule so the screens keep importing it from one place. */
