@@ -1,8 +1,9 @@
 // Small shared server-side helpers, deduped out of the route files.
 import type { Request } from 'express';
 import type { Event } from './schema';
+import { scheduledRevealAt } from '../../../shared/reveal';
 
-type RevealFields = Pick<Event, 'revealMode' | 'revealedAt' | 'expiresAt' | 'revealDelayHours'> & { revealHidden?: boolean };
+type RevealFields = Pick<Event, 'revealMode' | 'revealedAt' | 'expiresAt' | 'revealDelayHours' | 'revealAt'> & { revealHidden?: boolean };
 
 // Whether an event's photos are currently visible, per its reveal mode + organizer overrides.
 export function isRevealed(event: RevealFields): boolean {
@@ -12,9 +13,10 @@ export function isRevealed(event: RevealFields): boolean {
   if (event.revealMode === 'instant') return true;
   // "Reveal all now" sets revealedAt and wins in any mode (e.g. reveal an at_end event early).
   if (event.revealedAt) return true;
-  if (event.revealMode === 'at_end')
-    return Date.now() >= event.expiresAt + (event.revealDelayHours || 0) * 3600000;
-  return false;
+  // Nothing schedules this — the instant is recomputed on every read, so the gate opens on its own
+  // the moment it passes and there is no timer anywhere to fall behind or double-fire.
+  const at = scheduledRevealAt(event);
+  return at !== null && Date.now() >= at;
 }
 
 // Public base URL for building links (QR, emails, verify/redirects). Always prefer the

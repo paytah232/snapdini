@@ -51,6 +51,18 @@ export const emailTokens = pgTable('email_tokens', {
   userIdx: index('idx_email_tokens_user').on(t.userId),
 }));
 
+// Per-ACCOUNT email opt-outs. A ROW MEANS OPTED OUT — there is no subscribed row and no boolean to
+// read the wrong way round, so an account with no rows here receives everything, which is every
+// account that existed before the table did.
+//
+// Keyed to the user rather than an event on purpose: asking us to stop sending a kind of message is
+// a standing instruction from a recipient, not a setting on one party. See 0045_email_preferences.
+export const emailPreferences = pgTable('email_preferences', {
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  kind: text('kind').notNull(),             // the builder name in lifecycle-emails.ts, e.g. 'surveyEmail'
+  optedOutAt: ms('opted_out_at').notNull(), // when they asked — the record of the request itself
+}, (t) => ({ pk: primaryKey({ columns: [t.userId, t.kind] }) }));
+
 export const sessions = pgTable('sessions', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
@@ -81,6 +93,11 @@ export const events = pgTable('events', {
   faceMatchingEnabled: boolean('face_matching_enabled').notNull().default(false),
   revealMode: text('reveal_mode').notNull().default('instant'),
   revealDelayHours: integer('reveal_delay_hours').notNull().default(0),
+  // An exact instant the host picked instead of a delay off the end (see shared/reveal.ts).
+  // Absolute rather than derived: a delay is anchored to expires_at, so rescheduling the event
+  // would drag a date the host chose on purpose to a different day. NULL means fall back to
+  // reveal_delay_hours — which is every event that existed before this column.
+  revealAt: ms('reveal_at'),
   moderationEnabled: boolean('moderation_enabled').notNull().default(false),
   startsAt: ms('starts_at').notNull(),
   // Anchor for the reschedule window: the start this event was FIRST created with.
@@ -127,6 +144,32 @@ export const events = pgTable('events', {
   hostRewardCode: text('host_reward_code'),
   hostRewardExpiresAt: ms('host_reward_expires_at'),
   hostRewardSentAt: ms('host_reward_sent_at'),
+  // ── Guest delivery: getting the photos to the people who took them ─────────
+  // See drizzle/0046_guest_delivery.sql. Nothing here can email an existing event's guests: the
+  // consent gate is participants.wantsPhotos, which is false on every row that already exists.
+  // 'all_on_reveal' | 'favourites_manual' | 'scheduled' | 'manual' — WHEN the gallery link goes.
+  guestDelivery: text('guest_delivery').notNull().default('all_on_reveal'),
+  // 'all' | 'favourites' — WHICH photos that link shows. Separate from the mode, so "favourites,
+  // automatically at reveal" and "everything, by hand" are both sayable.
+  guestSendScope: text('guest_send_scope').notNull().default('all'),
+  // The instant for 'scheduled'. NEVER earlier than the reveal — a gallery link that lands before
+  // the gallery opens sends a guest to a locked page. Clamped up on write, re-checked at send.
+  guestSendAt: ms('guest_send_at'),
+  // One-shot guards, claimed atomically the way welcomeSentAt is. Three of them, because the three
+  // guest messages are three occasions: the guard that stops the link going twice must not also
+  // stop the thank-you that precedes it.
+  guestsSentAt: ms('guests_sent_at'),                 // the gallery link
+  guestThanksSentAt: ms('guest_thanks_sent_at'),      // the event-end message
+  guestReminderSentAt: ms('guest_reminder_sent_at'),  // "photos release tomorrow"
+  // Which of the three the host wants. The day-before reminder is off by default — it is the one
+  // that is noise for most events, and nobody should have to turn it off.
+  //
+  // guestMailThanks does NOT decide whether a guest who asked for their photos hears from us at the
+  // end: they asked, and that consent stands on its own. It decides whether that one message is
+  // also a thank-you carrying the release date.
+  guestMailThanks: boolean('guest_mail_thanks').notNull().default(true),
+  guestMailReminder: boolean('guest_mail_reminder').notNull().default(false),
+  guestMailLive: boolean('guest_mail_live').notNull().default(true),
   createdAt: ms('created_at').notNull(),
 }, (t) => ({
   slugIdx: uniqueIndex('idx_events_slug').on(t.slug).where(sql`${t.slug} IS NOT NULL`),
@@ -182,9 +225,15 @@ export const participants = pgTable('participants', {
   faceEmbedding: text('face_embedding'),
   faceConsentAt: ms('face_consent_at'),
   feedbackAskedAt: ms('feedback_asked_at'),
+  // The guest asked us to send them the photos. THE consent gate for every guest email — false on
+  // every row that predates it, which is why no existing event's guests can be mailed.
+  wantsPhotos: boolean('wants_photos').notNull().default(false),
   joinedAt: ms('joined_at').notNull(),
 }, (t) => ({
   eventIdx: index('idx_participants_event').on(t.eventId),
+  // The sweep's only read of this table: the guests at one event who asked and left an address.
+  wantsPhotosIdx: index('idx_participants_wants_photos').on(t.eventId)
+    .where(sql`${t.wantsPhotos} AND ${t.email} IS NOT NULL`),
 }));
 
 export const photos = pgTable('photos', {
@@ -209,6 +258,12 @@ export const photos = pgTable('photos', {
   durationMs: integer('duration_ms'),
   // 'capture' (shot in-app) | 'upload' (camera roll). Null for rows predating the column.
   source: text('source'),
+  // 'portrait' | 'landscape' | 'unknown' — how the phone was HELD, which the pixels cannot say when
+  // rotation lock keeps a sideways shot in a portrait-shaped frame. See 0042_capture_orientation.sql.
+  captureOrientation: text('capture_orientation'),
+  // The shape the guest CHOSE ('1:1', '4:5', 'full'…). Only meaningful for clips, where asking the
+  // camera for a shape frequently does not get you one. See 0043_capture_shape.sql.
+  captureShape: text('capture_shape'),
   // Gallery engagement. Counters, not an events table — at this volume they answer every question
   // we have without unbounded growth.
   viewCount: integer('view_count').notNull().default(0),
@@ -232,6 +287,22 @@ export const shares = pgTable('shares', {
   createdAt: ms('created_at').notNull(),
 }, (t) => ({
   slugIdx: uniqueIndex('idx_shares_slug').on(t.slug).where(sql`${t.slug} IS NOT NULL`),
+}));
+
+// Who a link has actually been emailed to — for BOTH the standing gallery link (shareId null) and
+// the curated shares a host creates. See drizzle/0041_share_sends.sql for why it is one table.
+//
+// `ok: false` rows are kept rather than dropped: a send that failed is precisely what the host
+// needs to see, and deleting it would leave the list quietly claiming everything went out.
+export const shareSends = pgTable('share_sends', {
+  id: text('id').primaryKey(),
+  eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
+  shareId: text('share_id').references(() => shares.id, { onDelete: 'cascade' }),  // null = gallery link
+  email: text('email').notNull(),
+  ok: boolean('ok').notNull().default(true),
+  sentAt: ms('sent_at').notNull(),
+}, (t) => ({
+  eventIdx: index('idx_share_sends_event').on(t.eventId, t.sentAt),
 }));
 
 // Generated slideshow exports. Versioned (one row per generation) so an organizer keeps a few
@@ -300,6 +371,7 @@ export type User = typeof users.$inferSelect;
 export type AuthIdentity = typeof authIdentities.$inferSelect;
 export type EmailToken = typeof emailTokens.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
+export type EmailPreference = typeof emailPreferences.$inferSelect;
 export type Event = typeof events.$inferSelect;
 export type Participant = typeof participants.$inferSelect;
 export type Photo = typeof photos.$inferSelect;

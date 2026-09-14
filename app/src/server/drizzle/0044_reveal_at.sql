@@ -1,0 +1,15 @@
+-- An exact reveal instant, chosen by the host, instead of a whole number of hours after the end.
+--
+-- The delay column it sits beside cannot express what hosts kept asking for. It is an INTEGER of
+-- hours clamped to a week, anchored to expires_at: it cannot say "next Saturday at 7 pm" (further
+-- out than the clamp), cannot say 7:15 (finer than an hour), and — the part that actually breaks —
+-- it MOVES. Rescheduling an event rewrites expires_at, which would silently drag a date the host
+-- picked deliberately onto a different day, with nothing to tell them.
+--
+-- So: absolute epoch ms, the same convention as starts_at / expires_at / revealed_at, and NULLABLE.
+-- NULL is not a special case to handle, it is the old rule: every event that already exists has
+-- NULL here and reveals exactly when it did before. Nothing is backfilled.
+--
+-- Values are rounded onto the 15-minute grid BEFORE they are stored (shared/reveal.ts), so what is
+-- in this column is the same instant the host was shown when they chose it.
+ALTER TABLE "events" ADD COLUMN IF NOT EXISTS "reveal_at" bigint;
