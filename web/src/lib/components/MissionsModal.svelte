@@ -200,7 +200,13 @@
     const sets = drafts.filter((d) => d.items.length).map((d) => ({
       key: d.key, label: d.label, items: d.items.map((i) => ({ id: i.id, text: i.text })),
     }));
-    const body = { eventType: type === 'general' ? null : type, tick, challenges: { sets } };
+    // 'general' is stored as itself, not flattened to null. It used to be mapped away on the
+    // grounds that "any event" and "not stated" behave identically — and they did, for packFor,
+    // tickFor and decorFor alike. They no longer do: the poster gallery suggests a design from the
+    // type, and a host who picked "Any event" at creation would silently lose that suggestion the
+    // first time they saved in here. Two representations of one answer is a bug waiting for the
+    // next thing that tells them apart.
+    const body = { eventType: type, tick, challenges: { sets } };
     // Started BEFORE the teardown so the request is already on the wire while the modal unmounts.
     // Nothing here touches component state afterwards, so being destroyed mid-flight is harmless.
     const pending = fetch(`/api/events/${encodeURIComponent(joinCode)}/challenges`, {

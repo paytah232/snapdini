@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
   import { getShare, type Photo } from '$lib/events';
+  import Loading from '$lib/components/Loading.svelte';
   import { applyEventTheme } from '$lib/theme';
   import { showToast } from '$lib/toast';
   import { tileAspect } from '$lib/ui';
@@ -114,7 +115,7 @@
   </header>
 
   {#if loading}
-    <p class="state">Loading…</p>
+    <Loading />
   {:else if error}
     <div class="state"><span class="big">🔗</span><p>{error}</p></div>
   {:else if !revealed}
@@ -136,6 +137,7 @@
          style={`--tile-ar:${tileAspect(aspectRatios)}`}>
       {#each photos as p, i (p.id)}
         <PhotoCard photo={p} selected={selecting && selected.has(p.id)}
+                   tileAr={tileAspect(aspectRatios)}
                    tileLabel={`Photo by ${p.participantName}`}
                    on:open={() => onThumb(p, i)}>
           <svelte:fragment slot="tile">

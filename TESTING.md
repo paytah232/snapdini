@@ -25,7 +25,7 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
 - [/] **Dashboard:** **Recent / Active / All** filter (default Recent) with counts; **real** guest/photo counts; long titles wrap; footer © + Terms/Privacy.
 
 ## 3. Create an event (pricing)
-- [/] Card order: "Your event" (name, **blurb**, guests, video, live price) → "When" → collapsible "Advanced settings".
+- [/] ~~Card order: "Your event" (name, **blurb**, guests, video, live price) → "When" → collapsible "Advanced settings".~~ *Superseded by the 4-step guided form — see §23.*
 - [/] **Live total updates on EVERY change**; free features show **struck-through-green** price at ≤10 guests, un-strike to +$ above 10.
 - [/] **Frame shapes:** ≤10 guests → all shapes **free & selectable**; **>10 guests → +$5 frame pack** (selectable, priced in). No in-between "limited" tier any more.
 - [/] Duration free ≤2 days / paid 3+; retention "1 year" = 365 days from event end; downloads default on (tooltip).
@@ -38,7 +38,7 @@ Stripe **test** card: `4242 4242 4242 4242`, any future expiry, any CVC.
 - [/] **Share & invite:** event code + *Copy*; **📤 Share** sends a link; **Save QR** PNG; copy join/gallery links.
 - [/] Custom slug → `/e/<slug>` opens it.
 - [/] **Theme:** pick a preset (**applies + saves instantly — no Preview/Save buttons**); **upload event image** (drag-drop) → reload → palette + image persist; no-theme event shows the warm default.
-- [/] **Create poster:** title/message default from the event (**blurb** as the message); two-pane desktop; **QR size (S/M/L) + 3×3 position**; text reflows around the QR; per-section colours + image palette; **colours follow the event theme until you edit one, then lock**; export PDF/PNG/JPG/Print.
+- [/] **Create poster:** title/message default from the event (**blurb** as the message); two-pane desktop; per-section colours + image palette; **colours follow the event theme until you edit one, then lock**; export PDF/PNG/JPG/Print. *(The S/M/L + 3×3 QR grid this line used to describe is gone — every element is now freely dragged and resized; see §16 and §23.)*
 - [/] **Upgrades panel:** matches the create-form pricing — **priced line items** + a **new total**, charges only the difference; frame pack can't be added free; promo records the **actual** amount.
 - [/] **Reveal / Lock / Downloads** toggle + persist; **Reveal ↔ Hide both work** (incl. ended at-end); **Settings** persist and keep the paid retention window.
 - [/] The old **"All photos" card is gone** — there's a **Review & Curate** link card instead.
@@ -300,3 +300,112 @@ on their own.
       `/pricing`, and **0ms of long tasks** either way — the difference is noise.
 - [ ] **Ingest is cheap:** `POST /api/track/events` is 3–6ms p95, and a 20-event batch costs no more
       than a 1-event batch (the response is sent before anything is written).
+
+## 23. Version 1.4.4 — event type, poster designer, reveal timing, downloads, slideshow
+
+### Event type at creation
+- [ ] **`/app` walks you through it:** a step strip (*Your event · When it runs · The details ·
+      Ready*); **Show me everything at once** on step 1 drops to the flat form and **Walk me through
+      it instead** restores it. No step blocks you except "name it to continue".
+- [ ] **Event type chips** sit directly under the name. Tapping the selected one clears it. Skipping
+      it entirely still creates a working event.
+- [ ] With a type picked, **"Give my guests a list of shots to hunt for"** appears; ticking it and
+      creating the event lands on a manager that already has a trick list, matching that type.
+- [ ] The type drives **four** things, so check all four: the missions offered, the **tick glyph**,
+      the **card decoration**, and which **poster design** the gallery puts first and marks.
+- [ ] Changing the type later in the trick-list editor works and does not strip the existing list.
+
+### Reveal timing
+- [ ] **Start time and reveal time both step in 15 minutes** on the picker (`/app` and Manage →
+      Settings, and the reschedule dialog).
+- [ ] **Delay presets** read: immediately · 1h · 3h · 12h · 24h · **2 days · 3 days · 1 week**.
+- [ ] **"Pick an exact date & time…"** reveals date + time inputs, and the hint states the exact
+      moment ("Photos appear from …"). Type **7:05 pm** → it says **7:15 pm** and explains why.
+- [ ] **The event's timezone, not yours.** Set the event to a zone several hours from your device,
+      pick a reveal, save, reload → the form shows back **the wall-clock time you typed**, not that
+      instant translated into your own zone.
+- [ ] **Refused, not silently fudged:** pick a reveal *after* the retention window ends → a clear
+      error naming retention, and nothing is saved.
+- [ ] **Existing events are untouched:** an event created before this release still reveals at
+      end + delay, and its `reveal_at` is NULL.
+- [ ] **The gate agrees with the countdown.** With a custom reveal a few minutes out, the guest
+      countdown, the share page and the actual unlock all name the same minute.
+
+### Poster designer
+- [ ] **Design gallery** shows **8** tiles + **Start from scratch**; the tiles carry your event's
+      real name/message/QR, not lorem. Escape and the backdrop both close it.
+- [ ] Picking a design also **themes the app** (join screen / camera / gallery), and the Theme card
+      shows the design's matching palette as the selected preset rather than highlighting nothing.
+- [ ] With a design saved, the button reads **🎩 Manage poster** and a second button
+      **Start again from a design…** reopens the gallery. Manage poster must NOT throw the work away.
+- [ ] **Guided steps:** *Words · Type · Join · Art · Colour · Place*, each with its question and the
+      preview beside it. **Skip — show me every control** and **Walk me through it instead** both work.
+- [ ] **Cards tab steps:** *Words · List · Layout · Art · Colour*; with only one trick card the
+      **List** step is stepped over and says why, rather than being a dead end.
+- [ ] **Type:** all five pairings (Plain / Editorial / Formal / Garden / Modern) render in their real
+      faces — **no frame of Arial** when flipping between them, and the exported PNG matches the
+      preview. (The fonts are self-hosted; test with the network throttled.)
+- [ ] **Names lockup:** "Rachel and Ross" → two stacked names with *and* in script between hairlines;
+      "Mia & Sam" keeps the ampersand; "The Wus" sets as one line; blank draws nothing.
+- [ ] **Small lines above/below the title** set as tracked caps and can be left empty.
+- [ ] **Snapdini mark** toggles off; the **logo inside the QR** does not (and the code still scans).
+- [ ] **White card behind the QR:** on a light background the checkbox is enabled and the hint states
+      a contrast % and grade; on a dark background it is **disabled** with the reason; over a photo
+      background it always stays. Untick it, then darken the background → **it turns itself back on**.
+- [ ] **Placed decorations:** add several, drag, resize, **rotate**, ↺ Upright, remove one, Remove
+      all. Adding one must **not** change the design's own decoration.
+- [ ] **Your own text lines:** add two, edit, drag, resize, delete. They can't leave the page.
+- [ ] **Tap an element on the preview to edit it** (title / message / how-to / names) — and a *drag*
+      must not open the keyboard.
+- [ ] **Hover or focus a control → the thing it changes is outlined**, including an empty field,
+      which shows where its words *would* go.
+- [ ] **↶ / ↷** are in the header, enabled/disabled correctly, and reachable **mid-drag and in
+      full-screen Arrange**. Ctrl/⌘+Z works.
+- [ ] **Background as paper:** with a plain colour and "print the background" off, the colour shows
+      while designing and is **absent from the exported PDF/PNG/JPG**.
+- [ ] **Light ink on dark paper** produces a *note* about white toner / screen print / foil, not a block.
+- [ ] Nothing can be dragged outside the **5 mm print margin**.
+- [ ] **Card sheet orientation:** Portrait/Landscape at **1, 2 and 4** per sheet; the note under the
+      buttons names the real result ("Two portrait A5 cards, cut down the middle"), and a landscape
+      PDF/print dialog is **landscape** — not a letterboxed portrait page.
+- [ ] **🖨 Front & back…** (only with a trick list) previews both pages sharply, pairs the poster
+      with the **previewed** set, and says to flip on the **long edge**.
+- [ ] **A big design still saves.** Place ~20 motifs and several text lines, reload the event page →
+      it opens. (An oversized design must be refused with a message, never 500 the event page.)
+- [ ] `grep -ri camerabig` over the repo returns **nothing** — the motif was added and removed.
+
+### Sharing & downloading
+- [ ] **Review → 📤 Share** opens a scope question: **whole gallery / favourites only / pick them
+      myself**, with real counts, and photos vs clips counted separately. Favourites is disabled with
+      an explanation when nothing is starred.
+- [ ] The **favourites link keeps up**: open it, then star another photo → the link shows it, with no
+      re-share.
+- [ ] **Gallery → Download** asks the same three questions; "the whole gallery" must not change
+      meaning with the **Highlights** toggle.
+- [ ] **Per-photo ⬇** on gallery tiles saves one photo, and the tile then shows it is already saved
+      on this device. Hidden entirely when the host has disallowed downloads.
+- [ ] **Files vs zip:** on a phone the first bulk download **asks**, remembers the answer, and the ⚙
+      reopens the choice. On a desktop it goes straight to a zip. A big roll saved as files shows a
+      running count and does not blow the tab up.
+- [ ] **iOS:** saving opens the share sheet (→ Photos, not Files); **cancelling it saves nothing**
+      and must not fall through to a download or tick the tile.
+
+### Slideshow
+- [ ] **No cap:** render an event with well over 60 photos → every one is in the film, and the end of
+      the night is not missing.
+- [ ] **Order:** *Start → end* vs *🔀 Shuffled*. Re-watching a shuffled render plays the **same**
+      cut; a new render deals a different one.
+- [ ] **Queue:** press Generate while one runs → a toast says it was queued, the queue list shows it,
+      and it starts on its own. A 4th while 3 wait is refused with a message, and the running render
+      is never killed.
+- [ ] **Survives the tab:** start a long render, close the tab, come back → the bar picks up (or the
+      film is in Recent). Lock the phone mid-render and return → the bar resumes rather than sitting
+      frozen.
+- [ ] **Chunk joins are invisible:** watch a long render right through — no dropped or doubled frame
+      at a crossfade, and the music runs across the joins without a seam.
+
+### Guest
+- [ ] **A way back out of the album:** a guest holding a session for the event sees a link from the
+      shared gallery back to their own camera. A stranger opening the same link does **not**.
+- [ ] **Guest filter popover** opens fully on screen at 320 / 360 / 390 px wide, with no sideways
+      scroll.

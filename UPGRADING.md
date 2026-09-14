@@ -8,7 +8,7 @@ The quickest safe route:
 
 ```bash
 cd /path/to/your/snapdini            # the directory holding your .env and docker-compose.yml
-./upgrade.sh 1.4.0                   # or omit the version for :latest
+./upgrade.sh 1.5.0                   # or omit the version for :latest
 ```
 
 The script checks the three traps, backs up `.env` and the database, upgrades, and verifies the
@@ -83,8 +83,8 @@ by hand.
 Compare yours against the release before upgrading:
 
 ```bash
-diff docker-compose.yml   <(curl -fsSL https://raw.githubusercontent.com/paytah232/snapdini/v1.1.1/app/docker-compose.yml)
-diff nginx/default.conf   <(curl -fsSL https://raw.githubusercontent.com/paytah232/snapdini/v1.1.1/app/nginx/default.conf)
+diff docker-compose.yml   <(curl -fsSL https://raw.githubusercontent.com/paytah232/snapdini/v1.5.0/app/docker-compose.yml)
+diff nginx/default.conf   <(curl -fsSL https://raw.githubusercontent.com/paytah232/snapdini/v1.5.0/app/nginx/default.conf)
 ```
 
 Watch for defaults that move out of compose into `.env`: if a value was only a compose default
@@ -93,10 +93,10 @@ behaviour changes quietly.
 
 ### 3. A pinned `IMAGE_TAG` means `pull` fetches the same version
 
-If `.env` has `IMAGE_TAG=1.0.8`, `docker compose pull` re-fetches 1.0.8 forever. Bump it:
+If `.env` has `IMAGE_TAG=1.4.3`, `docker compose pull` re-fetches 1.4.3 forever. Bump it:
 
 ```bash
-sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=1.1.1/' .env
+sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=1.5.0/' .env
 ```
 
 Pinning is the right default for production — you just have to change it deliberately.
@@ -132,12 +132,72 @@ docker compose up -d
 
 ## Version notes
 
-### 1.4.4
-Adds **photo missions** — an optional shot list a host gives guests, printed on cards and ticked off
-in the camera. Nothing to configure: it is off for every existing event until a host sets one up.
+### 1.5.0
+**Nothing to configure.** No new settings, so traps 1 and 2 do not apply to this release — but it is
+a large one, so here is what changes under you.
 
-Migrations `0038` (event type, challenges, `photos.challenge_id`) and `0039`
-(`participants.challenge_set`) apply automatically on boot. All columns are nullable and additive.
+Adds a **trick list** — an optional shot list a host gives guests, printed on cards and ticked off
+in the camera. It is off for every existing event until a host sets one up.
+
+Also in this release:
+
+- **The event type is asked when an event is created**, and it drives the shot ideas offered, the
+  mark a shot is ticked off with, the decoration on the printed cards, and which poster design is
+  suggested. Optional, and existing events are unaffected — they keep the generic defaults until a
+  host sets a type.
+- **A rebuilt poster designer.** A gallery of **eight** finished designs (was five) to start from,
+  five bundled typeface pairings, a guided six-step flow for the poster and five for the cards,
+  placed decorations you drag and rotate, your own extra text lines, a name lockup, a front-and-back
+  print preview, and card sheets in portrait or landscape at every card count. Designs saved before
+  this release open exactly as they were left: every new field defaults to the old behaviour.
+- **An exact reveal moment.** "At the end" gains *2 days · 3 days · 1 week* presets and a
+  **"Pick an exact date & time…"** option. See the migration note below — the behaviour of every
+  existing event is unchanged.
+- **Photo captions.** Guests write a line under their own shots; hosts can add, edit or delete any
+  of them.
+- **Emailing a shared link, with a record of it.** The gallery link and every curated share can be
+  emailed from the admin page, and who received what is kept — previously a send left no trace at
+  all, so "did I already send this to Mum?" had no answer and a failure was invisible.
+- **Server-side clip cropping.** A guest who picks a shape gets it even on a browser that ignores
+  the request. Chrome on Android crops at the camera; iOS Safari and Firefox on Android do not, and
+  those clips are now cropped after upload — losslessly for H.264 (an SPS header rewrite, no frames
+  re-encoded), and folded into the existing H.264 transcode for WebM. The uncropped original is
+  kept beside the result until the event's normal purge.
+- **Sharing and downloading ask what you mean.** Whole gallery / favourites only / pick your own,
+  instead of the button quietly meaning whatever filter was on screen. Plus a download button on
+  every photo, and a files-or-zip choice that is remembered per device.
+- **The slideshow lost its 60-item cap.** Long films are encoded in pieces and joined rather than
+  truncated, a second render queues behind the first instead of being dropped, the order can be
+  chronological or shuffled, and a render survives the tab being closed.
+
+Migrations apply automatically on boot. Every column is nullable and additive, and every table is
+new, so the upgrade is safe to run against a populated database and needs no downtime:
+
+| Migration | What it adds |
+|---|---|
+| `0038` | event type, challenges, `photos.challenge_id` |
+| `0039` | `participants.challenge_set` |
+| `0040` | `photos.caption` |
+| `0041` | `share_sends` — who a link has been emailed to (new table) |
+| `0042` | `photos.capture_orientation` — whether the phone was held sideways |
+| `0043` | `photos.capture_shape` — the shape the guest asked for, which is what lets the server finish a crop the camera refused |
+| `0044` | `events.reveal_at` — an exact reveal instant, chosen by the host |
+
+**About `0044`.** It is nullable, and **NULL is not a special case — it is the old rule.** Every
+event that already exists gets NULL and reveals exactly when it did before (`expires_at` plus the
+delay in hours). Nothing is backfilled. Only an event whose host explicitly picks a date and time
+gets a value, and that value is resolved in the **event's own timezone** and rounded up onto the
+15-minute tick before it is stored — so what is in the column is the instant the host was shown.
+
+**Disk note.** Cropping a clip writes up to two files beside the original (`_crop.mp4`, and
+`_dl.mp4` for downloads), and the original is deliberately never deleted. Budget roughly double the
+video footprint of previous releases for events that use both clips and a fixed shape.
+
+**CPU note.** An uncapped slideshow is a longer ffmpeg job than any previous release could produce.
+The encode timeout now scales with the length of the film rather than being a flat five minutes, so
+a long render is no longer killed merely for being long — but a 400-photo 4K render will keep every
+core busy for a while, and renders are serialised **per event**, not per box. On a small VPS running
+several events at once, that is worth knowing before a Saturday night.
 
 ### 1.4.3
 **Action required if you want your site in search results.** Search indexing is now opt-in per

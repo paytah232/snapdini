@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, postJson, getMe } from '$lib/api';
+  import Loading from '$lib/components/Loading.svelte';
   import { showToast } from '$lib/toast';
   import type { User } from '$lib/types';
 
@@ -298,7 +299,7 @@
 
 <main class="wrap">
   {#if loading}
-    <p class="muted">Loading…</p>
+    <Loading />
   {:else if !user}
     <h1>Site admin</h1>
     <p class="muted">You need to <a href="/app">sign in</a> as an admin to view this.</p>

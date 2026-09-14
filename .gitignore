@@ -34,6 +34,10 @@ CLAUDE.md
 # thing `git add -A` sweeps up silently. The genuine video fixtures live in loadtest/ and stay
 # tracked, which is why this is scoped to docs/ rather than a blanket *.mp4.
 /docs/*.mp4
+# Design references gathered from other people's products (Etsy listings, mockups, competitor
+# signage). Third-party artwork we do not own and must never republish — this is a PUBLIC repo, so
+# committing them would be redistributing someone else's work under our licence.
+/docs/themes/
 /docs/*.mov
 /docs/*.m4v
 /docs/*.webm

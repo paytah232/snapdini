@@ -3,6 +3,7 @@
   import { goto, replaceState } from '$app/navigation';
   import { page } from '$app/stores';
   import { fireLead } from '$lib/adtracking';
+  import Loading from '$lib/components/Loading.svelte';
   import { hasFreshDraft } from '$lib/eventDraft';
   import { getMe, getConfig, postJson } from '$lib/api';
   import SiteFooter from '$lib/components/SiteFooter.svelte';
@@ -171,7 +172,7 @@
   </div>
 
   {#if loading}
-    <p class="muted">Loading…</p>
+    <Loading />
   {:else if loadError}
     <div class="empty">
       <p>Couldn’t load your events.</p>

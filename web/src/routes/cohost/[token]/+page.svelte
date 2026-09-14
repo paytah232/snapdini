@@ -3,6 +3,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { getCohostInvite, acceptCohost, type CohostInvite } from '$lib/events';
+  import Loading from '$lib/components/Loading.svelte';
   import { postJson } from '$lib/api';
   import { showToast } from '$lib/toast';
   import Logo from '$lib/components/Logo.svelte';
@@ -45,7 +46,7 @@
   <div class="card">
     <a class="brand" href="/"><Logo /></a>
     {#if loading}
-      <p class="state">Loading…</p>
+      <Loading />
     {:else if error}
       <div class="state"><span class="big">🔗</span><p>{error}</p><a class="btn ghost" href="/">Go home</a></div>
     {:else if invite}

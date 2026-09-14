@@ -1984,13 +1984,13 @@
   .s-ghost { fill: none; stroke: currentColor; stroke-width: 1.4; opacity: 0.45; }
   .s-fill { fill: color-mix(in srgb, var(--accent) 18%, transparent); stroke: var(--accent); stroke-width: 1.6; }
   .s-play { fill: var(--accent); }
-  .s-track { fill: none; stroke: currentColor; stroke-width: 1.3; stroke-dasharray: 2 3; opacity: 0.4; }
-  .s-tick { fill: currentColor; opacity: 0.5; }
-  .s-dot { fill: currentColor; opacity: 0.42; }
+  .s-track { fill: none; stroke: currentColor; stroke-width: 1.3; stroke-dasharray: 2 3; opacity: 0.5; }
+  .s-tick { fill: currentColor; opacity: 0.6; }
+  .s-dot { fill: currentColor; opacity: 0.55; }
   .s-dot.extra { fill: var(--accent); opacity: 1; }
   /* A ring, not a disc: an unclaimed shot has to read as an empty slot rather than as a dimmer
      version of one the host already has. */
-  .s-dot.spare { fill: none; stroke: currentColor; stroke-width: 1.2; opacity: 0.3; }
+  .s-dot.spare { fill: none; stroke: currentColor; stroke-width: 1.2; opacity: 0.38; }
 
   .sum-rows { display: flex; flex-direction: column; gap: 6px; }
   .sum-row { display: flex; justify-content: space-between; gap: 12px; font-size: 0.85rem; }

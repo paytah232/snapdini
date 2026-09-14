@@ -24,26 +24,43 @@
   const allAspects = () => (options?.aspectRatios ?? []).map((a) => a.value);
   const hasAllShapes = allAspects().filter((v) => v !== '1:1').every((v) => aspectRatios.includes(v));
 
-  // Base add-on prices (mirror the server tiers) — used to label the dropdown options with
-  // their price, exactly like the event-creation form.
+  // Base add-on prices, mirroring the server tiers.
+  //
+  // These labels were lifted from the event-creation form, where the base price IS the price — you
+  // are buying from nothing. On an UPGRADE panel it is the wrong number twice over: the option the
+  // event is already on printed "+$5" for something already paid for, and a bigger option printed
+  // its full price when only the step up is charged. The panel's own footer says "you only pay the
+  // difference", and the dropdowns were contradicting it.
+  //
+  // So every price here is a DELTA from what the event already has on that dimension (see `extra`),
+  // and the current value carries no price at all.
   const shotsAddon = (shots: number) => (billing.shotsTiers ?? []).find((x) => shots <= x.maxShots)?.amountCents ?? 0;
   const videoBase = (seconds: number) => (billing.videoAddons ?? []).find((v) => v.seconds === seconds)?.amountCents ?? 0;
   const durationAddon = (hours: number) => (billing.durationTiers ?? []).find((x) => hours <= x.maxHours)?.amountCents ?? 0;
   const retAddon = (days: number) => (billing.retentionTiers ?? []).find((x) => days <= x.maxDays)?.amountCents ?? 0;
   const featuresFreeAt = (guests: number) => guests <= billing.freeAllGuests;
+  /** What stepping from `have` to `want` adds, never below zero.
+   *
+   *  An approximation of one dimension, not the quote — changing the guest tier can make a paid
+   *  add-on free, and only the server prices the whole basket. That is exactly why the running
+   *  total below is the authority and these labels are a guide: it is computed from the server's
+   *  own quote, and it is the number the host is charged. */
+  const extra = (cost: (n: number) => number, want: number, have: number) => Math.max(0, cost(want) - cost(have));
   // `guests` is an explicit arg so these labels re-run when the guest tier changes (a template
   // expression only re-evaluates when its arguments change, not a closed-over variable).
   const shotsLabel = (n: number, guests: number) => {
+    if (n === maxPhotos) return `${n} — current`;
     if (n <= (billing.shotsFree ?? 12)) return `${n}`;
-    const c = shotsAddon(n);
-    if (!c) return `${n}`;
+    const c = extra(shotsAddon, n, maxPhotos);
+    if (!c) return `${n} — no extra charge`;
     return featuresFreeAt(guests) ? `${n} — free (normally +${money(c)})` : `${n} — +${money(c)}`;
   };
   const videoLabel = (n: number, guests: number) => {
-    if (!n) return 'No video';
-    const c = videoBase(n);
-    if (!c) return `${n}s clips`;
-    return featuresFreeAt(guests) ? `${n}s clips — free (normally +${money(c)})` : `${n}s clips — +${money(c)}`;
+    const name = n ? `${n}s clips` : 'No video';
+    if (n === videoSeconds) return `${name} — current`;
+    const c = extra(videoBase, n, videoSeconds);
+    if (!c) return n ? `${name} — no extra charge` : name;
+    return featuresFreeAt(guests) ? `${name} — free (normally +${money(c)})` : `${name} — +${money(c)}`;
   };
   // Retention does NOT follow the guest-tier "everything free under 10" rule — it is the opposite.
   // A free event PAYS for anything past a week; a paid event gets a month INCLUDED. This label used
@@ -54,35 +71,51 @@
   const retCostFor = (days: number, guests: number) => (days <= retIncludedFor(guests) ? 0 : retAddon(days));
   const retLabelPriced = (days: number, guests: number) => {
     const base = retLabel(days);
-    const c = retCostFor(days, guests);
+    if (days === retentionDays) return `${base} — current`;
+    // Both sides priced at the SELECTED guest tier, because that tier is what decides how much is
+    // included — pricing the current value at the old tier would show a charge for something the
+    // upgrade has just made free.
+    const c = Math.max(0, retCostFor(days, guests) - retCostFor(retentionDays, guests));
     if (!c) return days <= retIncludedFor(guests) && retAddon(days) ? `${base} — included` : base;
     return `${base} — +${money(c)}`;
   };
   // Duration is charged identically on every tier — the guest count buys features, not hours — so
   // there is no "free on this tier" case to print here either.
   const durLabelPriced = (h: number, _guests: number) => {
-    const c = durationAddon(h);
     const base = durLabel(h);
+    if (h === durationHours) return `${base} — current`;
+    const c = extra(durationAddon, h, durationHours);
     if (!c) return base;
     return `${base} — +${money(c)}`;
   };
 
-  // choices ≥ current — tier caps plus the event's own cap (so it's always selectable, even
-  // for legacy events created before the dropdown matched the tiers).
-  const guestCaps = Array.from(new Set([guestCap, billing.freeAllGuests, ...billing.paidTiers.map((t) => t.maxGuests)]))
-    .filter((n) => n >= guestCap).sort((a, b) => a - b);
-  const guestChoices = guestCaps.map((n) => ({ maxGuests: n }));
-  const shotChoices = (options?.shotsPerPerson ?? []).map((s) => Number(s.value)).filter((n) => n >= maxPhotos);
-  const videoChoices = [0, ...billing.videoAddons.map((v) => v.seconds)].filter((n) => n >= videoSeconds);
+  /** The choices at or above what the event already has — and ALWAYS including that current value.
+   *
+   *  Filtering alone is not enough, and the difference is a dropdown that renders blank. A stored
+   *  value that is not itself a tier survives the filter nowhere, so the `<select>` is bound to a
+   *  number no `<option>` carries and the browser shows nothing selected. Both are real: a 15-second
+   *  video (a demo default) and a 31-day keep ("a month") are neither of them tier values.
+   *
+   *  The guest dropdown already did this — it unioned `guestCap` in, with a comment about legacy
+   *  events. The other four filtered without unioning, which is the same bug the comment describes,
+   *  left in four places. This is that fix, once. */
+  const atOrAbove = (values: number[], current: number): number[] =>
+    Array.from(new Set([current, ...values])).filter((n) => n >= current).sort((a, b) => a - b);
+
+  const guestChoices = atOrAbove([billing.freeAllGuests, ...billing.paidTiers.map((t) => t.maxGuests)], guestCap)
+    .map((n) => ({ maxGuests: n }));
+  const shotChoices = atOrAbove((options?.shotsPerPerson ?? []).map((s) => Number(s.value)), maxPhotos);
+  const videoChoices = atOrAbove([0, ...billing.videoAddons.map((v) => v.seconds)], videoSeconds);
   // Reactive to the SELECTED guest tier: stepping up to a paid tier includes a month, so a week is
   // no longer on offer and the selection moves up to what is now included rather than silently
   // keeping the free event's 7 days.
   $: retentionFloor = Math.max(retentionDays, retIncludedFor(uGuests));
-  $: retentionChoices = billing.retentionTiers.filter((t) => t.maxDays >= retentionFloor);
+  // Numbers, like the others — only maxDays was ever read out of the tier objects.
+  $: retentionChoices = atOrAbove(billing.retentionTiers.map((t) => t.maxDays), retentionFloor);
   $: if (uRet < retentionFloor) uRet = retentionFloor;
   const retLabel = (d: number) => d <= 7 ? '1 week' : d <= 31 ? '1 month' : d <= 92 ? '3 months' : d <= 182 ? '6 months' : '1 year';
   // Duration is a paid add-on, so it belongs here too — offer lengths ≥ the current event length.
-  const durationChoices = (options?.durations ?? []).map((d) => Number(d.value)).filter((n) => n >= durationHours);
+  const durationChoices = atOrAbove((options?.durations ?? []).map((d) => Number(d.value)), durationHours);
   const durLabel = (h: number) => (options?.durations ?? []).find((d) => Number(d.value) === h)?.label ?? `${h}h`;
 
   // selections (default to current)
@@ -126,7 +159,16 @@
     const t = billing.paidTiers.find((x) => x.maxGuests >= n);
     return t ? t.amountCents : (billing.paidTiers[billing.paidTiers.length - 1]?.amountCents ?? 0);
   };
-  const guestLabel = (n: number) => `Up to ${n}` + (guestPrice(n) ? ` — ${money(guestPrice(n))}` : ' — free');
+  // The guest tier is a REPLACEMENT price, not an add-on — a bigger tier costs its own amount and
+  // the smaller one stops applying — so this printed the whole new tier price ("$15") where every
+  // other dropdown printed a step. Same rule as the rest now: the tier you are on says so, and the
+  // ones above say what the step costs.
+  const guestLabel = (n: number) => {
+    if (n === guestCap) return `Up to ${n} — current`;
+    const c = Math.max(0, guestPrice(n) - guestPrice(guestCap));
+    if (!c) return `Up to ${n}` + (guestPrice(n) ? '' : ' — free');
+    return `Up to ${n} — +${money(c)}`;
+  };
   $: newTotal = quote ? (quote.tier === 'paid' || quote.amountCents > 0 ? quote.amountCents : 0) : 0;
 
   // Anything left to offer above the current plan?
@@ -156,7 +198,7 @@
       {/if}
       {#if retentionChoices.length > 1}
         <label class="u"><span>Keep photos</span>
-          <select bind:value={uRet}>{#each retentionChoices as t}<option value={t.maxDays}>{retLabelPriced(t.maxDays, uGuests)}</option>{/each}</select>
+          <select bind:value={uRet}>{#each retentionChoices as d}<option value={d}>{retLabelPriced(d, uGuests)}</option>{/each}</select>
         </label>
       {/if}
       {#if durationChoices.length > 1}

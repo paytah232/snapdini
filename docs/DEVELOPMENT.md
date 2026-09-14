@@ -121,6 +121,12 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   `npm run test:load` / `npm run test:load:multi`.
 - **Trick list** — a shot list a host gives guests, printed on cards and ticked off in the app.
   (Named "photo missions" while it was built; the ids and columns still say `challenge`.)
+  - **The event TYPE is asked at creation** (`/app`, step 1, optional), not discovered later, because
+    four separate things key off it: which mission pack is offered, the default tick glyph
+    (`tickFor`), the card's default decoration (`decorFor`), and which poster design the gallery puts
+    first (`presetForEventType`). One vocabulary — the pack keys in `EVENT_TYPES` — and never a
+    second one invented alongside it. Until it was asked up front, every new event silently took the
+    generic fallback. It stays editable in the trick-list editor, and `null` is a valid answer.
   - Content lives in `web/src/lib/challenges.ts`: 9 packs (the 8 use-case types + a `general`
     default) × 24 challenges, each tagged with one or more **moods** that drive the quick-pick
     buttons. Ids are **stable for the life of the product** — they are stored on photos and counted
@@ -191,13 +197,122 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   - `cardSkip` stores **exclusions**, not inclusions, so a set added later prints by default.
   - Decorations (`web/src/lib/cardDecor.ts`) are drawn vector, no assets and no requests, before
     the content so text always sits on top. Confetti is **seeded** or it shimmers between redraws.
+
+- **The poster designer** — `web/src/lib/components/PosterModal.svelte` (the editor),
+  `PosterWizard.svelte` (the design gallery), `posterRender.ts` (every drawing primitive),
+  `posterPresets.ts` (the eight designs), `posterFonts.ts` (typography), `cardDecor.ts` (motifs).
+  - **The renderer is shared, and that is the point.** `drawPoster()` was pulled out of the modal so
+    the gallery's thumbnails could be drawn by the *same* function with the event's own name,
+    message and QR. A gallery of approximations would be asking a host to choose from something they
+    are not going to get.
+  - **A preset IS a saved poster config** — the same object shape `events.poster_config` already
+    holds, handed to the modal as `initialConfig` and applied by the existing `restore()`. No
+    parallel format to keep in step. It deliberately omits `headline`/`message`/`stepsText`, because
+    `restore()` reads every field with `??`: picking a style must never eat the host's words. Every
+    preset sets `colorsLocked: true`, or the next reactive pass recomputes text colours from the
+    theme and quietly overwrites the palette.
+  - Each preset also carries a **screen** palette for the guest-facing app, NOT derived from the
+    poster's colours. A poster palette is for print — light stock, dark ink; the app is dark-first
+    and lit from behind. Botanical's cream as an app background reads as the lights coming on, not
+    as the same design. Same character, different values.
+  - Poster typography (`posterFonts.ts`) picks from five bundled pairings. The faces are
+    self-hosted in `web/static/fonts` (five OFL 1.1 families, latin woff2, ~169KB) and declared in
+    `app.css` but used by **no selector**, so nothing downloads until a pairing is asked for.
+    **`ctx.font` falls back silently** — a canvas will happily print in Arial and never say so — so
+    `drawPoster()` awaits `ensurePosterFonts()` before it paints anything. Nothing may draw ahead of
+    that: the poster is exported as a PNG the host takes to a printer, not a preview they can
+    re-render. `plain` is the default, which is what keeps a design saved before this existed
+    opening exactly as its host left it.
+  - Canvas `letterSpacing` is **sticky state**, like `fillStyle`. A tracked headline will space out
+    the join code drawn after it unless the tracking is actively cleared, which is why every face
+    sets it (to `0px` when it wants none) rather than only setting it when it has some.
+  - The headline is up to **three rows in two faces** but exactly **one draggable box**. The
+    designer measures it through the renderer's own `measureTitleBlock()` rather than keeping a
+    second guess — a handle sized from a different measurement is a handle that does not sit on the
+    text.
   - `readableOn()` walks a colour's own lightness until it clears the WCAG bar rather than
     flipping to black — a gold title on white goes darker gold. The join code is drawn on the QR
     panel's **white**, so it needs contrast against that, not against the poster background.
+  - **The QR panel is dropped on a MEASUREMENT, not on taste.** `symbolContrast()` is Rmax − Rmin in
+    reflectance and `panelOptional()` clears it at grade C (40) — the floor a code is expected to
+    read at in the wild, which is exactly what this is: read once, in bad light, by a stranger
+    holding a phone at an angle. A photographic background is not measurable this way at all (the
+    code could land on sky or on a dark suit), so over an image the panel stays, full stop. And a
+    design saved on one background and reopened on another turns the panel back on by itself rather
+    than waiting to be noticed.
+  - **Placed decorations and custom text lines are lists**, not a spare slot each. `decorItems`
+    (kind, x, y, scale, rot) and `textItems` (text, x, y, size) go through the same drag surface as
+    the fixed elements, keyed `decor:<i>` / `text:<i>`. `DECOR_PX` is the one number converting the
+    drag system's pixels to a placement's scale — keep it single. The PLACE tool's `placeKind` is
+    deliberately separate from the design's `decorKind`: they used to share one value, so choosing
+    what to add destroyed the decoration you already had.
+  - **The card sheet's orientation applies at every card count**, not only 2-up. Turning the paper
+    turns every card on it, and `sheetOrientation` is passed to the print/PDF path — a landscape
+    sheet sent to a portrait page is letterboxed at half size with nothing on screen warning of it.
+  - Paper scale is **height-based, not area-based** (see the trick-card notes above).
   - **Never truncate `poster_config`.** It used to be `.slice(0, 4000)`, and the organizer payload
     parses that column on every load — JSON cut mid-string is a syntax error, so one oversized
     design would have 500'd the event page permanently. Saving now refuses (413) and reading is
     defensive, so a row that is already bad reads as "no design" instead of locking the host out.
+
+- **Reveal timing lives in `shared/reveal.ts`**, because the host is *shown* the moment ("photos
+  appear from 7:15 pm") in the browser and *gated* on it by the server — two computations of one
+  instant, whose only interesting failure is the one where they disagree silently.
+  - `events.reveal_at` (migration **0044**) is an absolute epoch-ms instant and **nullable**. NULL is
+    not a special case: it is the old rule, `expires_at + revealDelayHours`, and every event that
+    already existed has it. Nothing is backfilled. `scheduledRevealAt()` is the single function the
+    gate, the guest countdown, the share-page countdown and the camera all read — they were four
+    copies of `expiresAt + delay * 3600000` and drifted the moment one learned something.
+  - The delay column it sits beside **cannot express what hosts asked for**: it is hours, clamped to
+    a week, anchored to `expires_at` — so it cannot say "next Saturday at 7 pm", cannot say 7:15,
+    and *moves* when an event is rescheduled, silently dragging a chosen date onto another day.
+  - **Resolved server-side from wall-clock strings + the EVENT's timezone**, deliberately not taken
+    as an epoch from the client the way `starts_at` is: the browser's zone is wherever the host is
+    standing. A refusal is returned rather than a fallback to the delay — a silent fallback saves a
+    reveal at a time the host did not choose and reports it as saved.
+  - **Rounded UP onto `REVEAL_TICK_MS` (15 min) before storage**, never on the way out. Fifteen
+    because that is the finest sweep the product runs (`lifecycle.ts` SWEEP_MS); reveal rides that
+    tick rather than adding a timer. Rounding to nearest would reveal *before* the chosen moment,
+    and an early reveal cannot be undone. Start times snap to the same grid, for the same reason.
+  - `zonedWallTimeToMs()` probes the zone on either side of the reading and keeps the latest
+    candidate that survives a round trip. The obvious single correction resolves Sydney's skipped
+    02:30 forwards and New York's backwards — half the world's hosts would get the reveal an hour
+    early. Both DST exceptions resolve **late**, on purpose.
+
+- **Saving photos to a device** (`web/src/lib/saveImage.ts`) has two routes and the platform decides:
+  `navigator.share({files})` on iOS (the only way into Photos — a download lands in Files), a plain
+  `<a download>` everywhere else, where the share sheet is worse. `saveMany()` batches by **bytes and
+  count** (48MB / 10 files) because a phone tab will not hold a whole roll at once, records WHICH ids
+  landed rather than a count, and treats a dismissed sheet (`AbortError`) as "nothing arrived" — so
+  the grid's saved marks can never overstate. `prefersFiles()` (coarse pointer) picks which option to
+  OFFER first; the answer is then remembered per device, because no amount of sniffing gets this
+  right and every wrong guess looks like the button being broken.
+
+- **Scope is ASKED, not inferred** (`web/src/lib/components/ShareScope.svelte`). Share used to mean
+  whatever tab you were standing on — All shared the gallery, Favourites shared the favourites, and
+  Select mode had a different button — three behaviours behind one word, and the only way to know
+  which you were about to get was to notice which tab was underlined. One component now serves both
+  verbs and offers exactly the three scopes the SERVER already understands (`shares.kind` is
+  `all | favourites | selected`), so it can never offer something that cannot be created. The
+  favourites link resolves at read time, which is worth saying in the UI: a host who thinks it is a
+  snapshot will make five links instead of one.
+
+- **The slideshow renders in CHUNKS, and has no item cap** (`app/src/server/slideshow.ts`).
+  - What bounds peak memory is how much **film one ffmpeg run produces** — measured at ~3.3GB before
+    the first frame plus ~86MB per second of output — not how many photos the host uploaded. So
+    `planChunks()` splits the timeline against a frame budget and an item budget, each chunk is
+    encoded to its own MPEG-TS part with one identical settings object (the concat demuxer joins by
+    trusting the codec parameters match), and consecutive chunks **share their boundary item** so a
+    crossfade is never cut in half.
+  - Two guards, because they catch different failures: the **budget** scales with the length of the
+    film (`encodeTimeoutMs`), so a 400-photo render is not killed for being long; the **stall** guard
+    (10 min of silence on `-progress`) is what catches a wedged process.
+  - **Order** is `chronological | shuffled` and nothing else — a hand-sorted running order is a video
+    editor's job. A shuffle is seeded from the **render id**, so a film is reproducible from its job
+    row and only a NEW render deals a new order.
+  - A second request while one runs is **queued** (`MAX_QUEUE = 3`), never dropped and never allowed
+    to kill the running encode: renders are versioned rows in `slideshows`, so both films survive and
+    the host picks. Serial, because ffmpeg here already takes every core.
 
 - **compose-env is checked PER SERVICE.** The guard used to scan the whole compose file, so a
   variable listed under `web:` satisfied the app's requirement and vice versa — it only ever
@@ -234,7 +349,8 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   single-use, so a failed submit must `reset()` the widget or the retry fails for a second reason.
 - **`shared/` holds the rules the server and the browser must agree about**, imported directly by
   both — see `shared/README.md`. Agreeing by copy does not work: captions counted one way in the box
-  and another on the server, and the difference was silent truncation.
+  and another on the server, and the difference was silent truncation. Two modules live there today:
+  `caption.ts` (the length rule) and `reveal.ts` (when a scheduled reveal happens — see below).
 - **A guest's trick card can be reassigned by the HOST.** `participants.challenge_set` is written
   once, at join, and a returning guest deliberately keeps the card they were given (that is what
   stops them shopping for easier tricks) — which left a genuine mis-scan with no way out. The host
@@ -378,4 +494,7 @@ with `IMAGE_TAG` in `.env`; point at your own registry with `IMAGE_PREFIX`.
 ## Other docs
 
 - **[GUIDE.md](GUIDE.md)** — page-by-page walkthrough of the app (visitor → organizer → guest → admin).
-- **[../TESTING.md](../TESTING.md)** — manual QA checklist.
+- **[../UPGRADING.md](../UPGRADING.md)** — the traps a `pull && up -d` does not close, plus per-release notes.
+- **[../TESTING.md](../TESTING.md)** — manual QA checklist, and what the automated suites already cover.
+- **[../shared/README.md](../shared/README.md)** — why `shared/` exists and how one relative path resolves in both images.
+- **[../loadtest/CAPACITY.md](../loadtest/CAPACITY.md)** — measured capacity and where the ceiling is.

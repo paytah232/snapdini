@@ -15,7 +15,7 @@
   export let allowSave = false;
   $: canCaption = captionMode === 'any' || (captionMode === 'own' && !!photo?.isOwn);
 
-  const dispatch = createEventDispatcher<{ close: void; caption: Photo; photochange: number }>();
+  const dispatch = createEventDispatcher<{ close: void; caption: Photo; photochange: number; saved: string }>();
   $: photo = photos[index];
 
   /** When it was taken, said the way a person would. Seconds are noise on a photo, and so is the
@@ -51,6 +51,9 @@
       if (out === 'shared') savedMsg = '✓ Saved';
       else if (out === 'downloaded') savedMsg = '✓ Downloaded';
       else if (out === 'failed') savedMsg = 'Couldn’t save';
+      // Tell the grid behind us, so the tick appears on the tile the moment this closes. Only on
+      // an outcome that actually reached the device — a cancel or a failure marks nothing.
+      if (out === 'shared' || out === 'downloaded') dispatch('saved', photo.id);
     } catch { savedMsg = 'Couldn’t save'; }
     finally {
       saving = false;
