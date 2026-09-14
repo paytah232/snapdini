@@ -101,7 +101,11 @@
     // "Drop the QR on the tables" is the exact moment a host thinks "…on what?" — and we answer
     // that in the product and used to say nothing about it here. Every competitor has QR-join;
     // what we have is the thing that gets the QR onto a table looking like it belongs there.
-    { n: '02 / SHARE', t: 'Put it on the tables', d: 'Design the poster and table cards right here — pick a look, print, done. Or just send the link. Guests join in a tap.' },
+    // `img` is optional on every step — drop the two lines and the slot disappears cleanly rather
+    // than leaving a broken frame. Files live in web/static/marketing/; ship a .webp and a .jpg of
+    // the same name and <picture> below picks whichever the browser can take.
+    { n: '02 / SHARE', t: 'Put it on the tables', d: 'Design the poster and table cards right here — pick a look, print, done. Or just send the link. Guests join in a tap.',
+      img: 'poster-sweetheart', alt: 'A printable table poster: the couple’s names, a QR code with the Snapdini mark in it, and the join link' },
     { n: '03 / REVEAL', t: 'Make them reappear', d: 'Everyone shoots through the night — then the whole gallery reappears at once.' }
   ];
 
@@ -235,7 +239,20 @@
   <h2>Set up the whole trick in about a minute.</h2>
   <div class="grid steps">
     {#each steps as s}
-      <div class="card"><div class="step-n">{s.n}</div><h3>{s.t}</h3><p>{s.d}</p></div>
+      <div class="card" class:has-img={s.img}>
+        <div class="step-n">{s.n}</div>
+        <h3>{s.t}</h3>
+        <p>{s.d}</p>
+        {#if s.img}
+          <!-- width/height are the real intrinsic size, so the row does not jump when it loads.
+               lazy + async: it is below the fold and must never hold up the first paint. -->
+          <picture>
+            <source srcset="/marketing/{s.img}.webp" type="image/webp" />
+            <img class="step-img" src="/marketing/{s.img}.jpg" alt={s.alt}
+                 width="620" height="877" loading="lazy" decoding="async" />
+          </picture>
+        {/if}
+      </div>
     {/each}
   </div>
 </section>
@@ -320,6 +337,21 @@
   .lede { font-size: 1.15rem; color: var(--text-muted); max-width: 32ch; margin: 22px 0 30px; }
   .cta { display: flex; gap: 12px; flex-wrap: wrap; }
   .note { margin-top: 18px; font-size: .82rem; color: var(--text-muted); }
+  /* The illustration sits UNDER its step's words, not beside them: the three steps are a row on a
+     desktop and a column on a phone, and an image that floats left of the text reflows into a
+     different reading order at the breakpoint. Capped in height so a tall portrait poster cannot
+     make its card twice the height of its neighbours. */
+  .step-img {
+    display: block;
+    width: 100%;
+    max-width: 260px;
+    height: auto;
+    margin: 14px auto 0;
+    border-radius: var(--radius-sm, 10px);
+    /* Posters are printed on white; on a dark page they need an edge or they float. */
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.45);
+  }
+
   .strip { display: flex; align-items: center; gap: 8px; transform: rotate(-4deg); background: #0a0a0b; padding: 12px; border-radius: 12px;
     box-shadow: 0 30px 60px rgba(0,0,0,.45); }
   /* Frame adopts the photo's real ratio; the reshape eases (and only the empty gradient is
@@ -352,7 +384,10 @@
   .faq-item p { color: var(--text-muted); margin: 10px 0 0; line-height: 1.5; }
   h2 { font-size: clamp(1.8rem, 4vw, 2.5rem); font-weight: 800; margin: 12px 0 36px; max-width: 22ch; }
   .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
-  .grid.steps { grid-template-columns: repeat(3, 1fr); }
+  /* align-items: start so a card carrying an illustration does not stretch its two neighbours to
+     match. Grid's default is `stretch`, which turned steps 01 and 03 into tall boxes with their
+     text at the top and a void underneath the moment step 02 gained a poster. */
+  .grid.steps { grid-template-columns: repeat(3, 1fr); align-items: start; }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 22px; }
   .card .ic { font-size: 1.5rem; }
   .card h3 { font-size: 1.05rem; margin: 12px 0 8px; }
