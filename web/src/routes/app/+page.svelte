@@ -939,7 +939,7 @@
            build a list FROM, so the switch dims (Toggle handles that itself) and the line beneath
            says why. A control that is simply absent reads as a bug. -->
       <div class="field">
-        <div class="toggle-field">
+        <div class="toggle-field" class:locked={!eventType}>
           <span class="tf-label"><label for="seed-missions">Trick list</label></span>
           <Toggle id="seed-missions" bind:checked={seedMissions} disabled={!eventType} />
         </div>
@@ -1591,7 +1591,7 @@
       {/if}
 
       {#if guestLiveAutomatic}
-        <div class="mail-opt" class:fresh={mailNewLive}>
+        <div class="mail-opt locked" class:fresh={mailNewLive}>
           <div class="field toggle-field">
             <span class="tf-label"><label for="g-live">The gallery link</label>{#if mailNewLive}<span class="fresh-pill">new</span>{/if}</span>
             <Toggle id="g-live" checked disabled />
@@ -2009,6 +2009,10 @@
      on the first toggle rather than as a statement about all of them. */
   /* A row that was not here last time the host looked. The page hides what does not apply, so an
      appearance is a real change and worth pointing at once. */
+  /* The gallery-link row is locked to the delivery mode, and the trick list needs an event type
+     before it can do anything. Pressing either does nothing, so neither should offer a hand. */
+  .locked .tf-label > label { cursor: default; }
+
   .fresh-pill {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 0.58rem; letter-spacing: 0.1em; text-transform: uppercase;
@@ -2027,9 +2031,21 @@
      and three presses of Next against a dot that never moves reads as a stuck button. */
   /* The strip's finished steps are real buttons now, so they need the button reset the div never
      needed — and a cursor that says they can be pressed. */
+  /* Neutralise ONLY what a <button> brings that a <div> does not — and nothing .stepdot already
+     declares. `button.stepdot` is (0,1,1) against .stepdot's (0,1,0), so it wins every collision:
+     a blanket `border: 0` took the track segment away from every finished step, and `font: inherit`
+     overrode the 0.75rem so the label jumped to body size the moment its number became a tick.
+     Browser defaults lose to author rules whatever the specificity, so .stepdot's own border-top,
+     font-size, padding-top, colour and alignment need no help here. */
   button.stepdot {
-    font: inherit; color: inherit; background: none; border: 0; padding: 0;
-    cursor: pointer; text-align: inherit;
+    font-family: inherit;
+    /* A <button> takes `line-height: normal` from the browser while a <div> inherits the page's, so
+       without this the finished steps sat 4px shorter than the ones beside them. */
+    line-height: inherit;
+    background: none;
+    border-right: 0; border-bottom: 0; border-left: 0;
+    padding-right: 0; padding-bottom: 0; padding-left: 0;
+    cursor: pointer;
   }
   button.stepdot:hover .sd-t { color: var(--text); }
   button.stepdot:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }

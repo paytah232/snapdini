@@ -47,7 +47,12 @@
     width: 46px;
     height: 26px;
     flex-shrink: 0;
+    /* The real input is width:0 and transparent, so the <label> wrapper is the entire hit area —
+       and without this it inherits the page's default arrow and reads as decoration rather than as
+       something you can press. Every other control in the product shows a hand. */
+    cursor: pointer;
   }
+  /* Later and more specific, so it wins over the rule above. */
   .toggle.disabled { opacity: 0.5; cursor: not-allowed; }
   .toggle input {
     position: absolute;
