@@ -1197,7 +1197,7 @@
        too spends both routes out of here on the same destination and leaves no way back to the site. -->
   <a class="brand" href="/"><Logo /> <small>ADMIN</small></a>
   <nav class="topnav-right">
-    {#if viewerIsAdmin}<a class="nav-link site-admin" href="/siteadmin" title="Back to the platform console">🎩 Site admin</a>{/if}
+    {#if viewerIsAdmin}<a class="nav-link site-admin" href="/siteadmin" title="Back to the platform console" aria-label="Site admin">🎩<span class="nav-label"> Site admin</span></a>{/if}
     {#if viewerLoggedIn}<a class="nav-link" href="/dashboard">← My events</a>{/if}
   </nav>
 </header>
@@ -2241,9 +2241,23 @@
   .fb-fab:hover { color: var(--text); border-color: var(--accent); }
 
   /* Fixed-height nav bar, consistent across pages. */
+  /* This bar overflowed on a phone, and only for a SITE ADMIN — they get a third item the rest of
+     the world never sees, and nothing here could shrink: both links are nowrap and neither side had
+     min-width:0, so the row simply ran past the viewport. The giveaway was the border-bottom
+     stopping short of the last link, because the border is the viewport's width and the content was
+     not. It also dragged the whole PAGE wider, which is where the stray horizontal scroll came from.
+     Both sides may now shrink, and below 460px the wordy parts give way rather than the layout. */
   .topnav { display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    height: 56px; padding: 0 16px; border-bottom: 1px solid var(--border); }
-  .topnav-right { display: flex; align-items: center; gap: 10px; }
+    height: 56px; padding: 0 16px; border-bottom: 1px solid var(--border); min-width: 0; }
+  .topnav .brand { min-width: 0; flex: 0 1 auto; overflow: hidden; }
+  .topnav-right { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 0 1 auto; }
+  @media (max-width: 460px) {
+    /* The mark stays — it is a red pill and unmistakable — and the words go. "My events" keeps its
+       words, because it is the one people actually press. */
+    .nav-link.site-admin .nav-label { display: none; }
+    .nav-link { padding: 6px 8px; font-size: 0.8rem; }
+    .topnav { gap: 8px; padding: 0 12px; }
+  }
   .nav-link { color: var(--text); text-decoration: none; font-weight: 700; font-size: 0.84rem;
     white-space: nowrap; padding: 6px 10px; border-radius: 8px; }
   .nav-link:hover { background: var(--surface-2); }
@@ -2343,6 +2357,12 @@
   .muted { color: var(--text-muted); }
   .small { font-size: 0.85rem; }
   .hint { font-size: 0.78rem; color: var(--text-muted); }
+  /* Had no rule at all, so it inherited full-strength --text and shouted next to every other piece
+     of supporting copy on the page. It is an aside under the primary action, and should read like
+     one — same size and weight as .hint, with the link carrying the emphasis instead. */
+  .auth-alt { margin: 14px 0 0; font-size: 0.78rem; line-height: 1.5; color: var(--text-muted); text-align: center; }
+  .auth-alt a { color: var(--accent); font-weight: 700; text-decoration: none; }
+  .auth-alt a:hover { text-decoration: underline; }
   .reveal-note { margin: -4px 0 12px; line-height: 1.5; }
   /* The two controls a host is most likely to poke at one-handed on a phone; iOS shrinks a bare
      date/time input below a comfortable tap. */
