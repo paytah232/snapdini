@@ -58,7 +58,7 @@ async function renderCard(
 
 // Bundled royalty-free tracks (CC-BY — see assets/music/MANIFEST.md; attribution shown in UI).
 export const MUSIC_DIR = process.env.MUSIC_DIR || '/app/assets/music';
-const MAX_IMAGES = 60;          // bound encode time/memory (counts photos + clips)
+const MAX_QUEUE = 3;            // how many renders may wait behind the running one, per event
 const D_DEFAULT = 3;            // default seconds per photo
 const T = 0.6;                  // crossfade seconds
 const CLIP_MAX = 6;             // cap each video clip's length (s) so one clip can't dominate
@@ -70,23 +70,184 @@ const RES: Record<string, { w: number; h: number; sizeScale: number }> = {
   '1080p': { w: 1920, h: 1080, sizeScale: 1 },
 };
 const resOf = (r?: string) => RES[r || '4k'] || RES['4k'];
+const resKey = (r?: string) => (r === '1080p' ? '1080p' : '4k');
+
+// Wall-clock seconds of ENCODING per second of finished video, and seconds of sharp pre-scaling per
+// item. MEASURED in this container 2026-09-14 on 12–32 real photos per run, libx264 -preset veryfast
+// -crf 20: 4K ran 0.89× real time and 0.19 s/item to pre-scale; 1080p ran 0.27× and 0.07 s/item.
+// Seeded a little above the measurement to cover the per-chunk ffmpeg startup, then corrected by
+// every render that completes, because a different box is a different number.
+const RENDER_RATE: Record<string, number> = { '4k': 1.0, '1080p': 0.35 };
+const PREP_SECS: Record<string, number> = { '4k': 0.19, '1080p': 0.07 };
+function noteRenderRate(resolution: string | undefined, outputSeconds: number, wallMs: number): void {
+  if (outputSeconds <= 0 || wallMs <= 0) return;
+  const key = resKey(resolution);
+  // Smoothed, so one freak render — a box that was already busy, a pile of video clips — doesn't
+  // throw every later estimate out.
+  RENDER_RATE[key] = RENDER_RATE[key] * 0.7 + (wallMs / 1000 / outputSeconds) * 0.3;
+}
+
+// How long ONE encode is allowed to take. The flat five minutes this replaced was survivable while
+// a render was capped at 60 items and fatal the moment it wasn't: the big renders — the ones the
+// host most wanted — would have been the only ones that reliably died.
+//
+// The budget scales with the work, and the work is the length of the film that comes out: seconds
+// per photo × the photos, plus each clip's own real duration (clips cost more, being decoded and
+// re-encoded rather than held). × 4 headroom over what we expect, because this exists to catch a
+// process that is stuck, not to put a ceiling on a job that is merely long.
+const ENCODE_HEADROOM = 4;
+const ENCODE_BUDGET_FLOOR_MS = 5 * 60_000;
+export function encodeTimeoutMs(outputSeconds: number, resolution?: string): number {
+  return Math.max(ENCODE_BUDGET_FLOOR_MS, Math.round(outputSeconds * RENDER_RATE[resKey(resolution)] * ENCODE_HEADROOM * 1000));
+}
+// The guard that actually catches a wedged ffmpeg. `-progress` reports the encoded position
+// continuously, so silence this long means stuck whatever the budget above still allows.
+const ENCODE_STALL_MS = 10 * 60_000;
+
+// How much film one ffmpeg run may produce. MEASURED here: a 4K run costs ~3.3 GB before it writes
+// a frame and then climbs ~86 MB for every second of film it makes — 32 photos in one graph reached
+// 9.9 GB. What bounds peak memory is therefore how much film a RUN produces, not how many photos
+// the host uploaded, which is why both a frame budget and an item budget are enforced.
+const CHUNK_LIMITS: Record<string, { items: number; secs: number }> = {
+  '4k':    { items: 12, secs: 20 },   // ≈ 3.3 GB + 20×86 MB ≈ 5 GB, at any film length
+  '1080p': { items: 24, secs: 60 },   // ≈ 1.0 GB + 60×21 MB ≈ 2.3 GB
+};
+const chunkLimitsFor = (W: number) => (W <= RES['1080p'].w ? CHUNK_LIMITS['1080p'] : CHUNK_LIMITS['4k']);
+
+// ── The timeline, counted in FRAMES ───────────────────────────────────────────
+//
+// Everything below is integer frames, never fractional seconds. A 0.6s fade rounded to a frame
+// boundary one way on one side of a chunk join and the other way on the other side is a dropped or
+// doubled frame — a stutter that shows up only at some item counts, which is the worst kind.
+export type Timeline = {
+  frames: number[];      // how long item i is on screen
+  fade: number[];        // junction j (item j → j+1) blends for this many frames
+  offset: number[];      // frame at which item i's own footage begins, in the finished film
+  totalFrames: number;
+};
+/** Lay the items out on one frame-accurate timeline.
+ *
+ *  The fade length is per-junction rather than one global T, because an item has to carry BOTH its
+ *  fades and still hold at least one frame of its own in between — and a 1s video clip cannot give
+ *  0.6s to each side. Shortening that one junction is invisible; the alternatives are padding the
+ *  clip with a frozen frame or letting two fades overlap into a corrupt graph. The floor((f-1)/2)
+ *  on each side is what guarantees the hold, and the hold is what gives a chunk boundary somewhere
+ *  safe to land. */
+export function buildTimeline(durations: readonly number[], fps: number, fadeSecs: number): Timeline {
+  const frames = durations.map((d) => Math.max(3, Math.round(d * fps)));
+  const want = Math.max(1, Math.round(fadeSecs * fps));
+  const fade: number[] = [];
+  for (let i = 0; i + 1 < frames.length; i++) {
+    fade.push(Math.max(1, Math.min(want, Math.floor((frames[i] - 1) / 2), Math.floor((frames[i + 1] - 1) / 2))));
+  }
+  const offset = [0];
+  for (let i = 1; i < frames.length; i++) offset[i] = offset[i - 1] + frames[i - 1] - fade[i - 1];
+  const totalFrames = frames.length ? offset[frames.length - 1] + frames[frames.length - 1] : 0;
+  return { frames, fade, offset, totalFrames };
+}
+
+export type Chunk = { from: number; to: number; startFrame: number; endFrame: number };
+/** Split the timeline into runs, without ever splitting a crossfade.
+ *
+ *  Consecutive chunks SHARE their boundary item: chunk k ends on item b and chunk k+1 begins on it.
+ *  Each chunk emits the window running from just after its first item's incoming fade to just after
+ *  its last item's incoming fade — so every join lands on a frame where the picture is one photo at
+ *  full strength, with identical content either side, and every fade sits wholly inside one run.
+ *  startFrame/endFrame are in the CHUNK's own local timeline (its first item starts at frame 0).
+ *  A chunk always holds at least one whole junction, so a budget smaller than a two-item span
+ *  cannot be met — with the real limits (20s at 4K) against the longest an item may be shown (8s)
+ *  that never binds, but it is why the budget is a target rather than a guarantee. */
+export function planChunks(tl: Timeline, maxItems: number, maxFrames: number): Chunk[] {
+  const n = tl.frames.length;
+  if (n === 0) return [];
+  if (n === 1) return [{ from: 0, to: 0, startFrame: 0, endFrame: tl.frames[0] }];
+  const startOf = (a: number) => (a === 0 ? 0 : tl.fade[a - 1]);
+  const endOf = (a: number, b: number) =>
+    tl.offset[b] - tl.offset[a] + (b === n - 1 ? tl.frames[b] : tl.fade[b - 1]);
+  const chunks: Chunk[] = [];
+  let a = 0;
+  while (a < n - 1) {
+    let b = a + 1;
+    // Grow while the run stays inside BOTH budgets; always at least two items, so a chunk can never
+    // be empty and the walk always advances.
+    while (b < n - 1 && (b + 2 - a) <= maxItems && endOf(a, b + 1) - startOf(a) <= maxFrames) b++;
+    chunks.push({ from: a, to: b, startFrame: startOf(a), endFrame: endOf(a, b) });
+    a = b;
+  }
+  return chunks;
+}
+
+// Never blow the whole event up to 4K when nothing in it is bigger than 1080p. The canvas would
+// carry no detail the photos don't have, and a 4K encode measured 3.3× the wall clock of a 1080p
+// one here — pure waiting, for nothing. Only downgraded when EVERY source fits inside 1080p as it
+// is: one bigger photo and the big canvas stays, because that one would visibly lose detail.
+export function canvasFor(
+  resolution: string | undefined, sources: readonly { width?: number | null; height?: number | null }[],
+): { w: number; h: number; downgraded: boolean } {
+  const want = resOf(resolution);
+  if (want.w <= RES['1080p'].w || !sources.length) return { w: want.w, h: want.h, downgraded: false };
+  const fits = sources.every((s) => !!s.width && !!s.height
+    && Math.max(s.width, s.height) <= RES['1080p'].w && Math.min(s.width, s.height) <= RES['1080p'].h);
+  return fits
+    ? { w: RES['1080p'].w, h: RES['1080p'].h, downgraded: true }
+    : { w: want.w, h: want.h, downgraded: false };
+}
 
 function prettyLabel(file: string): string {
   return file.replace(/\.mp3$/i, '').replace(/^c0-/i, '').replace(/^\d+[-_]/, '').replace(/[-_]+/g, ' ')
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
+/** A track's length in seconds, read off the file. 0 if it can't be read. */
+export function probeAudioSeconds(file: string): Promise<number> {
+  return new Promise((resolve) => {
+    const p = spawn('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file]);
+    let out = '';
+    const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* */ } resolve(0); }, 15_000);
+    p.stdout.on('data', (d) => { out += d.toString(); });
+    p.on('error', () => { clearTimeout(t); resolve(0); });
+    p.on('close', () => { clearTimeout(t); const v = parseFloat(out.trim()); resolve(isFinite(v) ? v : 0); });
+  });
+}
+// Keyed by path+mtime+size so a replaced custom upload re-probes and a bundled track never does.
+// The panel polls slideshowInfo every 1.5s while a render runs; without this that would be an
+// ffprobe per track per poll.
+const audioSecsCache = new Map<string, number>();
+async function cachedAudioSeconds(file: string): Promise<number | undefined> {
+  try {
+    const st = fs.statSync(file);
+    const key = `${file}:${st.mtimeMs}:${st.size}`;
+    const hit = audioSecsCache.get(key);
+    if (hit === undefined) audioSecsCache.set(key, await probeAudioSeconds(file));
+    return audioSecsCache.get(key) || undefined;
+  } catch { return undefined; }
+}
 // Offer ONLY the no-attribution set (Mixkit Free License, prefix "c0-") so slideshows are
 // credit-free. The CC-BY tracks remain on disk for reference but aren't selectable.
-export function listMusic(): { id: string; label: string }[] {
+//
+// Lengths are probed HERE rather than read in the browser from <audio preload="metadata">, which is
+// where they used to come from. iOS Safari will not load media metadata without a user gesture, so
+// `loadedmetadata` never fired on an iPhone and every track length — and with them the "your music
+// is shorter than the show" warning — was silently missing on the device most hosts use. The server
+// already has ffprobe, the answer is identical for every visitor, and it is knowable BEFORE the
+// host taps a track, which is exactly when they want to see it.
+export async function listMusic(): Promise<{ id: string; label: string; secs?: number }[]> {
+  let files: string[] = [];
   try {
-    return fs.readdirSync(MUSIC_DIR)
-      .filter((f) => f.toLowerCase().endsWith('.mp3') && f.toLowerCase().startsWith('c0-'))
-      .sort().map((f) => ({ id: f, label: prettyLabel(f) }));
+    files = fs.readdirSync(MUSIC_DIR)
+      .filter((f) => f.toLowerCase().endsWith('.mp3') && f.toLowerCase().startsWith('c0-')).sort();
   } catch { return []; }
+  return Promise.all(files.map(async (f) => {
+    const secs = await cachedAudioSeconds(path.join(MUSIC_DIR, f));
+    return secs ? { id: f, label: prettyLabel(f), secs } : { id: f, label: prettyLabel(f) };
+  }));
 }
 
 type Phase = 'collecting' | 'encoding';
-type Opts = { favouritesOnly?: boolean; track?: string; tracks?: string[]; loopMusic?: boolean; secondsPer?: number; includeVideos?: boolean; keepVideoAudio?: boolean; quality?: string; resolution?: string; branding?: boolean };
+// Two orders, and deliberately only two: the night in the order it happened, or shuffled. A
+// hand-sorted running order is a video editor's job, not something to ask a party host for.
+export type SlideshowOrder = 'chronological' | 'shuffled';
+export const orderOf = (o?: string): SlideshowOrder => (o === 'shuffled' ? 'shuffled' : 'chronological');
+type Opts = { favouritesOnly?: boolean; track?: string; tracks?: string[]; loopMusic?: boolean; secondsPer?: number; includeVideos?: boolean; keepVideoAudio?: boolean; quality?: string; resolution?: string; branding?: boolean; order?: string };
 
 // Concatenate several audio files (played in order) into one AAC file — so the rest of the encode
 // treats "the music" as a single track (looped or not). Returns false on failure.
@@ -110,7 +271,50 @@ const QUALITY: Record<string, { crf: number; kbps: number }> = {
   small:  { crf: 28, kbps: 1800 },
 };
 const qualityOf = (q?: string) => QUALITY[q || 'best'] || QUALITY.best;
-type Item = { path: string; isVideo: boolean; hasAudio?: boolean };
+type Item = { path: string; isVideo: boolean; hasAudio?: boolean; width?: number | null; height?: number | null };
+
+// FNV-1a over the render id → a 32-bit seed. A shuffled render has to be REPRODUCIBLE from the job
+// that produced it: seeding off Math.random() would deal a different film every time the same job
+// ran, so a host who liked what they saw could never get that one back.
+function seedFrom(text: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+// mulberry32 — tiny, fast, and identical for a given seed on every run.
+function rng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+/** Fisher–Yates driven by a seeded PRNG: same input + same seed → same output, every time. */
+export function seededShuffle<T>(items: readonly T[], seed: string): T[] {
+  const out = items.slice();
+  const next = rng(seedFrom(seed));
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(next() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+/** Put the items of one render into playing order.
+ *
+ *  Nothing is left out any more: a host who asks for all 300 photos gets all 300. This was a
+ *  `slice(0, MAX_IMAGES)` that answered two questions at once — which photos survived a cut, and
+ *  what order they played in — and it answered the first by accident, binning the end of a long
+ *  night. With no cut to survive, only the order question is left.
+ *
+ *  Favourites deliberately do NOT sort here. They were promoted purely to survive the cap; keeping
+ *  that with nothing to survive would silently drag every starred photo to the front of the film,
+ *  which is not what starring a photo means. */
+export function orderForRender<T>(items: readonly T[], order: SlideshowOrder, seed: string): T[] {
+  return order === 'shuffled' ? seededShuffle(items, seed) : items.slice();
+}
 
 // Probe a video's real duration (seconds); 0 if it can't be read. We count decoded packets and
 // divide by the frame rate — reliable even for webm from MediaRecorder, whose container/format
@@ -188,8 +392,16 @@ export function probeHasAudioStream(file: string): Promise<boolean> {
   });
 }
 
-type Job = { status: 'running' | 'done' | 'error'; url?: string; error?: string; truncated?: boolean; progress?: number; phase?: Phase };
+type Job = { status: 'running' | 'done' | 'error'; url?: string; error?: string;
+             progress?: number; phase?: Phase; label?: string; startedAt?: number };
+type Pending = { id: string; opts: Opts; label: string; queuedAt: number };
+export type StartResult = Job & { queuedCount: number; queueFull?: boolean };
 const jobs = new Map<string, Job>();
+const pending = new Map<string, Pending[]>();
+// A render that failed while others were queued behind it would otherwise vanish the instant the
+// next one claimed the job slot — the host would see the bar restart and never learn that the
+// render before it died. Kept until a later render for the same event finishes.
+const lastFailure = new Map<string, { label: string; error: string; at: number }>();
 
 // Status + the info the panel needs to preview/estimate before building: eligible photo counts
 // (so it can show "N photos · ~Xs") and the music list. Async because it counts photos.
@@ -201,19 +413,28 @@ async function visibleStatusSql(eventId: string): Promise<string> {
 }
 
 export async function slideshowInfo(eventId: string) {
-  let photoCount = 0, favouriteCount = 0, videoCount = 0;
+  let photoCount = 0, favouriteCount = 0, videoCount = 0, favouriteVideoCount = 0, sourcesFitIn1080 = false;
   try {
-    const rows = await all<{ is_highlighted: boolean; media_type: string }>(
-      `SELECT is_highlighted, media_type FROM photos
+    const rows = await all<{ is_highlighted: boolean; media_type: string; width: number | null; height: number | null }>(
+      `SELECT is_highlighted, media_type, width, height FROM photos
          WHERE event_id = ? AND ${await visibleStatusSql(eventId)}`, [eventId]);
     const imgs = rows.filter((r) => r.media_type !== 'video');
     photoCount = imgs.length;
     favouriteCount = imgs.filter((r) => r.is_highlighted).length;
     videoCount = rows.length - imgs.length;
+    // Favourite CLIPS are counted separately because a favourites render drops them unless asked
+    // for: the SQL excludes videos before the favourite filter runs, so a host who starred a clip
+    // lost it with nothing said. The panel can only offer them by name if it knows how many.
+    favouriteVideoCount = rows.filter((r) => r.media_type === 'video' && r.is_highlighted).length;
+    // Whether a 4K request would be pure upscale, so the panel can quote the time it will really
+    // take rather than the time 4K would have taken.
+    sourcesFitIn1080 = rows.length > 0 && canvasFor('4k', rows).downgraded;
   } catch { /* none */ }
-  let hasCustomAudio = false;
+  let hasCustomAudio = false, customAudioSecs: number | undefined;
   try {
-    hasCustomAudio = fs.readdirSync(eventDir(eventId)).some((n) => n.startsWith('audio-'));
+    const dir = eventDir(eventId);
+    const own = fs.readdirSync(dir).find((n) => n.startsWith('audio-'));
+    if (own) { hasCustomAudio = true; customAudioSecs = await cachedAudioSeconds(path.join(dir, own)); }
   } catch { /* none */ }
   const job = jobs.get(eventId) ?? { status: 'idle' as unknown as Job['status'] };
   const recent = await listSlideshows(eventId);
@@ -224,9 +445,12 @@ export async function slideshowInfo(eventId: string) {
     { id: 'high', label: 'High', kbps: QUALITY.high.kbps },
     { id: 'small', label: 'Smaller file', kbps: QUALITY.small.kbps },
   ];
+  // renderScale = wall-clock seconds of rendering per second of finished video, so the panel can
+  // say roughly how long this will take before the host starts it. Learned, not assumed — see
+  // RENDER_RATE.
   const resolutions = [
-    { id: '4k', label: '4K (sharpest)', sizeScale: RES['4k'].sizeScale },
-    { id: '1080p', label: '1080p (faster, smaller)', sizeScale: RES['1080p'].sizeScale },
+    { id: '4k', label: '4K (sharpest)', sizeScale: RES['4k'].sizeScale, renderScale: Math.round(RENDER_RATE['4k'] * 100) / 100, prepPerItem: PREP_SECS['4k'] },
+    { id: '1080p', label: '1080p (faster, smaller)', sizeScale: RES['1080p'].sizeScale, renderScale: Math.round(RENDER_RATE['1080p'] * 100) / 100, prepPerItem: PREP_SECS['1080p'] },
   ];
   // "Remove the Snapdini intro/outro" add-on: whether this event can already do it for free
   // (self-host, or already entitled) and the price to unlock it otherwise.
@@ -245,7 +469,15 @@ export async function slideshowInfo(eventId: string) {
     try { return fs.existsSync(path.join(UPLOADS_DIR, play)) ? `/uploads/${play}` : undefined; }
     catch { return undefined; }
   })();
-  return { ...job, playUrl: jobPlay, music: listMusic(), photoCount, favouriteCount, videoCount, hasCustomAudio, maxImages: MAX_IMAGES, secondsPerDefault: D_DEFAULT, recent, qualities, resolutions,
+  // What is waiting behind the running render. The panel shows it so a host who queued a second
+  // one can see that it exists, rather than wondering whether their second press did anything.
+  const queued = (pending.get(eventId) ?? []).map((p) => ({ id: p.id, label: p.label, queuedAt: p.queuedAt }));
+  // Surfaced separately from `job.error`, because by the time the panel asks, the job slot may
+  // already belong to the render that was queued behind the one that failed.
+  const failed = job.status === 'error' ? undefined : lastFailure.get(eventId);
+  return { ...job, playUrl: jobPlay, music: await listMusic(), photoCount, favouriteCount, videoCount, favouriteVideoCount,
+    hasCustomAudio, customAudioSecs, sourcesFitIn1080, secondsPerDefault: D_DEFAULT, recent, qualities, resolutions,
+    queued, maxQueue: MAX_QUEUE, failed,
     brandingRemovable, brandingPriceCents: BRANDING_REMOVAL_CENTS, billingEnabled: BILLING_ON };
 }
 
@@ -253,30 +485,62 @@ const SLIDESHOW_TTL_MS = 24 * 60 * 60 * 1000;   // non-favourite renders auto-pu
 
 function slideshowLabel(opts: Opts): string {
   const d = Math.min(8, Math.max(2, Math.round(opts.secondsPer || D_DEFAULT)));
-  return `${opts.favouritesOnly ? 'Favourites' : 'All photos'} · ${d}s/photo${opts.includeVideos ? ' · video' : ''}`;
+  return `${opts.favouritesOnly ? 'Favourites' : 'All photos'} · ${d}s/photo${opts.includeVideos ? ' · video' : ''}${orderOf(opts.order) === 'shuffled' ? ' · shuffled' : ''}`;
 }
 
-export function startSlideshow(eventId: string, opts: Opts): Job {
-  const existing = jobs.get(eventId);
-  if (existing?.status === 'running') return existing;
-  const id = randomUUID().replace(/-/g, '');
-  const job: Job = { status: 'running', progress: 0, phase: 'collecting' };
-  jobs.set(eventId, job);
-  run(eventId, opts, id)
+// Start a render, or queue it behind the one already going.
+//
+// The old behaviour was to hand back the running job and drop the new request on the floor, so a
+// host who changed a setting and pressed go again got no render with those settings and no word
+// about it. An encode costs real minutes of this box's CPU, so the running one is never killed to
+// make room either. Queue instead: renders are versioned rows in `slideshows`, so both films
+// survive and the host picks. Serial and not parallel, deliberately — ffmpeg here already takes
+// every core and is killed on a 5-minute timeout, so two 4K encodes at once would starve each
+// other until one of them hit that timeout and died.
+export function startSlideshow(eventId: string, opts: Opts): StartResult {
+  const entry: Pending = { id: randomUUID().replace(/-/g, ''), opts, label: slideshowLabel(opts), queuedAt: Date.now() };
+  const running = jobs.get(eventId);
+  if (running?.status === 'running') {
+    const queue = pending.get(eventId) ?? [];
+    if (queue.length >= MAX_QUEUE) return { ...running, queuedCount: queue.length, queueFull: true };
+    queue.push(entry);
+    pending.set(eventId, queue);
+    return { ...running, queuedCount: queue.length };
+  }
+  begin(eventId, entry);
+  return { ...jobs.get(eventId)!, queuedCount: 0 };
+}
+
+function begin(eventId: string, entry: Pending): void {
+  jobs.set(eventId, { status: 'running', progress: 0, phase: 'collecting', label: entry.label, startedAt: Date.now() });
+  run(eventId, entry.opts, entry.id)
     .then(async (r) => {
       // Record this render so it shows in the "recent slideshows" list (versioned, not overwritten).
-      try { await db.insert(slideshows).values({ id, eventId, filename: eventRelPath(eventId, `slideshow-${id}.mp4`), label: slideshowLabel(opts), resolution: (opts.resolution === '1080p' ? '1080p' : '4k'), createdAt: Date.now() }); } catch { /* best-effort */ }
-      jobs.set(eventId, { status: 'done', url: r.url, truncated: r.truncated, progress: 100 });
+      // r.resolution, not what was asked for: a 4K request over an all-1080p event renders at 1080p.
+      try { await db.insert(slideshows).values({ id: entry.id, eventId, filename: eventRelPath(eventId, `slideshow-${entry.id}.mp4`), label: entry.label, resolution: r.resolution, createdAt: Date.now() }); } catch { /* best-effort */ }
+      jobs.set(eventId, { status: 'done', url: r.url, label: entry.label, progress: 100 });
+      lastFailure.delete(eventId);   // a render that worked answers the one that didn't
       // A 4K render is what you want to keep and download; it is not what a phone should be asked
       // to stream in a preview. Build a 1080p H.264 copy alongside it, in the background so the
       // host is not kept waiting on the render they already have. 1080p renders need nothing.
-      if (opts.resolution !== '1080p') {
-        void makePlaybackProxy(path.join(UPLOADS_DIR, eventRelPath(eventId, `slideshow-${id}.mp4`)))
+      if (r.resolution !== '1080p') {
+        void makePlaybackProxy(path.join(UPLOADS_DIR, eventRelPath(eventId, `slideshow-${entry.id}.mp4`)))
           .catch(() => false);
       }
     })
-    .catch((e) => jobs.set(eventId, { status: 'error', error: String(e?.message || e) }));
-  return job;
+    .catch((e) => {
+      const error = String(e?.message || e);
+      jobs.set(eventId, { status: 'error', error, label: entry.label });
+      lastFailure.set(eventId, { label: entry.label, error, at: Date.now() });
+    })
+    // Only now, with the finished render written to `slideshows`, does the next one take the job
+    // slot — so handing the slot on can never lose the render that just finished.
+    .finally(() => {
+      const queue = pending.get(eventId);
+      const next = queue?.shift();
+      if (!queue?.length) pending.delete(eventId);
+      if (next) begin(eventId, next);
+    });
 }
 
 // Recent renders for an event, newest first.
@@ -350,23 +614,27 @@ export async function purgeOldSlideshows(): Promise<number> {
   return removed;
 }
 
-async function run(eventId: string, opts: Opts, outId: string): Promise<{ url: string; truncated: boolean }> {
-  const { w: Wp, h: Hp } = resOf(opts.resolution);   // output canvas (4K default, 1080p option)
+async function run(eventId: string, opts: Opts, outId: string): Promise<{ url: string; resolution: string }> {
   const D = Math.min(8, Math.max(2, Math.round(opts.secondsPer || D_DEFAULT)));   // 2–8s/photo
   // Include video clips too when asked; otherwise photos only. Rejected/pending always excluded.
-  let rows = await all<{ filename: string; is_highlighted: boolean; media_type: string }>(
-    `SELECT filename, is_highlighted, media_type FROM photos
+  let rows = await all<{ filename: string; is_highlighted: boolean; media_type: string; width: number | null; height: number | null }>(
+    `SELECT filename, is_highlighted, media_type, width, height FROM photos
        WHERE event_id = ? AND ${await visibleStatusSql(eventId)}
          ${opts.includeVideos ? '' : "AND media_type != 'video'"}
        ORDER BY taken_at ASC`, [eventId]);
   if (opts.favouritesOnly) rows = rows.filter((r) => r.is_highlighted);
 
   const allItems: Item[] = rows
-    .map((r) => ({ path: path.join(UPLOADS_DIR, r.filename), isVideo: r.media_type === 'video' }))
+    .map((r) => ({ path: path.join(UPLOADS_DIR, r.filename), isVideo: r.media_type === 'video', width: r.width, height: r.height }))
     .filter((it) => fs.existsSync(it.path));
-  const truncated = allItems.length > MAX_IMAGES;
-  const items = allItems.slice(0, MAX_IMAGES);
+  // Every visible item the host asked for goes in — the render id doubles as the shuffle seed, so a
+  // shuffled film is fixed for the life of that render and only a NEW render deals a new order.
+  const items = orderForRender(allItems, orderOf(opts.order), outId);
   if (!items.length) throw new Error('No photos to include yet');
+  // Output canvas: what was asked for, unless every source is small enough that 4K would only be
+  // an expensive upscale of nothing.
+  const { w: Wp, h: Hp, downgraded } = canvasFor(opts.resolution, items);
+  const resolution = downgraded || opts.resolution === '1080p' ? '1080p' : '4k';
 
   // Per-item duration: photos get D; clips get their own length, capped to CLIP_MAX (≥1s).
   // When keeping clip sound, also probe which clips actually carry an audio track.
@@ -418,8 +686,8 @@ async function run(eventId: string, opts: Opts, outId: string): Promise<{ url: s
       { text: 'Loved capturing your event? Your guests did too.', size: 40, color: '#f0ece6', weight: 400, dy: 560 },
       { text: 'Start your own at snapdini.com', size: 40, color: accent, weight: 700, dy: 650 },
     ], outroPath, { bgImage: headerImage, accent, bg: themeBg, footer: `© ${year} Snapdini · snapdini.com` });
-    if (fs.existsSync(introPath)) { items.unshift({ path: introPath, isVideo: false }); durs.unshift(CARD_SECS); cardFiles.push(introPath); }
-    if (fs.existsSync(outroPath)) { items.push({ path: outroPath, isVideo: false }); durs.push(CARD_SECS); cardFiles.push(outroPath); }
+    if (fs.existsSync(introPath)) { items.unshift({ path: introPath, isVideo: false, width: Wp, height: Hp }); durs.unshift(CARD_SECS); cardFiles.push(introPath); }
+    if (fs.existsSync(outroPath)) { items.push({ path: outroPath, isVideo: false, width: Wp, height: Hp }); durs.push(CARD_SECS); cardFiles.push(outroPath); }
   } catch { /* cards are best-effort — skip on any failure */ }
 
   // Pre-scale still photos to 1080p ONCE (fast, via sharp) so ffmpeg isn't re-scaling a 33-megapixel
@@ -479,102 +747,169 @@ async function run(eventId: string, opts: Opts, outId: string): Promise<{ url: s
   fs.mkdirSync(outDir, { recursive: true });
   const outPath = path.join(outDir, `slideshow-${outId}.mp4`);
 
-  const total = durs.reduce((a, b) => a + b, 0) - (items.length - 1) * T;   // final video length (s)
+  const tl = buildTimeline(durs, FPS, T);
+  const totalSecs = tl.totalFrames / FPS;
+  const profile: EncodeProfile = { W: Wp, H: Hp, crf: qualityOf(opts.quality).crf, preset: ENCODE_PRESET, fps: FPS, padColor, threads: NCPU };
+  const limits = chunkLimitsFor(Wp);
+  const chunks = planChunks(tl, limits.items, limits.secs * FPS);
   const job = jobs.get(eventId);
   if (job) job.phase = 'encoding';
-  // Report encode progress (ffmpeg -progress) back onto the job so the panel shows a live bar.
+  const encodeStarted = Date.now();
   try {
-    await runFfmpeg(buildArgs(items, durs, music, outPath, !!opts.keepVideoAudio, qualityOf(opts.quality).crf, Wp, Hp, loopMusic, padColor), (sec) => {
-      if (job) job.progress = Math.max(0, Math.min(99, Math.round((sec / total) * 100)));
-    });
+    // Each chunk is encoded to its own MPEG-TS part with ONE identical settings object, because the
+    // concat demuxer joins streams by trusting that their codec parameters match — a chunk encoded
+    // even slightly differently is a glitch at the join, not an error anyone would see.
+    const parts: string[] = [];
+    let emitted = 0;   // frames finished in earlier chunks, so the bar spans the whole film
+    for (let c = 0; c < chunks.length; c++) {
+      const part = path.join(workDir, `${outId}-p${c}.ts`);
+      tempFiles.push(part);
+      const span = chunks[c].endFrame - chunks[c].startFrame;
+      await runFfmpeg(buildChunkArgs(items, tl, chunks[c], profile, part), (f) => {
+        if (job) job.progress = Math.max(0, Math.min(98, Math.round(((emitted + Math.min(f, span)) / tl.totalFrames) * 100)));
+      }, encodeTimeoutMs(span / FPS, resolution));
+      emitted += span;
+      parts.push(part);
+    }
+    const listPath = path.join(workDir, `${outId}-parts.txt`);
+    fs.writeFileSync(listPath, parts.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join('\n') + '\n');
+    tempFiles.push(listPath);
+    // One final pass joins the parts and lays the audio over the WHOLE film, with the video copied
+    // rather than re-encoded. The music has to run across the joins: cut and re-encoded per chunk it
+    // would click at every boundary, which is the same bug as a visible cut, just for the ears.
+    await runFfmpeg(buildMuxArgs(listPath, items, tl, music, outPath, !!opts.keepVideoAudio, loopMusic),
+      undefined, Math.max(ENCODE_BUDGET_FLOOR_MS, Math.round(totalSecs * 1000)));
+    if (job) job.progress = 99;
+    noteRenderRate(resolution, totalSecs, Date.now() - encodeStarted);
   } finally {
-    for (const f of tempFiles) { try { fs.unlinkSync(f); } catch { /* gone */ } }   // clean up temp cards + pre-scaled stills
+    // Success or failure, the whole working directory goes — chunk parts included, and they are the
+    // biggest thing in it.
+    for (const f of tempFiles) { try { fs.unlinkSync(f); } catch { /* gone */ } }
     try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* gone */ }
   }
-  return { url: `/uploads/${eventRelPath(eventId, `slideshow-${outId}.mp4`)}`, truncated };
+  return { url: `/uploads/${eventRelPath(eventId, `slideshow-${outId}.mp4`)}`, resolution };
 }
 
-function buildArgs(items: Item[], durs: number[], music: string | null, outPath: string, keepVideoAudio: boolean, crf: number, Wp: number, Hp: number, loopMusic = true, padColor = 'black'): string[] {
+export type EncodeProfile = { W: number; H: number; crf: number; preset: string; fps: number; padColor: string; threads: number };
+// Measured here on real photos at CRF 20: veryfast ran 0.88× real time at 4K and produced the
+// SMALLEST file of every preset tried (17.9 MB, against 21.8 for faster, 22.3 for fast, 19.9 for
+// medium and 75.7 for ultrafast). Slower presets cost time and gave nothing back on this content —
+// long static holds and slow crossfades — so there is nothing to win by moving off it.
+const ENCODE_PRESET = 'veryfast';
+
+// One chunk of the film: the normal xfade chain over just this chunk's items, then trimmed in
+// FRAMES to the window this chunk owns. Video only — audio is laid over the joined film later.
+export function buildChunkArgs(items: Item[], tl: Timeline, chunk: Chunk, p: EncodeProfile, outPath: string): string[] {
+  const { from: a, to: b } = chunk;
   const args: string[] = ['-progress', 'pipe:1', '-nostats'];
-  // `-t durs[i]` caps each input's video AND audio to its shown duration; stills are looped.
-  items.forEach((it, i) => {
-    if (it.isVideo) args.push('-t', String(durs[i]), '-i', it.path);
-    else args.push('-loop', '1', '-t', String(durs[i]), '-i', it.path);
-  });
-  // Loop the music to fill the whole show (default), or play it once — when it's shorter than the
-  // show the trailing video is silent (the UI warns about this before generating).
-  if (music) { if (loopMusic) args.push('-stream_loop', '-1', '-i', music); else args.push('-i', music); }
-
-  const N = items.length;
-  const musicIdx = N;   // music is the input after the N media items
-  // offsets[i] = when clip i starts in the output timeline (each transition overlaps by T).
-  const offsets: number[] = [0];
-  for (let i = 1; i < N; i++) offsets[i] = offsets[i - 1] + durs[i - 1] - T;
-  const total = durs.reduce((a, b) => a + b, 0) - (N - 1) * T;
-
+  for (let i = a; i <= b; i++) {
+    if (items[i].isVideo) args.push('-i', items[i].path);
+    // A couple of frames more than needed; the trim below takes it back to the exact count.
+    else args.push('-loop', '1', '-t', ((tl.frames[i] + 2) / p.fps).toFixed(4), '-i', items[i].path);
+  }
   const parts: string[] = [];
-  for (let i = 0; i < N; i++) {
-    parts.push(`[${i}:v]scale=${Wp}:${Hp}:force_original_aspect_ratio=decrease,` +
-      `pad=${Wp}:${Hp}:(ow-iw)/2:(oh-ih)/2:${padColor},setsar=1,fps=${FPS},format=yuv420p,setpts=PTS-STARTPTS[v${i}]`);
+  for (let i = a; i <= b; i++) {
+    const k = i - a;
+    // tpad clones the last frame if a clip delivers a frame or two fewer than it claimed; trim then
+    // cuts every input to EXACTLY frames[i]. Without it one short clip shifts every later fade.
+    const pad = items[i].isVideo ? 'tpad=stop_mode=clone:stop_duration=2,' : '';
+    parts.push(`[${k}:v]scale=${p.W}:${p.H}:force_original_aspect_ratio=decrease,` +
+      `pad=${p.W}:${p.H}:(ow-iw)/2:(oh-ih)/2:${p.padColor},setsar=1,fps=${p.fps},${pad}format=yuv420p,` +
+      `trim=end_frame=${tl.frames[i]},setpts=PTS-STARTPTS[v${k}]`);
   }
   let last = 'v0';
-  for (let i = 1; i < N; i++) {
-    const out = i === N - 1 ? 'vout' : `x${i}`;
-    parts.push(`[${last}][v${i}]xfade=transition=fade:duration=${T}:offset=${offsets[i].toFixed(3)}[${out}]`);
-    last = out;
+  for (let i = a + 1; i <= b; i++) {
+    const k = i - a;
+    parts.push(`[${last}][v${k}]xfade=transition=fade:duration=${(tl.fade[i - 1] / p.fps).toFixed(6)}` +
+      `:offset=${((tl.offset[i] - tl.offset[a]) / p.fps).toFixed(6)}[x${k}]`);
+    last = `x${k}`;
   }
+  // Cut this chunk's window out of the local timeline by frame index, and rebase to zero so the
+  // concat demuxer can lay the parts end to end.
+  parts.push(`[${last}]trim=start_frame=${chunk.startFrame}:end_frame=${chunk.endFrame},setpts=PTS-STARTPTS[out]`);
+  args.push('-filter_complex_threads', String(p.threads), '-filter_complex', parts.join(';'),
+    '-map', '[out]', '-an',
+    '-c:v', 'libx264', '-threads', String(p.threads), '-pix_fmt', 'yuv420p', '-r', String(p.fps),
+    '-preset', p.preset, '-crf', String(p.crf), '-f', 'mpegts', '-y', outPath);
+  return args;
+}
 
-  const maps = ['-map', `[${last}]`];
-  let haveAudio = false;
-  const afade = (label: string) => `${label}atrim=0:${total.toFixed(3)},afade=t=out:st=${Math.max(0, total - 2).toFixed(3)}:d=2[a]`;
-
+// Join the parts and add the sound, in one pass, with `-c:v copy` — the picture is already encoded.
+export function buildMuxArgs(listPath: string, items: Item[], tl: Timeline, music: string | null,
+                      outPath: string, keepVideoAudio: boolean, loopMusic: boolean): string[] {
+  const total = tl.totalFrames / FPS;
+  const args: string[] = ['-progress', 'pipe:1', '-nostats', '-fflags', '+genpts',
+    '-f', 'concat', '-safe', '0', '-i', listPath];
+  let idx = 1, musicIdx = -1;
+  // Loop the music to fill the whole show (default), or play it once — when it's shorter than the
+  // show the trailing video is silent (the UI warns about this before generating).
+  if (music) { if (loopMusic) args.push('-stream_loop', '-1'); args.push('-i', music); musicIdx = idx++; }
+  const clips: { item: number; input: number }[] = [];
   if (keepVideoAudio) {
-    // Place each clip's own audio at its timeline offset, then mix them (under the backing track,
-    // if one is selected). Clips without an audio track are simply skipped.
-    const mixIns: string[] = [];
-    items.forEach((it, i) => {
-      if (it.isVideo && it.hasAudio) {
-        const ms = Math.max(0, Math.round(offsets[i] * 1000));
-        parts.push(`[${i}:a]aresample=async=1,adelay=${ms}:all=1[ca${i}]`);
-        mixIns.push(`[ca${i}]`);
-      }
-    });
-    if (music) { parts.push(`[${musicIdx}:a]aresample=async=1,volume=0.35[bgm]`); mixIns.push('[bgm]'); }
-    if (mixIns.length) {
-      parts.push(`${mixIns.join('')}amix=inputs=${mixIns.length}:duration=longest:dropout_transition=0[amx]`);
-      parts.push(afade('[amx]'));
-      maps.push('-map', '[a]'); haveAudio = true;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].isVideo && items[i].hasAudio) { args.push('-i', items[i].path); clips.push({ item: i, input: idx++ }); }
     }
-  } else if (music) {
-    parts.push(afade(`[${musicIdx}:a]`));
-    maps.push('-map', '[a]'); haveAudio = true;
   }
-
-  const filter = parts.join(';');
-  args.push('-filter_complex_threads', String(NCPU), '-filter_complex', filter, ...maps,
-    '-c:v', 'libx264', '-threads', '0', '-pix_fmt', 'yuv420p', '-r', String(FPS), '-preset', 'veryfast', '-crf', String(crf));
-  if (haveAudio) args.push('-c:a', 'aac', '-b:a', '160k');
+  const parts: string[] = [];
+  const mixIns: string[] = [];
+  // Each clip's own audio sits at the frame its footage starts on, which is the only place it can
+  // be now that the picture is already cut.
+  for (const c of clips) {
+    parts.push(`[${c.input}:a]aresample=async=1,adelay=${Math.round((tl.offset[c.item] / FPS) * 1000)}:all=1[ca${c.item}]`);
+    mixIns.push(`[ca${c.item}]`);
+  }
+  if (musicIdx >= 0) {
+    // Under the clips when there are clips to be under; at its own level when it is the only sound.
+    parts.push(`[${musicIdx}:a]aresample=async=1${clips.length ? ',volume=0.35' : ''}[bgm]`);
+    mixIns.push('[bgm]');
+  }
+  const maps = ['-map', '0:v'];
+  if (mixIns.length) {
+    let src = mixIns[0];
+    if (mixIns.length > 1) {
+      parts.push(`${mixIns.join('')}amix=inputs=${mixIns.length}:duration=longest:dropout_transition=0[amx]`);
+      src = '[amx]';
+    }
+    parts.push(`${src}atrim=0:${total.toFixed(3)},afade=t=out:st=${Math.max(0, total - 2).toFixed(3)}:d=2[a]`);
+    args.push('-filter_complex', parts.join(';'));
+    maps.push('-map', '[a]');
+  }
+  args.push(...maps, '-c:v', 'copy');
+  if (mixIns.length) args.push('-c:a', 'aac', '-b:a', '160k');
   args.push('-movflags', '+faststart', '-y', outPath);
   return args;
 }
 
-function runFfmpeg(args: string[], onProgress?: (seconds: number) => void): Promise<void> {
+// Two guards, because they catch different failures. The BUDGET is a ceiling on a legitimate job
+// and scales with the job, so an uncapped 400-photo film is not killed merely for being long. The
+// STALL guard is the one that catches a process that is actually stuck: `-progress` reports the
+// encoded position continuously, so ten minutes of silence means wedged, whatever budget is left.
+function runFfmpeg(args: string[], onProgress: ((frames: number) => void) | undefined, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const p = spawn('ffmpeg', args);
     let err = '';
-    // Hard cap on encode time so a pathological input can't pin a CPU forever.
-    const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* */ } reject(new Error('ffmpeg timed out')); }, 5 * 60_000);
+    const stop = () => { try { p.kill('SIGKILL'); } catch { /* already gone */ } };
+    const budget = setTimeout(() => { stop(); reject(new Error('ffmpeg exceeded its time budget')); }, timeoutMs);
+    let stall: ReturnType<typeof setTimeout>;
+    const waitForProgress = () => {
+      stall = setTimeout(() => { stop(); reject(new Error('ffmpeg stopped reporting progress')); }, ENCODE_STALL_MS);
+    };
+    waitForProgress();
+    const done = () => { clearTimeout(budget); clearTimeout(stall); };
     p.stderr.on('data', (d) => { err = (err + d.toString()).slice(-4000); });
-    // `-progress pipe:1` writes key=value lines to stdout; out_time_us is the encoded position.
-    if (onProgress) {
-      let buf = '';
-      p.stdout.on('data', (d) => {
-        buf = (buf + d.toString()).slice(-2000);
-        const m = [...buf.matchAll(/out_time_us=(\d+)/g)].pop();
-        if (m) onProgress(parseInt(m[1], 10) / 1_000_000);
-      });
-    }
-    p.on('error', (e) => { clearTimeout(t); reject(e); });
-    p.on('close', (code) => { clearTimeout(t); code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${err.slice(-400)}`)); });
+    // `-progress pipe:1` writes key=value lines to stdout; `frame` is the encoded position, and
+    // frames are what the timeline is counted in. Always read, even with no onProgress: the stall
+    // guard is driven off the same lines.
+    let buf = '';
+    p.stdout.on('data', (d) => {
+      buf = (buf + d.toString()).slice(-2000);
+      const m = [...buf.matchAll(/frame=\s*(\d+)/g)].pop();
+      if (!m) return;
+      clearTimeout(stall);
+      waitForProgress();
+      if (onProgress) onProgress(parseInt(m[1], 10));
+    });
+    p.on('error', (e) => { done(); reject(e); });
+    p.on('close', (code) => { done(); code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${err.slice(-400)}`)); });
   });
 }
