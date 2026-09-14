@@ -43,9 +43,13 @@
     return { label: '● Live', cls: 'b-live' };
   }
 
-  // Filters. "Active" = anything not yet ended (live, locked, or upcoming).
+  // Filters, in the order a host actually thinks about their events: what is happening now, what
+  // just happened, what is done, everything.
+  //
+  // "Active" = anything not yet ended (live, locked, or upcoming).
   // "Recent" = active OR ended within the last 14 days.
-  type Filter = 'recent' | 'active' | 'all';
+  // "Ended"  = past its end — the archive.
+  type Filter = 'active' | 'recent' | 'ended' | 'all';
   const RECENT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
   let filter: Filter = 'recent';
 
@@ -56,11 +60,26 @@
   $: counts = {
     all: events.length,
     active: events.filter(isActive).length,
-    recent: events.filter((e) => isRecent(e, now)).length
+    recent: events.filter((e) => isRecent(e, now)).length,
+    ended: events.filter((e) => e.isExpired).length
   };
+
+  // Land on Active when there IS something active — that is the tab a host opening this page is
+  // almost always here for. Only fall back to Recent when nothing is running.
+  //
+  // Once, when the events first arrive, and never again: doing it reactively would drag the host
+  // back to Active every time the list refreshed, undoing the tab they had just chosen.
+  let filterChosen = false;
+  $: if (!filterChosen && events.length) {
+    filter = counts.active > 0 ? 'active' : 'recent';
+    filterChosen = true;
+  }
+  const pick = (f: Filter) => { filter = f; filterChosen = true; };
+
   $: shown =
     filter === 'all' ? events
     : filter === 'active' ? events.filter(isActive)
+    : filter === 'ended' ? events.filter((e) => e.isExpired)
     : events.filter((e) => isRecent(e, now));
 
   const manageHref = (ev: MyEvent) => `/admin/${ev.joinCode}#${encodeURIComponent(ev.organizerCode)}`;
@@ -185,14 +204,15 @@
     </div>
   {:else}
     <div class="filters" role="tablist" aria-label="Filter events">
-      <button class="chip-btn" class:on={filter === 'recent'} on:click={() => (filter = 'recent')}>Recent <span class="n">{counts.recent}</span></button>
-      <button class="chip-btn" class:on={filter === 'active'} on:click={() => (filter = 'active')}>Active <span class="n">{counts.active}</span></button>
-      <button class="chip-btn" class:on={filter === 'all'} on:click={() => (filter = 'all')}>All <span class="n">{counts.all}</span></button>
+      <button class="chip-btn" class:on={filter === 'active'} on:click={() => pick('active')}>Active <span class="n">{counts.active}</span></button>
+      <button class="chip-btn" class:on={filter === 'recent'} on:click={() => pick('recent')}>Recent <span class="n">{counts.recent}</span></button>
+      <button class="chip-btn" class:on={filter === 'ended'} on:click={() => pick('ended')}>Ended <span class="n">{counts.ended}</span></button>
+      <button class="chip-btn" class:on={filter === 'all'} on:click={() => pick('all')}>All <span class="n">{counts.all}</span></button>
     </div>
 
     {#if shown.length === 0}
       <div class="empty">
-        <p>No {filter === 'active' ? 'active' : 'recent'} events.</p>
+        <p>No {filter === 'all' ? '' : filter} events.</p>
         <button class="btn ghost" on:click={() => (filter = 'all')}>Show all events</button>
       </div>
     {:else}
