@@ -36,7 +36,7 @@
 // printed, often on a home inkjet, and a filled shape is both uglier and dearer than an outline.
 
 export type DecorKind = 'none' | 'frame' | 'bows' | 'birds' | 'glasses' | 'confetti' | 'stars' | 'camera'
-  | 'botanical' | 'deco' | 'rings';
+  | 'botanical' | 'deco' | 'rings' | 'cameraline' | 'wave' | 'hearts' | 'heartlens';
 /** Where a motif sits. Only the scattered/repeatable kinds use it — a border is already everywhere
  *  and the camera is pinned to the QR. */
 export type DecorPos = 'top' | 'corners' | 'both';
@@ -47,7 +47,14 @@ export type Rect = { x: number; y: number; w: number; h: number };
 export const DECOR_KINDS: { key: DecorKind; label: string; positional: boolean }[] = [
   { key: 'none',      label: 'None',            positional: false },
   { key: 'frame',     label: 'Border',          positional: false },
-  { key: 'bows',      label: 'Bow ties',        positional: true },
+  // The same job as 'frame' in a different hand. 'frame' is engraved — straight rules, mitred
+  // corners, a lozenge — and half the signs this set is drawn from are not engraved at all, they
+  // are drawn with a marker. A wobbly rule is what carries that, and nothing else here does.
+  { key: 'wave',      label: 'Wavy border',     positional: false },
+  // Relabelled, not redrawn: the drawing is a black-tie signal, and "Bow ties" made it sound like
+  // an accessory rather than an occasion — which is why it was being used as the CORPORATE default,
+  // where it says formal dinner rather than conference.
+  { key: 'bows',      label: 'Black tie',       positional: true },
   { key: 'birds',     label: 'Birds',           positional: true },
   { key: 'glasses',   label: 'Glasses',         positional: true },
   { key: 'confetti',  label: 'Confetti',        positional: true },
@@ -59,7 +66,20 @@ export const DECOR_KINDS: { key: DecorKind; label: string; positional: boolean }
   { key: 'botanical', label: 'Sprig',           positional: true },
   { key: 'deco',      label: 'Art deco',        positional: true },
   { key: 'rings',     label: 'Rings',           positional: true },
+  // Drawn as an open stroke, never as the filled glyph: a solid heart is the one mark that makes a
+  // printed sign look typed rather than made, and it is also the most ink any motif here could
+  // possibly ask an inkjet for.
+  { key: 'hearts',    label: 'Hearts',          positional: true },
   { key: 'camera',    label: 'Camera (round the QR)', positional: false },
+  // The same subject drawn the other way: not a frame around the QR but a single continuous line,
+  // the way a one-line illustration is drawn. It is a motif rather than a surround, so unlike
+  // 'camera' it takes a position.
+  { key: 'cameraline', label: 'Camera (one line)',    positional: true },
+  // A third camera, and it earns the slot: a heart cannot be drawn into 'cameraline' at all, since
+  // that motif's lens IS the end of its single unbroken stroke, and 'camera' has no lens of its own
+  // — the QR is its lens. So the one drawing every "scan for our photos" sign carries needed a
+  // body of its own to sit in.
+  { key: 'heartlens', label: 'Camera (heart lens)',  positional: true },
 ];
 
 export const DECOR_POSITIONS: { key: DecorPos; label: string }[] = [
@@ -87,6 +107,25 @@ export const DEFAULT_DECOR: Record<string, DecorKind> = {
 };
 export const decorFor = (eventType: string | null | undefined): DecorKind =>
   DEFAULT_DECOR[eventType ?? ''] ?? 'frame';
+
+/** A motif the host has placed themselves. */
+export type DecorPlacement = {
+  kind: DecorKind;
+  /** Centre, as a fraction of the rect (0–1). */
+  x: number;
+  y: number;
+  scale: number;
+  /** Radians. */
+  rot: number;
+  /** Blank = follow the design's decoration colour. */
+  colour?: string;
+};
+
+export type DecorAtOpts = DecorPlacement & {
+  colour: string;
+  unit: number;
+  card: { x: number; y: number; w: number; h: number };
+};
 
 export type DecorOpts = {
   kind: DecorKind;
@@ -119,10 +158,53 @@ function rng(seed: number): () => number {
 // that exponent is what keeps the stroke monoline. At scale 1.8 the line is 22% heavier, not 80%
 // heavier, so a big motif reads as a larger drawing rather than as a zoomed-in one.
 type Pen = { hair(): void; line(): void };
-function makePen(ctx: CanvasRenderingContext2D, unit: number, scale: number): Pen {
+/** The stroke widths, as numbers, so the two-weight rule can be TESTED rather than only described.
+ *
+ *  RESOLVED, with the numbers, because it has now been argued both ways:
+ *
+ *  A later review proposed clamping the stroke to a constant 1.4px instead of letting it grow with
+ *  the host's size slider, on the grounds that one hand means one pen width. That is the right
+ *  instinct and the wrong answer HERE, and the arithmetic says why. Line width as a fraction of the
+ *  motif, across the slider's 0.6–1.8 range on an A6 card:
+ *
+ *      scale     0.6    0.8    1.0    1.4    1.8
+ *      exponent  8.4%   7.0%   6.0%   4.9%   4.1%
+ *      clamp     9.7%   7.3%   5.8%   4.2%   3.2%
+ *
+ *  The clamp is MORE extreme at both ends, and the end that matters is the small one: at scale 0.6
+ *  the focal motif is about 9mm across on an A6 card, with internal detail already at the ~1.5mm
+ *  floor where an inkjet gives up. Making the line 9.7% of the drawing there thickens exactly the
+ *  case closest to blotting. The exponent is not a compromise on the monoline rule — it is what
+ *  protects the fragile end while still giving "larger and finer" (8.4% down to 4.1%).
+ *
+ *  The genuine defect that review was reaching for was real, and was elsewhere: the two weights had
+ *  collapsed from the designed 1.72:1 to 1.61:1 because of the hairline's absolute floor. That is
+ *  fixed in hair() below. The exponent stays.
+ *
+ *  Note what DOES scale linearly and should: `unit`, the paper. An A4 poster is viewed from further
+ *  away and its whole drawing is bigger, so it earns a heavier pen. The slider is the host's size
+ *  preference within one sheet, which is a different thing.
+ */
+export function penWidths(unit: number, scale: number): { line: number; hair: number } {
   const base = Math.max(1, 1.45 * unit * Math.pow(scale, 0.35));
+  return { line: base, hair: Math.max(0.72, base * 0.58) };
+}
+
+function makePen(ctx: CanvasRenderingContext2D, unit: number, scale: number): Pen {
+  const base = penWidths(unit, scale).line;
   return {
-    hair() { ctx.lineWidth = Math.max(0.9, base * 0.58); ctx.globalAlpha = 0.55; },
+    // The floor is 0.72, not 0.9, and the difference is the whole two-weight rule.
+    //
+    // At A6 and default scale `base` is 1.45, so the hairline WANTS 1.45 × 0.58 = 0.84. A 0.9 floor
+    // overrode that and produced 1.45 : 0.90 = 1.61:1 — not the 1.72:1 the ratio was chosen to give
+    // — and it got worse as the slider came down, reaching 1.35:1 at the bottom. Alpha still told
+    // the two weights apart on screen, but ALPHA IS NOT WHAT SURVIVES AN INKJET; width is. So the
+    // contrast this file's first house rule depends on was being quietly flattened exactly where it
+    // is hardest to print: the smallest card at the smallest setting.
+    //
+    // 0.72 keeps the designed ratio from about scale 0.64 upward — the slider bottoms out at 0.6 —
+    // so the floor now only bites at the very end of the range, which is what a floor is for.
+    hair() { ctx.lineWidth = penWidths(unit, scale).hair; ctx.globalAlpha = 0.55; },
     line() { ctx.lineWidth = base; ctx.globalAlpha = 0.85; },
   };
 }
@@ -462,6 +544,135 @@ function frame(ctx: CanvasRenderingContext2D, p: Pen, card: Rect, unit: number, 
   }
 }
 
+/** A point on a rounded rect addressed by DISTANCE travelled around its perimeter, plus the
+ *  outward normal there.
+ *
+ *  A wobble is an offset along the normal, so it needs the path as one continuous parameter — not
+ *  as four sides and four corners. Wobbling each side separately and then joining them leaves a
+ *  kink at every corner where the two offsets disagree, which is the one artefact that reads as a
+ *  bug rather than as a hand. Arc length also keeps the lobes the same LENGTH on a short edge as on
+ *  a long one; parameterising by t-per-side would stretch them on the long sides of a portrait
+ *  card. */
+function rrAt(x: number, y: number, w: number, h: number, r: number, t: number):
+  { x: number; y: number; nx: number; ny: number } {
+  const sw = Math.max(0, w - 2 * r), sh = Math.max(0, h - 2 * r), arc = (Math.PI / 2) * r;
+  const segs = [sw, arc, sh, arc, sw, arc, sh, arc];
+  let u = t, i = 0;
+  while (i < 7 && u > segs[i]) { u -= segs[i]; i++; }
+  const a = (from: number) => from + u / Math.max(r, 1e-6);
+  const on = (cx: number, cy: number, ang: number) =>
+    ({ x: cx + Math.cos(ang) * r, y: cy + Math.sin(ang) * r, nx: Math.cos(ang), ny: Math.sin(ang) });
+  switch (i) {
+    case 0: return { x: x + r + u, y, nx: 0, ny: -1 };
+    case 1: return on(x + w - r, y + r, a(-Math.PI / 2));
+    case 2: return { x: x + w, y: y + r + u, nx: 1, ny: 0 };
+    case 3: return on(x + w - r, y + h - r, a(0));
+    case 4: return { x: x + w - r - u, y: y + h, nx: 0, ny: 1 };
+    case 5: return on(x + r, y + h - r, a(Math.PI / 2));
+    case 6: return { x, y: y + h - r - u, nx: -1, ny: 0 };
+    default: return on(x + r, y + r, a(Math.PI));
+  }
+}
+
+/** The drawn border: one continuous sinuous line round a rounded rect, four or five gentle lobes to
+ *  an edge, no fill and nothing inside it.
+ *
+ *  THE WOBBLE IS ABSOLUTE, and that is the whole motif. Its amplitude comes from `unit` — the
+ *  paper — and never from the rect, because a hand drawing a box round an A4 sheet wobbles by the
+ *  same couple of millimetres it wobbles by on a card; only the number of wobbles goes up. Taking
+ *  the amplitude from the rect instead would give the A4 sheet a wobble three times as deep, which
+ *  is precisely what a scaled-up graphic looks like and precisely what this motif exists to avoid.
+ *
+ *  The lobe COUNT does come from the rect, and is then rounded to a whole number of cycles around
+ *  the perimeter. The rounding is not cosmetic: a fractional count leaves the line arriving back at
+ *  its start out of phase, so the one place a closed border must be seamless gets a visible step.
+ *
+ *  One weight, like the one-line camera and for the same reason — there is no supporting structure
+ *  here for a hairline to carry, and a border that changed weight halfway round would stop reading
+ *  as one pen. */
+function waveBorder(ctx: CanvasRenderingContext2D, p: Pen, card: Rect, unit: number, scale: number) {
+  const amp = 3.2 * unit;
+  // The inset is capped tighter than frame()'s, and the CORNER is why. A border's deepest point
+  // relative to the card's content box is not on the sides, where it is inset + amp, but on the
+  // corner diagonal, where the rounding pulls it a further r(1 − 1/√2) inward. At the top of the
+  // size slider that difference is worth about 9 units, which is the whole of the clearance left in
+  // the card's 34-unit text padding — so sized by its sides alone this border prints through the
+  // corner of the title block. Capped here, the diagonal lands at ~31 at every scale.
+  const inset = Math.min(13 * unit * scale, Math.min(card.w, card.h) * 0.06) + amp;
+  const x = card.x + inset, y = card.y + inset, w = card.w - inset * 2, h = card.h - inset * 2;
+  if (w <= 4 * unit || h <= 4 * unit) return;
+
+  const span = Math.min(w, h);
+  const r = Math.min(22 * unit, span * 0.10);   // the card's own corner radius, near enough
+  const P = 2 * Math.max(0, w - 2 * r) + 2 * Math.max(0, h - 2 * r) + 2 * Math.PI * r;
+  // ~4.5 lobes to the short edge, two lobes to a cycle, then rounded so the line closes on itself.
+  const cycles = Math.max(6, Math.round(P / (span / 2.25)));
+  // Sampled as a polyline rather than as curves: the offset path is not a shape any curve primitive
+  // has, and at this step a round-joined polyline is indistinguishable from one. Capped so an A4
+  // sheet does not pay for thousands of segments on a path that is redrawn on every keystroke.
+  const n = Math.max(64, Math.min(560, Math.ceil(P / Math.max(2.5 * unit, 1))));
+
+  p.line();
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    // Phase from i/n, not from t/P: the two are the same number and only the first is exactly
+    // periodic in floating point, which is what makes the seam at i = 0 disappear.
+    const q = rrAt(x, y, w, h, r, (i / n) * P);
+    const o = amp * Math.sin((2 * Math.PI * cycles * i) / n);
+    const px = q.x + q.nx * o, py = q.y + q.ny * o;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.stroke();
+}
+
+/** One heart, as a single open stroke: up the left flank, over the notch, down the right and a
+ *  little PAST the tip it started from.
+ *
+ *  The overshoot is deliberate and so is the asymmetry — the right lobe is a shade fuller than the
+ *  left and its shoulder sits a shade lower, and the notch is off centre. A heart drawn symmetrically about its
+ *  own axis and closed cleanly at the tip is the ♥ glyph, which every keyboard already has; the
+ *  point of drawing one is that it looks drawn.
+ *
+ *  `s` is half-height-ish, `lean` a rotation about the heart's own centre, which is how two of them
+ *  can sit near each other without reading as a pair of copies. */
+function openHeart(ctx: CanvasRenderingContext2D, cx: number, cy: number, s: number, lean: number) {
+  ctx.save();
+  ctx.translate(cx, cy); ctx.rotate(lean);
+  ctx.beginPath();
+  ctx.moveTo(0, 0.92 * s);
+  ctx.bezierCurveTo(-0.38 * s, 0.46 * s, -0.94 * s, 0.10 * s, -0.86 * s, -0.38 * s);
+  ctx.bezierCurveTo(-0.80 * s, -0.78 * s, -0.30 * s, -0.88 * s, -0.04 * s, -0.42 * s);
+  ctx.bezierCurveTo(0.26 * s, -0.92 * s, 0.80 * s, -0.80 * s, 0.86 * s, -0.32 * s);
+  ctx.bezierCurveTo(0.94 * s, 0.14 * s, 0.42 * s, 0.52 * s, -0.06 * s, 0.98 * s);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** Two or three hearts, thrown rather than arranged.
+ *
+ *  Every offset here is a fixed number, and it has to be: the same design is drawn into the preset
+ *  gallery's thumbnails, into the live preview on every keystroke and into the printed sheet, and a
+ *  scatter that moved between those three would not be a scatter, it would be a bug the host can
+ *  see. The confetti motif solves the same problem with a seeded rng because it places thirteen
+ *  pieces; three can simply be placed.
+ *
+ *  They are laid out to break the three things that make a scatter read as a row of stickers: no
+ *  two the same size, no two on the same baseline, and no mirrored pair — the small ones both sit
+ *  to the right of the large one rather than flanking it. (The corner SET is still mirrored left to
+ *  right by the caller, as every motif here is; that is the frame reading, not this one.) */
+function hearts(ctx: CanvasRenderingContext2D, p: Pen, cx: number, cy: number, s: number, n: number) {
+  p.line();
+  openHeart(ctx, cx - 0.26 * s, cy, 0.92 * s, -0.13);
+  // The companions drop to the hairline for the same reason the far birds do: at this size a second
+  // heavy outline stops being an accent and starts being a second subject.
+  p.hair();
+  openHeart(ctx, cx + 1.44 * s, cy - 0.62 * s, 0.40 * s, 0.24);
+  // The third is skipped in a corner, where the same three marks in a quarter of the room are a
+  // blot rather than a scatter.
+  if (n > 2) openHeart(ctx, cx + 0.98 * s, cy + 0.88 * s, 0.25 * s, -0.31);
+}
+
 /**
  * How far a camera body reaches out from the QR square: `m` at the sides and the bottom, and
  * CAMERA_TOP × m above it for the control deck. Exported because the card has to leave that much
@@ -509,6 +720,150 @@ function camera(ctx: CanvasRenderingContext2D, p: Pen, qr: Rect, card: Rect, uni
  * Paint the chosen decoration into `card`. Stroke-only line art in one colour, drawn before the
  * card's own content so text always sits on top of it.
  */
+/** A camera drawn WITHOUT LIFTING THE PEN.
+ *
+ *  This is the continuous-line style — the flowing single-stroke drawing you see on minimalist
+ *  stationery — and the implementation is the literal thing rather than an impression of it: ONE
+ *  beginPath, a chain of curves, ONE stroke. Nothing is drawn twice and the pen never jumps, which
+ *  is exactly what gives it the handwritten, cursive quality. Drawing it as separate shapes that
+ *  happen to touch produces visible joins at every seam and reads as assembled rather than drawn.
+ *
+ *  The route: in along the left of the body, up over the viewfinder bump, across the top, down the
+ *  right, back along the bottom, then — still without lifting — inward on a spiral that becomes the
+ *  lens. The spiral is what sells it. A closed circle for the lens would end the gesture; a coil
+ *  keeps it moving and finishes the line somewhere deliberate.
+ *
+ *  One weight only, and that is on purpose. The two-weight rule elsewhere is about a hairline
+ *  supporting a heavier contour — but a single unbroken line has no supporting structure to carry,
+ *  and a stroke that changed weight mid-path would stop reading as one pen.
+ */
+function cameraLine(ctx: CanvasRenderingContext2D, p: Pen, cx: number, cy: number, s: number): void {
+  p.line();
+  const w = s * 1.30, h = s * 0.92;           // body half-extents
+  const l = cx - w, r = cx + w, t = cy - h * 0.62, b = cy + h;
+  const k = s * 0.30;                          // corner softness
+
+  ctx.beginPath();
+  // Start part-way down the left edge, so the opening and closing of the line are not at a corner.
+  ctx.moveTo(l, cy + h * 0.22);
+  ctx.quadraticCurveTo(l, t + k * 0.6, l + k, t + k * 0.35);        // up into the top-left
+  // The viewfinder: a small rise in the top edge rather than a box sitting on it, so it stays part
+  // of the same stroke.
+  ctx.lineTo(cx - s * 0.44, t + k * 0.1);
+  ctx.quadraticCurveTo(cx - s * 0.34, t - s * 0.34, cx - s * 0.04, t - s * 0.30);
+  ctx.quadraticCurveTo(cx + s * 0.20, t - s * 0.26, cx + s * 0.22, t + k * 0.06);
+  ctx.lineTo(r - k, t + k * 0.3);
+  ctx.quadraticCurveTo(r, t + k * 0.55, r, cy - h * 0.10);          // down into the top-right
+  ctx.quadraticCurveTo(r, b - k * 0.4, r - k, b);                   // right edge to bottom-right
+  ctx.lineTo(l + k, b);
+  ctx.quadraticCurveTo(l, b - k * 0.3, l, cy + h * 0.46);           // bottom-left, heading back up
+  // …and straight on into the lens, without a break: a short sweep to the rim, then the coil.
+  ctx.quadraticCurveTo(cx - s * 0.86, cy + s * 0.30, cx - s * 0.62, cy + s * 0.16);
+  const turns = 1.85, steps = 74, r0 = s * 0.62, r1 = s * 0.17;
+  for (let i = 0; i <= steps; i++) {
+    const f = i / steps;
+    const a = Math.PI + f * turns * Math.PI * 2;
+    const rad = r0 + (r1 - r0) * f;
+    ctx.lineTo(cx + Math.cos(a) * rad, cy + Math.sin(a) * rad * 0.98);
+  }
+  ctx.stroke();
+}
+
+/** The camera whose lens is a heart.
+ *
+ *  THE WEIGHTS ARE THE OTHER WAY ROUND HERE, and that is the design. Everywhere else the heavy line
+ *  is the outer contour and the hairline is the detail inside it; here the body, the top plate, the
+ *  shutter and the flash are all hairline, and the only heavy lines in the drawing are the lens
+ *  ring and the heart inside it. The camera is the container and the heart is the subject — draw it
+ *  the usual way round and the eye lands on a rounded rectangle, which is a picture of equipment.
+ *  This motif is supposed to be fond of you.
+ *
+ *  The flash is three short rays with a GAP at their origin. Rays that meet at a point are a
+ *  sparkle, which this set already has twice; light leaving a lamp is a burst, and the gap is the
+ *  whole difference. */
+function heartLens(ctx: CanvasRenderingContext2D, p: Pen, cx: number, cy: number, s: number): void {
+  const bw = 1.18 * s, bh = 0.76 * s, top = cy - 0.62 * s;
+  p.hair();
+  rr(ctx, cx - bw, top, bw * 2, bh * 2, 0.26 * s); ctx.stroke();                       // body
+  // Plate and button sit ON the top edge — their lower edge is the body's upper one — rather than
+  // straddling it. Two outlines crossing at card size is a smudge, not a join.
+  rr(ctx, cx - 0.78 * s, top - 0.24 * s, 0.80 * s, 0.24 * s, 0.09 * s); ctx.stroke();  // top plate
+  rr(ctx, cx + 0.50 * s, top - 0.17 * s, 0.24 * s, 0.17 * s, 0.07 * s); ctx.stroke();  // shutter
+  const fx = cx + 1.04 * s, fy = top - 0.08 * s;
+  for (const [ang, len] of [[-1.98, 0.20], [-1.39, 0.26], [-0.80, 0.20]] as const) {
+    const ca = Math.cos(ang), sa = Math.sin(ang);
+    ctx.beginPath();
+    ctx.moveTo(fx + ca * 0.11 * s, fy + sa * 0.11 * s);
+    ctx.lineTo(fx + ca * (0.11 + len) * s, fy + sa * (0.11 + len) * s);
+    ctx.stroke();
+  }
+  p.line();
+  const ly = top + bh;
+  ctx.beginPath(); ctx.arc(cx, ly, 0.56 * s, 0, Math.PI * 2); ctx.stroke();
+  // Lifted a hair: a heart's mass sits above its tip, so one centred in the ring by its bounding
+  // box hangs visibly low in it.
+  openHeart(ctx, cx, ly - 0.03 * s, 0.40 * s, 0);
+}
+
+/** One positional motif, drawn around the anchor (cx, cy) at half-size `s`.
+ *
+ *  Lifted out of drawDecor's `top` slot so the same drawing can be placed anywhere — a host who can
+ *  drag a motif needs it drawn where they dragged it, not at one of three fixed positions.
+ *
+ *  The small per-motif vertical nudges are part of each drawing, not part of the slot: the glasses
+ *  hang below their anchor and throw the clink above it, the sprig's mass is under its stem, the
+ *  heart-lens carries its flash burst at the top. Anchoring them all flat centres the ink somewhere
+ *  different for each one. */
+function paintMotif(ctx: CanvasRenderingContext2D, p: Pen, kind: DecorKind, cx: number, cy: number, s: number): void {
+  // cameraline and confetti are handled by their own early-return branches in drawDecor, so they
+  // were never part of the block this function was lifted from — and a host who placed either got
+  // a draggable box containing nothing. Any POSITIONAL kind must have a branch here; the test
+  // "every positional motif draws something when placed" is what keeps the two lists in step.
+  if (kind === 'cameraline') { cameraLine(ctx, p, cx, cy, s); return; }
+  if (kind === 'confetti') {
+    // Confetti scatters through a band rather than sitting at a point. Placed by hand it gets that
+    // band centred on the anchor, so what the host drags is the middle of the scatter rather than
+    // its top-left corner.
+    const bw = s * 4.4, bh = s * 2.8;
+    confetti(ctx, p, { x: cx - bw / 2, y: cy - bh / 2, w: bw, h: bh }, s, 0x5eed, 13);
+    return;
+  }
+  if (kind === 'bows') bowTie(ctx, p, cx, cy, s);
+  else if (kind === 'birds') birds(ctx, p, cx, cy, s);
+  else if (kind === 'glasses') glasses(ctx, p, cx, cy + s * 0.25, s);
+  else if (kind === 'stars') stars(ctx, p, cx, cy, s);
+  else if (kind === 'botanical') sprigPair(ctx, p, cx, cy + s * 0.62, s);
+  else if (kind === 'deco') decoFan(ctx, p, cx, cy + s * 0.62, s * 1.18);
+  else if (kind === 'rings') rings(ctx, p, cx, cy, s);
+  else if (kind === 'hearts') hearts(ctx, p, cx, cy, s, 3);
+  else if (kind === 'heartlens') heartLens(ctx, p, cx, cy + s * 0.12, s);
+}
+
+/** One motif, placed and rotated by the host rather than dropped into a slot.
+ *
+ *  `x`/`y` are FRACTIONS of the rect, so a placement survives the poster being rendered at a
+ *  thumbnail size, at full page size, and into a PDF — all three happen to the same design.
+ *
+ *  Only positional kinds place: `frame`, `wave` and `camera` are defined by the edges
+ *  of the paper or by the code, and "drag the border somewhere else" is not a thing anyone means. */
+export function drawDecorAt(ctx: CanvasRenderingContext2D, o: DecorAtOpts): void {
+  const kind = o.kind;
+  if (kind === 'none') return;
+  if (!(DECOR_KINDS.find((d) => d.key === kind)?.positional ?? false)) return;
+  const scale = Math.max(0.4, Math.min(2.2, o.scale || 1));
+  const span = Math.min(o.card.w, o.card.h);
+  const s = Math.min(24 * o.unit * scale, span * 0.17);
+  ctx.save();
+  ctx.strokeStyle = o.colour;
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const p = makePen(ctx, o.unit, scale);
+  p.line();
+  ctx.translate(o.card.x + o.x * o.card.w, o.card.y + o.y * o.card.h);
+  if (o.rot) ctx.rotate(o.rot);
+  paintMotif(ctx, p, kind, 0, 0, s);
+  ctx.restore();
+}
+
 export function drawDecor(ctx: CanvasRenderingContext2D, o: DecorOpts): void {
   if (o.kind === 'none') return;
   const unit = o.unit, scale = Math.max(0.4, Math.min(2.2, o.scale || 1));
@@ -519,6 +874,9 @@ export function drawDecor(ctx: CanvasRenderingContext2D, o: DecorOpts): void {
   p.line();
 
   if (o.kind === 'frame') { frame(ctx, p, o.card, unit, scale); ctx.restore(); return; }
+  // A border is already everywhere on the card, so like 'frame' it takes the whole rect and ignores
+  // the position control.
+  if (o.kind === 'wave') { waveBorder(ctx, p, o.card, unit, scale); ctx.restore(); return; }
   if (o.kind === 'camera') { if (o.qr) camera(ctx, p, o.qr, o.card, unit, scale); ctx.restore(); return; }
 
   // Motif half-size. Paper-scaled first — a motif is meant to keep its physical size as the card
@@ -531,6 +889,24 @@ export function drawDecor(ctx: CanvasRenderingContext2D, o: DecorOpts): void {
   const wantCorners = o.pos === 'corners' || o.pos === 'both';
   const cx = o.card.x + o.card.w / 2;
   const topY = o.card.y + m + s * 0.95;
+
+  if (o.kind === 'cameraline') {
+    // One drawing, placed like any other positional motif — top, corners, or both.
+    if (wantTop) cameraLine(ctx, p, cx, topY, s);
+    if (wantCorners) {
+      // Mirrored left-to-right only. Never vertically: an upside-down camera is not a decoration.
+      const cs = s * 0.62;
+      for (const gx of [-1, 1]) {
+        ctx.save();
+        ctx.translate(o.card.x + (gx < 0 ? m + cs : o.card.w - m - cs), o.card.y + o.card.h - m - cs * 0.9);
+        ctx.scale(gx, 1);
+        cameraLine(ctx, p, 0, 0, cs);
+        ctx.restore();
+      }
+    }
+    ctx.restore();
+    return;
+  }
 
   if (o.kind === 'confetti') {
     // Confetti scatters through a band rather than sitting at a point, so it gets its own
@@ -548,17 +924,7 @@ export function drawDecor(ctx: CanvasRenderingContext2D, o: DecorOpts): void {
     ctx.restore(); return;
   }
 
-  if (wantTop) {
-    if (o.kind === 'bows') bowTie(ctx, p, cx, topY, s);
-    else if (o.kind === 'birds') birds(ctx, p, cx, topY, s);
-    // The glasses hang BELOW their anchor and throw the clink above it, so they are the one motif
-    // dropped further in — anchored level with the rest they print their sparks off the paper.
-    else if (o.kind === 'glasses') glasses(ctx, p, cx, topY + s * 0.25, s);
-    else if (o.kind === 'stars') stars(ctx, p, cx, topY, s);
-    else if (o.kind === 'botanical') sprigPair(ctx, p, cx, topY + s * 0.62, s);
-    else if (o.kind === 'deco') decoFan(ctx, p, cx, topY + s * 0.62, s * 1.18);
-    else if (o.kind === 'rings') rings(ctx, p, cx, topY, s);
-  }
+  if (wantTop) paintMotif(ctx, p, o.kind, cx, topY, s);
 
   if (wantCorners) {
     // The corner set is MIRRORED left to right so the four together read as one frame rather than
@@ -592,6 +958,8 @@ export function drawDecor(ctx: CanvasRenderingContext2D, o: DecorOpts): void {
         // — level with the edge it reads as a twig someone dropped there.
         else if (o.kind === 'botanical') { ctx.rotate(-0.34); sprig(ctx, p, -cs * 1.05, cs * 0.45, cs * 2.0); }
         else if (o.kind === 'rings') rings(ctx, p, 0, 0, cs * 0.86);
+        else if (o.kind === 'hearts') hearts(ctx, p, 0, 0, cs, 2);
+        else if (o.kind === 'heartlens') heartLens(ctx, p, 0, 0, cs);
         ctx.restore();
       }
     }

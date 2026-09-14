@@ -5,7 +5,17 @@
   import { savePoster, type EventTheme } from '$lib/events';
   import { DEFAULT_EVENT_THEME } from '$lib/theme';
   import { tickFor, cleanTick } from '$lib/challenges';
-  import { drawDecor, decorFor, cameraMargin, CAMERA_TOP, DECOR_KINDS, DECOR_POSITIONS, type DecorKind, type DecorPos } from '$lib/cardDecor';
+  import { drawDecor, decorFor, cameraMargin, CAMERA_TOP, DECOR_KINDS, DECOR_POSITIONS,
+           type DecorKind, type DecorPos, type DecorPlacement } from '$lib/cardDecor';
+  // ONE implementation of every poster drawing primitive, shared with the design wizard's preset
+  // thumbnails. The card/sheet code below is a second coordinate space and stays here, but it
+  // borrows the same primitives rather than keeping a copy that could drift.
+  import { drawPoster, drawBrandChip, drawCover, drawUrl, fitText, roundRect, wrapToLines,
+           PAGE, PAGE_W, PAGE_H, type Box, type Space, type PosterElKey, DEFAULT_POSTER_LAYOUT, clonePosterLayout,
+           measureTitleBlock, measureNames, measureTextItem, qrPanelRect, symbolContrast, panelOptional, contrastGrade,
+           type PosterTextItem } from '$lib/posterRender';
+  import { TYPE_SETS, DEFAULT_TYPE_SET, typeSet, titleFaceOf, applyFace, castFor, clearTracking,
+           ensurePosterFonts, warmAllPosterFonts, type TypeSetKey, type TitleFace } from '$lib/posterFonts';
   import EventImageEditor from './EventImageEditor.svelte';
 
   export let eventName: string;
@@ -102,9 +112,66 @@
   };
   let colorsLocked = false;
 
+  // ── Guided customising ──────────────────────────────────────────────────────
+  //
+  // The gallery gets a host to a finished design; this gets them through changing it. Dropped
+  // straight into the full editor they meet every control at once with no idea which matter — the
+  // blank-canvas problem again, one level down.
+  //
+  // The steps follow the order the questions actually occur in: what it says, what the join details
+  // look like, what it is decorated with, what colour it is, and only then free-form arranging. The
+  // canvas is on screen throughout, so every answer is previewed as it is given rather than
+  // discovered afterwards.
+  //
+  // Same escape as everywhere else: skipping to every control is offered on the first step, and a
+  // host who knows the editor never has to walk it. Not a gate.
+  let pGuided = true;
+  let pStep = 1;
+  const P_LAST = 6;
+  // Named for what a host is deciding, not for what the code calls it. "Type" and "Join details"
+  // are our vocabulary; "What does it say?" is theirs — and the step strip is the only guide anyone
+  // gets on a phone, where the preview and the controls cannot both be on screen.
+  const P_TITLES = ['Words', 'Type', 'Join', 'Art', 'Colour', 'Place'];
+  const P_ASK = [
+    'What does your sign say?',
+    'How should the words look?',
+    'How do guests join?',
+    'Anything drawn on it?',
+    'What colours?',
+    'Where does everything sit?',
+  ];
+  // The cards get the same treatment, with their own steps — they are a different object with a
+  // different job, and walking someone through "Type" again on a tab that inherits the poster's
+  // pairing would be walking them through nothing.
+  let cGuided = true;
+  let cStep = 1;
+  const C_LAST = 5;
+  const C_TITLES = ['Words', 'List', 'Layout', 'Art', 'Colour'];
+  // A step with nothing in it is a dead end you still have to press Next through. The List step only
+  // has anything to decide once there is more than one set — with a single card there is no set to
+  // choose between and no preview to flick through, so it says why and gets stepped over.
+  $: cStepSkipped = (n: number) => n === 2 && sheets.length <= 1;
+  $: cStepWhy = (n: number) =>
+    cStepSkipped(n) ? 'Nothing to choose here — this event has one trick card, so there are no sets to pick between' : C_ASK[n - 1];
+  /** The next usable step in a direction, or null at the end. */
+  function cNextStep(from: number, dir: 1 | -1): number | null {
+    for (let n = from + dir; n >= 1 && n <= C_LAST; n += dir) if (!cStepSkipped(n)) return n;
+    return null;
+  }
+  // If the sets disappear while the host is standing on that step, move them off it rather than
+  // leaving them on a panel with nothing in it.
+  $: if (cGuided && cStepSkipped(cStep)) cStep = cNextStep(cStep, 1) ?? cNextStep(cStep, -1) ?? 1;
+  const C_ASK = [
+    'What goes at the top?',
+    'Which tricks, and how many cards?',
+    "What's on the card?",
+    'Anything drawn on it?',
+    'What colours?',
+  ];
+
   const dispatch = createEventDispatcher<{ close: void }>();
 
-  const W = 1080, H = 1527;                 // A4 portrait
+  const W = PAGE_W, H = PAGE_H;             // A4 portrait — the page space posterRender.ts draws in
   // The slice of paper a printer cannot reach. Consumer inkjets and lasers lose 3–5mm on every edge
   // (more at the bottom on some), and a print shop wants a margin for trimming, so 5mm is the floor
   // for "this will come out whole". W maps to 210mm, so this is that in design pixels.
@@ -119,6 +186,93 @@
 
   // ── Editable state (auto-saved to localStorage per event) ──
   let headline = eventName || 'Our Event';
+  // Typography. 'plain' is the default so every poster saved before this existed opens looking
+  // exactly as its host left it — a design that silently restyles itself is a design you cannot trust.
+  let typeSetKey: TypeSetKey = DEFAULT_TYPE_SET;
+  let titleFace: TitleFace = 'display';
+  // The small-caps lines that bracket the headline. Empty by default: two more lines of text is a
+  // choice, not something to impose on a host who only wanted a title.
+  let headlineTop = '';
+  let headlineBottom = '';
+  // Whose event it is, set as a lockup at the foot. Blank by default — it is a real design element,
+  // not a field to be nagged about, and an empty one draws nothing and collides with nothing.
+  let names = '';
+  // Our wordmark across the top of someone else's wedding sign. Default on, host's call — the chip
+  // in the QR is the mark that actually matters and it is not optional.
+  let showBrand = true;
+  // The white card under the QR. On by default and it stays that way unless the paper can carry the
+  // code on its own — see qrSafe below, which measures rather than guesses.
+  let qrPanel = true;
+
+  // ── Placed decorations ─────────────────────────────────────────────────────
+  // Motifs the host positions themselves, any number of them, each with its own size and rotation.
+  // Empty means the old single-motif-in-a-slot behaviour, which is what every saved design has.
+  let decorItems: DecorPlacement[] = [];
+  // The on-page footprint of a motif at scale 1. drawDecorAt sizes from `unit`, and the poster
+  // passes unit 2, so a scale-1 motif is 2 × 24 × 2 across. The drag system speaks in pixels and
+  // the placement speaks in scale; this is the one number that converts between them, kept here so
+  // there is no second copy of it to drift.
+  const DECOR_PX = 96;
+
+  // ── Lines the host adds themselves ─────────────────────────────────────────
+  // A list, not a single spare field: a poster that allows exactly one addition is a poster that
+  // needs a second one the moment someone wants a table number AND a hashtag. They are dragged and
+  // resized through the same surface as everything else, keyed `text:<index>`.
+  let textItems: PosterTextItem[] = [];
+  const textIdx = (k: string) => (k.startsWith('text:') ? Number(k.slice(5)) : -1);
+  function patchText(i: number, patch: Partial<PosterTextItem>) {
+    if (!textItems[i]) return;
+    textItems = textItems.map((t, n) => (n === i ? { ...t, ...patch } : t));
+  }
+  function addText() {
+    pushUndo(JSON.stringify(cfg));
+    // Stepped down the page so a second does not land exactly on the first and look like nothing
+    // happened. Seeded with words rather than blank — an empty line draws nothing, which reads as
+    // the button having failed.
+    const n = textItems.length;
+    textItems = [...textItems, { text: 'Your own line', x: 0.5, y: Math.min(0.78, 0.66 + 0.05 * n), size: 30 }];
+    selectedKey = `text:${textItems.length - 1}`;
+  }
+  function removeText(i: number) {
+    pushUndo(JSON.stringify(cfg));
+    textItems = textItems.filter((_, n) => n !== i);
+    selectedKey = null;
+  }
+  $: selectedText = selectedKey ? textIdx(selectedKey) : -1;
+  const decorIdx = (k: string) => (k.startsWith('decor:') ? Number(k.slice(6)) : -1);
+  const decorBox = (i: number): Box => {
+    const it = decorItems[i];
+    return it ? { x: it.x, y: it.y, size: it.scale * DECOR_PX } : { x: 0.5, y: 0.5, size: DECOR_PX };
+  };
+  function patchDecor(i: number, patch: Partial<DecorPlacement>) {
+    if (!decorItems[i]) return;
+    decorItems = decorItems.map((d, n) => (n === i ? { ...d, ...patch } : d));
+  }
+  // The motif the PLACE tool will drop next — its own choice, nothing to do with the design's
+  // decoration above.
+  //
+  // It used to read `decorKind`, which meant the only way to place a sprig was to switch the whole
+  // design to sprigs first: choosing what to add destroyed the decoration you already had. Two
+  // different questions were sharing one answer.
+  let placeKind: DecorKind = 'botanical';
+  // Only the motifs that HAVE a position. A border or a QR wrapper is defined by the edges of the
+  // paper or by the code, so "drop one here" is not a thing either of them can mean.
+  const PLACEABLE = DECOR_KINDS.filter((d) => d.positional);
+  function addDecor() {
+    pushUndo(JSON.stringify(cfg));
+    const kind = placeKind;
+    // Stepped down the page so a second and third do not land exactly on the first and look like
+    // one motif that did not appear.
+    const n = decorItems.length;
+    decorItems = [...decorItems, { kind, x: 0.5 + (n % 2 ? 0.18 : -0.18) * Math.min(n, 3), y: 0.16 + 0.07 * n, scale: 1, rot: 0 }];
+    selectedKey = `decor:${decorItems.length - 1}`;
+  }
+  function removeDecor(i: number) {
+    pushUndo(JSON.stringify(cfg));
+    decorItems = decorItems.filter((_, n) => n !== i);
+    selectedKey = null;
+  }
+  $: selectedDecor = selectedKey ? decorIdx(selectedKey) : -1;
   // A welcome blurb (if set) becomes the default poster message; still freely editable below.
   let message = blurb.trim() || "You're invited — scan to join the camera";
   let stepsText = '①  Scan to join     ②  Snap your roll     ③  Revealed when it ends';
@@ -150,21 +304,14 @@
   // ── Free layout: every element is independently draggable + resizable, so the organizer can
   // place text off faces. x/y are the element CENTRE as a fraction of the poster (0–1); `size` is
   // px in the 1080-wide canvas space (font size for text; the QR square's width for `qr`). ──
-  type ElKey = 'brand' | 'title' | 'message' | 'steps' | 'qr' | 'footer';
-  type Box = { x: number; y: number; size: number };
+  type ElKey = PosterElKey;
   // Default positions are spaced so nothing overlaps: brand at the very top, title + message above
   // the QR panel, the QR centred, then the how-to line and footer below it. (The QR's white panel
   // is ~675px tall at the default size, so its top sits ≈0.36 and bottom ≈0.81 of the page.)
-  const DEFAULT_LAYOUT: Record<ElKey, Box> = {
-    brand:   { x: 0.5, y: 0.07,  size: 34 },   // the 🎩 Snapdini mark — slides left/right along the top only
-    title:   { x: 0.5, y: 0.20,  size: 72 },
-    message: { x: 0.5, y: 0.295, size: 32 },
-    qr:      { x: 0.5, y: 0.585, size: 480 },
-    steps:   { x: 0.5, y: 0.88,  size: 30 },
-    footer:  { x: 0.5, y: 0.96,  size: 26 },
-  };
-  const cloneLayout = (l: Record<ElKey, Box>): Record<ElKey, Box> =>
-    ({ brand: { ...l.brand }, title: { ...l.title }, message: { ...l.message }, steps: { ...l.steps }, qr: { ...l.qr }, footer: { ...l.footer } });
+  // Both of these moved to $lib/posterRender — the preset gallery lays a poster out without ever
+  // opening this editor, so they belong with the drawing rather than with the editing.
+  const DEFAULT_LAYOUT = DEFAULT_POSTER_LAYOUT;
+  const cloneLayout = clonePosterLayout;
   let layout: Record<ElKey, Box> = cloneLayout(DEFAULT_LAYOUT);
   let { cHeadline, cMessage, cSteps, cCode, cFooter } = themeDefaults();
 
@@ -204,6 +351,18 @@
   let cardSkip: string[] = [];             // set keys NOT to print; stored as exclusions so a NEW set is included by default
   let cardShowQr = true;
   let cardShowLink = true;
+  /** What the card prints beside its QR when `cardShowLink` is on.
+   *
+   *  It used to be the POSTER's `codeDisplay`, which meant a host who set the poster to show
+   *  "Nothing (QR only)" got a card with the words "Scan to join" and then blank space under them —
+   *  having ticked the card's own box asking for exactly the opposite. The card's checkbox now
+   *  means what it says: tick it and something is printed.
+   *
+   *  The poster's choice is still honoured where it is an actual preference — a host who picked the
+   *  CODE for the poster gets the code on the card too — but 'none' is a choice about the poster,
+   *  not an instruction to print a heading over nothing. */
+  let cardCodeMode: 'code' | 'url' = 'url';
+  $: cardCodeMode = codeDisplay === 'code' ? 'code' : 'url';
   let cardCaption = 'Tick them off as you pull them off.';
   // Card colour overrides. Blank = follow the poster's colour (which is the whole point of the two
   // being one design); set = this card does its own thing.
@@ -231,9 +390,9 @@
   // ── Persistence (auto-save on every change) ──
   // The server stores this as a bounded JSON blob, so it stays deliberately compact: drag values are
   // rounded (see roundBox) rather than carrying fifteen decimal places of pointer noise.
-  $: cfg = { headline, message, stepsText, bgMode, cBg, printBg, codeDisplay, showFooterUrl, layout, colorsLocked, cHeadline, cMessage, cSteps, cCode, cFooter,
+  $: cfg = { headline, headlineTop, headlineBottom, names, showBrand, qrPanel, decorItems, textItems, typeSetKey, titleFace, message, stepsText, bgMode, cBg, printBg, codeDisplay, showFooterUrl, layout, colorsLocked, cHeadline, cMessage, cSteps, cCode, cFooter,
              cardTitle, cardInkSaver, cardsPerSheet, cardRound, cardIds, cardSkip, cardShowQr, cardShowLink, cardCaption,
-             cardCTitle, cardCBody, cardCCode, cardCBg, cardLayout, decorKind, decorPos, decorScale, decorColour };
+             cardCTitle, cardCBody, cardCCode, cardCBg, cardLayout, cardSheetLandscape, decorKind, decorPos, decorScale, decorColour };
   // Keep the default text colours readable as the background changes — until the organizer edits a
   // colour (colorsLocked). The void refs make Svelte re-run this when bgMode/cBg/theme change.
   $: if (!colorsLocked) { void bgMode; void cBg; void theme; ({ cHeadline, cMessage, cSteps, cCode, cFooter } = themeDefaults()); }
@@ -248,7 +407,9 @@
     message: readableOn(cMessage, posterBg),
     steps: readableOn(cSteps, posterBg),
     footer: readableOn(cFooter, posterBg, INK_BODY),   // the smallest type on the page
-    code: readableOn(cCode, '#ffffff', INK_BODY),
+    // Against the PANEL when there is one, against the paper when there is not — the code does not
+    // move, but what is behind it does, and a colour picked to read on white can vanish on kraft.
+    code: readableOn(cCode, qrPanel ? '#ffffff' : posterBg, INK_BODY),
   };
   // Ink lighter than the paper it sits on, with the colour left off the print.
   //
@@ -291,6 +452,11 @@
   }
   function applyCfg(c: Record<string, any>) {
     headline = c.headline; message = c.message; stepsText = c.stepsText;
+    headlineTop = c.headlineTop ?? ''; headlineBottom = c.headlineBottom ?? ''; names = c.names ?? '';
+    showBrand = c.showBrand ?? true; qrPanel = c.qrPanel ?? true;
+    decorItems = Array.isArray(c.decorItems) ? (c.decorItems as DecorPlacement[]).map((d) => ({ ...d })) : [];
+    textItems = Array.isArray(c.textItems) ? (c.textItems as PosterTextItem[]).map((t) => ({ ...t })) : [];
+    typeSetKey = c.typeSetKey ?? DEFAULT_TYPE_SET; titleFace = c.titleFace ?? 'display';
     bgMode = c.bgMode; cBg = c.cBg; codeDisplay = c.codeDisplay; showFooterUrl = c.showFooterUrl;
     printBg = c.printBg ?? true;   // absent in designs saved before the option existed
     layout = cloneLayout(c.layout);
@@ -300,6 +466,7 @@
     cardsPerSheet = c.cardsPerSheet; cardRound = c.cardRound; cardIds = c.cardIds; cardSkip = [...(c.cardSkip ?? [])];
     cardShowQr = c.cardShowQr; cardShowLink = c.cardShowLink; cardCaption = c.cardCaption;
     cardCTitle = c.cardCTitle; cardCBody = c.cardCBody; cardCCode = c.cardCCode; cardCBg = c.cardCBg;
+    cardSheetLandscape = c.cardSheetLandscape ?? false;
     cardLayout = cloneCardLayout(c.cardLayout);
     decorKind = c.decorKind; decorPos = c.decorPos; decorScale = c.decorScale; decorColour = c.decorColour;
   }
@@ -337,6 +504,18 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
+    // Escape peels ONE layer at a time, innermost first. The designer had no Escape at all, so the
+    // only way out of any of this was finding the right ✕ — and a modal that traps focus and then
+    // ignores Escape is a room with the handle on the outside.
+    //
+    // Order matters: closing the whole designer from inside the front-and-back preview would throw
+    // away the panel and the work behind it in one keystroke.
+    if (e.key === 'Escape') {
+      if (finishOpen) { finishOpen = false; return; }
+      if (fsEdit) { fsEdit = false; return; }
+      dispatch('close');
+      return;
+    }
     if (!(e.ctrlKey || e.metaKey)) return;
     const k = e.key.toLowerCase();
     if (k === 'z' && !e.shiftKey) { e.preventDefault(); void undo(); }
@@ -354,6 +533,39 @@
     const c = initialConfig;
     if (!c) return;
     headline = (c.headline as string) ?? headline; message = (c.message as string) ?? message; stepsText = (c.stepsText as string) ?? stepsText;
+    headlineTop = (c.headlineTop as string) ?? headlineTop; headlineBottom = (c.headlineBottom as string) ?? headlineBottom;
+    names = (c.names as string) ?? names;
+    showBrand = (c.showBrand as boolean) ?? showBrand;
+    qrPanel = (c.qrPanel as boolean) ?? qrPanel;
+    if (Array.isArray(c.textItems)) {
+      textItems = (c.textItems as unknown[]).flatMap((raw) => {
+        const t = raw as Partial<PosterTextItem>;
+        if (typeof t.text !== 'string') return [];
+        const num = (v: unknown, lo: number, hi: number, d: number) =>
+          typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d;
+        return [{ text: t.text.slice(0, 80), x: num(t.x, 0, 1, 0.5), y: num(t.y, 0, 1, 0.7), size: num(t.size, 14, 120, 30) }];
+      });
+    }
+    // Validated element by element: this is a stored blob, and a bad entry here reaches drawDecorAt
+    // as NaN coordinates, which paints nothing and looks like the motif silently vanishing.
+    if (Array.isArray(c.decorItems)) {
+      decorItems = (c.decorItems as unknown[]).flatMap((raw) => {
+        const d = raw as Partial<DecorPlacement>;
+        if (!DECOR_KINDS.some((k) => k.key === d.kind && k.positional)) return [];
+        const num = (v: unknown, lo: number, hi: number, dflt: number) =>
+          typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : dflt;
+        return [{
+          kind: d.kind as DecorKind,
+          x: num(d.x, 0, 1, 0.5), y: num(d.y, 0, 1, 0.3),
+          scale: num(d.scale, 0.4, 2.2, 1), rot: num(d.rot, -Math.PI, Math.PI, 0),
+          colour: typeof d.colour === 'string' ? d.colour : undefined,
+        }];
+      });
+    }
+    // Validated rather than trusted: the blob is stored server-side and an unknown key here would
+    // reach ctx.font as a family name that does not exist, which fails silently in Arial.
+    if (TYPE_SETS.some((t) => t.key === c.typeSetKey)) typeSetKey = c.typeSetKey as TypeSetKey;
+    if (c.titleFace === 'display' || c.titleFace === 'script') titleFace = c.titleFace;
     bgMode = (c.bgMode as typeof bgMode) ?? bgMode; cBg = (c.cBg as string) ?? cBg; codeDisplay = (c.codeDisplay as typeof codeDisplay) ?? codeDisplay; showFooterUrl = (c.showFooterUrl as boolean) ?? showFooterUrl;
     if (c.layout) layout = { ...cloneLayout(DEFAULT_LAYOUT), ...(c.layout as Record<ElKey, Box>) };
     // Colours: only restore saved ones once the organizer locked them in by editing. Otherwise
@@ -375,6 +587,7 @@
     cardCaption = (c.cardCaption as string) ?? cardCaption;
     cardCTitle = (c.cardCTitle as string) ?? cardCTitle; cardCBody = (c.cardCBody as string) ?? cardCBody;
     cardCCode = (c.cardCCode as string) ?? cardCCode; cardCBg = (c.cardCBg as string) ?? cardCBg;
+    cardSheetLandscape = (c.cardSheetLandscape as boolean) ?? cardSheetLandscape;
     if (c.cardLayout) cardLayout = { ...cloneCardLayout(DEFAULT_CARD_LAYOUT), ...(c.cardLayout as Record<CardElKey, Box>) };
     // A saved decoration wins over the event-type default; blank still means "let the type decide".
     if (typeof c.decorKind === 'string' && DECOR_KINDS.some((d) => d.key === c.decorKind)) decorKind = c.decorKind as DecorKind;
@@ -391,42 +604,6 @@
     if (!p) { p = new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src; }); imgCache.set(src, p); }
     return p;
   }
-  function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
-    ctx.beginPath(); ctx.moveTo(x + r, y);
-    ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
-    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
-  }
-  function drawCover(ctx: CanvasRenderingContext2D, img: HTMLImageElement, w: number, h: number) {
-    const s = Math.max(w / img.width, h / img.height); const dw = img.width * s, dh = img.height * s;
-    ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
-  }
-  // Draw a single line, shrinking the font until it fits maxW — keeps long join URLs from
-  // spilling past the QR panel / page edge (no clean place to wrap a URL).
-  function fitText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxW: number, weight: number, sizePx: number, family: string): void {
-    let size = sizePx;
-    ctx.font = `${weight} ${size}px ${family}`;
-    while (size > 14 && ctx.measureText(text).width > maxW) { size -= 2; ctx.font = `${weight} ${size}px ${family}`; }
-    ctx.fillText(text, x, y);
-  }
-  // Draw a URL, splitting a long one onto two lines — domain on top, the /path below — rather
-  // than shrinking it to nothing. Each line still fits-to-width as a safety net.
-  function drawUrl(ctx: CanvasRenderingContext2D, url: string, x: number, y: number, maxW: number, weight: number, sizePx: number, family: string, lineH: number): void {
-    ctx.font = `${weight} ${sizePx}px ${family}`;
-    if (ctx.measureText(url).width <= maxW) { ctx.fillText(url, x, y); return; }
-    const i = url.indexOf('/');
-    const domain = i === -1 ? url : url.slice(0, i);
-    const path = i === -1 ? '' : url.slice(i);
-    fitText(ctx, domain, x, y, maxW, weight, sizePx, family);
-    if (path) fitText(ctx, path, x, y + lineH, maxW, weight, Math.round(sizePx * 0.82), family);
-  }
-  // Plain background = a solid colour (default white; the organizer can recolour it or match the theme).
-  function paintPlain(ctx: CanvasRenderingContext2D) {
-    // See printBg: with it off the colour is the PAPER, so it is drawn while designing and left off
-    // what prints. The ink is deliberately NOT recomputed — it was chosen to read on that colour,
-    // and the real stock is that colour, so the print matches the preview once it is on the card.
-    ctx.fillStyle = renderingForPrint ? '#ffffff' : (cBg || '#ffffff');
-    ctx.fillRect(0, 0, W, H);
-  }
 
   /** Hand `fn` a canvas showing what will actually be printed, then put the preview back. */
   async function asPrinted(fn: () => void | Promise<void>): Promise<void> {
@@ -435,88 +612,53 @@
     try { await fn(); }
     finally { if (swap) { renderingForPrint = false; void draw(); } }
   }
-  // The Snapdini brand mark punched into the centre of the QR: a white safety ring (so the QR stays
-  // readable), the gold chip, and a black top-hat — matching the <Logo> component. Safe because the
-  // poster QR is generated at high error-correction (≈30% recoverable).
-  function drawBrandChip(ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number) {
-    const ring = size * 1.16;
-    ctx.fillStyle = '#ffffff'; roundRect(ctx, cx - ring / 2, cy - ring / 2, ring, ring, ring * 0.26); ctx.fill();
-    ctx.fillStyle = '#f5c518'; roundRect(ctx, cx - size / 2, cy - size / 2, size, size, size * 0.24); ctx.fill();
-    ctx.fillStyle = '#111111';
-    const cw = size * 0.36, ch = size * 0.40, top = cy - size * 0.17;
-    roundRect(ctx, cx - cw / 2, top, cw, ch, size * 0.04); ctx.fill();                       // hat crown
-    const bw = size * 0.64, bh = size * 0.11;
-    roundRect(ctx, cx - bw / 2, top + ch - bh * 0.35, bw, bh, bh * 0.5); ctx.fill();          // hat brim
-  }
   const bgSrc = () => bgMode === 'custom' ? customBgUrl : bgMode === 'event' ? themeImageUrl : null;
+
+  /** Everything drawPoster needs, in one place.
+   *
+   *  Factored out because the front-and-back preview renders the poster a SECOND time, at full page
+   *  size on its own canvas — and a second copy of this list is a second poster that drifts from the
+   *  first. One definition, two canvases. */
+  const posterOpts = () => ({
+      headline, headlineTop, headlineBottom, names, showBrand, qrPanel, decorItems, textItems, typeSet: typeSetKey, titleFace,
+      message, stepsText, cleanUrl, joinCode, codeDisplay, showFooterUrl, layout, ink,
+      // The poster carries the same decoration the cards do. It did not before, which is why a
+      // design preset could only ever change colours.
+      //
+      // `decorKind`, NOT `decorUsed`. decorUsed falls back to a motif chosen from the event type,
+      // which is right for cards (they have always been decorated) and wrong here: every poster
+      // ever saved has an empty decorKind, so using the fallback would put a decoration on all of
+      // them retrospectively. Only an explicit choice draws.
+      //
+      // The colour is passed raw for the same reason — decorInk falls back to the CARD's title ink,
+      // which is a different design. drawPoster falls back to the poster's own headline ink.
+      decorKind, decorPos, decorScale, decorColour,
+      qrSrc: qrImg, bgSrc: bgSrc(),
+      // See printBg: with it off the colour is the PAPER, so it is drawn while designing and left off
+      // what prints. The ink is deliberately NOT recomputed — it was chosen to read on that colour,
+      // and the real stock is that colour, so the print matches the preview once it is on the card.
+      plainBg: renderingForPrint ? '#ffffff' : (cBg || '#ffffff'),
+      // Our cache, not the renderer's: a redraw must not re-decode the background or the preview
+      // flickers mid-drag, and onBgCropped has to be able to evict a replaced blob URL.
+      loadImage: loadImg,
+    });
 
   async function draw() {
     if (!canvas) return;
     const ctx = canvas.getContext('2d'); if (!ctx) return;
     canvas.width = W; canvas.height = H;
-    const src = bgSrc();
-    if (src) {
-      try { const bg = await loadImg(src); drawCover(ctx, bg, W, H); ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, W, H); extractPalette(bg); }
-      catch { paintPlain(ctx); }
-    } else paintPlain(ctx);
-
-    // Brand badge along the top — slides left/right (fixed height, never resized).
-    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-    ctx.fillStyle = ink.headline; ctx.font = `600 ${layout.brand.size}px "Helvetica Neue", Arial, sans-serif`;
-    ctx.fillText('🎩 Snapdini', layout.brand.x * W, layout.brand.y * H + layout.brand.size * 0.34);
-
-    // Everything else is drawn at its free layout position (the organizer drags/resizes these).
-    const qr = await loadImg(qrImg);
-    drawQrPanel(ctx, layout.qr, qr);
-    drawTextBox(ctx, headline || 'Our Event', 800, ink.headline, layout.title, W - 140);
-    if (message.trim()) drawTextBox(ctx, message, 400, ink.message, layout.message, W - 200);
-    if (stepsText.trim()) drawTextBox(ctx, stepsText, 500, ink.steps, layout.steps, W - 120);
-    if (showFooterUrl) {
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = ink.footer;
-      drawUrl(ctx, cleanUrl, layout.footer.x * W, layout.footer.y * H, W - 120, 400, layout.footer.size, 'ui-monospace, Menlo, Consolas, monospace', layout.footer.size * 1.25);
-    }
+    const { backgroundImage } = await drawPoster(ctx, posterOpts());
+    // The two things the renderer deliberately does not do, because a wizard thumbnail must not do
+    // them: sample the background for the swatch strip, and drop the "building poster" spinner.
+    // Both still only happen on a successful paint — drawPoster rejecting leaves the spinner up.
+    if (backgroundImage) extractPalette(backgroundImage);
     busy = false;
-  }
-
-  // Wrap text to maxW at the current font, returning the lines.
-  function wrapToLines(ctx: CanvasRenderingContext2D, text: string, maxW: number): string[] {
-    const words = text.split(/\s+/); const lines: string[] = []; let line = '';
-    for (const w of words) { const t = line ? line + ' ' + w : w; if (ctx.measureText(t).width > maxW && line) { lines.push(line); line = w; } else line = t; }
-    if (line) lines.push(line); return lines;
-  }
-  // The coordinate space a Box's x/y fractions are measured against. The poster is the whole page;
-  // a card is a rect inside the sheet — same helpers, same drag code, two spaces.
-  type Space = { w: number; h: number; ox: number; oy: number };
-  const PAGE: Space = { w: W, h: H, ox: 0, oy: 0 };
-  // Centred (horizontally + vertically) wrapped text block at the box's centre.
-  function drawTextBox(ctx: CanvasRenderingContext2D, text: string, weight: number, color: string, box: Box, maxW: number, sp: Space = PAGE, sizePx = box.size) {
-    const family = '"Helvetica Neue", Arial, sans-serif';
-    ctx.font = `${weight} ${sizePx}px ${family}`; ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    const lines = wrapToLines(ctx, text, maxW); const lh = sizePx * 1.18;
-    let y = sp.oy + box.y * sp.h - ((lines.length - 1) * lh) / 2;
-    for (const ln of lines) { ctx.fillText(ln, sp.ox + box.x * sp.w, y); y += lh; }
-  }
-  // White QR panel (QR + centre brand chip + optional code/URL), centred on its box.
-  function drawQrPanel(ctx: CanvasRenderingContext2D, box: Box, qr: HTMLImageElement) {
-    const qSize = box.size, panelW = qSize + 90, panelH = qSize + (codeDisplay !== 'none' ? 195 : 90);
-    const px = box.x * W - panelW / 2, py = box.y * H - panelH / 2;
-    ctx.fillStyle = '#ffffff'; roundRect(ctx, px, py, panelW, panelH, 36); ctx.fill();
-    const qx = px + (panelW - qSize) / 2, qy = py + 45, ccx = px + panelW / 2;
-    ctx.imageSmoothingEnabled = false; ctx.drawImage(qr, qx, qy, qSize, qSize); ctx.imageSmoothingEnabled = true;
-    drawBrandChip(ctx, qx + qSize / 2, qy + qSize / 2, qSize * 0.20);
-    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-    if (codeDisplay === 'code') {
-      ctx.fillStyle = '#555'; ctx.font = '400 26px "Helvetica Neue", Arial, sans-serif'; ctx.fillText('Join code', ccx, qy + qSize + 52);
-      ctx.fillStyle = ink.code; ctx.font = '800 58px ui-monospace, Menlo, Consolas, monospace'; ctx.fillText(joinCode, ccx, qy + qSize + 116);
-    } else if (codeDisplay === 'url') {
-      ctx.fillStyle = ink.code; drawUrl(ctx, cleanUrl, ccx, qy + qSize + 86, panelW - 70, 700, 36, '"Helvetica Neue", Arial, sans-serif', 44);
-    }
   }
 
   // ── Drag + resize the elements directly on the preview ──────────────────────
   let stageEl: HTMLDivElement;
-  let dragKey: ElKey | null = null;
-  let selectedKey: ElKey | null = null;   // click-to-select → reveals that element's outline + grip
+  let dragKey: string | null = null;
+  let selectedKey: string | null = null;   // click-to-select → reveals that element's outline + grip
   let fsEdit = false;                  // full-screen layout mode (bigger stage = easier dragging)
   // QR sizing limits, in 1080-wide canvas px. The poster is A4 (210mm wide) so px·0.194 ≈ mm.
   // Below the floor the code + centre logo stops scanning reliably; below the warn line we caution.
@@ -546,11 +688,12 @@
   // 24 design px at 390 and 26 at 360.
   const SNAP_PX = 7;
   $: elements = ([
-    { key: 'brand', label: 'Logo', show: true, resizable: false, axis: 'x' },
+    { key: 'brand', label: 'Logo', show: showBrand, resizable: false, axis: 'x' },
     { key: 'title', label: 'Title', show: true, resizable: true, axis: 'xy' },
     { key: 'message', label: 'Message', show: !!message.trim(), resizable: true, axis: 'xy' },
     { key: 'steps', label: 'How-to', show: !!stepsText.trim(), resizable: true, axis: 'xy' },
     { key: 'qr', label: 'QR', show: true, resizable: true, axis: 'xy' },
+    { key: 'names', label: 'Names', show: !!names.trim(), resizable: true, axis: 'xy' },
     { key: 'footer', label: 'Link', show: showFooterUrl, resizable: true, axis: 'xy' },
   ] as { key: ElKey; label: string; show: boolean; resizable: boolean; axis: 'x' | 'xy' }[]).filter((e) => e.show);
 
@@ -570,6 +713,18 @@
     let w = 0; for (const ln of lines) w = Math.max(w, ctx.measureText(ln).width);
     return { x: sp.ox + box.x * sp.w - w / 2, y: sp.oy + box.y * sp.h - h / 2, w, h };
   }
+  // The title is the one element whose footprint the renderer alone knows how to work out — it can
+  // be three rows in two faces at two sizes. Ask it, rather than keeping a second guess here.
+  function titleBounds(ctx: CanvasRenderingContext2D, box: Box): Rect {
+    const { w, h } = measureTitleBlock(ctx, { headline, headlineTop, headlineBottom, typeSet: typeSetKey, titleFace }, box);
+    return { x: box.x * W - w / 2, y: box.y * H - h / 2, w, h };
+  }
+  // Like the title, the lockup is several rows in two faces — and its hairlines stick out past the
+  // joiner, so only the renderer knows how wide it really is.
+  function namesBounds(ctx: CanvasRenderingContext2D, box: Box): Rect {
+    const { w, h } = measureNames(ctx, { headline, headlineTop, headlineBottom, names, typeSet: typeSetKey, titleFace }, box);
+    return { x: box.x * W - w / 2, y: box.y * H - h / 2, w, h };
+  }
   function footerBounds(ctx: CanvasRenderingContext2D, box: Box): Rect {
     const maxW = W - 120;
     ctx.font = `400 ${box.size}px ui-monospace, Menlo, Consolas, monospace`;
@@ -581,10 +736,9 @@
     const h = path ? box.size * 1.25 + box.size * 0.82 : box.size;
     return { x: box.x * W - w / 2, y: box.y * H - box.size / 2, w, h };
   }
-  function qrBounds(box: Box): Rect {
-    const panelW = box.size + 90, panelH = box.size + (codeDisplay !== 'none' ? 195 : 90);
-    return { x: box.x * W - panelW / 2, y: box.y * H - panelH / 2, w: panelW, h: panelH };
-  }
+  // The renderer owns this geometry; asking it is what keeps the drag outline on the panel it is
+  // supposed to be outlining.
+  const qrBounds = (box: Box): Rect => qrPanelRect(box, codeDisplay);
   function brandBounds(ctx: CanvasRenderingContext2D): Rect {
     ctx.font = `600 ${layout.brand.size}px "Helvetica Neue", Arial, sans-serif`;
     const w = ctx.measureText('🎩 Snapdini').width, h = layout.brand.size * 1.2;
@@ -593,13 +747,14 @@
   const ZERO_RECT: Rect = { x: 0, y: 0, w: 0, h: 0 };
   function measureBounds(): Record<ElKey, Rect> {
     const ctx = measureCtx();
-    if (!ctx) return { brand: ZERO_RECT, title: ZERO_RECT, message: ZERO_RECT, steps: ZERO_RECT, qr: ZERO_RECT, footer: ZERO_RECT };
+    if (!ctx) return { brand: ZERO_RECT, title: ZERO_RECT, message: ZERO_RECT, steps: ZERO_RECT, qr: ZERO_RECT, footer: ZERO_RECT, names: ZERO_RECT };
     return {
       brand: brandBounds(ctx),
-      title: textBounds(ctx, headline || 'Our Event', 800, layout.title, W - 140),
+      title: titleBounds(ctx, layout.title),
       message: textBounds(ctx, message || ' ', 400, layout.message, W - 200),
       steps: textBounds(ctx, stepsText || ' ', 500, layout.steps, W - 120),
       qr: qrBounds(layout.qr),
+      names: namesBounds(ctx, layout.names),
       footer: footerBounds(ctx, layout.footer),
     };
   }
@@ -607,7 +762,36 @@
   // the assignment expression itself (comma operator) so Svelte tracks them reliably — text content,
   // the QR's code/URL toggle and footer visibility all change an element's measured size.
   let bounds: Record<ElKey, Rect> = measureBounds();
-  $: bounds = (layout, headline, message, stepsText, codeDisplay, showFooterUrl, mounted, measureBounds());
+  $: bounds = (layout, headline, headlineTop, headlineBottom, names, showBrand, qrPanel, typeSetKey, titleFace, message, stepsText, codeDisplay, showFooterUrl, mounted, measureBounds());
+  // A motif's footprint is a square around its anchor — the drawings are roughly as tall as they are
+  // wide, and an exact hull would need every motif to measure itself. A square is honest enough to
+  // grab and to keep inside the print margin, which is all the rect is used for.
+  $: textRects = (() => {
+    const ctx = measureCtx();
+    if (!ctx) return {} as Record<string, Rect>;
+    return Object.fromEntries(textItems.map((t, i) => {
+      const { w, h } = measureTextItem(ctx, { typeSet: typeSetKey }, t);
+      return [`text:${i}`, { x: t.x * W - w / 2, y: t.y * H - h / 2, w, h }];
+    })) as Record<string, Rect>;
+  })();
+  $: decorRects = Object.fromEntries(decorItems.map((it, i) => {
+    const side = Math.min(it.scale * DECOR_PX, Math.min(W, H) * 0.34);
+    return [`decor:${i}`, { x: it.x * W - side / 2, y: it.y * H - side / 2, w: side, h: side }];
+  })) as Record<string, Rect>;
+
+  // ── Can this paper carry the code without its panel? ──
+  // Measured, not assumed. Symbol Contrast is Rmax − Rmin in reflectance, and grade C (40) is the
+  // lowest a code is expected to read reliably in the wild — which is what this is: read once, in
+  // bad light, by a stranger holding a phone at an angle.
+  //
+  // A photographic background is NOT measurable this way — the code could land on a bright sky or a
+  // dark suit depending on where the host drags it — so the panel stays put over an image, full stop.
+  $: qrOverImage = bgMode !== 'plain';
+  $: qrSC = symbolContrast(posterBg);
+  $: qrSafe = !qrOverImage && panelOptional(posterBg);
+  // A design saved on one background and reopened on another must not silently ship an unreadable
+  // code, so the panel comes back on its own rather than waiting to be noticed.
+  $: if (!qrPanel && !qrSafe) qrPanel = true;
 
   // A draggable surface: the poster page, or one card on the sheet. Everything the drag needs that
   // differs between the two lives here, so there is ONE drag implementation rather than a card copy
@@ -628,10 +812,16 @@
     remeasure: () => void;
     redraw: () => void;
     select: (key: string | null) => void;
+    /** What is selected right now. A pinch has to know, because the gesture that starts it also
+     *  changes it. */
+    selected: () => string | null;
     dragging: (key: string | null) => void;
   };
+  const selectedOn = (surf: Surface) => surf.selected();
   // Drag values are saved, and the saved design is a bounded blob: four decimals is well under a
   // printed pixel and keeps a dragged layout from bloating the record with pointer noise.
+  // Set on pointerup when the gesture moved nothing. Read by the click that follows, and only by it.
+  let tapped = false;
   const r4 = (n: number) => Math.round(n * 1e4) / 1e4;
   const r1 = (n: number) => Math.round(n * 10) / 10;
 
@@ -678,6 +868,8 @@
     pushUndo(JSON.stringify(cfg));
     e.preventDefault(); e.stopPropagation();
     const stage = surf.stage(); if (!stage) return;
+    // What was selected BEFORE this gesture touched anything. A pinch needs it: see onDown.
+    const wasSelected = selectedOn(surf);
     surf.dragging(key); surf.select(key);
     const rect = stage.getBoundingClientRect();
     // Rebased when the dead zone is crossed, so engaging a drag never jumps the element by the slop
@@ -692,20 +884,37 @@
     // event carrying both fingers.
     const pts = new Map<number, { x: number; y: number }>([[e.pointerId, { x: e.clientX, y: e.clientY }]]);
     let pinch: { d0: number; size0: number } | null = null;
+    // Which element the pinch is actually sizing. Usually the one under the first finger — but not
+    // when something was already selected. See onDown.
+    let pinchKey = key;
     (e.target as Element).setPointerCapture?.(e.pointerId);
 
     // A second finger ANYWHERE turns the gesture into a pinch — it does not have to land on the
     // element, which on a phone would mean pinching a 30px-tall strip of text. Capture phase,
     // because it may land on another element whose own handler stops the event.
     const onDown = (ev: PointerEvent) => {
-      if (pinch || ev.pointerType !== 'touch' || pts.size >= 2) return;
-      if (!(surf.resizable?.(key) ?? true)) return;
+      if (pinch || ev.pointerType !== 'touch') return;
+      // The element a pinch sizes is the SELECTED one, not whatever happened to be under the first
+      // finger. Selecting a thing and then pinching it is the whole gesture — but the first finger
+      // of that pinch lands somewhere on the page, hit-tests to whichever element box is under it,
+      // and used to make that the target. So you would select the title, pinch, and watch the
+      // message resize: it zoomed "other things I've touched" rather than the thing I chose.
+      //
+      // Only when the previous selection can actually be resized; otherwise fall back to the
+      // element under the finger, which is the old behaviour and still the right one when nothing
+      // was selected at all.
+      if (wasSelected && wasSelected !== key && (surf.resizable?.(wasSelected) ?? true)) {
+        pinchKey = wasSelected;
+        surf.select(pinchKey); surf.dragging(pinchKey);
+      }
+      if (!(surf.resizable?.(pinchKey) ?? true)) return;
+      if (pts.size >= 2) return;
       pts.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
       const [a, c] = [...pts.values()];
       const d0 = Math.hypot(a.x - c.x, a.y - c.y);
       if (d0 < 1) { pts.delete(ev.pointerId); return; }   // two fingers on one spot: no scale to read
       // From the CURRENT size, not box0 — the first finger may already have resized it.
-      pinch = { d0, size0: surf.box(key).size };
+      pinch = { d0, size0: surf.box(pinchKey).size };
       clearGuides();
       ev.preventDefault();
     };
@@ -716,11 +925,11 @@
         if (pts.size < 2) return;
         const [a, c] = [...pts.values()];
         const d = Math.hypot(a.x - c.x, a.y - c.y);
-        const [lo, hi] = surf.limits(key);
+        const [lo, hi] = surf.limits(pinchKey);
         // Multiplicative, so the element scales with the gap between the fingers exactly as a photo
-        // would. limits(key) still has the last word — that is what keeps the QR above its
+        // would. limits() still has the last word — that is what keeps the QR above its
         // scannable floor no matter how hard someone pinches.
-        surf.size(key, r1(clamp(pinch.size0 * (d / pinch.d0), lo, hi)));
+        surf.size(pinchKey, r1(clamp(pinch.size0 * (d / pinch.d0), lo, hi)));
       } else {
         if (ev.pointerId !== e.pointerId) return;   // a stray pointer not driving this gesture
         if (!live) {
@@ -790,6 +999,9 @@
     // on the finger that happens to remain would move the element by wherever that finger was
     // sitting — a jump, right at the moment the user thought they had finished.
     const onUp = () => {
+      // A gesture that never crossed the dead zone was a TAP, not a drag. The click that follows can
+      // then mean something — see the inline editor.
+      tapped = !live && !pinch;
       surf.dragging(null); clearGuides();
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
@@ -801,25 +1013,94 @@
     window.addEventListener('pointercancel', onUp);
     window.addEventListener('pointerdown', onDown, true);
   }
+  // A placed motif is a draggable thing on the same surface as the text, so it goes through the SAME
+  // drag implementation rather than getting a second one — snapping, the print margin, the pinch and
+  // the undo coalescing all come free, and none of them can drift away from how the text behaves.
+  // The keys are `decor:<index>`; everything below routes on that prefix.
   const posterSurface: Surface = {
     pad: PAGE_PAD,
     stage: () => stageEl,
     w: W, h: H,
-    rects: () => bounds,
-    box: (k) => layout[k as ElKey],
-    // The QR floor is what keeps a code with our logo punched into its centre scannable.
-    limits: (k) => (k === 'qr' ? [QR_MIN_PX, 760] : [16, 170]),
+    rects: () => ({ ...bounds, ...decorRects, ...textRects }),
+    box: (k) => {
+      const d = decorIdx(k); if (d >= 0) return decorBox(d);
+      const t = textIdx(k); if (t >= 0) { const it = textItems[t]; return it ? { x: it.x, y: it.y, size: it.size } : { x: 0.5, y: 0.7, size: 30 }; }
+      return layout[k as ElKey];
+    },
+    // The QR floor is what keeps a code with our logo punched into its centre scannable. A motif's
+    // range is its own scale clamp (0.4–2.2) expressed in pixels, so the renderer never has to
+    // second-guess a size the designer allowed.
+    limits: (k) => (decorIdx(k) >= 0 ? [0.4 * DECOR_PX, 2.2 * DECOR_PX] : textIdx(k) >= 0 ? [14, 120] : k === 'qr' ? [QR_MIN_PX, 760] : [16, 170]),
     lockY: (k) => k === 'brand',      // the brand mark slides left/right along the top only
     // The brand mark has no resize grip, so a pinch must not give it one by the back door.
     resizable: (k) => k !== 'brand',
-    move: (k, x, y) => { layout = { ...layout, [k]: { ...layout[k as ElKey], x, y } }; },
-    size: (k, px) => { layout = { ...layout, [k]: { ...layout[k as ElKey], size: px } }; },
+    move: (k, x, y) => {
+      const i = decorIdx(k); if (i >= 0) { patchDecor(i, { x, y }); return; }
+      const t = textIdx(k); if (t >= 0) { patchText(t, { x, y }); return; }
+      layout = { ...layout, [k]: { ...layout[k as ElKey], x, y } };
+    },
+    size: (k, px) => {
+      const i = decorIdx(k); if (i >= 0) { patchDecor(i, { scale: px / DECOR_PX }); return; }
+      const t = textIdx(k); if (t >= 0) { patchText(t, { size: px }); return; }
+      layout = { ...layout, [k]: { ...layout[k as ElKey], size: px } };
+    },
     remeasure: () => { bounds = measureBounds(); },
     redraw: scheduleRedraw,
-    select: (k) => (selectedKey = k as ElKey | null),
-    dragging: (k) => (dragKey = k as ElKey | null),
+    select: (k) => (selectedKey = k),
+    selected: () => selectedKey,
+    dragging: (k) => (dragKey = k),
   };
-  function startDrag(key: ElKey, mode: 'move' | 'resize', e: PointerEvent) { dragOn(posterSurface, key, mode, e); }
+  function startDrag(key: string, mode: 'move' | 'resize', e: PointerEvent) { dragOn(posterSurface, key, mode, e); }
+
+  // ── Edit it where it is ─────────────────────────────────────────────────────
+  // On a phone the controls are BELOW the preview, so changing the title meant scrolling down to a
+  // field, typing blind, and scrolling back up to see what happened — for every word. Tapping the
+  // words themselves puts the caret where the host is already looking.
+  //
+  // Only the text elements: the QR is an image, the brand mark is fixed wording, and the footer is
+  // the join URL, which is not the host's to write.
+  type EditKey = 'title' | 'message' | 'steps' | 'names';
+  const EDITABLE: Record<EditKey, { label: string; get: () => string; set: (v: string) => void; max: number }> = {
+    title:   { label: 'Title',       get: () => headline,   set: (v) => (headline = v),   max: 60 },
+    message: { label: 'Message',     get: () => message,    set: (v) => (message = v),    max: 80 },
+    steps:   { label: 'How-to line', get: () => stepsText,  set: (v) => (stepsText = v),  max: 120 },
+    names:   { label: 'Names',       get: () => names,      set: (v) => (names = v),      max: 60 },
+  };
+  const isEditable = (k: string): k is EditKey => k in EDITABLE;
+  let editingKey: EditKey | null = null;
+  let editEl: HTMLInputElement | undefined;
+
+  async function tapElement(key: string) {
+    // Only a tap opens it. After a drag the click is the tail of the gesture that just moved the
+    // element, and opening a keyboard then would cover the thing they were positioning.
+    if (!tapped || !isEditable(key)) return;
+    pushUndo(JSON.stringify(cfg));
+    editingKey = key;
+    await tick();
+    editEl?.focus(); editEl?.select();
+  }
+  function endEdit() { editingKey = null; }
+  /** Narrow helpers for the markup, where a TypeScript cast is a syntax error. */
+  $: editSpec = editingKey ? EDITABLE[editingKey] : null;
+  const setEdit = (v: string) => { if (editingKey) EDITABLE[editingKey].set(v); };
+
+  // ── Show me what this changes ───────────────────────────────────────────────
+  // Hovering or focusing a control outlines the thing it affects. Most useful on the controls whose
+  // effect is hard to predict: an empty field shows WHERE its words would land, so a host can see
+  // that the Names line has a place waiting for it before deciding to fill it in.
+  let hintKey: string | null = null;
+  const hintOn = (k: string) => () => (hintKey = k);
+  const hintOff = () => (hintKey = null);
+  /** Where a hidden element WOULD sit, so an empty field can still be pointed at. */
+  $: hintLabel = hintKey && isEditable(hintKey) ? EDITABLE[hintKey].label : '';
+  $: ghostRect = (() => {
+    if (!hintKey || !isEditable(hintKey)) return null;
+    if (elements.some((e) => e.key === hintKey)) return null;   // it is drawn; the real outline shows
+    const b = layout[hintKey as ElKey];
+    if (!b) return null;
+    const w = W * 0.55, h = Math.max(28, b.size * 1.4);
+    return { x: b.x * W - w / 2, y: b.y * H - h / 2, w, h };
+  })();
   function resetLayout() { layout = cloneLayout(DEFAULT_LAYOUT); bounds = measureBounds(); scheduleRedraw(); }
 
   // Coalesce redraws to one per animation frame so the preview tracks dragging smoothly.
@@ -901,7 +1182,14 @@
       if (d?.qrCode) { qrImg = d.qrCode; scheduleRedraw(); }
     } catch { /* keep the provided QR */ }
   }
-  onMount(() => { restore(); mounted = true; loadPosterQr(); loadMissions(); draw().catch(() => { busy = false; showToast('Could not build the poster', true); }); });
+  onMount(() => {
+    restore(); mounted = true; loadPosterQr(); loadMissions();
+    draw().catch(() => { busy = false; showToast('Could not build the poster', true); });
+    // Pull every bundled face down once the designer is open, then redraw. drawPoster awaits the
+    // set it needs anyway, so this is not correctness — it is so that flipping between pairings is
+    // instant instead of showing a frame of the fallback stack on each first visit.
+    warmAllPosterFonts().then(() => { if (mounted) { bounds = measureBounds(); draw().catch(() => {}); } });
+  });
   onDestroy(() => { if (customBgUrl) URL.revokeObjectURL(customBgUrl); });
 
   // `kind` names what was exported — the poster and each set's card sheet land in the same
@@ -924,6 +1212,95 @@
       pdf.save(`${slug}-poster.pdf`);
     } catch { showToast('Could not build the PDF', true); }
   }
+  /** Poster on the front, the trick list on the back — one job, two pages.
+   *
+   *  The owner asked for this from the start ("it's very possible to have the main poster on one
+   *  side, and the list only on the other"), and it needs no new geometry: the poster and the card
+   *  sheet already render themselves, and printSheets already knows how to put several images on
+   *  separate pages and wait for every one to decode before calling print(). This is those three
+   *  facts joined up.
+   *
+   *  Page 2 is the sheet for the set being previewed, not all of them. A double-sided job has to
+   *  pair ONE back with ONE front — send four sets and the printer interleaves them against a
+   *  single poster, which is four wrong pairings rather than four sheets.
+   *
+   *  The duplex instruction matters and is not ours to control: the browser's print dialog owns
+   *  it. Flipping on the LONG edge is what keeps both sides upright on a portrait sheet; short-edge
+   *  gives you a back that is upside down relative to the front. So we say so, rather than leaving
+   *  someone to discover it after fifty sheets. */
+  // ── Front & back, seen before it is printed ────────────────────────────────
+  // printDoubleSided has existed for a while as one button in the export row that went straight to
+  // the browser's print dialog. Nobody found it, and nobody who did could tell what they were about
+  // to get: whether the back really matched the front, or which set was on it. A double-sided job is
+  // the one print where you cannot check the result without wasting a sheet, so it gets a look first.
+  let finishOpen = false;
+  let finishBusy = false;
+  let fFront: HTMLCanvasElement | undefined;
+  let fBack: HTMLCanvasElement | undefined;
+
+  /** Copy a full-size render into a thumbnail, keeping its own proportions — the poster and a
+   *  4-up A6 sheet are both A4, but a 1-up sheet is not, and a preview that forced them to one
+   *  shape would be lying about the pairing it exists to confirm. */
+  function paintInto(dst: HTMLCanvasElement | undefined, src: HTMLCanvasElement, cssW = 230) {
+    if (!dst) return;
+    const ctx = dst.getContext('2d'); if (!ctx) return;
+    // Backing store at the DEVICE resolution, CSS box at the display size. It used to be a flat
+    // 230px canvas stretched to whatever the layout gave it — on a 3× phone that is a 230px image
+    // across ~700 device pixels, which is exactly the mush the owner saw. This preview exists to
+    // answer "does the back really match the front", and it cannot answer that blurred.
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const w = Math.min(src.width, Math.round(cssW * dpr));
+    const h = Math.max(1, Math.round((w * src.height) / src.width));
+    dst.width = w; dst.height = h;
+    dst.style.width = `${cssW}px`; dst.style.height = 'auto';
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h);
+    // High-quality downscale: the default is a cheap sampler that drops thin strokes entirely, and
+    // this page is almost all thin strokes and small type.
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(src, 0, 0, w, h);
+  }
+
+  async function openFinish() {
+    finishOpen = true; finishBusy = true;
+    await tick();
+    try {
+      // The FRONT is rendered fresh at full page size rather than copied off the on-screen preview,
+      // which is only ever as big as the stage it sits in — on a phone that is a few hundred pixels
+      // and every downscale after it starts from that. asPrinted still runs so a paper-colour
+      // background is swapped out first: this shows the sheet, not the screen.
+      await asPrinted(async () => {
+        const full = document.createElement('canvas');
+        full.width = W; full.height = H;
+        const fctx = full.getContext('2d');
+        if (fctx) { await drawPoster(fctx, posterOpts()); paintInto(fFront, full); }
+        else if (canvas) paintInto(fFront, canvas);
+      });
+      if (activeSheet) paintInto(fBack, await sheetCanvas(activeSheet));
+    } catch { showToast('Could not build the preview', true); }
+    finally { finishBusy = false; }
+  }
+
+  async function printDoubleSided() {
+    const set = activeSheet;
+    if (!set) { showToast('Add a trick list first — there is nothing for the back', true); return; }
+    try {
+      let front = '';
+      await asPrinted(() => { front = canvas.toDataURL('image/png'); });
+      const back = (await sheetCanvas(set)).toDataURL('image/png');
+      const w = window.open('', '_blank');
+      if (!w) { showToast('Allow pop-ups to print', true); return; }
+      const pages = [front, back];
+      w.document.write(
+        '<style>@page{size:A4;margin:0}html,body{margin:0;padding:0}'
+        + 'img{width:100%;height:auto;display:block}img+img{page-break-before:always}</style>'
+        + `<script>let n=0;function k(){if(++n===${pages.length}){window.focus();window.print();}}<\/script>`
+        + pages.map((u) => `<img src="${u}" onload="k()">`).join(''));
+      w.document.close();
+      finishOpen = false;
+      showToast('Two pages — set your printer to double-sided, flip on the LONG edge');
+    } catch { showToast('Could not build the double-sided print', true); }
+  }
+
   function printPoster() { void asPrinted(printPosterNow); }
   function printPosterNow() {
     const url = canvas.toDataURL('image/png'); const w = window.open('', '_blank');
@@ -950,6 +1327,9 @@
   // below is laid out in the poster's own 1080×1527 design space — so px·0.194 ≈ mm still holds —
   // and the canvas is scaled up by the transform on the way out.
   const CARD_SCALE = 2;                // 2× A4 out: at 1× a 12px mission line prints mushy
+  /** What the printer has to be told. A landscape sheet sent to a portrait page is letterboxed —
+   *  printed at half size inside two white bands — and nothing on screen would have warned of it. */
+  $: sheetOrientation = (cardSheetLandscape ? 'landscape' : 'portrait') as 'landscape' | 'portrait';
   const CARD_GAP = 10;                 // gutter inside the cut line, so scissors have somewhere to go
   const CARD_PAD = 34;                 // ≈6.6mm of quiet space inside the card's edge
   // The card's QR. QR_MIN_PX (≈33mm) is the floor that keeps a code with our logo punched into its
@@ -957,7 +1337,17 @@
   // here: that line sizes a code to be read across a room, and a card is held in the hand.
   const CARD_QR_PX = 200;
   const CARD_QR_MAX = 420;
-  const CARD_FAMILY = '"Helvetica Neue", Arial, sans-serif';
+  // The cards carry the poster's pairing. They were hardcoded to Helvetica in thirteen places, so
+  // choosing a typeface restyled the poster and left the cards it prints alongside it unchanged —
+  // one design, two voices, on the same table.
+  //
+  // The BODY face only, for the list and the join details: a trick list is read at arm's length in
+  // low light, and the display face's tracking and casing are wrong for a column of short lines.
+  // The title takes the full face, because that is the one thing on the card doing the design's job.
+  let CARD_FAMILY = '"Helvetica Neue", Arial, sans-serif';
+  $: cardTypeSet = typeSet(typeSetKey);
+  $: CARD_FAMILY = cardTypeSet.body.family;
+  $: cardTitleFace = titleFaceOf(cardTypeSet, titleFace);
   const CARD_MONO = 'ui-monospace, Menlo, Consolas, monospace';
 
   // How the sheet is divided, and the paper scale that follows from it. Every measurement below is
@@ -969,11 +1359,30 @@
   // is identical, and only the full-page card is twice as tall. Scaling A5 by area instead would
   // make its QR half again as tall for no gain and squeeze the trick list into the gap; this way the
   // extra width of a half-sheet card goes where it is actually useful, into longer lines.
-  $: cardCols = cardsPerSheet === 4 ? 2 : 1;
-  $: cardRows = cardsPerSheet === 1 ? 1 : 2;
-  $: slotW = W / cardCols;
-  $: slotH = H / cardRows;
+  // Which way up the SHEET goes — at EVERY card count, not just 2-up.
+  //
+  // It was gated to 2-up on the reasoning that only there does the shape change. That is true of the
+  // CARD's proportions and beside the point: a host may simply want to print landscape, and a
+  // landscape sheet is a legitimate choice at one, two or four to a page. Turning the paper turns
+  // every card on it — four landscape A6, two portrait A5, one landscape A4.
+  let cardSheetLandscape = false;
+  $: sheetW = cardSheetLandscape ? H : W;
+  $: sheetH = cardSheetLandscape ? W : H;
+  // The split follows the paper: a portrait sheet halves across, a landscape one halves down the
+  // middle, and both fill it exactly either way.
+  $: cardCols = cardsPerSheet === 4 ? 2 : (cardsPerSheet === 2 && cardSheetLandscape ? 2 : 1);
+  $: cardRows = cardsPerSheet === 1 ? 1 : (cardsPerSheet === 2 && cardSheetLandscape ? 1 : 2);
+  $: slotW = sheetW / cardCols;
+  $: slotH = sheetH / cardRows;
   $: cardUnit = cardsPerSheet === 1 ? 2 : 1;
+  /** What the chosen paper actually produces, said in card shapes rather than in paper sizes —
+   *  "two landscape A5s" is the thing being decided; "A4 landscape" is how it gets there. */
+  $: cardShapeNote =
+    cardsPerSheet === 1
+      ? (cardSheetLandscape ? 'One landscape A4 card — the whole sheet.' : 'One portrait A4 card — the whole sheet.')
+      : cardsPerSheet === 2
+        ? (cardSheetLandscape ? 'Two portrait A5 cards, cut down the middle.' : 'Two landscape A5 cards, cut across the middle.')
+        : (cardSheetLandscape ? 'Four landscape A6 cards.' : 'Four portrait A6 cards.');
 
   // Which sets actually go to the printer. Stored as EXCLUSIONS so a set added to the trick list
   // later is printed by default rather than silently left out of the stack.
@@ -1069,19 +1478,24 @@
   const cardLabelFor = (set: MissionSet | null): string =>
     cardIds && sheets.length > 1 && set ? set.label.toUpperCase() : '';
 
-  type TitleGeom = { rect: Rect; size: number; lines: string[]; labelSize: number; label: string };
+  // `px` and `lh` are the size the face ACTUALLY draws at and its own line height — a script sets
+  // much smaller than a sans for the same requested px, so measuring at one and drawing at the other
+  // is how a title ends up overlapping the rule under it.
+  type TitleGeom = { rect: Rect; size: number; px: number; lh: number; lines: string[]; labelSize: number; label: string };
   function titleGeom(ctx: CanvasRenderingContext2D, g: CardBox, set: MissionSet | null): TitleGeom {
     const size = cardLayout.title.size * g.u, labelSize = 19 * g.u, label = cardLabelFor(set);
-    ctx.font = `800 ${size}px ${CARD_FAMILY}`;
+    const px = applyFace(ctx, cardTitleFace, size);
+    const lh = px * cardTitleFace.lineHeight;
     // Two lines at most: past that there is no card left for the tricks.
-    const lines = wrapToLines(ctx, cardHeading, g.innerW).slice(0, 2);
+    const lines = wrapToLines(ctx, castFor(cardTitleFace, cardHeading), g.innerW).slice(0, 2);
     let w = 0;
     for (const ln of lines) w = Math.max(w, ctx.measureText(ln).width);
+    clearTracking(ctx);
     if (label) { ctx.font = `700 ${labelSize}px ${CARD_FAMILY}`; w = Math.max(w, ctx.measureText(label).width); }
     w = Math.min(w, g.innerW);
-    const h = lines.length * size * 1.2 + (label ? labelSize * 1.5 : 0);
+    const h = lines.length * lh + (label ? labelSize * 1.5 : 0);
     const c = placeOnCard(g, cardLayout.title, w, h);
-    return { rect: { x: c.x - w / 2, y: c.y - h / 2, w, h }, size, lines, labelSize, label };
+    return { rect: { x: c.x - w / 2, y: c.y - h / 2, w, h }, size, px, lh, lines, labelSize, label };
   }
 
   // The join block — QR, "Scan to join" + the code/link, and the caption — moves and resizes as ONE
@@ -1097,14 +1511,14 @@
     // the fitted one depends on where this block ends up, which is what we are working out.
     const camGap = decorUsed === 'camera' && qrPx ? Math.max(13 * g.u, qrPx * 0.16) * Math.min(decorScale, 1.25) : 0;
     const gap = 24 * g.u + camGap;
-    const showCode = cardShowLink && codeDisplay !== 'none';
+    const showCode = cardShowLink;
     const caption = cardCaption.trim();
     const maxTextW = g.innerW - (qrPx ? qrPx + gap : 0);
     let tw = 0, th = 0;
     let capLines: string[] = [];
     if (cardShowLink) { ctx.font = `700 ${20 * ts}px ${CARD_FAMILY}`; tw = Math.max(tw, ctx.measureText('Scan to join').width); th += 30 * ts; }
     if (showCode) {
-      if (codeDisplay === 'code') { ctx.font = `800 ${34 * ts}px ${CARD_MONO}`; tw = Math.max(tw, ctx.measureText(joinCode).width); th += 48 * ts; }
+      if (cardCodeMode === 'code') { ctx.font = `800 ${34 * ts}px ${CARD_MONO}`; tw = Math.max(tw, ctx.measureText(joinCode).width); th += 48 * ts; }
       else { ctx.font = `700 ${21 * ts}px ${CARD_FAMILY}`; tw = Math.max(tw, ctx.measureText(cleanUrl).width); th += 58 * ts; }
     }
     if (caption) {
@@ -1163,8 +1577,10 @@
       ctx.fillStyle = cardInk.muted; ctx.font = `700 ${t.labelSize}px ${CARD_FAMILY}`;
       ctx.fillText(t.label, tcx, ty); ty += t.labelSize * 1.5;
     }
-    ctx.fillStyle = cardInk.title; ctx.font = `800 ${t.size}px ${CARD_FAMILY}`;
-    for (const ln of t.lines) { ctx.fillText(ln, tcx, ty); ty += t.size * 1.2; }
+    ctx.fillStyle = cardInk.title;
+    applyFace(ctx, cardTitleFace, t.size);
+    for (const ln of t.lines) { ctx.fillText(ln, tcx, ty); ty += t.lh; }
+    clearTracking(ctx);
     const ruleY = t.rect.y + t.rect.h + 10 * u;
     ctx.fillStyle = cardInk.rule; ctx.fillRect(x0 + pad, ruleY, innerW, 1.5 * u);
 
@@ -1232,8 +1648,8 @@
       ctx.fillStyle = cardInk.muted; ctx.font = `700 ${20 * ts}px ${CARD_FAMILY}`;
       ctx.fillText('Scan to join', j.tx, jy); jy += 30 * ts;
       ctx.fillStyle = cardInk.code;
-      if (codeDisplay === 'code') { fitText(ctx, joinCode, j.tx, jy, j.tw, 800, 34 * ts, CARD_MONO); jy += 48 * ts; }
-      else if (codeDisplay === 'url') { drawUrl(ctx, cleanUrl, j.tx, jy, j.tw, 700, 21 * ts, CARD_FAMILY, 26 * ts); jy += 58 * ts; }
+      if (cardCodeMode === 'code') { fitText(ctx, joinCode, j.tx, jy, j.tw, 800, 34 * ts, CARD_MONO); jy += 48 * ts; }
+      else { drawUrl(ctx, cleanUrl, j.tx, jy, j.tw, 700, 21 * ts, CARD_FAMILY, 26 * ts); jy += 58 * ts; }
     }
     // What the card is FOR. Without this a guest has a list and no idea it is tickable in the app.
     ctx.fillStyle = cardInk.muted; ctx.font = `400 ${18 * ts}px ${CARD_FAMILY}`;
@@ -1242,6 +1658,9 @@
 
   /** Paint one set's sheet at CARD_SCALE, however many cards the host wants on it. */
   async function drawSheet(ctx: CanvasRenderingContext2D, set: MissionSet) {
+    // Same reason drawPoster awaits it: ctx.font falls back to Arial silently, and a card sheet is
+    // exported straight to a printer. The poster's own await does not cover this path.
+    await ensurePosterFonts(typeSetKey);
     ctx.setTransform(CARD_SCALE, 0, 0, CARD_SCALE, 0, 0);
     // The sheet is paper: white, always. Each card paints its own background inside its cut line,
     // so an ink-saver sheet leaves the gutters unprinted (and a JPG/PDF export never goes black
@@ -1318,6 +1737,7 @@
     remeasure: () => { cardBounds = measureCardBounds(); },
     redraw: () => scheduleCardRedraw(),
     select: (k) => (cardSelectedKey = k as CardElKey | null),
+    selected: () => cardSelectedKey,
     dragging: (k) => (cardDragKey = k as CardElKey | null),
   };
   function startCardDrag(key: CardElKey, mode: 'move' | 'resize', e: PointerEvent) { dragOn(cardSurface, key, mode, e); }
@@ -1375,7 +1795,7 @@
   /** A sheet on its own canvas, so an export never depends on which one is being previewed. */
   async function sheetCanvas(set: MissionSet): Promise<HTMLCanvasElement> {
     const c = document.createElement('canvas');
-    c.width = W * CARD_SCALE; c.height = H * CARD_SCALE;
+    c.width = sheetW * CARD_SCALE; c.height = sheetH * CARD_SCALE;
     const ctx = c.getContext('2d');
     if (!ctx) throw new Error('no canvas context');
     await drawSheet(ctx, set);
@@ -1393,7 +1813,7 @@
       // Every page has to decode before print() fires, or a multi-page job comes out with blank
       // pages. The break goes BEFORE each image after the first, so there is no trailing blank.
       w.document.write(
-        '<style>@page{size:A4;margin:0}body{margin:0}img{width:100%;display:block}img+img{page-break-before:always}</style>'
+        `<style>@page{size:A4 ${sheetOrientation};margin:0}body{margin:0}img{width:100%;display:block}img+img{page-break-before:always}</style>`
         + `<script>let n=0;function k(){if(++n===${pages.length}){window.focus();window.print();}}<\/script>`
         + pages.map((u) => `<img src="${u}" onload="k()">`).join(''));
       w.document.close();
@@ -1408,7 +1828,7 @@
     if (!list.length) return;
     try {
       const { jsPDF } = await import('jspdf');
-      const pdf = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
+      const pdf = new jsPDF({ orientation: sheetOrientation, unit: 'pt', format: 'a4' });
       for (let i = 0; i < list.length; i++) {
         if (i) pdf.addPage();
         const c = await sheetCanvas(list[i]);
@@ -1448,7 +1868,7 @@
   // just for cardShowLink and only when the design shows a code or a link at all; its background
   // row is overruled outright by ink-saver's forced white.
   $: VISIBLE_CARD_COLOR_ROWS = CARD_COLOR_ROWS.filter((r) =>
-    r.key === 'cardCode' ? cardShowLink && codeDisplay !== 'none'
+    r.key === 'cardCode' ? cardShowLink
     : r.key === 'cardBg' ? !cardInkSaver
     : true);
   // The image swatches write to whichever row is active, so a row that has just been hidden would
@@ -1473,6 +1893,13 @@
     <div class="head"><span>{fsEdit ? 'Arrange layout' : view === 'cards' ? 'Trick cards' : 'Event poster'}</span>
       <div class="head-actions">
         <!-- Full-screen arranging is the poster's; a card is arranged at its own size in the preview. -->
+        <!-- Always visible, including mid-drag and in full screen. The existing pair sit inside the
+             Arrange controls, which is exactly where you cannot see them while dragging on the
+             preview — the one moment an undo is worth anything. -->
+        <button class="tog undo" on:click={undo} disabled={!undoStack.length}
+                aria-label="Undo" title="Undo the last change (Ctrl/⌘+Z)">↶</button>
+        <button class="tog undo" on:click={redo} disabled={!redoStack.length}
+                aria-label="Redo" title="Redo (Ctrl/⌘+Shift+Z)">↷</button>
         {#if view === 'poster'}<button class="tog" on:click={() => (fsEdit = !fsEdit)} aria-label={fsEdit ? 'Exit full screen' : 'Full-screen layout'} title={fsEdit ? 'Exit full screen' : 'Full-screen layout — easier to arrange'}>{fsEdit ? '✓ Done' : '⛶ Arrange'}</button>{/if}
         {#if !fsEdit}<button class="x" on:click={() => dispatch('close')} aria-label="Close">✕</button>{/if}
       </div></div>
@@ -1533,21 +1960,84 @@
           <!-- Alignment guides: only while a drag is actually snapping, and only the axis in play. -->
           {#if dragKey && snapX !== null}<div class="snap-guide vert" style="left:{snapX * 100}%" aria-hidden="true"></div>{/if}
           {#if dragKey && snapY !== null}<div class="snap-guide horz" style="top:{snapY * 100}%" aria-hidden="true"></div>{/if}
+          {#if ghostRect}
+            <!-- Where an empty line WOULD land. Without this, "Names" is a field with no visible
+                 consequence — you cannot judge whether to fill it in if nothing shows you where it
+                 goes. -->
+            <div class="el-ghost" aria-hidden="true"
+                 style="left:{(ghostRect.x / W) * 100}%; top:{(ghostRect.y / H) * 100}%; width:{(ghostRect.w / W) * 100}%; height:{(ghostRect.h / H) * 100}%">
+              <span>{hintLabel} goes here</span>
+            </div>
+          {/if}
+          {#if editingKey && editSpec && bounds[editingKey]}
+            {@const eb = bounds[editingKey]}
+            <!-- Anchored ON the element, so the words appear where the words are. Sized to the
+                 element's own box rather than floated in a corner — the point is that you are
+                 editing the thing you can see, not a field that happens to change it. -->
+            <div class="el-edit" style="left:2%; top:{Math.min(88, Math.max(2, ((eb.y + eb.h) / H) * 100 + 1))}%; width:96%">
+              <input bind:this={editEl} type="text" maxlength={editSpec.max}
+                     value={editSpec.get()}
+                     placeholder={editSpec.label}
+                     aria-label={editSpec.label}
+                     on:input={(e) => setEdit(e.currentTarget.value)}
+                     on:keydown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); endEdit(); } }}
+                     on:blur={endEdit} />
+              <button class="ee-done" on:click={endEdit} aria-label="Done">✓</button>
+            </div>
+          {/if}
           {#each elements as el (el.key)}
             {#if bounds[el.key]}
               {@const b = bounds[el.key]}
               <!-- The whole footprint is the move target; outline shows on hover or when selected. -->
               <!-- label-below: near the top of the stage there is no room above, and the sheet
                    clips anything that overflows it, so the label would simply vanish. -->
-              <div class="el-box" class:active={dragKey === el.key} class:selected={selectedKey === el.key} class:warn={el.key === 'qr' && qrTooSmall} class:lock-x={el.axis === 'x'} class:label-below={(b.y / H) < 0.07}
+              <div class="el-box" class:active={dragKey === el.key} class:selected={selectedKey === el.key} class:warn={el.key === 'qr' && qrTooSmall} class:lock-x={el.axis === 'x'} class:label-below={(b.y / H) < 0.07} class:hinted={hintKey === el.key}
                 style="left:{(b.x / W) * 100}%; top:{(b.y / H) * 100}%; width:{(b.w / W) * 100}%; height:{(b.h / H) * 100}%"
-                on:pointerdown={(e) => startDrag(el.key, 'move', e)} role="button" tabindex="-1" aria-label="Move {el.label}">
+                on:pointerdown={(e) => startDrag(el.key, 'move', e)} on:click={() => tapElement(el.key)}
+                role="button" tabindex="-1" aria-label="Move {el.label}">
                 <span class="el-name">{el.label}{#if el.key === 'qr' && qrTooSmall} ⚠{/if}</span>
               </div>
               {#if el.resizable && selectedKey === el.key}
                 <span class="el-rz" class:active={dragKey === el.key}
                   style="left:{((b.x + b.w) / W) * 100}%; top:{((b.y + b.h) / H) * 100}%"
                   on:pointerdown={(e) => startDrag(el.key, 'resize', e)} aria-label="Resize {el.label}">⤡</span>
+              {/if}
+            {/if}
+          {/each}
+
+          <!-- Lines the host added. Same box, same grip, same drag code as everything else. -->
+          {#each textItems as t, i (i)}
+            {@const tb = textRects[`text:${i}`]}
+            {#if tb}
+              <div class="el-box" class:active={dragKey === `text:${i}`} class:selected={selectedKey === `text:${i}`}
+                style="left:{(tb.x / W) * 100}%; top:{(tb.y / H) * 100}%; width:{(tb.w / W) * 100}%; height:{(tb.h / H) * 100}%"
+                on:pointerdown={(e) => startDrag(`text:${i}`, 'move', e)} role="button" tabindex="-1"
+                aria-label="Move your line">
+                <span class="el-name">Your line</span>
+              </div>
+              {#if selectedKey === `text:${i}`}
+                <span class="el-rz" class:active={dragKey === `text:${i}`}
+                  style="left:{((tb.x + tb.w) / W) * 100}%; top:{((tb.y + tb.h) / H) * 100}%"
+                  on:pointerdown={(e) => startDrag(`text:${i}`, 'resize', e)} aria-label="Resize your line">⤡</span>
+              {/if}
+            {/if}
+          {/each}
+
+          <!-- Placed motifs. Same box, same grip, same drag code as the text above — a host should
+               not have to learn a second way to move a thing on the same page. -->
+          {#each decorItems as it, i (i)}
+            {@const b = decorRects[`decor:${i}`]}
+            {#if b}
+              <div class="el-box decor" class:active={dragKey === `decor:${i}`} class:selected={selectedKey === `decor:${i}`}
+                style="left:{(b.x / W) * 100}%; top:{(b.y / H) * 100}%; width:{(b.w / W) * 100}%; height:{(b.h / H) * 100}%"
+                on:pointerdown={(e) => startDrag(`decor:${i}`, 'move', e)} role="button" tabindex="-1"
+                aria-label="Move {DECOR_KINDS.find((d) => d.key === it.kind)?.label ?? 'decoration'}">
+                <span class="el-name">{DECOR_KINDS.find((d) => d.key === it.kind)?.label ?? 'Decoration'}</span>
+              </div>
+              {#if selectedKey === `decor:${i}`}
+                <span class="el-rz" class:active={dragKey === `decor:${i}`}
+                  style="left:{((b.x + b.w) / W) * 100}%; top:{((b.y + b.h) / H) * 100}%"
+                  on:pointerdown={(e) => startDrag(`decor:${i}`, 'resize', e)} aria-label="Resize decoration">⤡</span>
               {/if}
             {/if}
           {/each}
@@ -1564,6 +2054,22 @@
         <p class="layout-hint">This event has no trick list yet. Set one up and the printable table cards appear here.</p>
       {:else}
         <p class="layout-hint">Identical cards to an A4 sheet — print, cut along the dashed guides, one per place setting. The colours, background and join details follow the poster you designed.</p>
+
+        {#if cGuided}
+          <div class="psteps" aria-label="Step {cStep} of {C_LAST}">
+            {#each C_TITLES as t, i}
+              <button class="pstep" class:on={i + 1 === cStep} class:done={i + 1 < cStep && !cStepSkipped(i + 1)}
+                      class:skipped={cStepSkipped(i + 1)} disabled={cStepSkipped(i + 1)}
+                      on:click={() => (cStep = i + 1)} title={cStepWhy(i + 1)}>
+                <span class="ps-n">{cStepSkipped(i + 1) ? '–' : i + 1 < cStep ? '✓' : i + 1}</span><span class="ps-t">{t}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+
+        {#if cGuided}<p class="p-ask">{C_ASK[cStep - 1]}</p>{/if}
+
+        {#if !cGuided || cStep === 1}
         <label class="fld"><span>Card title</span><input bind:value={cardTitle} maxlength="60" placeholder={headline} /></label>
 
         <div class="fld"><span>Cards per sheet</span>
@@ -1573,28 +2079,45 @@
             <button class="seg" class:on={cardsPerSheet === 1} on:click={() => (cardsPerSheet = 1)}>1 · A4</button>
           </div>
           <p class="layout-hint" style="margin-top:8px">A4 halves and quarters exactly, so every option fills the sheet. Bigger cards carry the same design at a bigger size — handy for a long trick list or a table sign. The preview shows a single card; the full sheet, with its cut guides, is what prints.</p>
+          <div class="sub-h">Paper</div>
+          <div class="bg-row">
+            <button class="seg" class:on={!cardSheetLandscape} on:click={() => (cardSheetLandscape = false)}>Portrait</button>
+            <button class="seg" class:on={cardSheetLandscape} on:click={() => (cardSheetLandscape = true)}>Landscape</button>
+          </div>
+          <p class="layout-hint" style="margin-top:8px">
+            {cardShapeNote}
+            {#if cardSheetLandscape} The PDF and the print dialog are already set to landscape.{/if}
+          </p>
         </div>
 
+        {/if}
+
+        {#if !cGuided || cStep === 2}
         <div class="fld"><span>Trick list</span>
           <p class="layout-hint">Each card ticks with <b>{cardGlyph}</b> — chosen with the trick list itself, so the printed card and the app always agree. It prints in your event's colour; set <b>Trick list</b> below to override it.</p>
           {#if tickIsEmoji}<p class="warn-note">⚠ Emoji ticks are printed in colour by your device's own font, so they won't match the card's ink colour — an outline tick in the trick-list editor will.</p>{/if}
         </div>
 
         {#if sheets.length > 1}
-          <div class="fld"><span>Print which sets</span>
-            <div class="bg-row">
-              {#each sheets as s}
-                <button class="seg" class:on={!cardSkip.includes(s.key)} on:click={() => toggleSet(s.key)}
-                  aria-pressed={!cardSkip.includes(s.key)}>{cardSkip.includes(s.key) ? '☐' : '☑'} {s.label}</button>
-              {/each}
+          <!-- Only with more than one set. With a single set this was a box containing one tick you
+               could only turn OFF — and turning it off is the one thing that stops the cards
+               printing at all. A chooser with nothing to choose reads as an empty list. -->
+          {#if sheets.length > 1}
+            <div class="fld"><span>Print which sets</span>
+              <div class="bg-row">
+                {#each sheets as s, i}
+                  <button class="seg" class:on={!cardSkip.includes(s.key)} on:click={() => toggleSet(s.key)}
+                    aria-pressed={!cardSkip.includes(s.key)}>{cardSkip.includes(s.key) ? '☐' : '☑'} {s.label || `Card ${String.fromCharCode(65 + i)}`}</button>
+                {/each}
+              </div>
+              {#if !printSets.length}<p class="warn-note">⚠ Every set is switched off — turn at least one back on to print.</p>{/if}
             </div>
-            {#if !printSets.length}<p class="warn-note">⚠ Every set is switched off — turn at least one back on to print.</p>{/if}
-          </div>
+          {/if}
           {#if printSets.length > 1}
             <div class="fld"><span>Previewing ({previewIdx + 1} of {printSets.length})</span>
               <div class="bg-row">
                 {#each printSets as s, i}
-                  <button class="seg" class:on={previewIdx === i} on:click={() => (sheetIdx = i)}>{s.label}</button>
+                  <button class="seg" class:on={previewIdx === i} on:click={() => (sheetIdx = i)}>{s.label || `Card ${String.fromCharCode(65 + i)}`}</button>
                 {/each}
               </div>
               <p class="layout-hint" style="margin-top:8px">One sheet per set. Print the sheet you're looking at, or all {printSets.length} at once — or turn off the card identifiers below, shuffle and hand them out at random.</p>
@@ -1603,12 +2126,13 @@
           <label class="chk"><input type="checkbox" bind:checked={cardIds} /><span>Print the card identifier on every card <span class="sub">({sheets[0]?.label ?? 'Card A'}, …)</span></span></label>
         {/if}
 
+        {/if}
+
+        {#if !cGuided || cStep === 3}
         <div class="fld"><span>Layout</span>
           <p class="layout-hint">Drag the title or the QR block on the preview to move it; drag the <b>⤡</b> corner to resize, or pinch it with two fingers. It snaps to the card’s centre and to the other block — a pink line shows what it lined up with. You are arranging the first card — the rest of the sheet follows it.</p>
           <div class="bg-row">
             <button class="seg" on:click={resetCardLayout}>↺ Reset card layout</button>
-            <button class="seg" on:click={undo} disabled={!undoStack.length} title="Undo the last change (Ctrl/⌘+Z)">↶ Undo</button>
-            <button class="seg" on:click={redo} disabled={!redoStack.length} title="Redo (Ctrl/⌘+Shift+Z)">↷ Redo</button>
           </div>
           <label class="chk"><input type="checkbox" bind:checked={cardShowQr} /><span>Show the QR code</span></label>
           <label class="chk"><input type="checkbox" bind:checked={cardShowLink} /><span>Show the join link / code beside it</span></label>
@@ -1616,9 +2140,17 @@
           <label class="chk"><input type="checkbox" bind:checked={cardInkSaver} /><span>Plain white cards <span class="sub">(saves ink — four to a sheet adds up)</span></span></label>
         </div>
 
-        <label class="fld"><span>Caption under the link</span><input bind:value={cardCaption} maxlength="70" placeholder="(blank to hide)" /></label>
+        <label class="fld"><span>Note beside the QR</span><input bind:value={cardCaption} maxlength="70" placeholder="(blank to hide)" /></label>
+        <p class="layout-hint">One line under the join details, telling a guest what the card is for — without it they have a list and no idea it ticks off in the app.</p>
 
-        <div class="fld"><span>Decoration</span>
+        {/if}
+
+        {#if !cGuided || cStep === 4}
+        <details class="fld grp" open><summary>Decoration</summary>
+          <!-- Three separate decisions — WHICH drawing, WHERE it goes, HOW it looks — that used to
+               run together as one column of button rows with nothing but 8px of margin to say where
+               one ended and the next began. -->
+          <div class="sub-h">Which one</div>
           <div class="bg-row">
             {#each DECOR_KINDS as d}
               <button class="seg" class:on={decorUsed === d.key} on:click={() => (decorKind = d.key)}>{d.label}</button>
@@ -1626,13 +2158,15 @@
           </div>
           {#if decorUsed !== 'none'}
             {#if decorPositional}
-              <div class="bg-row" style="margin-top:8px">
+              <div class="sub-h">Where it sits</div>
+              <div class="bg-row">
                 {#each DECOR_POSITIONS as p}
                   <button class="seg" class:on={decorPos === p.key} on:click={() => (decorPos = p.key)}>{p.label}</button>
                 {/each}
               </div>
             {/if}
-            <div class="bg-row" style="margin-top:8px">
+            <div class="sub-h">Customise</div>
+            <div class="bg-row">
               <label class="seg color"><input type="color" value={decorInk} on:input={onDecorColour} aria-label="Decoration colour" />Colour</label>
               {#if decorColour}<button class="seg" on:click={() => (decorColour = '')}>↺ Match ink</button>{/if}
             </div>
@@ -1641,8 +2175,11 @@
             </label>
           {/if}
           <p class="layout-hint" style="margin-top:6px">Line art in the card's own ink — it prints as cleanly as the text does. Your event type picks one to start with.</p>
-        </div>
+        </details>
 
+        {/if}
+
+        {#if !cGuided || cStep === C_LAST}
         <div class="colors">
           <div class="c-head">Card colours
             {#if cardColoursSet}<button class="mini-link" on:click={clearCardColours}>↺ Follow the poster</button>{/if}
@@ -1660,12 +2197,126 @@
           {/if}
           <p class="layout-hint" style="margin-top:8px">Text stays readable whatever background you choose — a colour that would disappear is nudged until it doesn't.</p>
         </div>
+        {/if}
+
+        {#if cGuided}
+          <div class="pnav">
+            {#if cNextStep(cStep, -1) !== null}<button class="seg" on:click={() => (cStep = cNextStep(cStep, -1) ?? cStep)}>← Back</button>{/if}
+            {#if cNextStep(cStep, 1) !== null}
+              <button class="seg grow" on:click={() => (cStep = cNextStep(cStep, 1) ?? cStep)}>Next →</button>
+            {:else}
+              <button class="seg grow" on:click={openFinish}>See it front &amp; back →</button>
+            {/if}
+          </div>
+          {#if cStep === 1}
+            <button class="mini-link" on:click={() => (cGuided = false)}>Skip — show me every control</button>
+          {/if}
+        {:else}
+          <button class="mini-link" on:click={() => { cGuided = true; cStep = 1; }}>Walk me through it instead</button>
+        {/if}
       {/if}
       {:else}
-      <label class="fld"><span>Title</span><input bind:value={headline} maxlength="60" /></label>
-      <label class="fld"><span>Message</span><input bind:value={message} maxlength="80" placeholder="(blank to hide)" /></label>
-      <label class="fld"><span>How-to line</span><input bind:value={stepsText} maxlength="120" placeholder="(blank to hide)" /></label>
+      {#if pGuided}
+        <div class="psteps" aria-label="Step {pStep} of {P_LAST}">
+          {#each P_TITLES as t, i}
+            <button class="pstep" class:on={i + 1 === pStep} class:done={i + 1 < pStep}
+                    on:click={() => (pStep = i + 1)} title={t}>
+              <span class="ps-n">{i + 1 < pStep ? '✓' : i + 1}</span><span class="ps-t">{t}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
 
+      {#if pGuided}<p class="p-ask">{P_ASK[pStep - 1]}</p>{/if}
+
+      {#if !pGuided || pStep === 1}
+      <!-- Pointing at a field outlines what it changes on the preview, and an EMPTY one shows where
+           its words would land. pointerenter rather than mouseenter so a touch never triggers it:
+           on a phone the hint would fire on the tap that focuses the field and then never clear. -->
+      <!-- The colour sits ON the field it colours. It was only on the Colours step, four screens
+           away, as a row labelled "Title" — so the host had to hold a mapping in their head between
+           a list of words and a list of colours. Here the swatch IS the answer to "what colour is
+           this line", and the question never has to be asked. The Colours step still exists for the
+           background and for the swatch palette pulled out of an image. -->
+      <label class="fld fld-c" on:pointerenter={hintOn('title')} on:pointerleave={hintOff} on:focusin={hintOn('title')} on:focusout={hintOff}><span>Title</span>
+        <span class="fc-row">
+          <input bind:value={headline} maxlength="60" />
+          <input class="fc-dot" type="color" value={ink.headline} on:input={(e) => onColorInput(e, 'headline')} aria-label="Title colour" title="Title colour" />
+        </span>
+      </label>
+      <label class="fld fld-c" on:pointerenter={hintOn('message')} on:pointerleave={hintOff} on:focusin={hintOn('message')} on:focusout={hintOff}><span>Message</span>
+        <span class="fc-row">
+          <input bind:value={message} maxlength="80" placeholder="(blank to hide)" />
+          <input class="fc-dot" type="color" value={ink.message} on:input={(e) => onColorInput(e, 'message')} aria-label="Message colour" title="Message colour" />
+        </span>
+      </label>
+      <label class="fld fld-c" on:pointerenter={hintOn('steps')} on:pointerleave={hintOff} on:focusin={hintOn('steps')} on:focusout={hintOff}><span>How-to line</span>
+        <span class="fc-row">
+          <input bind:value={stepsText} maxlength="120" placeholder="(blank to hide)" />
+          <input class="fc-dot" type="color" value={ink.steps} on:input={(e) => onColorInput(e, 'steps')} aria-label="How-to colour" title="How-to colour" />
+        </span>
+      </label>
+      <label class="fld"><span>Small line above</span><input bind:value={headlineTop} maxlength="40" placeholder="(blank to hide) e.g. CAPTURE THE" /></label>
+      <label class="fld"><span>Small line below</span><input bind:value={headlineBottom} maxlength="40" placeholder="(blank to hide) e.g. THE LOVE" /></label>
+      <label class="fld fld-c" on:pointerenter={hintOn('names')} on:pointerleave={hintOff} on:focusin={hintOn('names')} on:focusout={hintOff}><span>Names</span>
+        <span class="fc-row">
+          <input bind:value={names} maxlength="60" placeholder="(blank to hide) e.g. Rachel and Ross" />
+          <!-- The lockup is drawn in the headline ink, so this is the same colour as the title —
+               one control would be two places to change one thing, so it points at the same value. -->
+          <input class="fc-dot" type="color" value={ink.headline} on:input={(e) => onColorInput(e, 'headline')} aria-label="Names colour" title="Drawn in the title's colour" />
+        </span>
+      </label>
+      <p class="layout-hint">Type it as you'd say it. Put <b>and</b>, <b>&amp;</b> or <b>+</b> in the middle and it sets as a lockup — the two names stacked, your own joiner in script between two hairlines. No separator and it's simply one line.</p>
+
+      <!-- Anything the poster does not have a field for: a table number, a hashtag, "bar closes at
+           11". Dragged and sized on the preview like everything else. -->
+      <div class="fld"><span>Your own lines</span>
+        <div class="bg-row">
+          <button class="seg" on:click={addText}>＋ Add a line</button>
+        </div>
+        {#if textItems.length}
+          <ul class="dlist">
+            {#each textItems as t, i (i)}
+              <li class:on={selectedKey === `text:${i}`}>
+                <input class="d-in" value={t.text} maxlength="80" placeholder="Your words"
+                       aria-label="Your line {i + 1}"
+                       on:focus={() => (selectedKey = `text:${i}`)}
+                       on:input={(e) => patchText(i, { text: e.currentTarget.value })} />
+                <button class="d-x" on:click={() => removeText(i)} aria-label="Remove this line" title="Remove">🗑</button>
+              </li>
+            {/each}
+          </ul>
+          <p class="layout-hint" style="margin-top:6px">Drag each one on the preview to place it, or drag its ⤡ corner to size it. Tapping it on the preview edits it too.</p>
+        {/if}
+      </div>
+      <p class="layout-hint">A title set as two parts — small tracked caps over a big word — is what makes a printed sign read as designed rather than as typed.</p>
+
+      {/if}
+
+      {#if !pGuided || pStep === 2}
+      <div class="fld"><span>Typeface pairing</span>
+        <div class="tset-row">
+          {#each TYPE_SETS as t}
+            <button class="tset" class:on={typeSetKey === t.key} on:click={() => (typeSetKey = t.key)}>
+              <span class="tset-n" style="font-family:{t.script ? t.script.family : t.display.family}">Aa</span>
+              <span class="tset-l">{t.label}</span>
+              <span class="tset-note">{t.note}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
+      <div class="fld"><span>Set the title in</span>
+        <div class="bg-row">
+          <button class="seg" class:on={titleFace === 'display'} on:click={() => (titleFace = 'display')}>Structure</button>
+          <button class="seg" class:on={titleFace === 'script'} on:click={() => (titleFace = 'script')}
+                  disabled={!typeSet(typeSetKey).script}
+                  title={typeSet(typeSetKey).script ? '' : 'This pairing has no script face'}>Script</button>
+        </div>
+        <p class="layout-hint" style="margin-top:6px">The faces print with the poster — they are bundled with Snapdini, not fetched, so what you see here is what comes out of the printer.</p>
+      </div>
+      {/if}
+
+      {#if !pGuided || pStep === 3}
       <div class="fld"><span>Show under QR</span>
         <select bind:value={codeDisplay}>
           <option value="url">Join link</option>
@@ -1674,6 +2325,104 @@
         </select>
       </div>
       <label class="chk"><input type="checkbox" bind:checked={showFooterUrl} /><span>Show the link along the bottom</span></label>
+      <label class="chk"><input type="checkbox" bind:checked={showBrand} /><span>Show the Snapdini mark at the top</span></label>
+      <label class="chk"><input type="checkbox" bind:checked={qrPanel} disabled={!qrSafe} /><span>White card behind the QR</span></label>
+      {#if qrOverImage}
+        <p class="layout-hint">Over a photo the card stays — the code could land on anything from a bright sky to a dark suit, and that cannot be measured in advance.</p>
+      {:else if !qrSafe}
+        <p class="layout-hint qr-warn">This paper is too dark to drop the card: contrast measures {Math.round(qrSC)}% (grade {contrastGrade(qrSC)}), and a code needs 40% to scan reliably. Lighten the background and the option unlocks.</p>
+      {:else if !qrPanel}
+        <p class="layout-hint">Sitting on the paper — contrast measures {Math.round(qrSC)}%, grade {contrastGrade(qrSC)}. Print one and scan it before you print fifty.</p>
+      {/if}
+      {/if}
+
+      {#if !pGuided || pStep === 4}
+      <!-- Decoration on the POSTER tab. It only ever existed on the cards tab, because until today
+           the poster renderer ignored decoration entirely — so a design could carry a motif the
+           poster drew and the poster's own controls could not change. -->
+      <details class="fld grp" open><summary>Decoration</summary>
+        <!-- Same three headings as the cards tab, and the same reason: which drawing, where it sits,
+             and how it looks are three decisions, not one long column of buttons. -->
+        <div class="sub-h">Which one</div>
+        <div class="bg-row">
+          {#each DECOR_KINDS as d}
+            <button class="seg" class:on={decorKind === d.key} on:click={() => (decorKind = d.key)}>{d.label}</button>
+          {/each}
+        </div>
+        {#if decorKind && decorKind !== 'none'}
+          {#if DECOR_KINDS.find((d) => d.key === decorKind)?.positional}
+            <div class="sub-h">Where it sits</div>
+            <div class="bg-row">
+              {#each DECOR_POSITIONS as pp}
+                <button class="seg" class:on={decorPos === pp.key} on:click={() => (decorPos = pp.key)}>{pp.label}</button>
+              {/each}
+            </div>
+          {/if}
+          <div class="sub-h">Customise</div>
+          <div class="bg-row">
+            <label class="seg color"><input type="color" value={decorColour || ink.headline} on:input={onDecorColour} aria-label="Decoration colour" />Colour</label>
+            {#if decorColour}<button class="seg" on:click={() => (decorColour = '')}>↺ Match ink</button>{/if}
+          </div>
+          <label class="c-row" style="margin-top:6px"><span>Size</span>
+            <input type="range" min="0.6" max="1.8" step="0.1" bind:value={decorScale} aria-label="Decoration size" />
+          </label>
+        {/if}
+        <p class="layout-hint" style="margin-top:6px">Line art in your own ink — it prints as cleanly as the text. Leave it off for the plainest, cheapest print.</p>
+      </details>
+
+      <!-- Placing motifs by hand. Its OWN picker: choosing what to place must not change the
+           decoration the design is already using. -->
+      <!-- Closed by default: it is the advanced half of this step, and open it pushed the controls
+           that most hosts actually want below the fold on a phone. -->
+      <details class="fld grp"><summary>Place your own{#if decorItems.length} <span class="grp-n">{decorItems.length}</span>{/if}</summary>
+        <p class="layout-hint">Drop individual motifs wherever you like. These sit <b>on top of</b> the decoration above, not instead of it — to remove that one, set it to <b>None</b>.</p>
+        <div class="sub-h">Motif to place</div>
+        <div class="bg-row">
+          {#each PLACEABLE as d}
+            <button class="seg" class:on={placeKind === d.key} on:click={() => (placeKind = d.key)}>{d.label}</button>
+          {/each}
+        </div>
+        <div class="bg-row" style="margin-top:8px">
+          <button class="seg" on:click={addDecor}>＋ Add {DECOR_KINDS.find((d) => d.key === placeKind)?.label ?? 'motif'}</button>
+        </div>
+
+        {#if decorItems.length}
+          <!-- A list, because a motif dragged behind the QR or off to a corner is otherwise
+               unreachable — you cannot select what you cannot find, and you certainly cannot
+               delete it. Every placed piece has a row here for as long as it exists. -->
+          <div class="sub-h">Placed ({decorItems.length})</div>
+          <ul class="dlist">
+            {#each decorItems as it, i (i)}
+              <li class:on={selectedKey === `decor:${i}`}>
+                <button class="d-pick" on:click={() => (selectedKey = `decor:${i}`)}>
+                  <span class="d-n">{DECOR_KINDS.find((d) => d.key === it.kind)?.label ?? it.kind}</span>
+                  <span class="d-m">{Math.round(it.scale * 100)}%{#if it.rot} · {Math.round((it.rot * 180) / Math.PI)}°{/if}</span>
+                </button>
+                <button class="d-x" on:click={() => removeDecor(i)} aria-label="Remove this one" title="Remove">🗑</button>
+              </li>
+            {/each}
+          </ul>
+          {#if selectedDecor >= 0 && decorItems[selectedDecor]}
+            <label class="c-row" style="margin-top:8px"><span>Rotate</span>
+              <input type="range" min="-180" max="180" step="5"
+                     value={Math.round((decorItems[selectedDecor].rot * 180) / Math.PI)}
+                     on:input={(e) => patchDecor(selectedDecor, { rot: (Number(e.currentTarget.value) * Math.PI) / 180 })}
+                     aria-label="Rotate decoration" />
+            </label>
+            <div class="bg-row" style="margin-top:6px">
+              <button class="seg" on:click={() => patchDecor(selectedDecor, { rot: 0 })}>↺ Upright</button>
+            </div>
+          {:else}
+            <p class="layout-hint" style="margin-top:6px">Pick one above, or tap it on the preview, to rotate it. Drag to move, pinch to resize.</p>
+          {/if}
+          <div class="bg-row" style="margin-top:8px">
+            <button class="seg" on:click={() => { pushUndo(JSON.stringify(cfg)); decorItems = []; selectedKey = null; }}>Remove all</button>
+          </div>
+        {/if}
+      </details>
+      {/if}
+
+      {#if !pGuided || pStep === P_LAST}
 
       <div class="fld"><span>Layout</span>
         <p class="layout-hint">Drag any element to move it; drag the <b>⤡</b> corner to resize — or pinch it with two fingers. Elements snap to the page centre and to each other; a pink line shows what lined up, and dragging on past it breaks the snap. Place text off faces.</p>
@@ -1682,16 +2431,11 @@
           <button class="seg" on:click={() => (fsEdit = true)}>⛶ Full-screen arrange</button>
           <button class="seg" on:click={resetLayout}>↺ Reset layout</button>
         </div>
-        <!-- Undo covers everything in the design, not just the layout — Reset layout only puts the
-             boxes back. Ctrl/⌘+Z works too. -->
-        <div class="bg-row">
-          <button class="seg" on:click={undo} disabled={!undoStack.length}
-                  title="Undo the last change (Ctrl/⌘+Z)">↶ Undo</button>
-          <button class="seg" on:click={redo} disabled={!redoStack.length}
-                  title="Redo (Ctrl/⌘+Shift+Z)">↷ Redo</button>
-        </div>
       </div>
 
+      {/if}
+
+      {#if !pGuided || pStep === 5}
       <div class="fld"><span>Background</span>
         <div class="bg-row">
           {#if themeImageUrl}<button class="seg" class:on={bgMode === 'event'} on:click={() => (bgMode = 'event')}>Event image</button>{/if}
@@ -1739,6 +2483,31 @@
         {/if}
       </div>
       {/if}
+
+      {#if pGuided}
+        <div class="pnav">
+          {#if pStep > 1}<button class="seg" on:click={() => (pStep -= 1)}>← Back</button>{/if}
+          {#if pStep < P_LAST}
+            <button class="seg grow" on:click={() => (pStep += 1)}>Next →</button>
+          {:else}
+            <!-- The poster is half the job: the cards carry the same design and the host has just
+                 chosen all of it. Ending on "Show all controls" sent them back into the panel they
+                 had just finished, and the cards tab was left to be noticed. -->
+            {#if activeSheet}
+              <button class="seg grow" on:click={() => { view = 'cards'; pGuided = false; }}>Next: trick cards →</button>
+              <button class="seg grow" on:click={openFinish}>See it front &amp; back →</button>
+            {:else}
+              <button class="seg grow" on:click={() => { view = 'cards'; pGuided = false; }}>Next: trick cards →</button>
+            {/if}
+          {/if}
+        </div>
+        {#if pStep === 1}
+          <button class="mini-link" on:click={() => (pGuided = false)}>Skip — show me every control</button>
+        {/if}
+      {:else}
+        <button class="mini-link" on:click={() => { pGuided = true; pStep = 1; }}>Walk me through it instead</button>
+      {/if}
+      {/if}
     </details>
     </div>
 
@@ -1757,6 +2526,12 @@
       <p class="hint">Print it, drop it on the tables, or send the link out in advance — guests scan to join. Changes save automatically.</p>
       <div class="actions">
         <button class="btn primary" on:click={printPoster} disabled={busy}>🖨 Print</button>
+        <!-- Only when there is something to put on the back. With no trick list this is a button
+             that can only ever apologise. -->
+        {#if activeSheet}
+          <button class="btn ghost" on:click={openFinish} disabled={busy}
+                  title="Poster on the front, trick list on the back — see both first">🖨 Front &amp; back…</button>
+        {/if}
         <button class="btn ghost" on:click={exportPdf} disabled={busy}>PDF</button>
         <button class="btn ghost" on:click={exportPng} disabled={busy}>PNG</button>
         <button class="btn ghost" on:click={exportJpg} disabled={busy}>JPG</button>
@@ -1768,6 +2543,35 @@
 {#if editorFile}
   <EventImageEditor file={editorFile} overlay="none" aspectW={1080} aspectH={1527}
     on:confirm={onBgCropped} on:cancel={() => (editorFile = null)} />
+{/if}
+
+{#if finishOpen}
+  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
+  <div class="fin" on:click|self={() => (finishOpen = false)} role="dialog" aria-modal="true" aria-label="Front and back">
+    <div class="fin-card" use:modalFocus>
+      <div class="fin-head">
+        <span>Front &amp; back</span>
+        <button class="fin-x" on:click={() => (finishOpen = false)} aria-label="Close">✕</button>
+      </div>
+      <div class="fin-pages">
+        <figure><canvas bind:this={fFront}></canvas><figcaption>Front — the poster</figcaption></figure>
+        <figure><canvas bind:this={fBack}></canvas><figcaption>Back — {activeSheet?.label ?? 'trick list'}</figcaption></figure>
+      </div>
+      {#if finishBusy}<p class="hint">Building both sides…</p>{/if}
+      <!-- The one thing that actually ruins a double-sided job, and it is the printer's setting, not
+           ours: short-edge flipping gives you a back that is upside down relative to the front. Said
+           here, before printing, rather than in a toast after fifty sheets. -->
+      <p class="fin-note">
+        Two pages. Set your printer to <b>double-sided</b> and flip on the <b>long edge</b> — short
+        edge prints the back upside down.
+      </p>
+      <div class="fin-acts">
+        <button class="btn primary grow" on:click={printDoubleSided} disabled={finishBusy || !activeSheet}>🖨 Print both sides</button>
+        <button class="btn ghost" on:click={() => { finishOpen = false; printPoster(); }} disabled={finishBusy}>Poster only</button>
+        <button class="btn ghost" on:click={() => { finishOpen = false; view = 'cards'; }}>Cards only</button>
+      </div>
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -1896,4 +2700,156 @@
   .btn.primary { background: var(--accent); color: var(--accent-ink, #111); }
   .btn.ghost { background: transparent; border-color: var(--border); color: var(--text); }
   .btn:disabled { opacity: 0.5; cursor: default; }
+  /* Typeface pairings read as SAMPLES, not as words — the whole point is what they look like, so
+     each chip shows its own script (or display) face at a size you can actually judge. */
+  .tset-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 6px; }
+  .tset {
+    display: grid; grid-template-rows: auto auto auto; gap: 1px; text-align: left;
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--surface-2); color: var(--text); cursor: pointer; font: inherit; min-width: 0;
+  }
+  .tset.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .tset-n { font-size: 1.5rem; line-height: 1.1; }
+  .tset-l { font-weight: 700; font-size: 0.8rem; }
+  .tset-note { font-size: 0.68rem; color: var(--text-muted); line-height: 1.25; }
+
+  /* ── Guided customising ──────────────────────────────────────────────────── */
+  /* The strip is clickable, not just an indicator: a host who has been through once should be able
+     to jump straight back to Colours without pressing Next three times. */
+  .psteps { display: flex; gap: 4px; margin: 0 0 12px; }
+  .pstep {
+    flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 3px;
+    border: 0; border-top: 2px solid var(--border); background: none; cursor: pointer;
+    padding: 7px 2px 0; color: var(--text-muted); font: inherit; font-size: 0.68rem;
+  }
+  .pstep.on, .pstep.done { border-top-color: var(--accent); }
+  /* A step with nothing to decide. Greyed and unpressable, but still SHOWN — removing it would
+     renumber the others under the host mid-flow, and the title says why it is out. */
+  .pstep.skipped { opacity: .4; cursor: default; }
+  .pstep.skipped .ps-n { border-style: dashed; }
+  .pstep.on { color: var(--text); font-weight: 700; }
+  .ps-n {
+    width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; font-size: 0.64rem; font-weight: 700;
+    background: var(--surface-2); border: 1px solid var(--border);
+  }
+  .pstep.on .ps-n { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); }
+  .pstep.done .ps-n { color: var(--accent); border-color: var(--accent); }
+  /* Labels go first when there is no room — the numbers and the track still say where you are. */
+  @media (max-width: 520px) { .ps-t { display: none; } }
+
+  .pnav { display: flex; gap: 8px; margin-top: 12px; }
+  .pnav .grow { flex: 2 1 0; }
+  .pnav > .seg { flex: 1 1 0; min-width: 0; justify-content: center; }
+  /* ── Front & back ────────────────────────────────────────────────────────── */
+  /* Above .back (z-index 300), which is the designer's own backdrop. At 120 this panel opened
+     faithfully every time and was painted underneath it — indistinguishable from a dead button. */
+  .fin { position: fixed; inset: 0; z-index: 400; display: flex; align-items: center; justify-content: center;
+         background: rgba(0,0,0,0.6); padding: 16px; }
+  .fin-card { width: min(560px, 100%); max-height: 90vh; overflow: auto; padding: 14px;
+              background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+  .fin-head { display: flex; align-items: center; justify-content: space-between; font-weight: 800; margin-bottom: 10px; }
+  .fin-x { width: 44px; height: 44px; margin: -10px -10px -10px 0; background: none; border: 0;
+           color: var(--text-muted); font-size: 1rem; cursor: pointer; }
+  /* Side by side where there is room, stacked on a phone — and the pages keep their own proportions
+     so a 1-up A4 card sheet does not get squeezed into the poster's shape. */
+  .fin-pages { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
+  .fin-pages figure { margin: 0; flex: 0 1 auto; }
+  .fin-pages canvas { display: block; max-width: 100%; height: auto; border: 1px solid var(--border);
+                      border-radius: 4px; background: #fff; }
+  .fin-pages figcaption { padding-top: 5px; font-size: 0.72rem; color: var(--text-muted); text-align: center; }
+  .fin-note { margin: 12px 0 10px; font-size: 0.76rem; line-height: 1.45; color: var(--text-muted); }
+  .fin-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .fin-acts .grow { flex: 2 1 160px; }
+  .fin-acts .btn { flex: 1 1 110px; }
+  .qr-warn { color: var(--danger, #e0483d); }
+  /* What a control is about to change. Deliberately louder than the ordinary hover outline — the
+     point is to be findable across the whole preview at a glance, not to be tasteful. */
+  .el-box.hinted { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); }
+  /* Where an empty line would go. Dashed and unpressable: it is not there yet. */
+  .el-ghost {
+    position: absolute; display: flex; align-items: center; justify-content: center;
+    border: 1px dashed var(--accent); border-radius: 6px; pointer-events: none;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  .el-ghost span {
+    font-size: 0.62rem; font-weight: 700; letter-spacing: .03em; color: var(--accent);
+    background: var(--surface); padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+  }
+  /* The inline editor. Under the element rather than over it, so the thing being edited stays
+     visible while it is edited — covering it would defeat the entire point. */
+  .el-edit { position: absolute; display: flex; gap: 6px; z-index: 5; }
+  .el-edit input {
+    flex: 1 1 auto; min-width: 0; min-height: 44px; padding: 8px 10px; font: inherit; font-size: 16px;
+    color: var(--text); background: var(--surface); border: 2px solid var(--accent); border-radius: 9px;
+  }
+  /* 16px exactly: iOS Safari zooms the whole page in on any focused input smaller than that, which
+     on a poster preview throws away the view the host was working in. */
+  .ee-done {
+    flex: none; width: 44px; min-height: 44px; cursor: pointer; font-size: 1rem;
+    color: var(--accent-ink, #111); background: var(--accent); border: 0; border-radius: 9px;
+  }
+  /* A control group that folds. The summary keeps `.fld`'s label look so a collapsed group still
+     reads as the same kind of thing as an open one, with a chevron of our own rather than the
+     browser's triangle, which differs on every platform. */
+  .fld.grp { margin-top: 12px; }
+  .fld.grp > summary {
+    display: flex; align-items: center; gap: 7px; cursor: pointer; list-style: none;
+    margin-bottom: 4px; min-height: 34px; user-select: none;
+  }
+  .fld.grp > summary::-webkit-details-marker { display: none; }
+  .fld.grp > summary::before { content: '▸'; flex: none; width: .8em; text-align: center; }
+  .fld.grp[open] > summary::before { content: '▾'; }
+  .fld.grp > summary:hover { color: var(--text); }
+  /* How many are in there, so a collapsed group never hides work silently. */
+  .grp-n {
+    padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--accent-ink, #111);
+    font-size: 0.64rem; font-weight: 700;
+  }
+
+  /* The question this step is asking, in the host's words. It is the first thing in the panel, and
+     on a phone it is often the only thing visible above the fold — so it has to carry the step on
+     its own rather than lean on a preview the reader has scrolled past. */
+  .p-ask { margin: 0 0 12px; font-size: 0.95rem; font-weight: 700; line-height: 1.3; }
+
+  /* A small heading INSIDE a control group. The groups had grown to hold several unrelated
+     decisions each — a motif, then a position, then a colour — with nothing but spacing to say
+     where one ended and the next began. */
+  .sub-h {
+    margin: 10px 0 5px; font-size: 0.68rem; font-weight: 700; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--text-muted);
+  }
+  /* The placed-motif list. Each row is a target you press to select plus its own bin — a motif
+     dragged behind the QR is otherwise unreachable, and you cannot delete what you cannot find. */
+  .dlist { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .dlist li { display: flex; align-items: stretch; gap: 4px; }
+  /* The same button language as `.seg`, which is what every other control in this panel uses —
+     transparent ground, 1px border, 8px radius, 0.8rem. These were invented with their own fill and
+     radius and read as though they had come from a different app. */
+  .d-pick, .d-in, .d-x {
+    border: 1px solid var(--border); border-radius: 8px; background: transparent;
+    color: var(--text); font: inherit; font-size: 0.8rem; cursor: pointer; min-height: 44px;
+  }
+  .d-pick {
+    flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px;
+    text-align: left; padding: 7px 11px;
+  }
+  /* Selected shows as an accent OUTLINE, not `.seg.on`'s accent fill: a filled row in a list of
+     rows reads as the list having one permanent highlight rather than one current selection. */
+  .dlist li.on .d-pick, .dlist li.on .d-in { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .d-n { font-size: 0.8rem; font-weight: 600; }
+  .d-m { font-size: 0.68rem; color: var(--text-muted); font-variant-numeric: tabular-nums; margin-left: auto; }
+  /* The text rows edit in place — the list IS the editor, so there is no separate field to hunt for
+     and no question about which row you are changing. */
+  .d-in { flex: 1 1 auto; min-width: 0; padding: 7px 11px; cursor: text; }
+  .d-in:focus { outline: none; border-color: var(--accent); }
+  .d-x { flex: none; width: 44px; color: var(--text-muted); }
+  .d-x:hover { color: var(--danger, #e0483d); border-color: var(--danger, #e0483d); }
+  /* A motif's box is dashed rather than solid: it is a handle around a drawing, not the drawing's
+     own edge, and a solid box reads as though the motif is a rectangle. */
+  .el-box.decor { border-style: dashed; }
+  /* Narrower than the labelled toggles beside them — they are a pair of glyphs, and at the same
+     width they crowded the Arrange button off a 360px header. */
+  .tog.undo { min-width: 34px; padding-left: 6px; padding-right: 6px; font-size: 1rem; }
+  .tog.undo:disabled { opacity: 0.35; cursor: default; }
 </style>
