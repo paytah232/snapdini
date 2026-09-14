@@ -6,6 +6,12 @@ It is here because agreeing by copy does not work. Captions were the case that p
 counted one way, the server counted another, and the difference was silent truncation of somebody's
 sentence. A rule enforced in two places is a rule that will eventually be enforced two ways.
 
+The guest reminder proved it a second time, and more cheaply than it deserved to: `>` on the server,
+`>=` in the browser, each with a confident test asserting exactly what the other denied. Both suites
+were green for the whole time a 24-hour reveal delay showed the host an enabled switch and a fire
+time for an email that was never going to be sent. Two copies of a rule cannot be compared — there
+has to be one thing to compare against.
+
 ## How it is wired
 
 No aliases, no build step, no package publishing — the container mirrors the repo layout, so **one

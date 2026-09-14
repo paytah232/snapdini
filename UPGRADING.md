@@ -1,8 +1,8 @@
 # Upgrading Snapdini
 
-Most of the time an upgrade really is `docker compose pull && docker compose up -d`. The three
-things that make it *not* that are below — all three have bitten a real deployment, so they are
-worth two minutes before you start.
+Most of the time an upgrade really is `docker compose pull && docker compose up -d`. The four
+things that make it *not* that are below — every one of them has bitten a real deployment, so they
+are worth two minutes before you start.
 
 The quickest safe route:
 
@@ -11,8 +11,9 @@ cd /path/to/your/snapdini            # the directory holding your .env and docke
 ./upgrade.sh 1.5.0                   # or omit the version for :latest
 ```
 
-The script checks the three traps, backs up `.env` and the database, upgrades, and verifies the
-running version. It never overwrites your files — it tells you what differs and lets you decide.
+The script checks traps 1–3, backs up `.env` and the database, upgrades, and verifies the running
+version — and when that verification fails in the way trap 0 fails, it restarts the proxy and tries
+again. It never overwrites your files: it tells you what differs and lets you decide.
 
 ---
 
@@ -133,15 +134,15 @@ docker compose up -d
 ## Version notes
 
 ### 1.5.0
-**Nothing to configure.** No new settings, so traps 1 and 2 do not apply to this release — but it is
-a large one, so here is what changes under you.
+**Three new settings, and every one of them is optional** — the release works with none of them set,
+so trap 2 only applies if you want one. It is a large release, so here is what changes under you.
 
 #### Guest list & invite delivery tracking
 Adds a **guest list** per event (add by hand or import a CSV), Snapdini-branded **invite emails**,
 and per-recipient **delivery tracking**. Nothing to configure to get the list and the invites:
 they use whichever mail transport you already have.
 
-**One new setting, and it is optional:**
+**The one setting this half wants, and it is optional:**
 
 ```yaml
   app:
@@ -169,15 +170,101 @@ list** and it is skipped on every later send, visibly, with the reason shown on 
 That is deliberate and not per-event: repeatedly mailing dead addresses is what gets a sending
 domain throttled and then blocked.
 
-Migration `0044` (`event_guests`, `guest_invites`, `email_suppressions`) applies automatically on
-boot. It only creates new tables — no existing table is altered — so it is a safe no-op against a
-populated database.
+#### Unsubscribes, and where suppression is now enforced
+
+Invites carry two unsubscribe mechanisms. A **`List-Unsubscribe` header** (RFC 8058) that a mail
+client turns into its own one-press button — no page, no confirmation, because a confirmation step
+fails the standard outright, and because the thing sitting next to that button is *report spam*,
+which costs your sending domain far more than one lost guest. And a **link in the body**, which
+opens a page offering the two choices a guest actually has: stop mail about *this event*, or never
+from this deployment again. The page applies the unsubscribe on arrival and asks *why* only
+afterwards, on a page that already says "you're unsubscribed" — feedback that gated the opt-out
+would stop it being the cheap option, which is the one property the mechanism depends on.
+
+The operational change worth knowing: **suppression is now enforced inside `sendMail`**, not in the
+route that happens to be sending. Every sender honours it, including ones written later. Three
+sends are deliberately exempt, because for those *not* sending is the greater harm:
+
+- **sign-in and verification links** — withholding one locks someone out of their own account
+- **ops alerts and the daily digest** — addressed to your own support inbox
+- **the contact form** forward — someone asking you for help
+
+Everything else is suppressible by default, which is the point: the next email anyone adds is
+compliant without having to remember. Note the consequence for a host whose address has bounced or
+unsubscribed — they can still sign in, but the optional mail stops.
+
+#### Sending volume, before you hit the wall
+
+Mailgun's free plan allows **3000 messages per calendar month**, and running out of it is a *silent*
+failure — sends start being refused, invites stop arriving, and nothing on any screen says why. The
+daily ops digest now reports month-to-date usage, so the number reaches you before the wall rather
+than after it. Both settings are optional and go on **`app`** (see trap 1):
+
+| Setting | Default | What it does |
+|---|---|---|
+| `MAILGUN_MONTHLY_LIMIT` | `3000` | The plan's monthly allowance. Raise it when you move to a paid plan, or the digest goes on measuring you against a ceiling you no longer have. |
+| `MAILGUN_BUDGET_WARN_PCT` | `80` | How much of the allowance may be spent before the digest starts warning. |
+
+Three things to know before you read the number:
+
+- **It is a floor, not an exact count.** The figure is derived from `guest_invites` and
+  `share_sends` — the two tables that record mail per recipient — rather than from a counter of its
+  own, which would be a second source of truth for a number nobody bills on. Several kinds of mail
+  are therefore invisible to it: account mail (sign-in and verification links, the event-live
+  confirmation, check-ins, retention notices, the survey) is not recorded per recipient, and neither
+  is the guests' event-end message or release reminder, which are one-shot-per-*event* guards and so
+  cannot say how many people they reached. Real usage is always somewhat higher than reported. That
+  tail is why the default warning sits at **80%** rather than something tighter like 95: a warning
+  that arrives with 5% of the month's headroom left is one that arrives too late to move a plan.
+- **It warns; it never blocks.** Nothing refuses a send at the limit. Silently not sending a host's
+  invites to their own wedding is a worse outcome than an overage, and it is not a choice to make on
+  their behalf. Past 100% the digest simply says the allowance is spent and that anything beyond it
+  is billable or will start failing.
+- **The month boundary is UTC**, deliberately not `OPS_TZ` (which the rest of the digest uses for
+  "what day is it here"). The allowance is Mailgun's and resets on Mailgun's clock; counting a local
+  month would put your figure and theirs in disagreement around each boundary — exactly when the
+  number matters and when a disagreement is hardest to explain.
+
+The digest normally stays silent on a quiet day. It will break that silence for this, and a warn or
+over state is flagged in the **subject line** — a quiet week with no support messages and no errors
+is precisely when invites that have stopped going out go unnoticed.
+
+#### Migrations
+
+Four of them, applied automatically on boot, and **no event that already exists changes behaviour
+because of any of them.** Every new table starts empty; every added column is either nullable or
+carries the previous behaviour as its default. Nothing is backfilled.
+
+| Migration | What it adds |
+|---|---|
+| `0045` | `email_preferences` (new table) — per-**account** opt-outs for the optional emails. A row means opted *out*; there is no "subscribed" row and no boolean to get the wrong way round, so absence means send, and every account that already exists keeps receiving exactly what it received before. |
+| `0046` | `events.guest_delivery`, `guest_send_scope`, `guest_send_at`, three one-shot send guards and three per-event mail toggles — how and when guests get the photos. Plus `participants.wants_photos`, the consent gate. |
+| `0047` | `event_guests`, `guest_invites` and `email_suppressions` (new tables) — who the host means to invite, what became of each message sent to them, and the addresses that must never be mailed again. |
+| `0048` | `guest_unsubscribes` (new table) — per-event guest opt-outs, with the optional "why" if they gave one. |
+
+**About `0046`.** `participants.wants_photos` defaults to **false** and is not backfilled, which is
+the honest reading of every row already in that table: there was no way to ask, so nobody asked. An
+event that exists today therefore mails **no guests at all**, whatever the delivery columns happen
+to default to — the sweep looks for recipients first and stops when there are none. The defaults on
+the other columns describe what a *new* event should do; they are not a decision taken retroactively
+on behalf of hosts who never asked for any of it.
+
+**About `email_suppressions` being global.** It has no event column, on purpose. Sending reputation
+belongs to the *domain*, not to one party: an address that hard-bounced at one host's wedding is
+just as dead at another's birthday, and mailing it again from the same domain is what gets a domain
+throttled and then blocked — after which nothing this deployment sends reaches anyone. Scoping
+suppression per event would defeat the point of having it.
+
+**About `0048` being keyed by address.** The opt-out belongs to the *address at this event*, not to
+the host's row for that person. Keyed by guest id, a host who removed a guest and re-imported their
+spreadsheet would resurrect someone who had already said stop — a request honoured until the next
+import, which is the same as not honouring it. It is kept apart from `email_suppressions` because
+"stop mailing me about this wedding" is not "cut me off from every event I am ever invited to"; when
+a guest *does* choose the global option that lands in `email_suppressions` as well, and this table
+records that it was a request rather than a bounce, and which event it came from.
 
 
 ### 1.4.4
-Adds **photo missions** — an optional shot list a host gives guests, printed on cards and ticked off
-in the camera. Nothing to configure: it is off for every existing event until a host sets one up.
-
 Adds a **trick list** — an optional shot list a host gives guests, printed on cards and ticked off
 in the camera. It is off for every existing event until a host sets one up.
 

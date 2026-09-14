@@ -158,28 +158,6 @@ app.use('/api/contact', contactLimiter);
 app.use('/api/track', trackRoutes);
 app.use('/api/auth/register', onPost(requireTurnstile('register')));
 app.use('/api/auth/login', onPost(requireTurnstile('login')));
-// A guest emailing themselves their own gallery link is a PER-PERSON action, but a whole party is
-// behind one venue wifi — a single public IP. Sharing emailLimiter's 20/15min meant the 21st guest
-// at a 60-guest event was simply refused; worse, guests could exhaust the budget that
-// /api/billing/checkout and /api/billing/upgrade share, blocking the HOST from paying mid-event.
-// So key it on the guest's own session instead, behind a generous per-IP backstop that still bounds
-// how many distinct buckets one address can create (an unbounded key space is a memory vector).
-const guestEmailIpBackstop = rateLimit({
-  windowMs: 15 * 60 * 1000, limit: Number(process.env.GUEST_EMAIL_IP_LIMIT || 200),
-  standardHeaders: 'draft-7', legacyHeaders: false,
-  message: { error: 'Too many requests from this network — try again in a few minutes.' },
-});
-const guestEmailLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, limit: Number(process.env.GUEST_EMAIL_RATE_LIMIT || 5),
-  standardHeaders: 'draft-7', legacyHeaders: false,
-  // express.json() runs above, so the body is parsed by the time this sees the request.
-  keyGenerator: (req: Request) => {
-    const t = (req.body as { sessionToken?: unknown } | undefined)?.sessionToken;
-    return typeof t === 'string' && t ? `s:${t}` : `ip:${req.ip}`;
-  },
-  message: { error: "You've already emailed yourself a few times — check your inbox, including spam." },
-});
-app.use('/api/participants/email-my-photos', guestEmailIpBackstop, guestEmailLimiter);
 // Analytics ingest is public and batched, so the ceiling is per-network and deliberately high: a
 // 60-guest party is one IP, and losing a page view matters far less than refusing a real guest.
 app.use('/api/track/events', rateLimit({
@@ -189,6 +167,25 @@ app.use('/api/track/events', rateLimit({
 }));
 app.use('/api/billing/checkout', emailLimiter);
 app.use('/api/billing/upgrade', emailLimiter);
+// The comment above says this limiter covers "endpoints that send email or create Stripe sessions",
+// and for a year it covered only the two above — the other two routes that call
+// stripe.checkout.sessions.create were never mounted on it, so a Stripe session could be created at
+// the 600/min backstop rate. Stripe rate-limits its own API and starts charging for the noise long
+// before we notice, and /guest-upgrade needs nothing but a guest session token to reach.
+app.use('/api/billing/guest-upgrade', emailLimiter);
+app.use('/api/billing/branding-removal', emailLimiter);
+// Enrolling a face is the cheapest request in the product to SEND and by far the most expensive to
+// SERVE: routes/faces.ts backfills the whole event, one ML round trip per photo, in sequence. A
+// 500-photo event is 500 detect calls for one unauthenticated POST, so it gets its own very tight
+// bucket rather than the generic 600/min backstop, which would allow that 600 times a minute.
+// POST only — DELETE on the same path is the withdrawal, and a withdrawal that gets refused is a
+// withdrawal that did not happen.
+app.use('/api/faces/enrol', rateLimit({
+  windowMs: 15 * 60 * 1000, limit: Number(process.env.FACE_ENROL_RATE_LIMIT || 3),
+  standardHeaders: 'draft-7', legacyHeaders: false,
+  message: { error: 'Too many face-matching attempts — please wait a few minutes and try again.' },
+  skip: (req) => req.method !== 'POST',
+}));
 app.use('/api/auth/login', loginLimiter);
 // Per-address cooldown lives in the route; this caps one IP hammering MANY addresses, which is
 // the bulk-signup vector (magic-link creates an account for any new address).
@@ -217,11 +214,6 @@ app.use('/api/events/:joinCode/send-guest-link', emailLimiter);
 app.use('/api/events/:joinCode/guests/invite', emailLimiter);
 app.use('/api/events/:joinCode/cohosts', (req: Request, res: Response, next: NextFunction) => (req.method === 'POST' ? emailLimiter(req, res, next) : next()));
 
-// Landing page is the front door at `/` — registered before the static middleware,
-// which would otherwise serve index.html (now the quick create/join tool, at /app).
-app.get('/', (_req, res) => res.sendFile(path.join(__dirname, '../public/landing.html')));
-app.get('/app', (_req, res) => res.sendFile(path.join(__dirname, '../public/index.html')));
-
 // Organizer-uploaded backing tracks live under /uploads but are NOT public media — they're only
 // read server-side when building a slideshow. Block direct HTTP access (this must precede the
 // static mount below; the slideshow builder reads them straight off disk, unaffected). Covers both
@@ -234,7 +226,17 @@ app.use('/uploads', (req: Request, res: Response, next) => {
 });
 // Uploaded media is content-addressed by UUID filename and never mutates → cache hard.
 app.use('/uploads', express.static(UPLOADS_DIR, { immutable: true, maxAge: '365d' }));
-app.use(express.static(path.join(__dirname, '../public')));
+
+// NOTE there is no static mount and no page route below this line, and that is deliberate.
+//
+// nginx sends this service /api/ and /uploads/ and NOTHING else — everything that renders is the
+// SvelteKit app (see nginx/default.conf). So the old src/public frontend that used to be mounted
+// here was unreachable from the moment the proxy split the two, and stayed in the tree for months
+// looking like live code. That is not a harmless leftover: /email-gallery, a path that only ever
+// existed in it, kept a rate limiter pointed at a route that did not exist, so the gallery blast —
+// 200 host-supplied addresses per press — ran under the generic backstop alone and nothing failed
+// loudly. Anything served from this process must be under /api or /uploads, or nobody will ever
+// reach it and the next reader will believe otherwise.
 
 // ── Config endpoint ───────────────────────────────────────────────────────────
 
@@ -360,18 +362,6 @@ app.use('/api/email-prefs', emailPrefsRoutes);
 app.use('/api/guest-unsubscribe', express.urlencoded({ extended: false, limit: '1kb' }), unsubscribeRoutes);
 // Bundled royalty-free backing tracks — public + immutable, served for the slideshow track preview.
 app.use('/api/music', express.static(MUSIC_DIR, { immutable: true, maxAge: '7d' }));
-
-// ── Page routes ───────────────────────────────────────────────────────────────
-
-const pub = (p: string) => path.join(__dirname, '../public', p);
-
-app.get('/join/:code', (_req, res) => res.sendFile(pub('event.html')));
-app.get('/e/:slug', (_req, res) => res.sendFile(pub('event.html')));
-app.get('/gallery/:code', (_req, res) => res.sendFile(pub('gallery.html')));
-app.get('/admin/:code', (_req, res) => res.sendFile(pub('admin.html')));
-app.get('/signup', (_req, res) => res.sendFile(pub('signup.html')));
-app.get('/login', (_req, res) => res.sendFile(pub('login.html')));
-app.get('/dashboard', (_req, res) => res.sendFile(pub('dashboard.html')));
 
 // ── Error handler (must be last) ──────────────────────────────────────────────
 

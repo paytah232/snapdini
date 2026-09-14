@@ -53,3 +53,34 @@ export const RESCHEDULE_RETENTION_GRACE_MS = 24 * 60 * 60 * 1000;   // one day
 /** Marks the public "see what it looks like" demo events. A demo is an event with this name and
  *  NO owner — there is no is_demo column, so anything filtering demos derives it from those two. */
 export const DEMO_NAME = 'Demo Roll 🎞️';
+
+// ── Retention ────────────────────────────────────────────────────────────────
+
+/** The global retention floor, in days, for an event that holds no longer allowance of its own.
+ *
+ *  Read here rather than in each route because it was NOT read in each route: the Stripe webhook
+ *  had `|| 7` written into it, so an operator who set RETENTION_DAYS=30 got thirty days everywhere
+ *  except the one path a customer reaches by paying us. */
+export const RETENTION_DAYS = parseInt(process.env.RETENTION_DAYS || '7', 10) || 7;
+
+/**
+ * When an event's photos are destroyed: its end, plus the retention the customer actually holds.
+ *
+ * This is the single most destructive number in the product — cleanup.ts deletes every photo of
+ * every event whose purgeAt has passed, and there is no undo — so it is computed in one place and
+ * defended here rather than at four call sites.
+ *
+ * `expiresAt` is required and must be a real instant. The bug this replaces read it as
+ * `parseInt(metadata.expiresAt, 10) || 0`, which turned absent metadata into the epoch: purgeAt
+ * landed on 8 January 1970, comfortably in the past, and the next sweep destroyed the photos of an
+ * event whose owner had just paid to upgrade it. A missing expiry is not a zero, so it throws.
+ */
+export function purgeAtFor(expiresAt: number, retentionDays?: number | null): number {
+  if (!Number.isFinite(expiresAt) || expiresAt <= 0)
+    throw new RangeError(`purgeAtFor: refusing to compute a purge from expiresAt=${expiresAt}`);
+  const d = Number(retentionDays);
+  // Anything unusable — absent, zero, negative, NaN — falls back to the floor rather than to a
+  // shorter window. Every wrong answer here costs somebody their photos, so the failure leans long.
+  const days = Number.isFinite(d) && d > 0 ? d : RETENTION_DAYS;
+  return expiresAt + days * 86_400_000;
+}

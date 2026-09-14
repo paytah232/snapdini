@@ -1,4 +1,4 @@
-import { Router, type Request, type Response } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
 import fs from 'fs';
 import path from 'path';
@@ -43,10 +43,37 @@ const shotUpload = multer({
   fileFilter: (_req, file, cb) => { file.mimetype.startsWith('image/') ? cb(null, true) : cb(new Error('Screenshot must be an image')); },
 });
 
+const dropScreenshot = (req: Request): void => {
+  if (req.file) { try { fs.unlinkSync(req.file.path); } catch { /* */ } }
+};
+
+/**
+ * The bot check, plus the unlink it needs to not leak files.
+ *
+ * The gate cannot move ahead of multer the way index.ts's theme-image upload moves requireOrganizer
+ * ahead of it. That one reads the organizer code from a HEADER, so it needs no body; Turnstile's
+ * token arrives as the form field `cf-turnstile-response`, and on the multipart submissions — the
+ * only ones that carry a file at all — that field does not exist until multer has parsed the body.
+ * Checking first would find no token and 403 every in-app feedback report and every refund request
+ * (web FeedbackModal.svelte and admin/[code]/+page.svelte both append it to the FormData).
+ *
+ * So the file is unavoidably on disk by the time we can judge the request. What was missing is what
+ * happens next: requireTurnstile answers 403 itself and never calls next(), so the handler — which
+ * owns every other unlink in this route — never runs, and the screenshot stays on disk forever.
+ * There are orphans on the dev box from exactly this. Sweep it here instead.
+ */
+const turnstileGate = requireTurnstile('contact');
+const requireTurnstileOrDropFile = (req: Request, res: Response, next: NextFunction): void => {
+  let passed = false;
+  void Promise.resolve(turnstileGate(req, res, () => { passed = true; next(); }))
+    .then(() => { if (!passed) dropScreenshot(req); })
+    .catch(() => { dropScreenshot(req); });
+};
+
 // POST /api/contact — public contact / feedback / bug-report form. ALWAYS stored in the DB (a durable
 // mailbox) so nothing is lost if email is unconfigured or the send fails; forwarded to SUPPORT_EMAIL
 // when email is configured. Accepts JSON (contact page) or multipart with an optional 'screenshot'.
-router.post('/', shotUpload.single('screenshot'), requireTurnstile('contact'), async (req: Request, res: Response) => {
+router.post('/', shotUpload.single('screenshot'), requireTurnstileOrDropFile, async (req: Request, res: Response) => {
   const name = String(req.body?.name || '').trim().slice(0, 80);
   const from = String(req.body?.email || '').trim().slice(0, 200);
   const message = String(req.body?.message || '').trim().slice(0, 5000);
@@ -57,17 +84,17 @@ router.post('/', shotUpload.single('screenshot'), requireTurnstile('contact'), a
   // the form). Accept SILENTLY with a 200 rather than erroring — a bot that gets a 400 learns to
   // adapt, one that gets a cheerful success does not, and a real user is never affected.
   if (String(req.body?.website || '').trim()) {
-    if (req.file) { try { fs.unlinkSync(req.file.path); } catch { /* */ } }
+    dropScreenshot(req);
     return res.json({ success: true });
   }
 
-  if (!message) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch { /* */ } } return res.status(400).json({ error: 'Please enter a message' }); }
-  if (from && !isEmail(from)) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch { /* */ } } return res.status(400).json({ error: 'Enter a valid email (or leave it blank)' }); }
+  if (!message) { dropScreenshot(req); return res.status(400).json({ error: 'Please enter a message' }); }
+  if (from && !isEmail(from)) { dropScreenshot(req); return res.status(400).json({ error: 'Enter a valid email (or leave it blank)' }); }
 
   let imageFilename: string | null = null;
   if (req.file) {
     try { await stripImageMetadata(req.file.path); imageFilename = `feedback/${req.file.filename}`; }
-    catch { try { fs.unlinkSync(req.file.path); } catch { /* */ } return res.status(400).json({ error: 'That screenshot could not be read' }); }
+    catch { dropScreenshot(req); return res.status(400).json({ error: 'That screenshot could not be read' }); }
   }
 
   // Refund/cancellation requests: freeze an eligibility snapshot from the event's start time.

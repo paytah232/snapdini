@@ -115,6 +115,14 @@ async function countBetween(w: MonthWindow): Promise<{ invites: number; shares: 
  * failures were pre-flight and which were soft bounces of messages that WERE accepted — and
  * getting that wrong undercounts. Counting them errs toward warning early, which is the only
  * direction that is safe when the alternative is a host's invites silently not going out.
+ *
+ * So are WITHHELD ones — a row for someone who had unsubscribed, which the chokepoint stopped
+ * before it reached a transport at all (share_sends.ok false, guest_invites.status 'unsubscribed').
+ * Those definitely spent nothing, and they are still counted, for the same reason: ok=false carries
+ * both "we tried and it failed" and "we deliberately did not try", and splitting them here to shave
+ * a few off a number nobody bills us on would trade a safe over-count for a guess. It does mean the
+ * total is no longer a pure floor — it is a floor on real sends plus a small tail of sends that
+ * never happened — which only ever makes the warning arrive sooner.
  */
 export async function monthUsage(now: number = Date.now()): Promise<MonthUsage> {
   const w = monthWindow(now);

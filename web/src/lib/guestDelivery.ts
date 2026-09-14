@@ -13,6 +13,7 @@
 //    gallery. The host sees the time they chose; the guest sees a door that will not open.
 
 import { scheduledRevealAt } from '../../../shared/reveal';
+import { guestReminderInstant } from '../../../shared/guest-reminder';
 
 /** What the host chose on "How should your guests get the photos?" */
 export type GuestDelivery = 'all_on_reveal' | 'favourites_manual' | 'scheduled' | 'manual';
@@ -42,8 +43,9 @@ export const GUEST_DELIVERY_OPTIONS: readonly GuestDeliveryOption[] = [
     desc: 'No email is ever sent automatically. You press send from your event page when you are ready.' },
 ];
 
-/** How far ahead of the gallery opening the "photos release tomorrow" email goes out. */
-export const REMINDER_LEAD_MS = 24 * 3_600_000;
+/** How far ahead of the gallery opening the "photos release tomorrow" email goes out.
+ *  Re-exported from the shared rule so the screens keep importing it from one place. */
+export { REMINDER_LEAD_MS } from '../../../shared/guest-reminder';
 
 /** The reveal instant for a set of reveal controls, or null when only the host can open the gallery.
  *
@@ -79,17 +81,17 @@ export function guestReleaseAt(
 
 /** Is there room between the event ending and the gallery opening for a day-before reminder?
  *
- *  Measured against the event's END, not against now, because that is where the reminder sits in
- *  the sequence: the thank-you goes out when the event ends, and a reminder that would fire at or
- *  before that moment has already been overtaken. Deliberately free of the clock so the control
- *  cannot appear and disappear under a host who is still filling the form in. */
+ *  The answer comes from shared/guest-reminder.ts, which is also what the sweep that sends the
+ *  thing uses. This half used to carry its own copy of the rule, one character apart from the
+ *  server's, and the host was shown the switch enabled — with a time — for a gap the server would
+ *  never act on. Do not re-implement it here; ask the shared rule. */
 export function reminderCanFire(endsAt: number, releaseAt: number | null): boolean {
-  return releaseAt !== null && releaseAt - endsAt >= REMINDER_LEAD_MS;
+  return guestReminderInstant(endsAt, releaseAt) !== null;
 }
 
-/** When the reminder would land, or null when it cannot. */
+/** When the reminder would land, or null when it cannot. The same call the sweep makes. */
 export function reminderFiresAt(endsAt: number, releaseAt: number | null): number | null {
-  return reminderCanFire(endsAt, releaseAt) ? (releaseAt as number) - REMINDER_LEAD_MS : null;
+  return guestReminderInstant(endsAt, releaseAt);
 }
 
 /** Can the event-end email print a release date at all?

@@ -357,10 +357,23 @@ router.post('/:joinCode/guests/invite', requireOrganizer, async (req: Request, r
         // addresses off a host's spreadsheet — without an unsubscribe the only lever the recipient
         // has is "mark as spam", and that one is charged to our sending reputation.
         headers: unsubscribeHeaders(base, token),
+        // Scopes the chokepoint's own re-check to this event, so the backstop asks exactly the
+        // question the batch check above asked — global list AND this event's opt-outs. Without it
+        // the two disagree, and the weaker one is the one standing closest to the send.
+        eventId: ev.id,
       });
       row.provider = r.provider;
       row.providerMessageId = r.messageId;
-      sent++;
+      if (r.suppressed) {
+        // The batch check said mailable and the chokepoint said no: somebody unsubscribed in the
+        // seconds between. The chokepoint wins. Recording this as 'sent' would show the host a
+        // delivery that never happened and leave the guest looking invited — so it is recorded in
+        // the vocabulary that already exists for it, and reported beside the ones the batch caught.
+        row.status = 'unsubscribed';
+        skipped.push({ email: address, name: g.name, reason: 'unsubscribed' });
+      } else {
+        sent++;
+      }
     } catch (e) {
       // An immediate refusal — bad credentials, a malformed address, a provider 4xx. Recorded as
       // 'failed' (temporary) rather than 'bounced': the transport refused to CARRY it, which says

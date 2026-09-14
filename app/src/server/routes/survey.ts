@@ -11,6 +11,9 @@ import { isUnhappy, notifyUnhappySurvey } from '../ops-notify';
 const router = Router();
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{16,64}$/;
+/** How many comment boxes one submission may carry. The form has a handful; anything past this is
+ *  someone using a token-gated endpoint as free storage. */
+const MAX_COMMENT_KEYS = 20;
 const clampInt = (v: unknown, lo: number, hi: number): number | null => {
   const n = parseInt(String(v), 10);
   return Number.isInteger(n) && n >= lo && n <= hi ? n : null;
@@ -58,12 +61,31 @@ router.post('/:token', async (req: Request, res: Response) => {
   const [ev] = await db.select({ id: events.id, name: events.name, joinCode: events.joinCode }).from(events).where(eq(events.surveyToken, token));
   if (!ev) return res.status(404).json({ error: 'Survey not found' });
 
+  // One response per event, enforced here and not only shown on the GET.
+  //
+  // The token sits in an emailed link and never expires, and this route inserted unconditionally —
+  // so anyone holding it could write unbounded rows, and, because a low score fires an instant
+  // operator email below, generate operator mail at whatever the /api backstop allows. The GET
+  // already reads exactly this to render "you've answered"; without the same check on the write,
+  // that was a suggestion to the client rather than a rule.
+  //
+  // Answered with 200 rather than 409: the realistic cause is a double-tap or a re-opened link, and
+  // the honest thing to tell that person is that their answer is in, which it is.
+  const [prior] = await db.select({ id: surveyResponses.id }).from(surveyResponses)
+    .where(eq(surveyResponses.eventId, ev.id)).limit(1);
+  if (prior) return res.json({ ok: true, alreadySubmitted: true });
+
   const b = req.body || {};
   // comments: an object of { key: "text" }; keep it small and stringify for storage.
+  //
+  // The KEY COUNT is capped as well as each value's length. The whole map is stringified into one
+  // column, so without a cap the ceiling on what one token can store is express.json's body limit
+  // per request rather than anything we chose — and the survey only ever asks a handful of
+  // questions, so twenty is already far more than the form can produce.
   let comments: string | null = null;
   if (b.comments && typeof b.comments === 'object') {
     const clean: Record<string, string> = {};
-    for (const [k, v] of Object.entries(b.comments)) {
+    for (const [k, v] of Object.entries(b.comments).slice(0, MAX_COMMENT_KEYS)) {
       if (typeof v === 'string' && v.trim()) clean[String(k).slice(0, 40)] = v.trim().slice(0, 2000);
     }
     if (Object.keys(clean).length) comments = JSON.stringify(clean);

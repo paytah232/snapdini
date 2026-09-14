@@ -29,6 +29,7 @@ The rest of this guide is the full reference for each page.
 - [5 · Public sharing & gallery](#5-public-sharing--gallery)
 - [6 · Site administration](#6-site-administration)
 - [Lifecycle emails](#lifecycle-emails)
+- [Guest emails, unsubscribes & suppression](#guest-emails-unsubscribes--suppression)
 - [Guest referrals & gallery stats](#guest-referrals--gallery-stats)
 - [Moderation, reveal & retention](#moderation-reveal--retention--how-it-behaves)
 
@@ -85,8 +86,8 @@ Your events and account home.
 
 ### Create an event — `/app`
 
-The form walks you through **four steps** — *Your event · When it runs · The details · Ready* — with
-a step strip across the top. **Show me everything at once** on the first step drops the walkthrough
+The form walks you through **five steps** — *Your event · When it runs · Make it yours · Your guests ·
+Ready* — with a step strip across the top. **Show me everything at once** on the first step drops the walkthrough
 and puts every field on one page; **Walk me through it instead** puts it back. Nothing is gated: the
 steps are an order to answer the questions in, not permission to proceed.
 
@@ -101,7 +102,7 @@ steps are an order to answer the questions in, not permission to proceed.
   event with a ready-made [trick list](#manage-an-event--admincode) you can edit or print later.
 - **Welcome blurb** (optional) — shown under the title on the join screen, and used as the poster's
   default message.
-- **Expected guests** — sets the tier. **Video clips** — enable/disable guest video and its length.
+- **Expected guests** — sets the tier.
 - **Live total** — when billing is on, an itemised quote updates on every change; free-tier features
   show a struck-through price.
 
@@ -114,10 +115,14 @@ steps are an order to answer the questions in, not permission to proceed.
   The times you type are always the event's local times, never your phone's.
 - **Duration** — short events are free; longer is a paid add-on.
 
-**3 · The details** — **Advanced settings**: **Custom URL** (a pretty `/e/<name>` link, with a live
-availability check — optional, blank uses the automatic link), **Shots per person**, **Keep photos
-for** (retention), **Timezone**, **Photo shapes** (Square is always free; other shapes are the frame
-pack on paid tiers), **Allow downloads**, **No flash**, and **Reveal mode**:
+**3 · Make it yours** — the things that change the day, one card each with what they cost (or, on a
+free-tier event, a count of what you are *not* paying): **Video clips**, **Shots each**, **Frame
+shapes** (Square is always free; the rest are the frame pack on paid tiers) and **Keep them longer**
+(retention). The name is deliberate — everything the product actually sells used to sit behind a
+disclosure marked *Advanced settings*, a label that reads as "not for you" to exactly the host who
+would have enjoyed it. The plumbing stays collapsed under **Other settings**: **Custom URL** (a
+pretty `/e/<name>` link with a live availability check — blank uses the automatic one), **Timezone**,
+**Allow downloads** and **No flash**. Then **Reveal mode**:
 
 - **Instant** — photos appear as they are taken.
 - **At the end** — plus a **reveal delay** of *immediately · 1 hour · 3 hours · 12 hours · 24 hours ·
@@ -130,7 +135,14 @@ pack on paid tiers), **Allow downloads**, **No flash**, and **Reveal mode**:
 - **Manual** — nothing appears until you press Reveal.
 - **Moderate photos** — offered on any non-instant event.
 
-**4 · Ready** — a summary of what you are about to create and what it costs, then **Create event**.
+**4 · Your guests** — what happens *after* the party: **How should your guests get the photos?**,
+**Which photos do they get?**, and the three messages we may send them. It is a step of its own
+rather than another row among the settings, because it is a decision about the days after the event
+and folding it in with custom URLs and frame shapes is how it would never be read. Nothing here is
+final — every answer is on your event page afterwards. Full detail under [Getting the photos to your
+guests](#getting-the-photos-to-your-guests-in-manage).
+
+**5 · Ready** — a summary of what you are about to create and what it costs, then **Create event**.
 Free events go straight to the manager; paid events go through Stripe Checkout and activate on
 payment. Signed out, the button becomes **Create my account & event** — your answers are kept and
 you come straight back to finish.
@@ -143,14 +155,20 @@ The organizer control panel (owners and co-hosts; accessed by your account or th
   **🎩 Create poster** — which reads **🎩 Manage poster** once a design exists, because by then the
   button reopens your work rather than starting over. With a design saved, a second button,
   **Start again from a design…**, reopens the design gallery.
+- **Guest list:** who you mean to invite. It sits directly under *Share & invite* because it is the
+  same job for the people you are *not* standing next to — and it is the only place that can answer
+  "did that actually arrive?". Add guests by hand or import a spreadsheet, send the invites, and see
+  what became of each one. Detail [below](#guest-list-in-manage).
 - **Controls:** **Reveal all now / Hide photos** (override the reveal timing either way), **Allow
   downloads** toggle, **Lock / Unlock** (stop new joins/uploads), and **Delete** (two confirmations;
   owner only).
 - **Settings** (saved together): name, blurb, start date/time (**locked once the event has started**),
   timezone, **Custom URL** (add/change/clear), photo shapes, reveal mode + delay — including
   **Pick an exact date & time…**, which loads back as the wall-clock time you typed rather than that
-  instant translated into wherever you happen to be editing from — **Moderate photos**, and
-  **No flash**. Unsaved changes block the Upgrade panel so quotes stay accurate.
+  instant translated into wherever you happen to be editing from — **Moderate photos**, **No flash**,
+  and, at the foot of the same card, **how your guests get the photos** and what we email them
+  ([below](#getting-the-photos-to-your-guests-in-manage)). Unsaved changes block the Upgrade panel so
+  quotes stay accurate.
 - **Theme:** pick a colour preset or upload an event image (crop/zoom) — applies and saves instantly;
   it themes the join screen, gallery, poster and slideshow.
 - **Upgrades** (billing on): raise guests/shots/video/retention/length or add the frame pack — you
@@ -168,12 +186,126 @@ The organizer control panel (owners and co-hosts; accessed by your account or th
 - **Review & Curate** — link to the photo hub (shows a pending count under moderation).
 - **Co-hosts:** invite by email (they get a link + an in-app accept), copy a pending invite link, or
   remove a co-host. The owner can't be removed and only the owner can delete the event.
-- **Shared links:** every link you've made — **Copy**, **Edit** (rename / change the `/s/` URL), or
+- **Shared links:** the event's standing gallery link and every curated share you've made, each with
+  the same three ways of handing it on — **Copy**, **Share** (your device's own share sheet) and
+  **Email**, which sends it for you and keeps a record of who received what, so *"did I already send
+  this to Mum?"* has an answer. Email is collapsed by default: it is the heaviest of the three and
+  the least often wanted, and it only appears at all when the server can actually send. An address
+  this same link has already reached is **skipped rather than mailed twice** — including one your
+  guest was already sent it at automatically. Plus **Edit** (rename / change the `/s/` URL) and
   **Delete** (existing links keep working until deleted).
 - **Participants:** **Remove** a guest (also deletes their photos — useful for a duplicate join).
   With more than one trick card in play, each guest also has a **Card** picker — for the guest who
   scanned the wrong table's card by mistake. Moving them destroys nothing: their ticks for the old
   card simply stop counting, and come back if you move them back.
+
+#### Guest list (in Manage)
+
+A record of who is coming, and — once you have emailed them — what happened to each message. The
+second half is the part you cannot do from your own inbox: anyone can type twenty addresses into
+Gmail, but nothing there will tell you afterwards which three of them bounced.
+
+**Building the list**
+
+- **+ Add guest** — name, email, phone and a free-text note. *Any one* of name, email or phone is
+  enough: a plus-one you only know as "Dan's partner" and a cousin you only have a mobile number for
+  are both real entries on a real guest list. A guest with no email simply is not part of an email
+  send, and the counts say so rather than treating them as a failure.
+- **Import** — paste rows straight out of a spreadsheet (copying cells gives tab-separated text,
+  which is read as happily as a comma) or **Choose a CSV**. An `.xlsx` is detected and you are told
+  to save it as CSV, instead of the parser rendering your spreadsheet as one guest named after a zip
+  header.
+- **Preview first, always.** You get your own column headings with a dropdown against each —
+  *name · email · phone · notes · don't import* — a guessed mapping you can correct, and a count of
+  what the import will do: how many to **add**, how many are **already on the list**, how many
+  **bad addresses**, how many **skipped**. Skipped rows are listed, greyed, each with its reason.
+  "160 imported" with no mention of the other forty is how a host finds out at the party that forty
+  guests were never invited. Pressing Import re-runs the identical read over the identical text, so
+  what you approved is what happens.
+- **Importing the same spreadsheet twice does not double the list.** Duplicates are caught on the
+  email address, and — for guests who have no address — on name plus phone, because there is nothing
+  on those rows for an email check to match.
+- Limits: **2000 guests** per event and **2000 rows** per import (a guest list is a party, not a
+  mailing list), and the preview renders the first 200 rows with the totals beside them.
+
+**Sending**
+
+- **Send invites (N)** mails everyone on the list who has an address and is not blocked; N is that
+  count. Each row also has its own **Invite** / **Resend**. One press sends to at most 200 people.
+- The invite is a Snapdini-branded email with the event name, the join link and the join code, and
+  an unsubscribe link in the footer.
+- Afterwards you are told what actually happened — and anyone who was **not** mailed is reported
+  first, as a warning, by address and reason. A send that says "20 sent" and nothing else is exactly
+  as informative as one that silently dropped nineteen of them.
+
+**What each row tells you**
+
+Along the top: how many guests, how many have an email, and how many **need a look**. Against each
+guest, the state of the last invite sent to them — **Not invited**, **Sent**, **Delivered**,
+**Bounced**, **Marked as spam**, **Unsubscribed** or **Failed** — with the date. Only *Bounced* and
+*Marked as spam* are drawn in red, because they are the only two that need you to do something: a
+deferral is Mailgun still retrying, and colouring that as a failure sends hosts chasing guests whose
+mail is a few minutes late. Under a bounced or failed row you get the **mail server's own words**,
+not our paraphrase — *550 no such user* means fix the address, *mailbox full* means try tomorrow, and
+collapsing both into "failed" throws away the only thing that tells you which you are looking at.
+
+**Two honest admissions the card makes rather than hides**
+
+- With no mail transport configured, invites cannot be sent at all and it says so — the list still
+  works as your record of who's coming, and it still holds the phone numbers.
+- Delivery tracking needs Mailgun *and* a webhook signing key (see `UPGRADING.md`). Without both,
+  every invite reads **"Sent (delivery unknown)"** and stays there. A status that will never change
+  is better said out loud than left looking like one that is about to update.
+
+**Blocked addresses.** An address that hard-bounced or was reported as spam is marked **Blocked**
+with the reason, and no send will go to it — not even *Resend*. That list is deployment-wide, not
+per-event, so a guest can be blocked here because of something that happened at somebody else's
+event entirely. There is deliberately no un-block button: repeatedly mailing dead addresses is what
+gets a sending domain throttled and then blocked, after which nothing anyone sends arrives. Ask that
+guest for a different address and add it.
+
+**Removing a guest** takes them off the list but keeps the record of what was sent to them. A bounce
+you still need to act on must not vanish along with the typo that caused it.
+
+#### Getting the photos to your guests (in Manage)
+
+At the foot of the **Settings** card — the same questions the create wizard asked on *Your guests*,
+so setting it up one way and changing it later are the same screen.
+
+Only guests who **asked** for their photos are ever emailed; see [Guest
+capture](#4-guest-capture) for how they ask. The card shows how many have.
+
+- **How should your guests get the photos?**
+  - *Everything, as soon as photos are revealed* — the whole gallery the moment it opens. The
+    default, and nothing for you to do.
+  - *Just my favourites, when I've picked them* — nothing goes out until you say so.
+  - *At a time I choose* — pick a date and time below.
+  - *I'll send it myself* — nothing automatic, ever.
+- **Which photos do they get?** — *Everything* or *Just my favourites*. Asked only on the two
+  options that do not already answer it; on the other two the words you chose **are** the answer, and
+  asking twice only lets the two disagree.
+- **Send date / Send time** (on *At a time I choose*) — read in the **event's** timezone and stepped
+  in 15 minutes, the same grid the reveal runs on. It cannot be set before the photos are revealed:
+  a gallery link that arrives before the gallery opens sends a guest to a locked page, and they do
+  not come back. The hint under the fields says what will happen, including when your time moves up
+  to the next check.
+
+Three messages, each its own switch:
+
+- **Add a thank-you and the release date.** Note what this does *not* control: a guest who asked for
+  their photos gets them either way — they asked, and that consent stands on its own. This decides
+  whether that message also carries a thank-you and tells them when the full gallery opens.
+- **Remind them the day before.** Goes 24 hours before the gallery opens. It is only offered when
+  the gallery opens **more than** a day after your event ends; when it doesn't, the card says why
+  rather than quietly omitting a switch you have seen on another event. Exactly 24 hours is not
+  enough — the reminder would land in the same moment as the message that already tells your guests
+  when the photos arrive, so they would be told the same thing twice.
+- **Tell them the photos are live.** Goes with the gallery link the moment the photos are released.
+
+Underneath, **📨 Send the gallery link to guests now** (**Send it again now** once you have) sends
+your *saved* setting to every guest who asked. Once a send has gone, the card says when — without
+that, a send that worked and a send that never ran look identical, and the obvious next move is to
+send the whole thing again.
 
 #### Poster & trick cards (in Manage)
 
@@ -342,9 +474,12 @@ A film of the night, rendered on the server.
 What a guest sees after scanning the QR. Both **`/join/<code>`** and the prettier **`/e/<slug>`** open
 the same camera.
 - **Join screen:** event branding + blurb, a **"limited roll — N snaps"** callout, an **Event info**
-  panel (photo shapes, video, when photos appear), your **name** (and an optional **email** so you can
-  resume on another device), then **Join & open camera**. Returning with the same email resumes your
-  remaining roll.
+  panel (photo shapes, video, when photos appear), your **name**, an optional **email**, and
+  **Email me the photos when the event ends** — then **Join & open camera**. Returning with the same
+  email resumes your remaining roll. Only the name is really wanted: the address is both how you pick
+  up on another device and where the photos would go, so the tick sits beside it rather than after
+  the button. Tick it with the field empty and the hint asks for an address; leave it and the hint
+  says you can opt in later. Nothing here blocks the join.
 - **Camera:** full-resolution **shutter** (the counter drops; disabled at 0), tap-to-focus,
   drag-across-the-viewfinder **brightness**, **⚡ flash** (front screen-flash always; the rear LED is
   hidden if the host turned No-flash on), **flip**, camera picker, grid, save-to-device, fullscreen.
@@ -364,6 +499,14 @@ the same camera.
   Editable afterwards. A photo that was a trick keeps saying which trick it was, underneath.
 - **Gallery (🖼):** before reveal you always see your own shots (with "#N" snap numbers); after reveal,
   **Mine / All / Others** filters. Downloads appear only if the host allowed them.
+- **"📬 Want your shots when the event ends?"** — under your own roll, and deliberately not on the
+  camera screen: nothing new goes near the shutter, and this is the moment you are already looking at
+  your photos and thinking about keeping them. It is also the way back for anyone who skipped the
+  address on the join screen — tap it and, if we have nothing to send to, an inline field asks where.
+  Once you are opted in it confirms the address it will use, and **Actually, no thanks** undoes it at
+  any time. If the address you type is already registered to another guest at this event it is not
+  attached to your roll (that address is how *they* get back in on a new device) and the confirmation
+  says so plainly rather than treating it as an error.
 
 ---
 
@@ -417,12 +560,92 @@ filters and paging.
 ---
 
 ## Lifecycle emails
-What Snapdini sends a host, all of it skippable via the unsubscribe link in the footer.
+What Snapdini sends a **host**.
 **Welcome** on payment · **Check-in** a few days before the event · **Account welcome** and a one-off
 **nudge** for accounts that haven't made an event yet · **Post-event survey** 3 days after it ends,
 carrying the thank-you discount for the next event and — when there are still photos to make one
 from — a prompt to turn them into a **slideshow**, with the date they're deleted. Internal and admin
 accounts are excluded from all of it.
+
+**Which of them you can switch off — `/email-preferences/<token>`.** Two are promotional, or
+arguably so: the **post-event survey** (it sometimes carries a discount code for your next event) and
+the **activation nudge** (its entire purpose is to get you using the product). Those two, and only
+those two, carry an *Unsubscribe* link in their footer. It opens a preference page that needs no
+sign-in — an unsubscribe that first demands a password is not an unsubscribe facility, and the person
+reading the email is often not the person with a live session in that browser. The page shows your
+address masked, a switch for each optional message, and, listed plainly rather than quietly omitted,
+the mail that keeps coming either way: **signing in** (verification and sign-in links), **your event
+is live**, **just before the day**, **photos and deadlines** (retention and expiry notices) and
+**co-host invitations**. Those are factual notices about something you set up, and being able to
+switch off the warning that your photos are about to be deleted would be worse than the warning.
+
+The rest carry no unsubscribe link at all, which is deliberate: a link labelled *Unsubscribe* that
+does nothing is worse than no link, because it is the recipient's one attempt at opting out and it
+fails silently.
+
+Saving posts the whole set of switched-off messages rather than a change to it, so saving twice — or
+opening a second copy of the link — leaves you in the state you can see. Un-ticking one puts that
+message back.
+
+## Guest emails, unsubscribes & suppression
+
+Everything Snapdini sends to a **guest** rather than a host, and everything that stops it.
+
+**What a guest can receive**
+
+- An **invite** to the event, sent by the host from their [guest list](#guest-list-in-manage).
+- Their **photos**, if they asked for them — and, at the host's option, a thank-you carrying the
+  release date, a day-before reminder, and the gallery link when the photos go live. See [Getting the
+  photos to your guests](#getting-the-photos-to-your-guests-in-manage).
+- A **gallery or share link** the host emailed by hand from *Shared links*. This one is not gated on
+  anyone having opted in — the host typed the addresses — so treat it as the host mailing their own
+  contacts rather than as a Snapdini mailing list. A globally suppressed address is still skipped.
+
+Nothing else is automatic. Guests are not mailed because they joined; they are mailed because they
+were invited, because they asked for their photos, or because the host sent them a link.
+
+**Unsubscribing — `/unsubscribe/<token>`**
+
+Every invite carries two ways out, because they serve different people:
+
+- A **one-click unsubscribe in the mail client's own chrome**, from a `List-Unsubscribe` header
+  (RFC 8058). No page and no confirmation — a "are you sure?" step fails the standard outright, and
+  the entire value of that button is being cheaper than the *report spam* button beside it. A mail
+  client offers no way to say anything narrower, so one press has to mean **stop, everywhere**.
+- A **link in the body**, for the person who wants to choose: *just stop emails about this event*, or
+  *never email me from Snapdini again*.
+
+The page applies the unsubscribe the moment it loads. Arriving is the request, and asking someone to
+confirm the thing they have just done is how they end up at the spam button instead. It then shows
+which of the two is in force, with your address masked, and lets you widen or narrow it. **Only
+after that**, on a page already saying *You're unsubscribed*, does it ask why — *too many emails · I'm
+not going to this event · I didn't give anyone my address · this isn't my email address · something
+else*, plus a comment box. All of it optional, and skipping it changes nothing above it: feedback
+that gated the opt-out would stop it being the cheap option, which is the one property the mechanism
+depends on. It works with JavaScript switched off, as a plain form.
+
+Links in an invite are never acted on by anything but a person. The one-click endpoint answers a POST
+and nothing else, and the page's first load reads without changing anything — mail providers and
+security gateways routinely fetch every link in a message before a human ever sees it, and a
+scanner that could unsubscribe people would opt out guests who never opened the invite.
+
+**Suppression**
+
+An address stops being mailed when mail to it hard-bounces, when someone reports it as spam, or when
+someone asks never to be emailed again. That list is **deployment-wide**, not per-event: sending
+reputation belongs to the domain, so an address that is dead at one host's wedding is just as dead at
+another's birthday, and mailing it again is what gets a domain throttled and then blocked — after
+which nothing anyone sends arrives. A *just this event* unsubscribe is kept separate and stops only
+that event's mail. Someone who reopens their link and narrows *everything* back to *this event* is
+taken off the global list — but only when it was their own request that put them there. A bounce or a
+spam complaint is a fact about the mailbox rather than a preference, and nobody holding an invite
+link can erase one.
+
+Suppression is checked in the one place every outgoing email passes through, so every sender honours
+it, including ones written later. Three are deliberately exempt, because for those *not* sending is
+the greater harm: **sign-in and verification links** (withholding one locks somebody out of their own
+account), **operator alerts** addressed to the platform's own support inbox, and the **contact form** —
+someone asking for help.
 
 ## Guest referrals & gallery stats
 

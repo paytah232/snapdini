@@ -162,6 +162,15 @@ on their own.
   not counted; a cookie outliving its event is ignored); write-behind counters coalesce and do
   not write on the request path; `download_count` is separate from `view_count`; no unpaid or
   refunded event holds a host reward code; testimonial consent is gated on positive feedback.
+- **1.5 additions:** the CSV import plan (header guessing, column mapping, duplicate identity by
+  address *and* by name+phone, per-row problems); Mailgun webhook signature verification and event
+  normalising; delivery-state ordering (a provider event older than the one already recorded cannot
+  overwrite it); the suppression **chokepoint** — a test walks the server source and fails if
+  anything but `email.ts` reaches for a transport, and pins the check as running *before* a transport
+  is chosen; unsubscribe token/scope/feedback parsing and the merge of global vs per-event blocks;
+  account email preferences; the guest-delivery rules shared by the create wizard and Settings
+  (reminder window, scheduled-send vs reveal); the email-budget month window, floor and thresholds.
+  There is **no** integration spec for the guest list itself — §24 is manual.
 - **DB:** migration `0019_perf_indexes` adds indexes on the hot paths (`photos(event_id)`, `(event_id,status)`, `(event_id,taken_at)`, `(participant_id)`, `participants(event_id)`, `event_cohosts lower(email)`, and the user-FK cascade columns).
 
 ## 17. Version 1.2 — referrals, gallery stats, retention (verify these)
@@ -304,8 +313,9 @@ on their own.
 ## 23. Version 1.4.4 — event type, poster designer, reveal timing, downloads, slideshow
 
 ### Event type at creation
-- [ ] **`/app` walks you through it:** a step strip (*Your event · When it runs · The details ·
-      Ready*); **Show me everything at once** on step 1 drops to the flat form and **Walk me through
+- [/] ~~**`/app` walks you through it:** a step strip (*Your event · When it runs · The details ·
+      Ready*)~~ *Superseded in 1.5.0 — five steps now, and step 3 was renamed. See §24.*
+      **Show me everything at once** on step 1 drops to the flat form and **Walk me through
       it instead** restores it. No step blocks you except "name it to continue".
 - [ ] **Event type chips** sit directly under the name. Tapping the selected one clears it. Skipping
       it entirely still creates a working event.
@@ -409,3 +419,109 @@ on their own.
       shared gallery back to their own camera. A stranger opening the same link does **not**.
 - [ ] **Guest filter popover** opens fully on screen at 320 / 360 / 390 px wide, with no sideways
       scroll.
+
+## 24. Version 1.5.0 — guest list, invites, delivery tracking, guest photo delivery, unsubscribes
+
+### The create wizard gained a step
+- [ ] **`/app` is five steps** — *Your event · When it runs · Make it yours · Your guests · Ready*.
+      **Show me everything at once** still drops to the flat form and **Walk me through it instead**
+      restores it; nothing blocks you but "name it to continue".
+- [ ] **Make it yours** leads with the paid features as cards (video clips, shots each, frame shapes,
+      keep them longer) with what each costs — or, on a free-tier event, a line counting up what you
+      are *not* paying — and keeps custom URL, timezone, downloads and no-flash collapsed under
+      **Other settings**. Reveal mode and moderation are still on this step.
+
+### Guest list (Manage → Guest list)
+- [ ] **Add by hand:** name only, email only and phone only each save. Notes alone is refused in
+      words. A second guest with the same address on the same event is refused as a duplicate — a
+      409 with a sentence, not a 500.
+- [ ] **Addresses are lower-cased on the way in.** Add `Mum@Example.com`, then try `mum@example.com`
+      → refused as the duplicate it is.
+- [ ] **Import → Preview** shows your real column headings with a dropdown against each, a guessed
+      mapping you can correct, and counts (to add / already on the list / bad address / skipped).
+      Skipped rows are listed, greyed, each with its reason — never silently dropped.
+- [ ] **Paste from a spreadsheet** (tab-separated) parses as happily as a comma CSV. Uploading an
+      `.xlsx` is refused with "save it as CSV", not rendered as one guest of mojibake.
+- [ ] **Importing the same file twice adds nobody the second time** — including rows that have a name
+      and a phone but no address, which the email check cannot see.
+- [ ] **A file with no header row** says so and keeps the first line as a guest rather than eating it.
+- [ ] **Limits:** an import over 2000 rows is refused by number, and the list cannot pass 2000 guests.
+- [ ] **Remove a guest who has already been invited** → the row goes, and the record of what was sent
+      to them (and any bounce) is still there.
+
+### Invites and delivery state
+- [ ] **Send invites (N)** counts only guests who have an address and are not blocked. A guest with
+      no address is reported as such, never as a failure.
+- [ ] **The invite** carries the event name, the join link, the join code and an unsubscribe link.
+      The event name is **escaped** — call an event `<b>Jo</b>` and the inbox must show the
+      characters, not bold text.
+- [ ] **Per-row Invite / Resend** sends and records a second message; the row shows the **latest**
+      state and the earlier record is not overwritten.
+- [ ] **No mail transport configured** → the card says invites cannot be sent and the list still
+      works as a record of who is coming.
+- [ ] **Mailgun with no webhook signing key** → every invite reads **"Sent (delivery unknown)"** and a
+      line at the top explains why. It must not read like a state about to change.
+- [ ] **With the webhook wired** (see `UPGRADING.md`): a delivered message becomes **Delivered**; a
+      dead address becomes **Bounced**, in red, with the mail server's own words underneath.
+- [ ] **A wrong signing key is loud** in the app logs rather than quietly discarding every delivery
+      event — the two failures look identical from the outside, and only the log tells them apart.
+- [ ] **A redelivered webhook changes nothing** — replay the same event and there is still one record.
+- [ ] **A bounce blocks the address everywhere.** The row reads **Blocked** with the reason and has
+      no invite button; a *Send invites* that would have included them reports them as skipped, by
+      address and reason. Put the same address on a **different** event's list → blocked there too.
+
+### Guest unsubscribe
+- [ ] **The body link** opens `/unsubscribe/<token>` already saying *You're unsubscribed* — there is
+      nothing to press — and the address it names is masked.
+- [ ] **Widen, then narrow.** Choose *never email me from Snapdini again*, reload → still in force.
+      Choose *just this event* → the global block lifts. Now do the same for an address that actually
+      **bounced**: that block must NOT lift.
+- [ ] **Feedback comes after and is optional.** Skipping it leaves the unsubscribe in place. A
+      comment with no reason, and a reason with no comment, both save.
+- [ ] **JavaScript off:** the page still offers both choices as a plain form, and both work.
+- [ ] **Nothing unsubscribes on a GET.** GET the one-click URL → no opt-out. POST to it → unsubscribed
+      everywhere, answered in plain text.
+- [ ] **A junk or retired token answers the same as a real one** on the one-click endpoint (200), so
+      it cannot be used to tell a valid token from an invalid one.
+- [ ] **The host can see it** — an unsubscribed guest shows as blocked on the guest list with a
+      reason that says it was a request.
+
+### Suppression reaches every sender
+- [ ] Unsubscribe an address globally, then confirm it receives **none** of: an invite, the guest
+      photo email, the release reminder, the photos-are-live message, the post-event survey.
+- [ ] It **does** still receive a sign-in / verification link (otherwise they are locked out of their
+      own account), the contact form still forwards, and operator alerts still arrive.
+
+### Guests asking for their photos
+- [ ] **Join screen:** *Email me the photos when the event ends* sits beside the address field. Tick
+      it with the field empty → the hint asks for an address and the join still goes through.
+- [ ] **From their own roll:** *Want your shots when the event ends?* below the photos. With an
+      address already on file it is one tap and no dialog; without one, an inline field asks where.
+- [ ] **Actually, no thanks** switches it back off, and it stays off through a reload.
+- [ ] **A duplicate address** — one another guest at this event already uses — still opts this guest
+      in, does **not** move the address off the other roll, and says so plainly instead of erroring.
+
+### Getting the photos out (Manage → Settings, foot of the card)
+- [ ] All four delivery options save and load back. **Which photos do they get?** appears only on
+      *At a time I choose* and *I'll send it myself*.
+- [ ] **A scheduled send before the reveal is refused**, with a message naming the reveal moment, and
+      nothing is saved. A time of 7:05 pm moves up to 7:15 pm and the hint says why.
+- [ ] The scheduled moment is read in the **event's** timezone and loads back as the wall-clock time
+      you typed — check from a device several hours away.
+- [ ] **The day-before reminder is offered only when there is a day to fit it in.** When there isn't,
+      the card says why rather than quietly omitting a switch you have seen on another event.
+- [ ] **📨 Send the gallery link to guests now** sends the **saved** scope, not an unsaved edit, and
+      afterwards the card says when it went. A second press reads **Send it again now**.
+- [ ] **Only guests who asked are ever emailed.** An event where nobody opted in sends nothing and
+      does not pretend otherwise.
+- [ ] **An event that existed before this release mails no guests at all**, whatever its delivery
+      setting reads — nothing was backfilled, so nobody on it has asked.
+
+### Email allowance (operators)
+- [ ] With `OPS_NOTIFICATIONS` on, the daily digest carries an **Email allowance** line: the
+      month-to-date count against the limit, the split between invites and share sends, and the note
+      that it is a floor.
+- [ ] Set `MAILGUN_BUDGET_WARN_PCT` low → the digest sends on an otherwise quiet day, and the warning
+      leads the **subject line** rather than sitting halfway down the body.
+- [ ] **Nothing is ever blocked.** Past the limit, sends still go out and the digest simply says the
+      allowance is spent.

@@ -34,6 +34,22 @@ export const PAID_TIERS = [
   { maxGuests: 400, amountCents: 5900 },  // A$59
 ] as const;
 
+/**
+ * The largest guest count the ladder can actually price.
+ *
+ * Above it, quote() returns tier 'custom' — which is a REFERRAL, not a purchase. That branch has
+ * baseCents 0 and no add-on charges, so `requiresPayment` comes back false, and a caller that reads
+ * "requires no payment" as "is paid for" hands out an event bigger than the A$59 tier, with video
+ * and every frame shape, for nothing. Both the create and upgrade routes therefore refuse a
+ * 'custom' quote outright rather than entitling it. The pricing UI never offers a number this high;
+ * only a hand-made API call reaches it.
+ */
+export const MAX_QUOTABLE_GUESTS = PAID_TIERS[PAID_TIERS.length - 1].maxGuests;
+
+/** What both routes say when a configuration is off the top of the ladder. */
+export const CUSTOM_PLAN_ERROR =
+  `Events over ${MAX_QUOTABLE_GUESTS} guests need a custom plan — please contact us at support@snapdini.com.`;
+
 // ── Add-ons (paid events only; all included free on the ≤10 tier) ──
 // Shots-per-person: ≤12 free; more is a tiered add-on (smallest tier whose cap ≥ requested).
 export const SHOTS_FREE = 12;

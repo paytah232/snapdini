@@ -111,6 +111,29 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   forwards by email (best-effort) — but submitting always succeeds and is never lost if email is off
   or fails. On a Mailgun **sandbox** domain, `SUPPORT_EMAIL` must be an *authorized recipient* or the
   forwarded copy won't deliver (the DB record is kept regardless).
+- **Every outbound email goes through `email.sendMail()` — and has to.** That is where the
+  suppression check lives: the deployment-wide list, plus (when an `eventId` is passed) that event's
+  own guest opt-outs. It used to live in a single route, which meant a guest who chose "never email
+  me again" carried on receiving the gallery link, the thank-you, the reminder and every lifecycle
+  message — the unsubscribe worked perfectly and simply reached nothing. So:
+  - Never reach for nodemailer or the Mailgun API from another module.
+    `app/src/server/__tests__/suppression-chokepoint.test.ts` walks the server source and fails the
+    build if anything but `email.ts` touches a transport, and pins the check as happening *before* a
+    transport is chosen.
+  - `always: true` bypasses it, and belongs only where *not* sending does the greater harm — auth
+    links, ops alerts, and the contact form. Everything else stays suppressible by default, so the
+    next email anyone adds is compliant without having to remember.
+  - A suppressed send **returns** `{ suppressed: true }`; it does not throw. Callers stamp one-shot
+    guards and write ledger rows around these calls, and an exception would leave the claim unmade —
+    so the sweep would retry the same suppressed address on every tick, forever.
+- **Delivery status wording is duplicated on purpose.** `GuestList.svelte`'s `label()` mirrors
+  `describe()` in `app/src/server/delivery.ts` — three lines of words are not worth a round trip —
+  but the server copy is the one under test, so change both.
+- **The email allowance** (`MAILGUN_MONTHLY_LIMIT`, `MAILGUN_BUDGET_WARN_PCT`) puts a month-to-date
+  send count in the daily ops digest. `email-budget.ts` derives it from `guest_invites` +
+  `share_sends` rather than keeping a counter of its own, which makes it a **floor** rather than an
+  exact number; the month is a **UTC** one to match Mailgun's clock rather than `OPS_TZ`; and it
+  reports, never blocks. Full reasoning in `UPGRADING.md` → 1.5.0.
 - **Google sign-in (optional)** — set `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` to show the Google
   button. Create them at <https://console.cloud.google.com/apis/credentials> (OAuth client ID → "Web
   application"); the **Authorised redirect URI must be `<BASE_URL>/api/auth/google/callback`** and
@@ -349,8 +372,18 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   single-use, so a failed submit must `reset()` the widget or the retry fails for a second reason.
 - **`shared/` holds the rules the server and the browser must agree about**, imported directly by
   both — see `shared/README.md`. Agreeing by copy does not work: captions counted one way in the box
-  and another on the server, and the difference was silent truncation. Two modules live there today:
-  `caption.ts` (the length rule) and `reveal.ts` (when a scheduled reveal happens — see below).
+  and another on the server, and the difference was silent truncation. Three modules live there
+  today: `caption.ts` (the length rule), `reveal.ts` (when a scheduled reveal happens — see below)
+  and `guest-reminder.ts` (whether the day-before reminder can fire at all).
+  - `guest-reminder.ts` is the newest, and it is there because of the sharpest version of this bug
+    yet. The rule was written out twice and the copies differed **by one character** — the server
+    required the gap to exceed a day (`>`), the browser accepted exactly a day (`>=`) — and each
+    half carried a confident test asserting precisely what the other denied. Both suites were green
+    the entire time a host who chose a 24-hour reveal delay was shown the reminder switched on, with
+    the exact time it would fire, for an email the sweep would never send. Nothing compared the two
+    because there was nothing to compare against. The rule is now one function, `guestReminderInstant()`,
+    and the inequality is strict on purpose: the thank-you goes out when the event ends and already
+    names the release moment, so a reminder landing in that same tick has been overtaken by it.
 - **A guest's trick card can be reassigned by the HOST.** `participants.challenge_set` is written
   once, at join, and a returning guest deliberately keeps the card they were given (that is what
   stops them shopping for easier tricks) — which left a genuine mis-scan with no way out. The host
@@ -463,6 +496,36 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
     that network (mobile data) or allowlist the two domains.
   - Run the tests with `cd web && npm test`; the journey itself is covered end to end in
     `web/e2e/signup-verification.spec.ts`.
+
+- **`purgeAt` is the most destructive number in the product, so it is computed in exactly one
+  place** — `purgeAtFor()` in `app/src/server/lib.ts`, alongside `RETENTION_DAYS`. `cleanup.ts`
+  deletes every photo of every event whose `purge_at` has passed, with no undo and no warning, and
+  the value used to be assembled at four separate call sites. Two of them were wrong:
+  - The Stripe upgrade webhook hard-coded `|| 7`, so an operator who set `RETENTION_DAYS=30` got
+    thirty days everywhere **except** the one path a customer reaches by paying us.
+  - The same line read the expiry as `parseInt(metadata.expiresAt, 10) || 0`. Absent metadata
+    therefore became the epoch, `purge_at` landed on 8 January 1970 — already in the past — and the
+    next sweep destroyed the photos of an event whose owner had, one webhook earlier, paid to
+    upgrade it. Every neighbouring field in that same update used `|| undefined` precisely so a
+    missing value would leave the stored one alone.
+  `purgeAtFor()` throws on an unusable expiry rather than inventing one, falls back to the
+  configured floor (never to a shorter window) on unusable retention, and the webhook now takes
+  `Math.max` against the event's existing `purge_at` so a retry or an out-of-order event cannot walk
+  somebody's retention backwards. Covered by `retention-purge.test.ts`.
+
+- **A `custom` quote is a referral, not a price — never entitle one.** `quote()` returns
+  `tier: 'custom'` for a guest count above the top rung of `PAID_TIERS` (`MAX_QUOTABLE_GUESTS`,
+  currently 400). That branch has `baseCents: 0` and no add-on charges, so `requiresPayment` comes
+  back **false** — which is correct in itself (there is no price) and a trap for every caller, since
+  `POST /api/events` derived `entPaid = !q.requiresPayment`. Asking the API for 1000 guests produced
+  a fully-entitled 1000-guest event with video and every frame shape for A$0: strictly more than the
+  A$59 tier, free, to anyone who could write a `curl` command. The upgrade route was worse — the
+  quote came back cheaper than what the host had already paid, so `diff` went negative and the
+  free-delta branch applied it immediately. Both routes now refuse `tier: 'custom'` outright with
+  `CUSTOM_PLAN_ERROR`, rather than clamping: clamping would hand somebody who asked for 600 guests a
+  400-guest event and tell them it worked. Self-hosters (billing off) are unaffected — there is no
+  ladder to fall off. The pricing UI never offers a number this high; only a hand-made request gets
+  there. Covered by `retention-pricing.test.ts`.
 
 ## Releasing (maintainers)
 

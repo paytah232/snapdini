@@ -557,7 +557,14 @@ router.post('/', upload.single('photo'), async (req: Request, res: Response) => 
   try {
     return res.json(await finalizeUpload(participant, req.file.path, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId, req.body?.captureOrientation, req.body?.captureShape));
   } catch (e) {
-    return res.status((e as { status?: number }).status || 500).json({ error: (e as Error).message || 'Upload failed' });
+    // A `status` on the error means finalizeUpload raised it FOR the guest ("Video is too long —
+    // this server accepts clips up to 30s"), so its message is the message and must survive. An
+    // error without one is an internal fault, and its text is sharp/ffmpeg output or a Postgres
+    // constraint name — not something to hand an unauthenticated uploader. Log that one instead.
+    const status = (e as { status?: number }).status;
+    if (status) return res.status(status).json({ error: (e as Error).message });
+    console.error('[photos] upload failed:', (e as Error).message);
+    return res.status(500).json({ error: 'Upload failed' });
   }
 });
 
@@ -652,7 +659,14 @@ router.post('/complete', async (req: Request, res: Response) => {
   try {
     return res.json(await finalizeUpload(participant, staged, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId, req.body?.captureOrientation, req.body?.captureShape));
   } catch (e) {
-    return res.status((e as { status?: number }).status || 500).json({ error: (e as Error).message || 'Upload failed' });
+    // A `status` on the error means finalizeUpload raised it FOR the guest ("Video is too long —
+    // this server accepts clips up to 30s"), so its message is the message and must survive. An
+    // error without one is an internal fault, and its text is sharp/ffmpeg output or a Postgres
+    // constraint name — not something to hand an unauthenticated uploader. Log that one instead.
+    const status = (e as { status?: number }).status;
+    if (status) return res.status(status).json({ error: (e as Error).message });
+    console.error('[photos] upload failed:', (e as Error).message);
+    return res.status(500).json({ error: 'Upload failed' });
   }
 });
 

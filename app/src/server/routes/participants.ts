@@ -6,8 +6,6 @@ import { effectiveMaxPhotos, photosRemaining as remainingFor } from '../allowanc
 import { events, guestFeedback, participants, photos } from '../schema';
 import { readSets, setByKey, assignSet, readTick } from '../challenges';
 import { faceMatchingAvailable } from '../faces';
-import * as email from '../email';
-import { baseUrl, escapeHtml } from '../lib';
 import { billingEnabled } from '../billing';
 
 const router = Router();
@@ -55,6 +53,34 @@ export const guestSeesPhoto = (status: string, moderationEnabled: boolean): bool
 
 const isEmail = (s: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 
+/**
+ * Whatever a stranger posted, as a string.
+ *
+ * POST /api/participants is the first thing every guest in the product touches and it is
+ * unauthenticated, so nothing in its body is a string until we make it one. It used to call
+ * `.trim()` straight on the parsed JSON, which means `{"joinCode":{"a":1}}` and `{"name":123}` both
+ * threw TypeError out of the handler and came back as HTTP 500 — a server fault reported for a
+ * malformed request, on the most public endpoint we have, and one that an error-rate alert cannot
+ * tell from a real outage. The sibling routes below (PUT /email, POST /wants-photos) already coerce
+ * exactly like this; this is that same coercion, named once so it cannot drift.
+ *
+ * Exported so the regression test exercises THIS function rather than a copy of it.
+ */
+export const asText = (v: unknown): string => {
+  if (typeof v === 'string') return v;
+  if (v == null) return '';
+  try {
+    return String(v);
+  } catch {
+    // String() is not total, which is the trap this helper exists to close and would otherwise
+    // reopen: `{"joinCode":{"toString":null}}` is valid JSON, and it leaves an object with no
+    // callable toString and a valueOf that returns itself, so ToPrimitive throws TypeError — the
+    // same 500, reached by a slightly stranger body. Unconvertible means "no value given": '' is
+    // falsy, so the required-fields guard answers 400 exactly as it does for a missing field.
+    return '';
+  }
+};
+
 // 23505 = unique_violation. The only unique constraint a guest can trip is
 // (event_id, lower(email)) — one address per event, so an email can never point at two rolls (see
 // 0031_guest_upgrades.sql). Two people sharing an inbox is entirely normal, so hitting it is not a
@@ -68,7 +94,10 @@ const isDuplicate = (e: unknown): boolean => {
 // ── POST /api/participants — join an event ─────────────────────────────────────
 
 router.post('/', async (req: Request, res: Response) => {
-  const { joinCode, name, email: participantEmail } = req.body;
+  const body = (req.body ?? {}) as { joinCode?: unknown; name?: unknown; email?: unknown };
+  const joinCode = asText(body.joinCode);
+  const name = asText(body.name);
+  const participantEmail = asText(body.email);
   if (!joinCode || !name) return res.status(400).json({ error: 'joinCode and name are required' });
 
   const cleanEmail = participantEmail ? participantEmail.trim().slice(0, 200) : null;
@@ -266,8 +295,6 @@ router.get('/me', async (req: Request, res: Response) => {
   });
 });
 
-// ── POST /api/participants/email-my-photos ────────────────────────────────────
-
 // ── POST /api/participants/feedback — how it was to be a guest ────────────────────────────────
 // Asked once, answered or dismissed. A rating alone is fine; the comment is optional, because most
 // people will not write one and demanding it just loses the rating too.
@@ -324,8 +351,7 @@ router.put('/email', async (req: Request, res: Response) => {
 // way PUT /email does, and hits the same wall: (event_id, lower(email)) is UNIQUE, so an address
 // somebody else at this event is already using cannot be attached to this roll.
 //
-// On that collision we do what email-my-photos does — proceed for this guest, do NOT store the
-// address, and say so. The consent is real and is recorded; what cannot happen is the address
+// On that collision we proceed for this guest, do NOT store the address, and say so. The consent is real and is recorded; what cannot happen is the address
 // moving off the roll it already identifies, because that roll is how the other guest gets back in
 // on a new device. The flag is there so the UI can tell them plainly: that address is spoken for at
 // this event, and the photos will go to whoever holds it.
@@ -398,76 +424,18 @@ router.post('/feedback', async (req: Request, res: Response) => {
   res.json({ success: true, recorded: true });
 });
 
-router.post('/email-my-photos', async (req: Request, res: Response) => {
-  const { sessionToken, emailOverride } = req.body;
-  if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
-  if (!email.enabled) return res.status(503).json({ error: 'Email not configured on this server' });
-
-  const [p] = await db
-    .select({
-      id:        participants.id,
-      name:      participants.name,
-      email:     participants.email,
-      eventName: events.name,
-      joinCode:  events.joinCode,
-      slug:      events.slug,
-      moderationEnabled: events.moderationEnabled,
-    })
-    .from(participants)
-    .innerJoin(events, eq(events.id, participants.eventId))
-    .where(eq(participants.sessionToken, String(sessionToken)));
-  if (!p) return res.status(404).json({ error: 'Session not found' });
-
-  const toAddr = (emailOverride || p.email || '').trim();
-  if (!toAddr) return res.status(400).json({ error: 'No email address — enter one first' });
-  if (toAddr.length > 200 || !isEmail(toAddr))
-    return res.status(400).json({ error: 'Enter a valid email address' });
-
-  // If they provided a new address, save it — best effort, and case-insensitively compared so
-  // retyping the same address differently is not a pointless write.
-  //
-  // Sending does not depend on storing: the email is built from THIS participant's row and links to
-  // their own gallery. So an address already used by another guest at the event means "we cannot
-  // attach it to your roll", not "you cannot have your photos" — which is what it used to mean,
-  // because the failed UPDATE took the whole request down with it.
-  if (emailOverride && emailOverride.toLowerCase() !== (p.email || '').toLowerCase()) {
-    try {
-      await db.update(participants).set({ email: toAddr }).where(eq(participants.id, p.id));
-    } catch (e) {
-      if (!isDuplicate(e)) throw e;
-      console.warn(`[participants] ${p.id}: address in use by another guest — emailing photos anyway, not stored`);
-    }
-  }
-
-  // Counted through the SAME rule the gallery renders by, not raw rows. A flat count told a guest
-  // with five shots and three rejections 'You took 5 photos', then showed them two — which reads as
-  // photos we lost rather than photos a host binned, and is the sort of small lie that turns into a
-  // support email. Filtered here rather than in SQL so there is one copy of the rule, and the row
-  // set is bounded by the guest's own allowance (tens, not thousands).
-  const mine = await db.select({ status: photos.status }).from(photos).where(eq(photos.participantId, p.id));
-  const photoCount = mine.filter((r) => guestSeesPhoto(r.status, p.moderationEnabled)).length;
-  const galPath    = p.slug ? `/gallery/${p.slug}` : `/gallery/${p.joinCode}`;
-  const galUrl     = baseUrl(req) + galPath;
-
-  try {
-    await email.sendMail({
-      to:      toAddr,
-      subject: `Your photos from ${p.eventName} 📷`,
-      html: email.htmlEmail(`Your photos from ${p.eventName}`, `
-        <p>Hi ${escapeHtml(p.name)},</p>
-        ${photoCount
-          ? `<p>You took <strong>${photoCount} photo${photoCount !== 1 ? 's' : ''}</strong> at <strong>${escapeHtml(p.eventName)}</strong>.</p>`
-          // A guest whose shots are all still awaiting a host's approval has a real count of zero,
-          // and 'You took 0 photos' is both deflating and useless. Send them the gallery instead.
-          : `<p>Here's the gallery from <strong>${escapeHtml(p.eventName)}</strong>.</p>`}
-        <p style="margin:24px 0"><a href="${galUrl}" class="btn">View Gallery →</a></p>
-        <p style="color:#888;font-size:0.85em">Your photos appear under your name <strong>${escapeHtml(p.name)}</strong> in the gallery.</p>
-      `),
-    });
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
-  }
-});
+// There is no "email me my photos" route any more, and this is where it was.
+//
+// It took a session token and an `emailOverride`, and mailed the address named in the override —
+// ANY address, from our domain, with our branding. Joining an event is free and uncapped, so a
+// session token is free, and the per-session cap of 5 sat behind a per-IP backstop of 200 per 15
+// minutes: roughly 19,000 attacker-chosen recipients a day per address, which is a mail relay with
+// our reputation on it. Nothing in the product called it: the SvelteKit frontend never did, and its
+// only caller was the old src/public/js/event.js, unreachable behind nginx since the proxy split.
+//
+// The legitimate need it served is covered, and covered better, by the consent-gated path: a guest
+// asks with POST /wants-photos and guest-delivery.ts sends to the address on their OWN row. If a
+// "send it to me now" button is ever wanted again, it belongs there — sending to p.email only,
+// never to an address supplied in the request.
 
 export default router;

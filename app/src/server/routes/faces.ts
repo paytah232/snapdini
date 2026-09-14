@@ -4,7 +4,7 @@
 // and the GUEST must explicitly consent. Neither implies the other. A guest can withdraw at any
 // time, which deletes their template and every link derived from it.
 import { Router, type Request, type Response } from 'express';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, count, eq, inArray } from 'drizzle-orm';
 import fs from 'node:fs';
 import path from 'node:path';
 import multer from 'multer';
@@ -19,14 +19,36 @@ const selfieUpload = multer({ dest: '/tmp', limits: { fileSize: 12 * 1024 * 1024
 
 const thumbFor = (filename: string) => path.join(UPLOADS_DIR, filename.replace(/\.[^.]+$/, '_thumb.webp'));
 
+/** How alike two selfie embeddings have to be before we call them the same photo of the same face.
+ *
+ *  Far above MATCH_THRESHOLD (0.42, "this is probably the same person in a crowd") because it is
+ *  answering a much narrower question: did this guest just send us the selfie they already sent?
+ *  Embeddings are unit vectors, so this is a cosine — a re-upload of the same shot sits at ~1.0 and
+ *  even a second selfie taken moments later usually does not reach 0.98. Setting it too HIGH only
+ *  costs a redundant backfill; setting it too low would skip a genuine re-enrolment. */
+const SAME_SELFIE = Number(process.env.FACE_REENROL_SAME_THRESHOLD || 0.98);
+
 async function guestFor(sessionToken: string) {
   const [row] = await db.select({
       id: participants.id, eventId: participants.eventId,
       faceConsentAt: participants.faceConsentAt,
+      // The stored template, so enrol can tell a repeat submission from a new face before it spends
+      // an ML call per photo in the event on it.
+      faceEmbedding: participants.faceEmbedding,
       enabled: events.faceMatchingEnabled,
     }).from(participants).innerJoin(events, eq(events.id, participants.eventId))
     .where(eq(participants.sessionToken, sessionToken));
   return row;
+}
+
+/** The stored template, or null when there isn't one / the column cannot be read as one. A corrupt
+ *  value must not fail the enrolment — the worst it should cost is the backfill running again. */
+function storedEmbedding(raw: string | null): number[] | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as unknown;
+    return Array.isArray(v) && v.every((n) => typeof n === 'number') ? (v as number[]) : null;
+  } catch { return null; }
 }
 
 // ── POST /api/faces/enrol — a guest opts in and supplies a selfie ─────────────────────────────
@@ -48,6 +70,24 @@ router.post('/enrol', selfieUpload.single('selfie'), async (req: Request, res: R
 
     const embedding = await embedSelfie(req.file.path);
     if (!embedding) return res.status(422).json({ error: "We couldn't find a face in that photo — try a clearer one" });
+
+    // Already enrolled, with this same selfie? Stop before the backfill.
+    //
+    // The loop below is the expensive half — one detectFaces call per photo in the event, in
+    // sequence — and on an unchanged selfie it cannot produce a different answer: the links the
+    // first enrolment wrote are still there, and every photo uploaded since was matched on arrival
+    // (matchNewPhoto). So a guest who taps the button twice, or reopens the camera on a second
+    // device and is offered the control again, used to re-scan the whole gallery for nothing. That
+    // is also the shape of the abuse: re-posting one selfie is how you turn a single request into
+    // hundreds of ML round trips.
+    const prior = storedEmbedding(me.faceEmbedding);
+    if (me.faceConsentAt && prior && similarity(embedding, prior) >= SAME_SELFIE) {
+      const [tally] = await db.select({ n: count() }).from(photoFaces)
+        .where(eq(photoFaces.participantId, me.id));
+      // `scanned: 0` is the honest answer — nothing was looked at — and the client only ever shows
+      // `matched`, which is still the true number of photos this guest is linked to.
+      return res.json({ success: true, matched: Number(tally?.n ?? 0), scanned: 0, unchanged: true });
+    }
 
     await db.update(participants)
       .set({ faceEmbedding: JSON.stringify(embedding), faceConsentAt: Date.now() })
@@ -71,7 +111,12 @@ router.post('/enrol', selfieUpload.single('selfie'), async (req: Request, res: R
     }
     res.json({ success: true, matched, scanned: existing.length });
   } catch (e) {
-    res.status(500).json({ error: (e as Error).message });
+    // The caller here holds nothing but a guest session token, and the messages that reach this
+    // point are internal: the ML service's URL and HTTP status, a sharp decode failure, a Postgres
+    // constraint name. Log the real one, answer with the fixed string every other catch in the
+    // codebase answers with.
+    console.error('[faces] enrol failed:', (e as Error).message);
+    res.status(500).json({ error: 'Something went wrong' });
   } finally {
     cleanup();   // the selfie and its template never outlive the request
   }

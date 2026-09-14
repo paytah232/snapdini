@@ -37,6 +37,7 @@ import { events, participants, photos, shareSends, users, type Event } from './s
 import * as email from './email';
 import { isRevealed, DEMO_NAME } from './lib';
 import { scheduledRevealAt } from '../../../shared/reveal';
+import { guestReminderInstant } from '../../../shared/guest-reminder';
 import { guestSeesPhoto } from './routes/participants';
 import { eventEndEmail, releaseReminderEmail, photosLiveEmail } from './guest-emails';
 
@@ -149,17 +150,14 @@ export function clampGuestSendAt(requested: number, opensAt: number | null): { a
 /**
  * When "photos open tomorrow" is due, or null when it should never be sent.
  *
- * Two gates, and the second is the one that is easy to get wrong. The release has to be known and
- * a full day after the event ENDS — not a day after now. At exactly 24 hours the reminder falls on
- * the same instant as the event-end message, which already names the release moment, so the guest
- * would get the same fact twice within a tick of each other. A reminder that arrives with the
- * thing it is reminding you about is not a reminder, so the gap has to EXCEED a day.
+ * The rule itself is in shared/guest-reminder.ts, not here, because the host's form asks the same
+ * question before the event and has to show the same answer. It used to be written out in both
+ * places, and the two copies disagreed by one character — `>` here, `>=` there — which meant a
+ * 24-hour reveal delay was offered to the host with a fire time and then never sent. Both halves
+ * had a test. Both passed. Neither could see the other.
  */
 export function guestReminderAt(ev: GuestTiming): number | null {
-  const opens = revealOpensAt(ev);
-  if (opens === null) return null;
-  const at = opens - DAY;
-  return at > ev.expiresAt ? at : null;
+  return guestReminderInstant(ev.expiresAt, revealOpensAt(ev));
 }
 
 // ── Recipients ───────────────────────────────────────────────────────────────
@@ -393,6 +391,41 @@ async function tellHostScopeIsEmpty(ev: Event, scope: GuestSendScope, waiting: n
   }
 }
 
+/**
+ * Send one guest message and say what actually happened.
+ *
+ * Three outcomes, because there are three, and they are not interchangeable. sendMail RETURNS
+ * `suppressed` instead of throwing when the address has opted out — a deliberate design, so a
+ * caller can stamp its guard and record the truth — and every loop here used to discard that and
+ * count `sent++` on a message nobody received. The damage was quiet and threefold: the host was
+ * shown a delivery that did not happen, share_sends recorded the guest as holding a link they were
+ * never sent, and the monthly Mailgun allowance was charged for paper.
+ *
+ *   'sent'       went out.
+ *   'suppressed' was withheld on purpose. Not an error — nothing here should retry it, and the
+ *                unclaim-on-total-failure guards below must not read it as the transport being down.
+ *   'failed'     is ours, and worth another sweep.
+ */
+export type GuestSendOutcome = 'sent' | 'suppressed' | 'failed';
+
+/** Exported for the test that pins the three outcomes apart. Everything else in this file should
+ *  call it, not sendMail — that is the whole point of it existing. */
+export async function sendToGuest(
+  to: string, subject: string, html: string, eventId: string, what: string,
+  /** The transport, injectable so the three outcomes can be told apart in a test. It defaults to
+   *  the real chokepoint and no caller passes it — tsx loads these as ES modules, whose namespace
+   *  objects are frozen, so `email.sendMail` cannot be stubbed in place the way it could in CJS. */
+  send: typeof email.sendMail = email.sendMail,
+): Promise<GuestSendOutcome> {
+  try {
+    const r = await send({ to, subject, html, replyTo: 'support@snapdini.com', eventId });
+    return r.suppressed ? 'suppressed' : 'sent';
+  } catch (e) {
+    console.error(`[guest-delivery] ${what} to ${to} failed: ${(e as Error).message}`);
+    return 'failed';
+  }
+}
+
 const escapeForHost = (s: unknown) =>
   String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
 
@@ -463,14 +496,17 @@ export async function sendGuestLink(
       guestName: firstName(r.name), eventName: ev.name, hostName: owner?.name || '',
       galleryUrl, timezone: ev.timezone, scope, photoCount,
     });
-    let ok = true;
-    try { await email.sendMail({ to: r.email, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com', eventId: ev.id }); sent++; }
-    catch (e) { ok = false; errors++; console.error(`[guest-delivery] link to ${r.email} failed: ${(e as Error).message}`); }
-    sends.push({ email: r.email, ok });
+    const out = await sendToGuest(r.email, mail.subject, mail.html, ev.id, 'link');
+    if (out === 'sent') sent++;
+    else if (out === 'failed') errors++;
+    // ok=false for a suppressed address too, and that is the point: priorLinkAddresses reads this
+    // ledger to answer "does this person already hold the link?", and they do not.
+    sends.push({ email: r.email, ok: out === 'sent' });
   }
   await recordSends(ev.id, sends, now);
-  // `skipped` is everyone we did not mail: the addresses that already had the link, plus any whose
-  // send failed. The host's UI reports both, so neither disappears into a success count.
+  // `skipped` is everyone we did not mail: the addresses that already had the link, anyone who has
+  // unsubscribed, and any whose send failed. The host's UI reports them, so none of the three
+  // disappears into a success count.
   return { sent, skipped: recipients.length - sent, errors, scope, photoCount, recipients: recipients.length };
 }
 
@@ -552,8 +588,9 @@ async function sweepEventEnd(now: number): Promise<void> {
     });
     let sent = 0, errors = 0;
     for (const m of messages) {
-      try { await email.sendMail({ to: m.to, subject: m.subject, html: m.html, replyTo: 'support@snapdini.com', eventId: ev.id }); sent++; }
-      catch (e) { errors++; console.error(`[guest-delivery] event-end to ${m.to} failed: ${(e as Error).message}`); }
+      const out = await sendToGuest(m.to, m.subject, m.html, ev.id, 'event-end');
+      if (out === 'sent') sent++;
+      else if (out === 'failed') errors++;
     }
     // Nothing got through at all — the transport is down rather than one address being bad. Give
     // the guard back so the next sweep tries again; the recorded rows keep the failure visible.
@@ -594,8 +631,9 @@ async function sweepReminder(now: number): Promise<void> {
         guestName: firstName(r.name), eventName: ev.name, hostName: owner?.name || '',
         galleryUrl, timezone: ev.timezone, releaseAt: opens,
       });
-      try { await email.sendMail({ to: r.email, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com', eventId: ev.id }); sent++; }
-      catch (e) { errors++; console.error(`[guest-delivery] reminder to ${r.email} failed: ${(e as Error).message}`); }
+      const out = await sendToGuest(r.email, mail.subject, mail.html, ev.id, 'reminder');
+      if (out === 'sent') sent++;
+      else if (out === 'failed') errors++;
     }
     if (sent === 0 && errors > 0) await unclaim(ev.id, 'guestReminderSentAt');
   }

@@ -12,10 +12,10 @@ import { faceMatchingAvailable } from '../faces';
 import * as email from '../email';
 import * as auth from '../auth';
 import * as cleanup from '../cleanup';
-import { DEMO_NAME, RESCHEDULE_WINDOW_MS, baseUrl, escapeHtml, isRevealed } from '../lib';
+import { DEMO_NAME, RESCHEDULE_WINDOW_MS, RETENTION_DAYS, baseUrl, escapeHtml, isRevealed, purgeAtFor } from '../lib';
 import { referrerFromCookie, isSelfReferral } from '../referrals';
 import { startSlideshow, slideshowInfo, toggleSlideshowFavourite, deleteSlideshow, slideshowFile, streamSlideshow1080 } from '../slideshow';
-import { billingEnabled, quote, FREE_ALL_GUESTS, brandingRemovable, RETENTION_PAID_DAYS } from '../billing';
+import { billingEnabled, quote, FREE_ALL_GUESTS, brandingRemovable, RETENTION_PAID_DAYS, CUSTOM_PLAN_ERROR } from '../billing';
 import { sendWelcome } from '../lifecycle';
 import options from '../options';
 import { REVEAL_CUSTOM, ceilToRevealTick, zonedWallTimeToMs } from '../../../../shared/reveal';
@@ -26,7 +26,6 @@ const router = Router();
 
 // Photos + event are auto-deleted this many days after the event ends (retention).
 // Plan-scaled windows arrive with billing; this is the self-host/free default.
-const RETENTION_DAYS = parseInt(process.env.RETENTION_DAYS || '7');
 // DEMO_NAME lives in ../lib so the admin listing can filter on the same definition.
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Global video length (self-host / billing-off default; per-event entitlement when billing on).
@@ -225,6 +224,10 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
   const retentionDefault = wantsPaidTier ? Math.max(RETENTION_PAID_DAYS, RETENTION_DAYS) : RETENTION_DAYS;
   const reqRetention = Math.min(Math.max(parseInt((req.body as { retentionDays?: unknown }).retentionDays as string, 10) || retentionDefault, 1), 366);
   const q = quote({ maxGuests: reqGuests, maxPhotos: reqShots, aspectRatios: reqAspects, videoSeconds: reqVideo, durationHours: reqDuration, retentionDays: reqRetention });
+  // A 'custom' quote is a referral, not a price — see MAX_QUOTABLE_GUESTS. Refused here rather than
+  // clamped, because clamping would hand somebody who asked for 600 guests a 400-guest event and
+  // tell them it worked. Self-hosters (billing off) are unaffected: there is no ladder to fall off.
+  if (billingEnabled && q.tier === 'custom') return res.status(400).json({ error: CUSTOM_PLAN_ERROR });
   // When billing is on, store the entitled config from the quote (≤10 = free with everything; 11+ paid).
   const entGuestCap = reqGuests;
   const entVideoSeconds = billingEnabled ? q.videoSeconds : reqVideo;
@@ -237,7 +240,7 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
   const entPaid = billingEnabled ? !q.requiresPayment : true;
 
   const eventTz = (typeof timezone === 'string' && timezone) ? timezone.slice(0, 64) : null;
-  const purgeAt = expiresAt + entRetentionDays * DAY_MS;
+  const purgeAt = purgeAtFor(expiresAt, entRetentionDays);
 
   // Resolved down here rather than beside the mode, because the ceiling it is checked against is
   // the purge, and the purge is not known until the retention entitlement above is.
@@ -1178,6 +1181,12 @@ router.post('/:joinCode/email-link', requireOrganizer, async (req: Request, res:
         to: addr,
         subject,
         html: email.htmlEmail(share ? `${share.label || 'Photos'} from ${safeName}` : `Gallery from ${safeName}`, body_html),
+        // Without this the suppression check runs as blocksFor('') and sees only the GLOBAL list,
+        // so a guest who chose "stop emailing me about this event" on the preference centre still
+        // got the gallery link — the narrower of the two opt-outs was the one that did nothing, and
+        // this is the send that goes to 200 addresses at a press. The per-event scope only exists
+        // if the send says which event it is.
+        eventId: ev.id,
       });
       sent++;
     } catch { ok = false; errors++; }
@@ -1326,7 +1335,7 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
   const rMode    = (ratingMode === 'favourite' || ratingMode === 'stars') ? ratingMode : (ev.ratingMode || 'favourite');
   // Use the event's OWN retention window (a paid extension may exceed the global default) so a
   // settings save doesn't silently shorten retention the organizer paid to extend.
-  const purgeAt  = expiresAt + (ev.retentionDays || RETENTION_DAYS) * DAY_MS;
+  const purgeAt  = purgeAtFor(expiresAt, ev.retentionDays);
 
   // The custom reveal instant. Three cases, and the middle one is the one that has to be right:
   //   · the key is absent — an older client, or a save that only touched the name, must not clear a
@@ -1588,6 +1597,9 @@ router.post('/:joinCode/cohosts', requireOrganizer, async (req: Request, res: Re
           `<p><strong>${escapeHtml(inviter)}</strong> invited you to co-host <strong>${escapeHtml(ev.name)}</strong> on Snapdini — you'll be able to manage the event just like they can.</p>
            <p><a href="${link}" style="display:inline-block;padding:11px 18px;background:#f5c518;color:#111;border-radius:8px;font-weight:700;text-decoration:none">Accept invitation →</a></p>
            <p style="color:#888;font-size:13px">If you don't have a Snapdini account yet, you'll be able to create one in a moment. If you didn't expect this, you can ignore this email.</p>`),
+        // Same reason as the gallery blast above: this is mail ABOUT one event, so the suppression
+        // check has to be told which one or the per-event opt-out cannot apply to it.
+        eventId: ev.id,
       });
     } catch { /* best-effort; dev link still returned below */ }
   }

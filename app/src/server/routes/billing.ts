@@ -1,10 +1,11 @@
 import { Router, type Request, type Response } from 'express';
 import { eq, and, or } from 'drizzle-orm';
-import { billingEnabled, stripe, CURRENCY, publicBillingConfig, quote, brandingRemovable, BRANDING_REMOVAL_CENTS } from '../billing';
+import { billingEnabled, stripe, CURRENCY, publicBillingConfig, quote, brandingRemovable, BRANDING_REMOVAL_CENTS, CUSTOM_PLAN_ERROR } from '../billing';
 import { db } from '../db';
 import { GUEST_SHOT_PACK, GUEST_SHOT_PACK_CENTS, GUEST_UPGRADE_CUTOFF_MS, effectiveMaxPhotos } from '../allowance';
 import { events, participants } from '../schema';
 import { sendWelcome } from '../lifecycle';
+import { RETENTION_DAYS, purgeAtFor } from '../lib';
 
 const router = Router();
 
@@ -204,6 +205,11 @@ router.post('/upgrade', async (req: Request, res: Response) => {
   const aspectRatios = Array.from(new Set([...curAspects, ...reqAspects]));   // can only add shapes
 
   const q = quote({ maxGuests, maxPhotos, aspectRatios, videoSeconds, durationHours, retentionDays });
+  // Off the top of the ladder there is no price to charge a difference against, and the difference
+  // is what this route bills. An upgrade to 1000 guests quotes baseCents 0, so `diff` goes negative
+  // against what the host already paid and the free-delta branch below applies it at once — the
+  // A$59 customer upgrades to unlimited by asking. Refused for the same reason create refuses it.
+  if (q.tier === 'custom') return res.status(400).json({ error: CUSTOM_PLAN_ERROR });
   // Full price of the upgraded config. Use amountCents (NOT a tier check): under the current
   // model even ≤10-guest "free" events owe for paid add-ons (duration/retention), so gating on
   // tier==='paid' wrongly zeroed those and let them apply free + disagreed with the client quote.
@@ -214,7 +220,7 @@ router.post('/upgrade', async (req: Request, res: Response) => {
   const entitlement = {
     guestCap: maxGuests, maxPhotos: q.maxPhotos, videoSeconds: q.videoSeconds,
     retentionDays, aspectRatios: JSON.stringify(q.aspectRatios), expiresAt: newExpiresAt,
-    purgeAt: newExpiresAt + retentionDays * 86_400_000,
+    purgeAt: purgeAtFor(newExpiresAt, retentionDays),
   };
 
   // Free delta (e.g. config grew but still within the paid tier, or a ≤10 event) → apply now.
@@ -324,7 +330,28 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
       const paidNow = typeof session.amount_total === 'number' ? session.amount_total : (parseInt(m.amountCents, 10) || 0);
       if (m.kind === 'upgrade') {
         // amountPaidCents is cumulative real money, so an upgrade ADDS what it actually charged.
-        const [cur] = await db.select({ amountPaidCents: events.amountPaidCents }).from(events).where(eq(events.id, eventId));
+        const [cur] = await db.select({
+          amountPaidCents: events.amountPaidCents, expiresAt: events.expiresAt,
+          retentionDays: events.retentionDays, purgeAt: events.purgeAt,
+        }).from(events).where(eq(events.id, eventId));
+
+        // The purge, rebuilt from what we can actually stand behind.
+        //
+        // Every other field here says `|| undefined`, which leaves the stored value alone when the
+        // metadata is missing. purgeAt said `|| 0`, which did the opposite: an absent expiresAt
+        // became the epoch, purgeAt landed in January 1970, and the next cleanup sweep deleted
+        // every photo belonging to an event whose owner had — one webhook ago — paid us to make it
+        // bigger. Metadata first, the event's own row behind it, and nothing computed at all if
+        // neither can name an expiry.
+        const upExpiresAt = parseInt(m.expiresAt, 10) || cur?.expiresAt || 0;
+        const upRetention = parseInt(m.retentionDays, 10) || cur?.retentionDays || RETENTION_DAYS;
+        // An upgrade only ever ADDS. If this arrives out of order, or the metadata is thinner than
+        // what the event already holds, the longer window wins — a retry must not be able to walk
+        // somebody's retention backwards.
+        const upPurgeAt = upExpiresAt
+          ? Math.max(purgeAtFor(upExpiresAt, upRetention), cur?.purgeAt ?? 0)
+          : undefined;
+
         await db.update(events).set({
           paid: true,
           amountPaidCents: (cur?.amountPaidCents || 0) + paidNow,
@@ -334,7 +361,7 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
           retentionDays: parseInt(m.retentionDays, 10) || undefined,
           aspectRatios: m.aspectRatios || undefined,
           expiresAt: parseInt(m.expiresAt, 10) || undefined,
-          purgeAt: (parseInt(m.expiresAt, 10) || 0) + (parseInt(m.retentionDays, 10) || 7) * 86_400_000,
+          purgeAt: upPurgeAt,
         }).where(eq(events.id, eventId));
       } else if (m.kind === 'branding') {
         // The $1 add-on: just flips the entitlement (doesn't touch the event's paid total/tier).

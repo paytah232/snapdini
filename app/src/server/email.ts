@@ -110,7 +110,15 @@ async function sendViaMailgun({ to, subject, html, replyTo, variables, tag, head
     headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
     body: form,
   });
-  if (!res.ok) throw new Error(`Mailgun send failed (${res.status}): ${await res.text().catch(() => '')}`);
+  if (!res.ok) {
+    // Mailgun's body is the provider's own diagnostic — it names our domain, the API route and the
+    // recipient — and this string has travelled all the way out to callers that put an error
+    // message in a JSON response. The operator needs it; a stranger must not have it. Log one,
+    // throw the other. The status stays on the thrown message because it is the part a caller can
+    // reason about (4xx is ours to fix, 5xx is theirs) and it reveals nothing.
+    console.error(`[email] Mailgun send failed (${res.status}): ${await res.text().catch(() => '')}`);
+    throw new Error(`Mailgun send failed (${res.status})`);
+  }
   // { id: "<2026...@mg.example.com>", message: "Queued. Thank you." }. A response body we cannot
   // parse is NOT a failed send — the message is already queued — so this degrades to a null id
   // rather than throwing and making the caller record a failure that did not happen.
@@ -137,7 +145,11 @@ export async function sendMail({ to, subject, html, replyTo, variables, tag, hea
     const info = await transporter.sendMail({ from: FROM, to, subject, html, replyTo, headers });
     return { provider: 'smtp', messageId: unbracket(info?.messageId) };
   }
-  throw new Error('Email not configured — set MAILGUN_API_KEY+MAILGUN_DOMAIN, or SMTP_HOST/USER/PASS');
+  // This throws on a request path, and a caller's catch is what decides whether the text reaches a
+  // stranger — so the fix-it instructions, which name our environment variables, go to the log and
+  // a bare statement of fact goes to the caller. The operator is the one who can act on it anyway.
+  console.error('[email] no transport configured — set MAILGUN_API_KEY+MAILGUN_DOMAIN, or SMTP_HOST/SMTP_USER/SMTP_PASS');
+  throw new Error('Email is not configured on this server');
 }
 
 // ── Auth emails ────────────────────────────────────────────────────────────────
