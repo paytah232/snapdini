@@ -1,7 +1,71 @@
+/* Two separate mobile annoyances that look like one, and both of them only happen on touch:
+   the grey flash rectangle a browser paints over whatever you tapped, and the tap being read as the
+   start of a text selection so the button's own label highlights under your finger. Neither is
+   feedback we want — the controls have their own :active and :focus-visible states, which are the
+   ones we designed.
+
+   Controls only. Body copy, inputs and textareas keep normal selection, because selecting THOSE is
+   something people actually do — a host copying their own join link out of the page, for one. */
+button,
+summary,
+[role='button'],
+.tab,
+.seg {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* A textarea's default resize grip is BOTH axes, and dragging it sideways stretches the box clean
+   out of whatever card it sits in — past the rounded corner, over the neighbouring column, with no
+   way back but reloading. Vertical is the only axis anyone wants: the width belongs to the layout,
+   the height belongs to how much you are writing.
+
+   Element selector on purpose, so it is the floor rather than a decision: the few textareas that
+   want `resize: none` (the caption box over a photo) carry a class and still win. max-width is the
+   belt to that braces — a stored size or a zoomed page must not push it past its container either. */
+textarea {
+  resize: vertical;
+  max-width: 100%;
+}
+
+/* ── Bundled poster typefaces ────────────────────────────────────────────────
+   Self-hosted (static/fonts, OFL 1.1 — see the README there). Declared globally but NOT used by any
+   selector: nothing downloads until posterFonts.ts asks for a face by name, so the app's normal
+   pages stay exactly as light as they were. `font-display: block` rather than swap because the only
+   consumer is a canvas that has already awaited the load — there is no text on screen to flash. */
+@font-face {
+  font-family: 'Playfair Display'; font-style: normal; font-weight: 400 900; font-display: block;
+  src: url('/fonts/playfair-display.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Cormorant Garamond'; font-style: normal; font-weight: 300 700; font-display: block;
+  src: url('/fonts/cormorant-garamond.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Great Vibes'; font-style: normal; font-weight: 400; font-display: block;
+  src: url('/fonts/great-vibes.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Sacramento'; font-style: normal; font-weight: 400; font-display: block;
+  src: url('/fonts/sacramento.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Jost'; font-style: normal; font-weight: 100 900; font-display: block;
+  src: url('/fonts/jost.woff2') format('woff2');
+}
+
 /* ── Design tokens ───────────────────────────────────────────────
    Dark is the default. Light is applied via [data-theme="light"] on <html>
    (set from system preference or a per-event override). Both are first-class. */
 :root {
+  /* Tell the browser we have already handled dark mode ourselves.
+     Without this, a page is assumed to be a light page, and browsers that ship an automatic
+     dark mode — Samsung Internet's is on by default — re-tint it: our #0f0f0f ground gets pushed
+     darker still, the white shutter button comes out grey, and the brand gold loses its glow.
+     Declaring the scheme opts us out of that filter on every engine that has one. It also fixes
+     the parts of the UI the browser paints rather than us: scrollbars, form controls, spinners. */
+  color-scheme: dark;
   --bg:          #0f0f0f;
   --surface:     #1a1a1a;
   --surface-2:   #242424;
@@ -20,6 +84,7 @@
 }
 
 :root[data-theme='light'] {
+  color-scheme: light;
   --bg:          #f7f7f4;
   --surface:     #ffffff;
   --surface-2:   #efeee9;
@@ -46,6 +111,14 @@ body {
 a { color: inherit; }
 button { font-family: inherit; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+/* Native checkboxes and radios paint their tick in the OPERATING SYSTEM's accent colour — blue on
+   a default macOS or Windows install — which has nothing to do with this app or with the host's
+   event palette. One line makes every one of them ours, everywhere, rather than each page
+   remembering to do it: the frame-sizes checkbox was blue precisely because the rule existed on
+   .aspect-opt and it lives in .pack-toggle. */
+input[type='checkbox'],
+input[type='radio'] { accent-color: var(--accent); }
 
 /* Scrollbars, everywhere rather than in the one place it was noticed.
  *
