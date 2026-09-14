@@ -23,6 +23,7 @@ import { UPLOADS_DIR, eventDir, eventRelPath } from './paths';
 import { MUSIC_DIR, probeHasAudioStream } from './slideshow';
 import authRoutes from './routes/auth';
 import eventsRoutes, { requireOrganizer } from './routes/events';
+import guestsRoutes, { mailgunWebhookHandler } from './routes/guests';
 import participantsRoutes from './routes/participants';
 import photosRoutes from './routes/photos';
 import facesRoutes from './routes/faces';
@@ -75,7 +76,26 @@ app.use(helmet({
 // Stripe webhook needs the RAW body for signature verification — mount before express.json.
 app.post('/api/billing/webhook', express.raw({ type: 'application/json' }), stripeWebhookHandler);
 
+// The CSV import posts the file's TEXT as JSON, and a 2000-row guest list is comfortably past
+// express.json's 100KB default — which would answer 413 on a perfectly ordinary spreadsheet. A
+// bigger limit ONLY on these two paths: raising it globally would widen the body ceiling on every
+// public endpoint in the product to buy one admin-only feature some room.
+// Mounted before the global parser, which no-ops once a body has already been read.
+app.use('/api/events/:joinCode/guests/import', express.json({ limit: '2mb' }));
+
 app.use(express.json());
+
+// Mailgun delivery webhooks. Unlike Stripe's, this one does NOT need the raw body: Mailgun signs
+// the timestamp and token only, never the payload, so the ordinary JSON parser above is fine.
+// (That is also why the handler treats event-data as untrusted input and reads every field
+// defensively — the signature proves the SENDER, not the CONTENTS.)
+//
+// Registered HERE, above `app.use('/api', apiBackstop)`, on purpose rather than by accident: a
+// large send produces a burst of events, and a 429 is a non-2xx, which puts Mailgun into an
+// eight-hour retry ladder for traffic we simply rate-limited. The endpoint is not unprotected —
+// every request must carry a valid HMAC before it touches the database, and a forged one is
+// rejected at the top of the handler.
+app.post('/api/webhooks/mailgun', mailgunWebhookHandler);
 app.use(cookieParser());
 
 // Rate limiting. Strict on auth (low-volume organizer actions). NOTE: event guests at a
@@ -191,6 +211,9 @@ app.use('/api/events/:joinCode/email-link', emailLimiter);
 // Guest delivery's manual trigger sends to every guest who asked for their photos, on an
 // organizer code, so it belongs under the same throttle.
 app.use('/api/events/:joinCode/send-guest-link', emailLimiter);
+// Firing invites at a guest list is the same abuse surface as the gallery blast — a leaked
+// organizer code used as a spam relay — so it sits behind the same limiter.
+app.use('/api/events/:joinCode/guests/invite', emailLimiter);
 app.use('/api/events/:joinCode/cohosts', (req: Request, res: Response, next: NextFunction) => (req.method === 'POST' ? emailLimiter(req, res, next) : next()));
 
 // Landing page is the front door at `/` — registered before the static middleware,
@@ -303,6 +326,9 @@ app.post('/api/events/:joinCode/slideshow-audio', requireOrganizer, audioUpload.
 // ── API routes ────────────────────────────────────────────────────────────────
 
 app.use('/api/auth', authLimiter, authRoutes);
+// Before eventsRoutes: both are mounted on /api/events, and the specific paths here
+// (/:joinCode/guests…) must be reached before any broader pattern can claim them.
+app.use('/api/events', guestsRoutes);
 app.use('/api/events', eventsRoutes);
 app.use('/api/participants', participantsRoutes);
 app.use('/api/photos', photosRoutes);

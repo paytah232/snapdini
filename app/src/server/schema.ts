@@ -415,3 +415,70 @@ export const guestFeedback = pgTable('guest_feedback', {
   comment: text('comment'),
   createdAt: ms('created_at').notNull(),
 });
+
+// ── Guest list + invites ─────────────────────────────────────────────────────
+// See 0044_guest_invites.sql for the full reasoning. In short: event_guests is WHO, guest_invites
+// is WHAT HAPPENED to one message, and email_suppressions is WHO MUST NEVER BE MAILED AGAIN.
+
+/** A person the host means to invite. Everything but the event is optional — a real guest list has
+ *  rows with a phone and no email, and rows that are just a name. A row with no email is simply
+ *  not mailable; it is still part of the list. */
+export const eventGuests = pgTable('event_guests', {
+  id: text('id').primaryKey(),
+  eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
+  name: text('name'),
+  /** Lower-cased and trimmed on write. The partial unique index below is a byte comparison, so
+   *  normalising here is what actually stops the same spreadsheet importing twice. */
+  email: text('email'),
+  phone: text('phone'),
+  notes: text('notes'),
+  createdAt: ms('created_at').notNull(),
+  updatedAt: ms('updated_at').notNull(),
+}, (t) => ({
+  eventIdx: index('idx_event_guests_event').on(t.eventId, t.createdAt),
+  emailUnique: uniqueIndex('idx_event_guests_event_email').on(t.eventId, t.email).where(sql`${t.email} IS NOT NULL`),
+}));
+
+/** One invite email, to one address. Written at send time, then updated by the provider's webhook
+ *  as the outside world reports back. */
+export const guestInvites = pgTable('guest_invites', {
+  id: text('id').primaryKey(),
+  eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
+  /** SET NULL so removing a guest does not erase the record that we mailed them. */
+  guestId: text('guest_id').references(() => eventGuests.id, { onDelete: 'set null' }),
+  email: text('email').notNull(),
+  /** 'sent' | 'delivered' | 'bounced' | 'complained' | 'unsubscribed' | 'failed'.
+   *  'sent' means handed over and nothing heard since — which is the FINAL state on a transport
+   *  that cannot report back, and only a waypoint on one that can. `provider` distinguishes them. */
+  status: text('status').notNull().default('sent'),
+  provider: text('provider'),                              // 'mailgun' | 'smtp'
+  /** Our correlation id, attached to the message and echoed back by the webhook. Minted before the
+   *  send, so it exists even if the provider's response never arrives. */
+  token: text('token').notNull(),
+  providerMessageId: text('provider_message_id'),
+  reason: text('reason'),                                  // the provider's words, shown verbatim
+  severity: text('severity'),                              // 'permanent' | 'temporary', as reported
+  sentAt: ms('sent_at').notNull(),
+  updatedAt: ms('updated_at').notNull(),
+  /** The PROVIDER's timestamp for the event that last changed the status. Webhooks arrive out of
+   *  order, so this — not our clock — is what decides whether an arriving event is newer. */
+  eventAt: ms('event_at'),
+}, (t) => ({
+  eventIdx: index('idx_guest_invites_event').on(t.eventId, t.sentAt),
+  tokenUnique: uniqueIndex('idx_guest_invites_token').on(t.token),
+  messageIdx: index('idx_guest_invites_message').on(t.providerMessageId).where(sql`${t.providerMessageId} IS NOT NULL`),
+  guestIdx: index('idx_guest_invites_guest').on(t.guestId, t.sentAt).where(sql`${t.guestId} IS NOT NULL`),
+}));
+
+/** Addresses this deployment must not mail again, deployment-wide rather than per event.
+ *
+ *  Sending reputation belongs to the DOMAIN: an address that hard-bounced at one party is just as
+ *  dead at the next, and mailing it again is what gets a domain throttled and then blocked — after
+ *  which nothing reaches anybody. The address is the primary key so a redelivered webhook upserts
+ *  instead of accumulating rows. */
+export const emailSuppressions = pgTable('email_suppressions', {
+  email: text('email').primaryKey(),                       // lower-cased
+  reason: text('reason').notNull(),                        // 'bounced' | 'complained' | 'unsubscribed' | 'manual'
+  detail: text('detail'),
+  createdAt: ms('created_at').notNull(),
+});

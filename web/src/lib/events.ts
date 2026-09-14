@@ -415,3 +415,104 @@ export interface GuestSendResult {
  *  a cheerful "sent to 0". The caller surfaces whichever it gets. */
 export const sendGuestPhotos = (code: string, organizerCode: string, scope: GuestSendScope) =>
   postJson<GuestSendResult>(`/api/events/${code}/send-guest-link`, { scope }, org(organizerCode));
+// ── Guest list + invites ─────────────────────────────────────────────────────
+// A host's list of who they mean to invite, and what became of each email we sent them.
+
+/** What we know about one message. 'sent' is the interesting one: on a deployment with Mailgun
+ *  delivery tracking it means "in flight, ask again shortly"; without it, it is the FINAL state and
+ *  means "we handed it over and will never know". `GuestListPayload.deliveryTracking` says which
+ *  of those a given screen is looking at — never assume. */
+export type InviteStatus = 'sent' | 'delivered' | 'bounced' | 'complained' | 'unsubscribed' | 'failed';
+
+export interface InviteState {
+  status: InviteStatus;
+  /** The receiving server's own words, when there were any ("550 no such user", "mailbox full").
+   *  Shown verbatim: those two call for completely different actions from the host. */
+  reason: string | null;
+  provider: string | null;
+  sentAt: number;
+  updatedAt: number;
+}
+
+/** Why an address is blocked from further sends. Global to the deployment, not to this event —
+ *  a hard bounce anywhere means the address is dead everywhere. */
+export interface Suppression { reason: string; detail: string | null; since: number }
+
+export interface EventGuest {
+  id: string;
+  name: string | null;
+  /** Null is normal, not an error: a guest may be on the list for their phone number, or be a
+   *  plus-one whose address nobody has. They simply are not part of an email send. */
+  email: string | null;
+  phone: string | null;
+  notes: string | null;
+  createdAt: number;
+  lastInvite: InviteState | null;
+  suppressed: Suppression | null;
+}
+
+export interface GuestListPayload {
+  guests: EventGuest[];
+  invites: (InviteState & { id: string; guestId: string | null; email: string })[];
+  emailEnabled: boolean;
+  /** Whether a 'sent' on this deployment will ever become anything else. */
+  deliveryTracking: boolean;
+}
+
+export type GuestField = 'name' | 'email' | 'phone' | 'notes' | 'ignore';
+
+/** One line of the file as the preview shows it. `action: 'skip'` rows are rendered greyed rather
+ *  than hidden — a file where 40 of 200 rows are duplicates is a file the host needs to look at. */
+export interface ImportRow {
+  line: number;
+  guest: { name: string | null; email: string | null; phone: string | null; notes: string | null };
+  action: 'add' | 'skip';
+  problems: string[];
+}
+
+export interface ImportPreview {
+  headers: string[];
+  /** True when the first row held data rather than column names (someone pasted a selection
+   *  without the header). Worth telling them, since it changes what every column means. */
+  headerless: boolean;
+  delimiter: string;
+  mapping: GuestField[];
+  counts: { add: number; skip: number; duplicate: number; invalid: number };
+  fatal: string | null;
+  rows: ImportRow[];
+  truncated: boolean;
+  total: number;
+}
+
+export const listGuests = (code: string, organizerCode: string) =>
+  api<GuestListPayload>(`/api/events/${code}/guests`, { headers: org(organizerCode) });
+
+export const addGuest = (code: string, organizerCode: string, guest: Partial<EventGuest>) =>
+  postJson<GuestListPayload>(`/api/events/${code}/guests`, guest, org(organizerCode));
+
+export const updateGuest = (code: string, organizerCode: string, id: string, guest: Partial<EventGuest>) =>
+  api<GuestListPayload>(`/api/events/${code}/guests/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json', ...org(organizerCode) },
+    body: JSON.stringify(guest) });
+
+export const removeGuest = (code: string, organizerCode: string, id: string) =>
+  api<GuestListPayload>(`/api/events/${code}/guests/${id}`, { method: 'DELETE', headers: org(organizerCode) });
+
+/** What the import WOULD do. Writes nothing — the host approves this before anything is committed. */
+export const previewGuestImport = (code: string, organizerCode: string, text: string, mapping?: GuestField[]) =>
+  postJson<ImportPreview>(`/api/events/${code}/guests/import/preview`, { text, mapping }, org(organizerCode));
+
+/** Commit it. The same text and mapping go back, so the server re-runs the identical computation
+ *  rather than acting on a draft it was holding — what the host approved is what happens. */
+export const commitGuestImport = (code: string, organizerCode: string, text: string, mapping: GuestField[]) =>
+  postJson<{ imported: number; skipped: number } & GuestListPayload>(
+    `/api/events/${code}/guests/import`, { text, mapping }, org(organizerCode));
+
+/** Send the Snapdini invite. Omit `guestIds` to mail everyone on the list who has an address.
+ *
+ *  `skipped` is the part that matters: addresses that were NOT mailed because they are suppressed,
+ *  with the reason. A count of successes alone is how a guest ends up never invited. */
+export const sendInvites = (code: string, organizerCode: string, guestIds?: string[]) =>
+  postJson<{ sent: number; failed: number; noAddress: number;
+             skipped: { email: string; name: string | null; reason: string }[] } & GuestListPayload>(
+    `/api/events/${code}/guests/invite`, { guestIds }, org(organizerCode));

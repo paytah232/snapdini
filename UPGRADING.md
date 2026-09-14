@@ -136,6 +136,48 @@ docker compose up -d
 **Nothing to configure.** No new settings, so traps 1 and 2 do not apply to this release — but it is
 a large one, so here is what changes under you.
 
+#### Guest list & invite delivery tracking
+Adds a **guest list** per event (add by hand or import a CSV), Snapdini-branded **invite emails**,
+and per-recipient **delivery tracking**. Nothing to configure to get the list and the invites:
+they use whichever mail transport you already have.
+
+**One new setting, and it is optional:**
+
+```yaml
+  app:
+    environment:
+      - MAILGUN_WEBHOOK_SIGNING_KEY=${MAILGUN_WEBHOOK_SIGNING_KEY:-}
+```
+
+This is Mailgun's **HTTP webhook signing key** (Mailgun dashboard → Account Settings → Webhooks).
+It is **not** the API key — using the API key here fails every signature check, and the only
+symptom is that delivery state never updates. Then add a Mailgun webhook pointing at:
+
+```
+https://your-host/api/webhooks/mailgun
+```
+
+subscribed to `delivered`, `permanent_fail`, `temporary_fail`, `complained` and `unsubscribed`.
+
+**Leave it unset and nothing breaks.** Invites send exactly as before; each one simply stays at
+"sent — delivery unknown", and no address is ever automatically suppressed. The endpoint answers
+404 when there is no key, because an unverified webhook receiver would let anyone forge delivery
+events — including bounces, which would block real guests from being invited.
+
+With it set, a hard bounce or a spam complaint adds the address to a deployment-wide **suppression
+list** and it is skipped on every later send, visibly, with the reason shown on the guest's row.
+That is deliberate and not per-event: repeatedly mailing dead addresses is what gets a sending
+domain throttled and then blocked.
+
+Migration `0044` (`event_guests`, `guest_invites`, `email_suppressions`) applies automatically on
+boot. It only creates new tables — no existing table is altered — so it is a safe no-op against a
+populated database.
+
+
+### 1.4.4
+Adds **photo missions** — an optional shot list a host gives guests, printed on cards and ticked off
+in the camera. Nothing to configure: it is off for every existing event until a host sets one up.
+
 Adds a **trick list** — an optional shot list a host gives guests, printed on cards and ticked off
 in the camera. It is off for every existing event until a host sets one up.
 

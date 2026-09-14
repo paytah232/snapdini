@@ -330,6 +330,13 @@
       "when": 1790200000000,
       "tag": "0046_guest_delivery",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1790300000000,
+      "tag": "0047_guest_invites",
+      "breakpoints": true
     }
   ]
 }
