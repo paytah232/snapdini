@@ -9,7 +9,7 @@
 // appears at some item counts.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTimeline, planChunks, buildChunkArgs, canvasFor, type Timeline } from '../slideshow';
+import { buildTimeline, planChunks, buildChunkArgs, buildMuxArgs, canvasFor, type Timeline } from '../slideshow';
 
 const FPS = 30, T = 0.6;
 const stills = (n: number, secs = 3) => new Array(n).fill(secs);
@@ -117,18 +117,53 @@ describe('chunks stay inside the memory budget they were given', () => {
 });
 
 describe('every chunk is encoded with identical codec settings', () => {
+  // Deliberately NOT the shipping numbers. The old version of this test passed one profile object
+  // to every chunk and asserted the results agreed — which they must, there being no branch by
+  // which they could not. Odd values are what turn "the chunks agree" into "the chunks agree AND
+  // the profile is what they agree on", so a hardcoded `-crf 20` cannot hide inside a
+  // profile-shaped assertion.
+  const profile = { W: 3840, H: 2160, crf: 27, preset: 'slow', fps: FPS, padColor: 'black', threads: 8 };
+  /** Everything from -map onwards is the encode, less the output path. None of it may vary. */
+  const encodeOf = (a: string[]) => a.slice(a.indexOf('-map'), a.length - 1);
+  const valueOf = (a: string[], k: string) => a[a.indexOf(k) + 1];
+
   test('because the concat demuxer joins by trusting they match', () => {
     const tl = buildTimeline(stills(40), FPS, T);
     const items = tl.frames.map((_, i) => ({ path: `/tmp/${i}.jpg`, isVideo: false }));
-    const profile = { W: 3840, H: 2160, crf: 20, preset: 'veryfast', fps: FPS, padColor: 'black', threads: 8 };
-    const codecOf = (a: string[]) => {
-      const keys = ['-c:v', '-pix_fmt', '-r', '-preset', '-crf', '-f'];
-      return keys.map((k) => `${k}=${a[a.indexOf(k) + 1]}`).join(' ');
-    };
-    const sets = planChunks(tl, 7, 600).map((c, i) => codecOf(buildChunkArgs(items, tl, c, profile, `/tmp/p${i}.ts`)));
-    assert.equal(new Set(sets).size, 1, `chunks disagree on codec settings: ${[...new Set(sets)].join(' | ')}`);
-    assert.match(sets[0], /-f=mpegts/);
+    const chunks = planChunks(tl, 7, 600);
+    assert.ok(chunks.length >= 4, `needs several chunks to compare, got ${chunks.length}`);
+    const args = chunks.map((c, i) => buildChunkArgs(items, tl, c, profile, `/tmp/p${i}.ts`));
+    // These really are different runs — different inputs, different trim window. Without this the
+    // comparison below would be one thing against itself.
+    assert.equal(new Set(args.map((a) => a.join(' '))).size, chunks.length,
+      'the chunks are not distinct runs, so agreeing proves nothing');
+    const encodes = new Set(args.map((a) => encodeOf(a).join(' ')));
+    assert.equal(encodes.size, 1, `chunks disagree on encode settings:\n${[...encodes].join('\n')}`);
   });
+
+  test('and what they agree on is the profile they were given, not a constant', () => {
+    const tl = buildTimeline(stills(40), FPS, T);
+    const items = tl.frames.map((_, i) => ({ path: `/tmp/${i}.jpg`, isVideo: false }));
+    const a = buildChunkArgs(items, tl, planChunks(tl, 7, 600)[0], profile, '/tmp/p.ts');
+    assert.equal(valueOf(a, '-crf'), '27', 'the quality setting is hardcoded, not read from the profile');
+    assert.equal(valueOf(a, '-preset'), 'slow', 'the preset is hardcoded, not read from the profile');
+    assert.equal(valueOf(a, '-r'), String(FPS));
+    assert.equal(valueOf(a, '-threads'), '8');
+    // The codec, pixel format and container are what concat compares; none may drift.
+    assert.equal(valueOf(a, '-c:v'), 'libx264');
+    assert.equal(valueOf(a, '-pix_fmt'), 'yuv420p');
+    assert.equal(valueOf(a, '-f'), 'mpegts');
+  });
+
+  test('which matters because the join re-encodes nothing', () => {
+    // If the mux pass re-encoded, a mismatched chunk would be silently fixed up and none of this
+    // would be load-bearing. It copies — so the parts have to match before they get there.
+    const tl = buildTimeline(stills(8), FPS, T);
+    const items = tl.frames.map((_, i) => ({ path: `/tmp/${i}.jpg`, isVideo: false }));
+    const mux = buildMuxArgs('/tmp/list.txt', items, tl, null, '/tmp/out.mp4', false, false);
+    assert.equal(valueOf(mux, '-c:v'), 'copy', 'the join re-encodes the picture it was handed');
+  });
+
   test('chunks carry no audio — the music is laid over the joined film instead', () => {
     const tl = buildTimeline(stills(8), FPS, T);
     const items = tl.frames.map((_, i) => ({ path: `/tmp/${i}.jpg`, isVideo: false }));

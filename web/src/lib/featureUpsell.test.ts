@@ -1,176 +1,269 @@
-// The pricing rules the wizard sells from, pinned against the server's own tier table.
+// The pricing rules the wizard sells from, read at test time from the server's own tier table.
 //
-// Every one of these fails silently and expensively. A waiver applied one guest too far gives a
-// paid feature away; one applied a guest short charges for a gift we advertised. Retention runs
-// backwards to the rest and has already been got wrong once. And a struck-through price that a
-// screen reader announces as a charge is a false claim about money, not a styling slip.
+// app/src/server/billing.ts is parsed below for the very constants publicBillingConfig() hands to
+// /api/config, and every expectation in this file is built from those. The previous version claimed
+// exactly that in its first line and admitted in its fifteenth that the table was "a copy" — a
+// hand-typed fixture that stayed green with stale numbers whatever billing.ts said, which is the one
+// failure a pricing test exists to prevent. Parsing the source is not elegant; importing it is not
+// available (billing.ts pulls in Stripe, which is the server's dependency and not the web app's),
+// and a fixture that cannot go stale is worth more than a tidy import.
+//
+// Every one of these fails silently and expensively. A waiver applied one guest too far gives a paid
+// feature away; one applied a guest short charges for a gift we advertised. Retention runs backwards
+// to the rest and has already been got wrong once. And a struck-through price that a screen reader
+// announces as a charge is a false claim about money, not a styling slip.
 import { describe, it, expect } from 'vitest';
 import type { BillingConfig } from './types';
+// The server's pricing module, as TEXT. Vite's ?raw import is what makes that possible from the web
+// package, which has no @types/node and so cannot reach node:fs at all; it also means the path is
+// resolved at build time, so a billing.ts that moved fails the suite instead of silently reading
+// nothing. Importing it for real is not an option — billing.ts pulls in Stripe, the server's
+// dependency and not the web app's.
+import BILLING_SRC from '../../../app/src/server/billing.ts?raw';
 import {
   featuresFreeAt, framePackPrice, guestBaseCents, durationAddonCents, priceAria, priceTag,
   retentionChoices, retentionIncludedDays, retentionLabel, retentionPrice, shotsAddonCents,
   shotsPrice, videoAddonCents, videoPrice,
 } from './featureUpsell';
 
-// A copy of what /api/config serves when Stripe is configured, i.e. app/src/server/billing.ts.
+/** One `export const NAME = <literal>;` out of billing.ts, evaluated. Scalars and array literals
+ *  only — everything publicBillingConfig() serves is one or the other. */
+function serverConst<T>(name: string): T {
+  const head = `export const ${name} = `;
+  const at = BILLING_SRC.indexOf(head);
+  if (at < 0) throw new Error(`billing.ts no longer exports ${name} — the wizard is pricing from nothing`);
+  let depth = 0, i = at + head.length, out = '';
+  for (; i < BILLING_SRC.length; i++) {
+    const c = BILLING_SRC[i];
+    if (c === '[' || c === '{') depth++;
+    else if (c === ']' || c === '}') depth--;
+    else if (c === ';' && depth === 0) break;
+    out += c;
+  }
+  const literal = out.replace(/\/\/[^\n]*/g, '').replace(/\bas const\b/, '').trim();
+  return Function(`"use strict"; return (${literal});`)() as T;
+}
+
+/** The field → constant mapping publicBillingConfig() itself uses, so the fixture is assembled the
+ *  same way /api/config assembles its answer rather than by a second list kept in step by hand. */
+function publicMapping(): Record<string, string> {
+  const at = BILLING_SRC.indexOf('export function publicBillingConfig()');
+  if (at < 0) throw new Error('billing.ts no longer has publicBillingConfig()');
+  const body = BILLING_SRC.slice(at, BILLING_SRC.indexOf('\n}', at));
+  const out: Record<string, string> = {};
+  for (const m of body.matchAll(/^\s+(\w+): ([A-Z][A-Z0-9_]*),$/gm)) out[m[1]] = m[2];
+  return out;
+}
+
+const MAPPING = publicMapping();
+// billingEnabled and currency are runtime values rather than tier constants (a Stripe key and an
+// env var); the wizard is being tested with billing switched on, in the currency the tiers are
+// written in.
 const billing: BillingConfig = {
   billingEnabled: true,
   currency: 'aud',
-  freeAllGuests: 10,
-  paidTiers: [
-    { maxGuests: 25, amountCents: 500 },
-    { maxGuests: 60, amountCents: 1500 },
-    { maxGuests: 150, amountCents: 2900 },
-    { maxGuests: 400, amountCents: 5900 },
-  ],
-  shotsFree: 12,
-  shotsTiers: [
-    { maxShots: 12, amountCents: 0 },
-    { maxShots: 24, amountCents: 300 },
-    { maxShots: 36, amountCents: 500 },
-    { maxShots: 48, amountCents: 800 },
-  ],
-  framePackCents: 500,
-  videoAddons: [
-    { seconds: 10, amountCents: 200 },
-    { seconds: 30, amountCents: 500 },
-    { seconds: 60, amountCents: 800 },
-    { seconds: 90, amountCents: 1200 },
-  ],
-  durationFreeHours: 48,
-  durationTiers: [
-    { maxHours: 48, amountCents: 0 },
-    { maxHours: 72, amountCents: 200 },
-    { maxHours: 168, amountCents: 500 },
-    { maxHours: 336, amountCents: 700 },
-    { maxHours: 720, amountCents: 1000 },
-    { maxHours: 2160, amountCents: 2500 },
-  ],
-  retentionFreeDays: 7,
-  retentionPaidDays: 31,
-  retentionTiers: [
-    { maxDays: 7, amountCents: 0 },
-    { maxDays: 31, amountCents: 300 },
-    { maxDays: 92, amountCents: 800 },
-    { maxDays: 182, amountCents: 1200 },
-    { maxDays: 365, amountCents: 2000 },
-  ],
-};
+  ...Object.fromEntries(Object.entries(MAPPING).map(([field, konst]) => [field, serverConst(konst)])),
+} as BillingConfig;
 
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
+const paid = billing.paidTiers;
+const shots = billing.shotsTiers;
+const durations = billing.durationTiers;
+const retentions = billing.retentionTiers;
+const SMALL = billing.freeAllGuests;       // an event small enough for the feature waiver
+const BIG = SMALL + 1;                     // one guest past it
+
+describe('the table these rules are tested against', () => {
+  it('is the server’s, read through the same constants /api/config serves', () => {
+    // The guard on every expectation below. If billing.ts stops exporting one of these, or
+    // publicBillingConfig() stops serving it, the numbers under test are no longer the server's and
+    // nothing else in this file means anything.
+    for (const field of ['freeAllGuests', 'paidTiers', 'shotsFree', 'shotsTiers', 'framePackCents',
+      'videoAddons', 'durationFreeHours', 'durationTiers', 'retentionFreeDays', 'retentionPaidDays',
+      'retentionTiers'] as const) {
+      expect(MAPPING[field], `/api/config no longer serves ${field} from a billing.ts constant`).toBeTruthy();
+      expect(billing[field], `${field} came back empty`).toBeDefined();
+    }
+    for (const ladder of [paid, shots, durations, retentions, billing.videoAddons]) {
+      expect(ladder.length).toBeGreaterThan(1);
+    }
+  });
+
+  it('is a ladder that climbs, cap and price together', () => {
+    // Every "smallest tier that still fits" rule below assumes this. A table that went backwards
+    // would make those rules pass while pricing the wrong thing.
+    const climbs = (caps: number[]) => caps.every((v, i) => i === 0 || v > caps[i - 1]);
+    expect(climbs(paid.map((t) => t.maxGuests)) && climbs(paid.map((t) => t.amountCents))).toBe(true);
+    expect(climbs(shots.map((t) => t.maxShots)) && climbs(shots.map((t) => t.amountCents))).toBe(true);
+    expect(climbs(durations.map((t) => t.maxHours)) && climbs(durations.map((t) => t.amountCents))).toBe(true);
+    expect(climbs(retentions.map((t) => t.maxDays)) && climbs(retentions.map((t) => t.amountCents))).toBe(true);
+  });
+});
 
 describe('who the features are free for', () => {
   it('waives them at the threshold and charges one guest past it', () => {
-    expect(featuresFreeAt(billing, 10)).toBe(true);
-    expect(featuresFreeAt(billing, 11)).toBe(false);
+    expect(featuresFreeAt(billing, SMALL)).toBe(true);
+    expect(featuresFreeAt(billing, BIG)).toBe(false);
   });
 
   it('reads the threshold from config rather than assuming ten', () => {
     expect(featuresFreeAt({ ...billing, freeAllGuests: 25 }, 25)).toBe(true);
+    expect(featuresFreeAt({ ...billing, freeAllGuests: 25 }, 26)).toBe(false);
   });
 
-  it('falls back to the shipped threshold before the config has loaded', () => {
-    expect(featuresFreeAt(null, 10)).toBe(true);
-    expect(featuresFreeAt(null, 11)).toBe(false);
+  it('falls back to the SHIPPED threshold before the config has loaded', () => {
+    // featureUpsell carries its own copy of this number for the offline case. It has to be the
+    // server's number: a wizard rendered before /api/config answers would otherwise advertise a
+    // waiver at a guest count the server does not honour, which is a price quoted and not kept.
+    expect(featuresFreeAt(null, SMALL)).toBe(true);
+    expect(featuresFreeAt(null, BIG)).toBe(false);
+    expect(retentionIncludedDays(null, BIG)).toBe(billing.retentionFreeDays);
   });
 });
 
 describe('the event pass', () => {
   it('is free at or under the threshold', () => {
-    expect(guestBaseCents(billing, 10)).toBe(0);
+    expect(guestBaseCents(billing, SMALL)).toBe(0);
   });
 
   it('charges the smallest tier that still holds the guests', () => {
-    expect(guestBaseCents(billing, 11)).toBe(500);
-    expect(guestBaseCents(billing, 25)).toBe(500);
-    expect(guestBaseCents(billing, 26)).toBe(1500);
-    expect(guestBaseCents(billing, 400)).toBe(5900);
+    expect(guestBaseCents(billing, BIG)).toBe(paid[0].amountCents);
+    expect(guestBaseCents(billing, paid[0].maxGuests)).toBe(paid[0].amountCents);
+    expect(guestBaseCents(billing, paid[0].maxGuests + 1)).toBe(paid[1].amountCents);
+    expect(guestBaseCents(billing, paid.at(-1)!.maxGuests)).toBe(paid.at(-1)!.amountCents);
+  });
+
+  it('costs more, never less, as the guest count climbs', () => {
+    for (let i = 1; i < paid.length; i++) {
+      expect(guestBaseCents(billing, paid[i].maxGuests))
+        .toBeGreaterThan(guestBaseCents(billing, paid[i - 1].maxGuests));
+    }
   });
 
   it('does not fall to zero past the largest tier', () => {
-    // The server answers tier:'custom' there. A $0 shown while that is being arranged reads as
-    // "your 1000-guest event is free".
-    expect(guestBaseCents(billing, 1000)).toBe(5900);
+    // The server answers tier:'custom' there and the form says "contact us". A $0 shown while that
+    // is being arranged reads as "your 1000-guest event is free". (The server's own quote() is a
+    // separate matter and is not what this asserts — this pins what the WIZARD shows.)
+    const top = paid.at(-1)!;
+    expect(guestBaseCents(billing, top.maxGuests + 1)).toBe(top.amountCents);
+    expect(guestBaseCents(billing, top.maxGuests * 10)).toBe(top.amountCents);
   });
 });
 
 describe('extra shots', () => {
+  const firstPaid = () => shots.find((t) => t.amountCents > 0)!;
+
   it('charges nothing for the included allowance', () => {
-    expect(shotsPrice(billing, 12, 60)).toEqual({ kind: 'included' });
+    expect(shotsPrice(billing, billing.shotsFree, BIG)).toEqual({ kind: 'included' });
   });
 
   it('gifts the add-on on a small event, at its real price', () => {
-    expect(shotsPrice(billing, 24, 10)).toEqual({ kind: 'gift', wouldBeCents: 300 });
-    expect(shotsPrice(billing, 48, 10)).toEqual({ kind: 'gift', wouldBeCents: 800 });
+    const first = firstPaid();
+    expect(shotsPrice(billing, first.maxShots, SMALL))
+      .toEqual({ kind: 'gift', wouldBeCents: first.amountCents });
+    const top = shots.at(-1)!;
+    expect(shotsPrice(billing, top.maxShots, SMALL)).toEqual({ kind: 'gift', wouldBeCents: top.amountCents });
   });
 
   it('charges the same add-on once the event is bigger', () => {
-    expect(shotsPrice(billing, 24, 11)).toEqual({ kind: 'paid', cents: 300 });
-    expect(shotsPrice(billing, 36, 400)).toEqual({ kind: 'paid', cents: 500 });
+    const first = firstPaid();
+    expect(shotsPrice(billing, first.maxShots, BIG))
+      .toEqual({ kind: 'paid', cents: first.amountCents });
   });
 
-  it('prices by the smallest tier that covers the count', () => {
-    expect(shotsAddonCents(billing, 13)).toBe(300);
-    expect(shotsAddonCents(billing, 25)).toBe(500);
+  it('prices by the smallest tier that covers the count, and one shot past a cap costs more', () => {
+    for (let i = 1; i < shots.length; i++) {
+      expect(shotsAddonCents(billing, shots[i].maxShots)).toBe(shots[i].amountCents);
+      expect(shotsAddonCents(billing, shots[i - 1].maxShots + 1)).toBe(shots[i].amountCents);
+      expect(shotsAddonCents(billing, shots[i].maxShots))
+        .toBeGreaterThan(shotsAddonCents(billing, shots[i - 1].maxShots));
+    }
   });
 });
 
 describe('video clips', () => {
+  const offered = billing.videoAddons ?? [];
+
   it('treats no video as the absence of the feature, not as a gift', () => {
     // Otherwise the "Off" choice wears a struck-through price for a thing nobody is getting.
-    expect(videoPrice(billing, 0, 10)).toEqual({ kind: 'included' });
+    expect(videoPrice(billing, 0, SMALL)).toEqual({ kind: 'included' });
   });
 
   it('gifts a clip length on a small event and charges it on a big one', () => {
-    expect(videoPrice(billing, 30, 10)).toEqual({ kind: 'gift', wouldBeCents: 500 });
-    expect(videoPrice(billing, 30, 60)).toEqual({ kind: 'paid', cents: 500 });
+    const a = offered[1];
+    expect(videoPrice(billing, a.seconds, SMALL)).toEqual({ kind: 'gift', wouldBeCents: a.amountCents });
+    expect(videoPrice(billing, a.seconds, BIG)).toEqual({ kind: 'paid', cents: a.amountCents });
   });
 
   it('matches a clip length exactly rather than rounding up a ladder', () => {
-    // The video add-ons are a menu of lengths, not caps: 45s is not "the 60s tier".
-    expect(videoAddonCents(billing, 45)).toBe(0);
-    expect(videoAddonCents(billing, 90)).toBe(1200);
+    // The video add-ons are a menu of lengths, not caps: a length between two of them is not "the
+    // next one up", it is simply not on sale.
+    const between = Math.round((offered[1].seconds + offered[2].seconds) / 2);
+    expect(offered.some((v) => v.seconds === between)).toBe(false);
+    expect(videoAddonCents(billing, between)).toBe(0);
+    for (const v of offered) expect(videoAddonCents(billing, v.seconds)).toBe(v.amountCents);
   });
 });
 
 describe('frame shapes', () => {
   it('gifts the pack at or under the threshold and charges it above', () => {
-    expect(framePackPrice(billing, 10)).toEqual({ kind: 'gift', wouldBeCents: 500 });
-    expect(framePackPrice(billing, 11)).toEqual({ kind: 'paid', cents: 500 });
+    expect(framePackPrice(billing, SMALL)).toEqual({ kind: 'gift', wouldBeCents: billing.framePackCents });
+    expect(framePackPrice(billing, BIG)).toEqual({ kind: 'paid', cents: billing.framePackCents });
   });
 });
 
 describe('event length', () => {
-  it('prices by the smallest window that still fits', () => {
-    expect(durationAddonCents(billing, 48)).toBe(0);
-    expect(durationAddonCents(billing, 72)).toBe(200);
-    expect(durationAddonCents(billing, 336)).toBe(700);
-    expect(durationAddonCents(billing, 2160)).toBe(2500);
+  it('prices by the smallest window that still fits, and an hour past one costs more', () => {
+    expect(durationAddonCents(billing, billing.durationFreeHours)).toBe(0);
+    for (let i = 1; i < durations.length; i++) {
+      expect(durationAddonCents(billing, durations[i].maxHours)).toBe(durations[i].amountCents);
+      expect(durationAddonCents(billing, durations[i - 1].maxHours + 1)).toBe(durations[i].amountCents);
+      expect(durationAddonCents(billing, durations[i].maxHours))
+        .toBeGreaterThan(durationAddonCents(billing, durations[i - 1].maxHours));
+    }
+  });
+
+  it('gives the free window away for nothing', () => {
+    // The included window and the tier that covers it have to be the same length, or a host is
+    // charged an add-on for an event they were told was inside the free allowance.
+    const free = durations.find((t) => t.amountCents === 0)!;
+    expect(free.maxHours).toBe(billing.durationFreeHours);
   });
 });
 
 describe('keeping the photos', () => {
   it('runs the opposite way to the other add-ons', () => {
     // A free event gets a week; a paid one has a month included. The guest-count waiver does not
-    // reach retention at all.
-    expect(retentionIncludedDays(billing, 10)).toBe(7);
-    expect(retentionIncludedDays(billing, 11)).toBe(31);
+    // reach retention at all — it inverts there.
+    expect(retentionIncludedDays(billing, SMALL)).toBe(billing.retentionFreeDays);
+    expect(retentionIncludedDays(billing, BIG)).toBe(billing.retentionPaidDays);
+    expect(billing.retentionPaidDays).toBeGreaterThan(billing.retentionFreeDays);
+  });
+
+  it('has a tier of exactly the paid allowance, so "1 month" is never a charge for a day', () => {
+    // billing.ts keeps the 31-day tier equal to RETENTION_PAID_DAYS on purpose: a paid event
+    // picking the month must not be billed an add-on for a day or two past what it already has.
+    expect(retentions.some((t) => t.maxDays === billing.retentionPaidDays)).toBe(true);
+    expect(retentions.some((t) => t.maxDays === billing.retentionFreeDays)).toBe(true);
   });
 
   it('never offers a free event less than it already gets', () => {
-    const free = retentionChoices(billing, 10);
-    expect(free.map((c) => c.days)).toEqual([7, 31, 92, 182, 365]);
-    expect(free[0]).toMatchObject({ days: 7, amountCents: 0, label: '1 week', included: false });
-    expect(free[1]).toMatchObject({ days: 31, amountCents: 300, included: false });
+    const free = retentionChoices(billing, SMALL);
+    expect(free.map((c) => c.days)).toEqual(retentions.map((t) => t.maxDays));
+    expect(free[0]).toMatchObject({ days: billing.retentionFreeDays, amountCents: 0, included: false });
+    expect(free.every((c) => c.days >= billing.retentionFreeDays)).toBe(true);
   });
 
   it('drops the lengths a paid event has already paid to beat', () => {
-    const paid = retentionChoices(billing, 60);
-    expect(paid.map((c) => c.days)).toEqual([31, 92, 182, 365]);
+    const bought = retentionChoices(billing, BIG);
+    expect(bought.every((c) => c.days >= billing.retentionPaidDays)).toBe(true);
+    expect(bought.map((c) => c.days))
+      .toEqual(retentions.filter((t) => t.maxDays >= billing.retentionPaidDays).map((t) => t.maxDays));
     // The month has a real price and this event is not being charged it — that is "included",
     // which is a different claim from the week being free on a free event.
-    expect(paid[0]).toMatchObject({ days: 31, amountCents: 0, included: true });
-    expect(paid[1]).toMatchObject({ days: 92, amountCents: 800, included: false });
+    expect(bought[0]).toMatchObject({ days: billing.retentionPaidDays, amountCents: 0, included: true });
+    expect(bought[1].amountCents).toBe(retentions.find((t) => t.maxDays === bought[1].days)!.amountCents);
+    expect(bought[1].included).toBe(false);
   });
 
   it('is never gifted, only charged or already covered', () => {
@@ -183,6 +276,8 @@ describe('keeping the photos', () => {
   it('speaks in months and weeks, not in days', () => {
     expect([7, 31, 92, 182, 365].map(retentionLabel))
       .toEqual(['1 week', '1 month', '3 months', '6 months', '1 year']);
+    // And whatever the server's table holds, no length reaches a host as a raw day count.
+    for (const t of retentions) expect(retentionLabel(t.maxDays)).not.toMatch(/\bdays?\b/);
   });
 });
 
@@ -194,9 +289,9 @@ describe('the little price beside a choice', () => {
   });
 
   it('does not dress a real charge as anything else', () => {
-    const paid = { kind: 'paid', cents: 300 } as const;
-    expect(priceTag(paid, money)).toEqual({ text: '+$3.00', cls: 'add' });
-    expect(priceAria(paid, money)).toBe('plus $3.00');
+    const charge = { kind: 'paid', cents: 300 } as const;
+    expect(priceTag(charge, money)).toEqual({ text: '+$3.00', cls: 'add' });
+    expect(priceAria(charge, money)).toBe('plus $3.00');
   });
 
   it('lets the caller say "included" where "free" would be the wrong word', () => {

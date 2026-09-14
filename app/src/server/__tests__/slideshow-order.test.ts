@@ -9,7 +9,7 @@
 // cut for them to survive, and the budget has to grow with the film.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { seededShuffle, orderForRender, orderOf, encodeTimeoutMs } from '../slideshow';
+import { seededShuffle, orderForRender, orderOf, encodeTimeoutMs, buildTimeline } from '../slideshow';
 
 type Shot = { id: number; isFavourite: boolean };
 const shots = (n: number, favourites: number[] = []): Shot[] =>
@@ -84,33 +84,68 @@ describe('the shuffle is deterministic per render', () => {
   });
 });
 
-describe('the encode budget grows with the work', () => {
-  // The budget is applied per CHUNK now, not to the whole film. A chunk is at most 20s of 4K, and
-  // that measured ~18s to encode in this container — so the five-minute floor alone is already
-  // about 16× what a chunk needs, and the scaling part only matters for the long final mux pass.
-  test('a chunk-sized span gets the five-minute floor', () => {
-    assert.equal(encodeTimeoutMs(20, '4k'), 5 * 60_000);
-    assert.equal(encodeTimeoutMs(0, '4k'), 5 * 60_000);
+describe('the encode budget', () => {
+  // Two halves, and the production range lives entirely in the first one. The budget is applied per
+  // CHUNK, and a chunk is at most 20s of 4K (CHUNK_LIMITS), so every chunk this code actually
+  // encodes gets the flat five-minute floor — about 16x what a chunk needs. The scaling half only
+  // ever runs for the long final mux pass. The old version of this file asserted "a longer span
+  // buys more time, WITHOUT exception" and sampled only spans of 300s and up, which is the one
+  // region where that happens to be true; every real chunk sits in the flat part it never looked at.
+  const CHUNK_SECS_4K = 20;        // slideshow.ts CHUNK_LIMITS['4k'].secs
+  const FLOOR = 5 * 60_000;
+
+  test('every chunk production actually makes gets the same five-minute floor', () => {
+    for (const secs of [0, 1, 5, 10, CHUNK_SECS_4K]) {
+      assert.equal(encodeTimeoutMs(secs, '4k'), FLOOR, `a ${secs}s chunk`);
+    }
+    // 4K is budgeted at 1.0x real time x4 headroom, so the floor stops binding just past 75s —
+    // nearly four times the largest chunk. Pinned from both sides so neither the floor nor the
+    // rate can drift into the production range unnoticed.
+    assert.equal(encodeTimeoutMs(75, '4k'), FLOOR);
+    assert.ok(encodeTimeoutMs(76, '4k') > FLOOR, 'the floor swallows everything — the budget never scales at all');
   });
-  test('a longer span buys more time, without exception', () => {
+
+  test('past the floor a longer span buys more time, in proportion to it', () => {
     assert.ok(encodeTimeoutMs(300, '4k') < encodeTimeoutMs(600, '4k'));
     assert.ok(encodeTimeoutMs(600, '4k') < encodeTimeoutMs(1200, '4k'));
+    // Proportional, not merely increasing: a budget that grew by a constant would pass a
+    // monotonicity check and still kill the longest films.
+    assert.equal(encodeTimeoutMs(1200, '4k'), 2 * encodeTimeoutMs(600, '4k'),
+      'twice the film must buy twice the time');
   });
+
   test('a long film outgrows the flat five minutes the old code would have killed it with', () => {
-    assert.ok(encodeTimeoutMs(600, '4k') > 5 * 60_000);
-    assert.ok(encodeTimeoutMs(965, '4k') > 5 * 60_000);   // the 400-photo film
+    assert.ok(encodeTimeoutMs(600, '4k') > FLOOR);
+    assert.ok(encodeTimeoutMs(965, '4k') > FLOOR);   // the 400-photo film
   });
-  test('clips cost more than stills, because they run longer', () => {
-    // Ten 6s clips are 60s of film against ten 3s stills at 30s — same item count, different work.
-    assert.ok(encodeTimeoutMs(1200, '4k') > encodeTimeoutMs(600, '4k'));
+
+  test('clips buy more time than stills — but only once the film is long enough to leave the floor', () => {
+    // Ten 6s clips are twice the film ten 3s stills are. The budget is handed SECONDS OF FILM, not
+    // an item count, so that difference can only arrive through the timeline — which is why it is
+    // measured here rather than typed in as two numbers that differ by construction.
+    const filmSecs = (durs: number[]) => buildTimeline(durs, 30, 0.6).totalFrames / 30;
+    const tenStills = filmSecs(new Array(10).fill(3)), tenClips = filmSecs(new Array(10).fill(6));
+    assert.ok(tenClips > tenStills, 'the timeline does not know a clip runs longer than a still');
+    assert.equal(encodeTimeoutMs(tenClips, '4k'), encodeTimeoutMs(tenStills, '4k'),
+      'ten items of either kind are well inside the floor, so they cost the same');
+    const manyStills = filmSecs(new Array(300).fill(3)), manyClips = filmSecs(new Array(300).fill(6));
+    assert.ok(encodeTimeoutMs(manyClips, '4k') > encodeTimeoutMs(manyStills, '4k'),
+      'a film of clips got no more time than the same number of stills');
   });
+
   test('1080p is cheaper to encode, and its budget says so', () => {
     assert.ok(encodeTimeoutMs(1200, '1080p') < encodeTimeoutMs(1200, '4k'));
+    // Its floor reaches further, for the same reason: 0.35x real time means the flat five minutes
+    // covers nearly three times as much film.
+    assert.equal(encodeTimeoutMs(200, '1080p'), FLOOR);
+    assert.ok(encodeTimeoutMs(220, '1080p') > FLOOR);
   });
+
   test('an unknown resolution is budgeted as the 4K default, never as the cheap one', () => {
     assert.equal(encodeTimeoutMs(1200, undefined), encodeTimeoutMs(1200, '4k'));
     assert.equal(encodeTimeoutMs(1200, 'nonsense'), encodeTimeoutMs(1200, '4k'));
   });
+
   test('it clears the measured rate several times over', () => {
     // 4K measured 0.89x real time here. A run would have to be three times slower than measured
     // before the budget killed it — which is the point: it is not a performance limit.

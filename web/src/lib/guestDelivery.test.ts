@@ -82,9 +82,18 @@ describe('offering the day-before reminder', () => {
     expect(reminderCanFire(ENDS, ENDS + 48 * HOUR)).toBe(true);
   });
 
-  it('is offered at exactly 24 hours — the email still has a moment of its own', () => {
-    expect(reminderCanFire(ENDS, ENDS + REMINDER_LEAD_MS)).toBe(true);
-    expect(reminderFiresAt(ENDS, ENDS + REMINDER_LEAD_MS)).toBe(ENDS);
+  it('is NOT offered at exactly 24 hours, because the reminder would land on the end itself', () => {
+    // This test used to assert the opposite, and passed, while the server's test asserted THIS and
+    // also passed — the two halves each had their own copy of the rule, one character apart. The
+    // host was shown the switch on, with a fire time, and the sweep never sent it. One rule now,
+    // in shared/guest-reminder.ts, so a disagreement like that has nowhere left to hide.
+    expect(reminderCanFire(ENDS, ENDS + REMINDER_LEAD_MS)).toBe(false);
+    expect(reminderFiresAt(ENDS, ENDS + REMINDER_LEAD_MS)).toBeNull();
+  });
+
+  it('IS offered a minute over 24 hours — the first gap with room in it', () => {
+    expect(reminderCanFire(ENDS, ENDS + REMINDER_LEAD_MS + 60_000)).toBe(true);
+    expect(reminderFiresAt(ENDS, ENDS + REMINDER_LEAD_MS + 60_000)).toBe(ENDS + 60_000);
   });
 
   it('is NOT offered a minute under 24 hours', () => {

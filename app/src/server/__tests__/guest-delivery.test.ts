@@ -4,11 +4,12 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseGuestDelivery, parseGuestSendScope, effectiveGuestScope,
+  GUEST_DELIVERY_MODES, parseGuestDelivery, parseGuestSendScope, effectiveGuestScope,
   revealOpensAt, guestLinkAt, clampGuestSendAt, guestReminderAt,
-  dedupeRecipients, scopedVisibleCount, eventEndMessages, liveSendDue,
-  type GuestTiming, type GuestRecipient,
+  dedupeRecipients, scopedVisibleCount, eventEndMessages, liveSendDue, sendToGuest,
+  type GuestTiming, type GuestRecipient, type GuestDelivery,
 } from '../guest-delivery';
+import type { SendResult } from '../email';
 
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
@@ -24,6 +25,53 @@ const ev = (over: Partial<GuestTiming> = {}): GuestTiming => ({
 
 const guest = (n: number, over: Partial<{ email: string | null; wantsPhotos: boolean; name: string }> = {}) =>
   ({ id: `p${n}`, name: `Guest ${n}`, email: `guest${n}@example.com`, wantsPhotos: true, ...over });
+
+// ── Withheld is not delivered ────────────────────────────────────────────────
+//
+// sendMail RETURNS `suppressed` rather than throwing, so that a caller can stamp its one-shot guard
+// and record the truth instead of retrying a refusal forever. Every send loop in this file ignored
+// it and ran `sent++` regardless. Three things were wrong at once and all of them were quiet: the
+// host was shown a delivery that never happened, share_sends recorded the guest as holding a link
+// they were never sent (so the "one link per address, ever" guard would refuse to send them the
+// real one later), and the monthly Mailgun allowance was billed for paper. Nothing threw. Nothing
+// logged. The three outcomes are separated here so they cannot quietly merge again.
+
+describe('a message that was withheld is not a message that was sent', () => {
+  const send = (r: SendResult) =>
+    sendToGuest('guest@example.com', 'Subject', '<p>Body</p>', 'ev1', 'test', async () => r);
+  const boom = () =>
+    sendToGuest('guest@example.com', 'Subject', '<p>Body</p>', 'ev1', 'test', async () => {
+      throw new Error('provider 500');
+    });
+
+  test('a delivered message is "sent"', async () => {
+    assert.equal(await send({ provider: 'mailgun', messageId: 'a@b' }), 'sent');
+  });
+
+  test('a suppressed address is "suppressed" — never "sent"', async () => {
+    // The exact return the chokepoint gives for someone who unsubscribed.
+    assert.equal(await send({ provider: 'mailgun', messageId: null, suppressed: true }), 'suppressed');
+  });
+
+  test('and it is not an error either, so nothing retries it', async () => {
+    // This distinction is load-bearing. The sweeps give their one-shot guard BACK when a whole
+    // batch fails, on the theory that the transport was down. If an opted-out guest counted as a
+    // failure, an event whose recipients have all unsubscribed would unclaim and re-attempt itself
+    // on every sweep, forever.
+    const out = await send({ provider: 'mailgun', messageId: null, suppressed: true });
+    assert.notEqual(out, 'failed');
+  });
+
+  test('a transport that throws is "failed", and is the only thing that is', async () => {
+    assert.equal(await boom(), 'failed');
+  });
+
+  test('a send with no messageId but no suppression flag still counts as sent', async () => {
+    // SMTP without a Message-ID header is a real, successful send. Inferring suppression from a
+    // null id would silently stop counting every SMTP deployment's mail.
+    assert.equal(await send({ provider: 'smtp', messageId: null }), 'sent');
+  });
+});
 
 // ── The invariant: a link never arrives before the gallery opens ─────────────
 // A guest who taps a link and lands on a locked page does not tap it again. There is no recovery
@@ -354,16 +402,37 @@ describe('an event created before any of this', () => {
     }), []);
   });
 
-  test('and that holds for every delivery mode and every toggle', () => {
+  test('and no combination of the things the builder actually takes changes that', () => {
+    // This used to loop four delivery modes past eventEndMessages, which does not take one — `mode`
+    // appeared only in the failure message, so a single assertion ran eight times under four names.
+    // These are its real inputs, and the opt-in gate has to survive all of them.
     const none: GuestRecipient[] = dedupeRecipients([{ id: 'p1', name: 'Guest', email: 'one@example.com', wantsPhotos: false }]);
-    for (const mode of ['all_on_reveal', 'favourites_manual', 'scheduled', 'manual'] as const) {
-      for (const thanks of [true, false]) {
-        assert.equal(eventEndMessages(none, {
-          eventName: 'A party in 2025', hostName: '', galleryUrl: 'https://snapdini.com/gallery/OLD',
-          timezone: null, thanks, releaseAt: null, ownPhotoCount: () => 0,
-        }).length, 0, `${mode} / thanks=${thanks} built a message for a guest who never asked`);
+    const base = { eventName: 'A party in 2025', galleryUrl: 'https://snapdini.com/gallery/OLD', timezone: null };
+    for (const thanks of [true, false]) {
+      for (const releaseAt of [null, Date.now() + 3 * DAY, Date.now() - DAY]) {
+        for (const hostName of ['', 'Sam']) {
+          for (const own of [0, 9]) {
+            assert.deepEqual(
+              eventEndMessages(none, { ...base, hostName, thanks, releaseAt, ownPhotoCount: () => own }), [],
+              `thanks=${thanks} release=${releaseAt} host=${hostName || '(none)'} photos=${own} built a message for a guest who never asked`);
+          }
+        }
       }
     }
+  });
+
+  test('the delivery mode decides WHEN a send is due, which is the other half of the table', () => {
+    // Where the mode actually lives. Four modes, four different answers — so each one carries its
+    // own assertion instead of sharing one that ignores it. A default event ends at END, so
+    // all_on_reveal's link was already in the event-end message: 'covered', not a second email.
+    const due = (mode: GuestDelivery) => liveSendDue(ev({ guestDelivery: mode, guestSendAt: END + DAY }), END + 2 * DAY);
+    assert.equal(due('all_on_reveal'), 'covered', 'a second email saying what the event-end one already said');
+    assert.equal(due('scheduled'), 'send');
+    assert.equal(due('manual'), 'never', 'a manual mode sent without the host pressing anything');
+    assert.equal(due('favourites_manual'), 'never', 'a manual mode sent without the host pressing anything');
+    assert.deepEqual([...GUEST_DELIVERY_MODES].sort(),
+      ['all_on_reveal', 'favourites_manual', 'manual', 'scheduled'],
+      'a delivery mode was added or removed and the table above does not cover it');
   });
 
   test('an old at_end event still reveals exactly when it did', () => {

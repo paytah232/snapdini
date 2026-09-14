@@ -46,6 +46,31 @@ async function mount() {
 }
 const flat = (el: Element | null) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
 
+/** Just the time the panel quotes, out of the sentence it sits in. */
+const quoted = (container: Element): string => {
+  const line = flat(container.querySelector('.how-long'));
+  const m = line.match(/Building it takes (.+?), and it runs/);
+  if (!m) throw new Error(`no time quote in: ${line || '(no .how-long at all)'}`);
+  return m[1];
+};
+/** The same quote as a number of minutes, so two of them can be compared. Anything the panel says
+ *  that is not one of the three shapes it is allowed to say fails here rather than being counted. */
+const quotedMinutes = (phrase: string): number => {
+  if (phrase === 'a minute or two') return 2;
+  const hours = phrase.match(/^about ([\d.]+) hours?$/);
+  if (hours) return Number(hours[1]) * 60;
+  const mins = phrase.match(/^about (\d+) minutes$/);
+  if (mins) return Number(mins[1]);
+  throw new Error(`the panel quoted a time in a shape nothing here recognises: ${JSON.stringify(phrase)}`);
+};
+const quoteFor = async (over: Record<string, unknown>) => {
+  getSlideshow.mockResolvedValue(status(over));
+  const { container, unmount } = await mount();
+  const q = quoted(container);
+  unmount();
+  return q;
+};
+
 beforeEach(() => {
   getSlideshow.mockReset();
   startSlideshowJob.mockReset().mockResolvedValue({ status: 'running', queuedCount: 0 });
@@ -60,26 +85,40 @@ describe('nothing is capped, and the wait is stated up front', () => {
   });
   it('says roughly how long, in minutes rather than to the second', async () => {
     // 92 stills at 3s ≈ 221s of film; ×1.0 to encode plus 92×0.19s to pre-scale ≈ 4 minutes.
-    getSlideshow.mockResolvedValue(status());
-    const { container } = await mount();
-    const line = flat(container.querySelector('.how-long'));
-    expect(line).toMatch(/about \d+ minutes/);
-    expect(line).not.toMatch(/\d+ seconds/);
-  });
-  it('a big roll is quoted in hours, not in 90 minutes of minutes', async () => {
-    getSlideshow.mockResolvedValue(status({ photoCount: 1500 }));
-    const { container } = await mount();
-    expect(flat(container.querySelector('.how-long'))).toMatch(/about [\d.]+ hours?\b/);
-  });
-  it('and past an hour it stays in hours', async () => {
-    getSlideshow.mockResolvedValue(status({ photoCount: 2500 }));
-    const { container } = await mount();
-    expect(flat(container.querySelector('.how-long'))).toMatch(/about [\d.]+ hours\b/);
+    expect(await quoteFor({})).toMatch(/^about \d+ minutes$/);
   });
   it('a handful of photos is not dressed up as a wait', async () => {
-    getSlideshow.mockResolvedValue(status({ photoCount: 4 }));
-    const { container } = await mount();
-    expect(flat(container.querySelector('.how-long'))).toContain('a minute or two');
+    expect(await quoteFor({ photoCount: 4 })).toBe('a minute or two');
+  });
+  it('a big roll is quoted in hours — one hour, not "60 minutes" and not "1 hours"', async () => {
+    // Both of these used to assert only that the words "hours" appeared somewhere, which the same
+    // branch satisfies at any size. The number and its plural are the part a host reads.
+    expect(await quoteFor({ photoCount: 1500 })).toBe('about 1 hour');
+  });
+  it('and a bigger one still is quoted in whole hours, plural', async () => {
+    expect(await quoteFor({ photoCount: 2500 })).toBe('about 2 hours');
+  });
+  it('never quotes an hour as sixty minutes — it changes over exactly once, into one hour', async () => {
+    // The untested edge. roughTime switches units at 60 ROUNDED minutes, so 59.5 minutes of work
+    // must come out as "about 1 hour" and not "about 60 minutes"; the sweep brackets the crossover
+    // rather than hardcoding the photo count it happens to fall on today.
+    const counts = [1, 50, 500, 1000, 1200, 1350, 1370, 1377, 1378, 1400, 1500, 2500];
+    const quotes: string[] = [];
+    for (const photoCount of counts) quotes.push(await quoteFor({ photoCount }));
+
+    for (const q of quotes) {
+      if (/minutes/.test(q)) expect(quotedMinutes(q), `"${q}" should have been an hour`).toBeLessThan(60);
+    }
+    const mins = quotes.map(quotedMinutes);
+    for (let i = 1; i < mins.length; i++) {
+      expect(mins[i], `${counts[i]} photos quoted less time than ${counts[i - 1]}: ${quotes[i]} vs ${quotes[i - 1]}`)
+        .toBeGreaterThanOrEqual(mins[i - 1]);
+    }
+    const crossover = quotes.findIndex((q) => /hour/.test(q));
+    expect(crossover, `the sweep never reached the hours branch: ${quotes.join(' | ')}`).toBeGreaterThan(0);
+    expect(quotes[crossover]).toBe('about 1 hour');
+    expect(quotes.slice(crossover).every((q) => /hour/.test(q)),
+      `it went back to minutes after quoting hours: ${quotes.join(' | ')}`).toBe(true);
   });
   it('4K over an all-1080p event is quoted, and explained, as a 1080p render', async () => {
     getSlideshow.mockResolvedValue(status({ sourcesFitIn1080: true }));
@@ -92,11 +131,21 @@ describe('nothing is capped, and the wait is stated up front', () => {
     expect(flat(container.querySelector('.how-long'))).not.toMatch(/renders at\s*1080p/i);
   });
   it('the cheaper resolution is quoted as quicker', async () => {
-    getSlideshow.mockResolvedValue(status());
+    // Not merely "different": a regression that quoted 1080p as SLOWER than 4K passed the old
+    // .not.toBe(), and 1080p being the cheap option is the whole reason the panel offers it.
+    // 400 stills puts both resolutions in the minutes band, so the two are directly comparable.
+    getSlideshow.mockResolvedValue(status({ photoCount: 400 }));
     const { container } = await mount();
-    const at4k = flat(container.querySelector('.how-long'));
+    const at4k = quoted(container);
     await fireEvent.change(screen.getByDisplayValue('4K'), { target: { value: '1080p' } });
-    expect(flat(container.querySelector('.how-long'))).not.toBe(at4k);
+    const at1080 = quoted(container);
+    expect(quotedMinutes(at1080), `1080p quoted ${at1080} against 4K's ${at4k}`)
+      .toBeLessThan(quotedMinutes(at4k));
+    // And quicker BY THE MEASUREMENT, not by a rounding. The server reports 1080p at 0.35x the 4K
+    // rate; a quote that only differs by the per-item pre-scale has dropped renderScale on the
+    // floor and is still, just barely, "less".
+    expect(quotedMinutes(at1080), `1080p (${at1080}) is barely under 4K (${at4k}) — renderScale looks ignored`)
+      .toBeLessThan(quotedMinutes(at4k) * 0.6);
   });
 });
 

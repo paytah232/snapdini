@@ -8,7 +8,9 @@
 //    so a returning guest whose phone had autocapitalised their address missed recovery, fell
 //    through to the INSERT, hit the index, and got HTTP 500 — locked out of the event;
 //  • "email me my photos" did its UPDATE without handling the clash, so an address already used by
-//    another guest took the whole request down instead of just not being saved.
+//    another guest took the whole request down instead of just not being saved. That route is gone
+//    (it mailed any address the caller named, from our domain); the clash it hit is still reachable
+//    through PUT /api/participants/email, which is asserted below.
 //
 // SERIAL (9x- prefix): creates and removes its own event.
 import { api, dbq, group, ok, session, spec, createEvent } from '../lib/harness.mjs';
@@ -46,26 +48,21 @@ await spec('97-participant-email', async () => {
     // may not refuse the event.
     ok('and a join never answers 500 on a duplicate address', shared.status !== 500, `status ${shared.status}`);
 
-    // ── email-my-photos must survive an address it cannot store ──
+    // ── the same clash, on the route that is still here ──
+    // The address is already spoken for at this event, so it cannot be attached to Jo's roll. What
+    // must NOT happen is a 500: the UNIQUE constraint may refuse an address, it may not take the
+    // request down with it.
     const solo = await jn('Jo', '');
     ok('a guest can join without an email at all', solo.status === 200, `status ${solo.status}`);
     const token = solo.json.sessionToken;
-    // Jo asks for their photos at an address another guest at this event already holds.
-    const sent = await api('POST', '/api/participants/email-my-photos',
-      { body: { sessionToken: token, emailOverride: 'couple@example.com' } });
-    // The invariant is that the DUPLICATE ADDRESS no longer stops the request — it must get past
-    // the database and reach the send. Whether the send itself succeeds depends on the mail
-    // transport, and on dev Mailgun runs on a sandbox domain that refuses unlisted recipients. So
-    // this asserts on the FAILURE MODE rather than success: anything except a duplicate-key fault.
-    const err = JSON.stringify(sent.json || {});
-    const dbFault = /Something went wrong|duplicate key|idx_participants_event_email/i.test(err);
-    ok('the duplicate address no longer stops the request',
-      sent.status === 200 || (!dbFault && /mail|smtp|mailgun|transport|not configured/i.test(err)),
-      `status ${sent.status} ${err.slice(0, 110)}`);
+    const claim = await api('PUT', '/api/participants/email',
+      { body: { sessionToken: token, email: 'couple@example.com' } });
+    ok('claiming another guest’s address is refused, not a server fault',
+      claim.status === 409, `status ${claim.status} ${JSON.stringify(claim.json || {}).slice(0, 110)}`);
     ok('and the clash left the other guest’s address alone',
       Number(dbq(`SELECT count(*) FROM participants WHERE event_id=(SELECT id FROM events WHERE join_code='${ev.joinCode}') AND lower(email)='couple@example.com'`)) === 1);
-    ok('never surfacing a server fault to the guest', sent.json?.error !== 'Something went wrong',
-      JSON.stringify(sent.json).slice(0, 90));
+    ok('never surfacing a server fault to the guest', claim.json?.error !== 'Something went wrong',
+      JSON.stringify(claim.json).slice(0, 90));
   }
 
   dbq(`DELETE FROM events WHERE join_code='${ev.joinCode}'`);
