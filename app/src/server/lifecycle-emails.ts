@@ -50,9 +50,14 @@ const revealLabel = (m: LifecycleView['revealMode']) =>
   : 'Instant — photos appear as guests take them';
 
 // Outer shell: dark ground, centred 600px, brand chip, hidden preheader, footer.
+// `unsubUrl` is a REAL preference-centre link or it is absent. It used to default to a
+// mailto:support@ that no inbound automation has ever read: a link labelled Unsubscribe that does
+// nothing is worse than no link, because it is the recipient's one attempt at s18 and it fails
+// silently. The optional emails (activation nudge, survey) pass prefsUrlFor(); the service messages
+// pass nothing and render no link, which is what a designated commercial message is entitled to do.
 function shell(preheader: string, inner: string, unsubUrl?: string): string {
   const unsub = unsubUrl
-    ? ` · <a href="${esc(unsubUrl)}" style="color:${C.subtle};text-decoration:underline">Unsubscribe from tips</a>`
+    ? ` · <a href="${esc(unsubUrl)}" style="color:${C.subtle};text-decoration:underline">Unsubscribe</a>`
     : '';
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body bgcolor="${C.bg}" style="margin:0;padding:0;background:${C.bg};color:${C.ink};font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
@@ -66,7 +71,7 @@ function shell(preheader: string, inner: string, unsubUrl?: string): string {
     ${inner}
   </td></tr>
   <tr><td style="padding:20px 6px 0;color:${C.subtle};font-size:12px;line-height:1.6">
-    Snapdini — your event camera${unsub}
+    Snapdini · <a href="mailto:support@snapdini.com" style="color:${C.subtle};text-decoration:underline">support@snapdini.com</a>${unsub}
   </td></tr>
 </table>
 </td></tr></table>
@@ -115,14 +120,20 @@ export function welcomeEmail(v: LifecycleView): { subject: string; preheader: st
     ['✨', 'The reveal', revealLabel(v.revealMode)],
   ];
 
-  // Contextual upsell — only suggest what they DON'T already have.
-  const ups: string[] = [];
-  if (!v.hasVideo) ups.push(upItem('🎬', 'Add video clips — from A$2', 'Let guests capture the speeches, the vows and the first dance — not just stills.'));
-  if (v.retentionDays <= 7) ups.push(upItem('⏳', 'Keep the photos longer — from A$3', `Your roll is kept ${v.retentionDays} days. Extend to a month (or a year) so there's no rush to download.`));
-  const upsell = ups.length ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px dashed #4a4230;border-radius:12px;margin:22px 0"><tr><td style="padding:16px 18px">
-      <div style="font-size:12px;letter-spacing:1px;text-transform:uppercase;color:${C.accent};margin-bottom:6px;font-weight:700">Worth a thought before the day</div>
-      ${ups.join('')}
-    </td></tr></table>` : '';
+  // There was a priced upsell here — "Add video clips from A$2", "Keep the photos longer from A$3" —
+  // and it has been removed rather than rewritten.
+  //
+  // This message is sent to a host the moment they pay, so it is a commercial electronic message
+  // either way. What decided which KIND was those two offers. Without them the mail is no more than
+  // factual information about the thing they just bought, plus our name, logo and contact details,
+  // which Spam Act 2003 (Cth) Sch 1 cl 3(1)(a)–(2) expressly permits: a DESIGNATED commercial
+  // electronic message, exempt from s16 consent and s18 unsubscribe. With them it was an ordinary
+  // commercial message needing a functional unsubscribe facility — and the only one it offered was
+  // a mailto nothing in this codebase reads, which is not a facility at all.
+  //
+  // The fix is not to wire a real unsubscribe to this message: that would let a host who has just
+  // paid switch off the confirmation for the event they are in the middle of setting up. The fix is
+  // for the message to stay factual. Sell the upgrades on the event page, where they belong.
 
   // Short-notice bookings: fold the pre-flight into the welcome (no separate check-in will follow),
   // and lead with urgency instead of a leisurely "waiting for the day".
@@ -145,20 +156,12 @@ export function welcomeEmail(v: LifecycleView): { subject: string; preheader: st
     p('Ready when you are: open your event to grab the <b>QR code and join link</b> to share with guests.'),
     btn('Open your event', v.manageUrl),
     preflight,
-    upsell,
     sign('Any questions at all, just hit reply — a real person reads every message.'),
   ].join('');
 
   return { subject, preheader, html: shell(preheader, inner, v.unsubUrl) };
 }
 
-function upItem(emoji: string, head: string, desc: string): string {
-  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:9px 0"><tr>
-    <td style="width:26px;font-size:17px;vertical-align:top;padding-top:1px">${emoji}</td>
-    <td><div style="color:${C.head};font-weight:700;font-size:14px">${head}</div>
-        <div style="color:${C.muted};font-size:13px;line-height:1.5">${desc}</div></td>
-  </tr></table>`;
-}
 
 // ── 2. CHECK-IN (~5 days before) ─────────────────────────────────────────────
 export function checkinEmail(v: LifecycleView): { subject: string; preheader: string; html: string } {

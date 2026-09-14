@@ -82,6 +82,11 @@ function authHtml({ heading, body, cta }: { heading: string; body: string; cta: 
     <p>${body}</p>
     <p style="margin:24px 0"><a href="${link}" style="display:inline-block;background:#f5c518;color:#111;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold">${cta} →</a></p>
     <p style="color:#666;font-size:0.8rem">If you didn't request this, you can ignore this email.</p>
+    <!-- Sender identification (Spam Act 2003 s17): the name AND a contact address that is
+         reasonably likely to be valid for 30 days. Both of these layouts carried the logo and
+         nothing to reach us by. Contact details are expressly permitted alongside factual
+         information (Sch 1 cl 3(2)), so adding this cannot cost any message its designated status. -->
+    <p style="color:#666;font-size:0.8rem">Snapdini · <a href="mailto:support@snapdini.com" style="color:#888">support@snapdini.com</a></p>
   </div>
 </body></html>`;
 }
@@ -95,7 +100,7 @@ export function htmlEmail(title: string, body: string): string {
     </div>
     <h2 style="margin-bottom:16px">${title}</h2>
     ${body}
-    <p style="margin-top:40px;color:#666;font-size:0.8rem">Sent by Snapdini — your event camera</p>
+    <p style="margin-top:40px;color:#666;font-size:0.8rem">Snapdini · <a href="mailto:support@snapdini.com" style="color:#888">support@snapdini.com</a></p>
   </div>
   <style>.btn{display:inline-block;background:#f5c518;color:#111;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold}</style>
 </body></html>`;

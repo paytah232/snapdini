@@ -17,7 +17,7 @@ import { startLifecycle } from './lifecycle';
 import { startOps } from './ops-notify';
 import { migrateUploadsToPerEvent } from './migrate-uploads';
 import options from './options';
-import { publicBillingConfig } from './billing';
+import { publicBillingConfig, billingEnabled } from './billing';
 import * as email from './email';
 import { UPLOADS_DIR, eventDir, eventRelPath } from './paths';
 import { MUSIC_DIR, probeHasAudioStream } from './slideshow';
@@ -36,6 +36,7 @@ import adminRoutes from './routes/admin';
 import sharesRoutes from './routes/shares';
 import cohostsRoutes from './routes/cohosts';
 import surveyRoutes from './routes/survey';
+import emailPrefsRoutes from './routes/email-prefs';
 import { ensureAdminFromEnv } from './auth';
 import pkg from '../../package.json';
 
@@ -181,7 +182,15 @@ app.use('/api/events/demo', rateLimit({
 }));
 // Organizer-triggered outbound email (gallery blast + co-host invites) — throttle to prevent a
 // leaked organizer code being used as a spam relay. Only the POSTs send mail.
-app.use('/api/events/:joinCode/email-gallery', emailLimiter);
+// The path here was `/email-gallery` for as long as the limiter has existed, and no such route
+// does: the gallery blast is POST /api/events/:joinCode/email-link (routes/events.ts). So the one
+// endpoint that sends up to 200 host-supplied addresses in a request was governed only by the
+// generic 600/min /api backstop. Renaming a route is exactly how a limiter stops matching, and
+// nothing fails loudly when it does.
+app.use('/api/events/:joinCode/email-link', emailLimiter);
+// Guest delivery's manual trigger sends to every guest who asked for their photos, on an
+// organizer code, so it belongs under the same throttle.
+app.use('/api/events/:joinCode/send-guest-link', emailLimiter);
 app.use('/api/events/:joinCode/cohosts', (req: Request, res: Response, next: NextFunction) => (req.method === 'POST' ? emailLimiter(req, res, next) : next()));
 
 // Landing page is the front door at `/` — registered before the static middleware,
@@ -305,6 +314,11 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/shares', sharesRoutes);
 app.use('/api/cohosts', cohostsRoutes);
 app.use('/api/survey', surveyRoutes);
+// The preference centre. Deliberately NOT behind an auth gate or a tight limiter: it is reached
+// from a link in an email, by someone who may never sign in again, and an unsubscribe that gets
+// refused is an unsubscribe that did not happen. The token is 32 random bytes, so the /api backstop
+// is the only ceiling it needs.
+app.use('/api/email-prefs', emailPrefsRoutes);
 // Bundled royalty-free backing tracks — public + immutable, served for the slideshow track preview.
 app.use('/api/music', express.static(MUSIC_DIR, { immutable: true, maxAge: '7d' }));
 
@@ -358,6 +372,38 @@ const transient = (e: unknown): boolean => {
   return TRANSIENT.test(`${err?.code ?? ''} ${err?.message ?? ''} ${err?.cause?.code ?? ''} ${err?.cause?.message ?? ''}`);
 };
 
+/** Say which billing mode we booted in, every time, in the log.
+ *
+ *  Billing is one environment variable from silently vanishing:
+ *
+ *      export const billingEnabled = !!process.env.STRIPE_SECRET_KEY;
+ *
+ *  and when it vanishes every cap goes with it — guest limits, video seconds, retention, the paid
+ *  gate on joining — with no error anywhere, because "free self-host" is a legitimate mode that
+ *  looks exactly the same. This project's recurring bug is an env var that never reached the
+ *  container (compose passes them explicitly; see __tests__/compose-env.test.ts), and that failure
+ *  would land here as a hosted deployment quietly giving everything away.
+ *
+ *  The second check is the worse one. With a secret key but no WEBHOOK secret, checkout still works
+ *  and Stripe still takes the money — but the webhook that grants the entitlement cannot verify its
+ *  signature, so nothing is ever granted. The customer pays and their event stays unpaid. That is
+ *  money taken for nothing delivered, and it is invisible until someone complains. */
+function reportBillingMode(): void {
+  if (!billingEnabled) {
+    console.warn('[billing] DISABLED — no STRIPE_SECRET_KEY. Every cap is off: unlimited guests, '
+      + 'video, retention and shots, and no payment is required to use an event. This is correct for '
+      + 'a self-host install and WRONG for a hosted one.');
+    return;
+  }
+  if (!process.env.STRIPE_WEBHOOK_SECRET) {
+    console.error('[billing] MISCONFIGURED — STRIPE_SECRET_KEY is set but STRIPE_WEBHOOK_SECRET is not. '
+      + 'Checkout will work and customers WILL be charged, but the webhook cannot verify its signature, '
+      + 'so no entitlement is ever granted and every paid event stays unpaid. Fix before taking money.');
+    return;
+  }
+  console.log('[billing] enabled (Stripe, webhook verified)');
+}
+
 async function initWithRetry(): Promise<void> {
   const deadline = Date.now() + INIT_MAX_MS;
   let attempt = 0;
@@ -384,6 +430,7 @@ initWithRetry()
     startCounters();  // write-behind flush loop for gallery/referral counters
     startAnalytics();          // same write-behind shape as the counters above
     startOps();       // operator notifications (daily digest + instant alerts) — off unless OPS_NOTIFICATIONS=1
+    reportBillingMode();
     const server = app.listen(PORT, '0.0.0.0', () => console.log(`Snapdini running on port ${PORT}`));
     // Multi-GB media uploads (e.g. a 90s 4K/8K clip) can take a long time on event Wi-Fi/mobile;
     // Node's default 5-min requestTimeout would abort them mid-transfer. Allow up to an hour.

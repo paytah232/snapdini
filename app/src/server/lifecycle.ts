@@ -5,6 +5,8 @@ import { events, photos, users } from './schema';
 import * as email from './email';
 import { welcomeEmail, checkinEmail, surveyEmail, accountWelcomeEmail, activationNudgeEmail, type LifecycleView } from './lifecycle-emails';
 import { ensureHostReward } from './host-reward';
+import { optionalSendDecision, prefsUrlFor } from './email-prefs';
+import { guestSweep } from './guest-delivery';
 
 // Customer lifecycle emails, run in-process on a timer (same shape as the retention sweep). Welcome
 // fires immediately from the Stripe webhook; check-in and survey are found by the sweep. Every send
@@ -46,7 +48,7 @@ function datesLabel(startMs: number, endMs: number, tz?: string | null): string 
 
 type EventRow = typeof events.$inferSelect;
 
-function buildView(ev: EventRow, ownerName: string, extra?: { surveyUrl?: string; startsSoon?: boolean }): LifecycleView {
+function buildView(ev: EventRow, ownerName: string, extra?: { surveyUrl?: string; startsSoon?: boolean; unsubUrl?: string }): LifecycleView {
   let framesAll = false;
   try { framesAll = (JSON.parse(ev.aspectRatios || '["1:1"]') as string[]).some((a) => a && a !== '1:1'); } catch { /* */ }
   return {
@@ -61,7 +63,14 @@ function buildView(ev: EventRow, ownerName: string, extra?: { surveyUrl?: string
     retentionDays: ev.retentionDays,
     datesLabel: datesLabel(ev.startsAt, ev.expiresAt, ev.timezone),
     manageUrl: `${BASE()}/dashboard`,
-    unsubUrl: `mailto:support@snapdini.com?subject=${encodeURIComponent('Unsubscribe ' + ev.joinCode)}`,
+    // No unsubscribe link by default, and deliberately not a mailto placeholder.
+    //
+    // It used to be `mailto:support@…?subject=Unsubscribe <code>`, which looked like compliance and
+    // was not: nothing in this codebase reads inbound mail, so the recipient's one attempt to stop
+    // hearing from us went nowhere and told them it had worked. The emails that ARE optional
+    // override this with prefsUrlFor() — a real preference centre reachable without signing in. The
+    // event emails are service messages about something the host set up themselves, and carry no
+    // link at all rather than a broken one. See email-prefs.ts for where that line is drawn.
     ...extra,
   };
 }
@@ -131,8 +140,11 @@ async function sweep(): Promise<void> {
     const claimed = await db.update(users).set({ accountWelcomeSentAt: now })
       .where(and(eq(users.id, u.id), isNull(users.accountWelcomeSentAt))).returning({ id: users.id });
     if (!claimed.length) continue;
+    // Not gated on a preference: this is the first thing an account ever receives, so there is
+    // nothing anyone could have opted out of yet. It carries the link because it is the one message
+    // everyone reads — the earliest chance to say no to the optional ones that follow.
     const mail = accountWelcomeEmail({ ownerName: firstName(u.name, u.email), createUrl: `${BASE()}/app`,
-      unsubUrl: `mailto:support@snapdini.com?subject=${encodeURIComponent('Unsubscribe')}` });
+      unsubUrl: await prefsUrlFor(u.id, BASE()) });
     try { await email.sendMail({ to: u.email, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com' }); }
     catch (e) { await db.update(users).set({ accountWelcomeSentAt: null }).where(eq(users.id, u.id)); console.error(`[lifecycle] account welcome ${u.id} failed: ${(e as Error).message}`); }
   }
@@ -148,11 +160,16 @@ async function sweep(): Promise<void> {
   ));
   for (const u of nudgeCandidates) {
     if (!u.email || excl.includes(u.email.toLowerCase())) { await db.update(users).set({ activationNudgeSentAt: now }).where(eq(users.id, u.id)); continue; }
+    // Checked BEFORE the claim, and a failed read is not consent. 'opted-out' still burns the guard
+    // column: they said no once, and leaving it NULL would have the sweep reconsider them forever.
+    const decision = await optionalSendDecision(u.id, 'activationNudgeEmail');
+    if (decision === 'unknown') continue;                       // retry next tick rather than guess
+    if (decision === 'opted-out') { await db.update(users).set({ activationNudgeSentAt: now }).where(eq(users.id, u.id)); continue; }
     const claimed = await db.update(users).set({ activationNudgeSentAt: now })
       .where(and(eq(users.id, u.id), isNull(users.activationNudgeSentAt))).returning({ id: users.id });
     if (!claimed.length) continue;
     const mail = activationNudgeEmail({ ownerName: firstName(u.name, u.email), createUrl: `${BASE()}/app`,
-      unsubUrl: `mailto:support@snapdini.com?subject=${encodeURIComponent('Unsubscribe')}` });
+      unsubUrl: await prefsUrlFor(u.id, BASE()) });
     try { await email.sendMail({ to: u.email, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com' }); }
     catch (e) { await db.update(users).set({ activationNudgeSentAt: null }).where(eq(users.id, u.id)); console.error(`[lifecycle] nudge ${u.id} failed: ${(e as Error).message}`); }
   }
@@ -187,6 +204,15 @@ async function sweep(): Promise<void> {
   for (const ev of surveyCandidates) {
     const info = await eventWithOwner(ev.id);
     if (!info) { await db.update(events).set({ feedbackSentAt: now }).where(eq(events.id, ev.id)); continue; }
+    // The opt-out is held against the ACCOUNT, not this event: a host who asked us to stop sending
+    // feedback requests asked once, and would otherwise be asked again by every event they ever run.
+    const ownerId = info.ev.ownerUserId;
+    // eventWithOwner inner-joins users, so this is never null in practice — but the column is
+    // nullable, and an email we cannot check a preference for is one we must not send.
+    if (!ownerId) { await db.update(events).set({ feedbackSentAt: now }).where(eq(events.id, ev.id)); continue; }
+    const decision = await optionalSendDecision(ownerId, 'surveyEmail');
+    if (decision === 'unknown') continue;                       // an unreadable preference is not consent
+    if (decision === 'opted-out') { await db.update(events).set({ feedbackSentAt: now }).where(eq(events.id, ev.id)); continue; }
     const claimed = await db.update(events).set({ feedbackSentAt: now })
       .where(and(eq(events.id, ev.id), isNull(events.feedbackSentAt))).returning({ id: events.id });
     if (!claimed.length) continue;
@@ -203,11 +229,23 @@ async function sweep(): Promise<void> {
     // useful rather than invented: on the common 7-day retention the host has about four days left.
     const [pc] = await db.select({ n: sql<number>`count(*)` }).from(photos).where(eq(photos.eventId, ev.id));
     const slideshow = slideshowOffer(info.ev, Number(pc?.n ?? 0), BASE());
-    const view = buildView(info.ev, info.ownerName, { surveyUrl: `${BASE()}/survey/${token}` });
+    // The survey carries a discount code, which makes it commercial however warmly it is written —
+    // so it gets a real unsubscribe link, not the mailto the service emails still use.
+    const view = buildView(info.ev, info.ownerName, {
+      surveyUrl: `${BASE()}/survey/${token}`,
+      unsubUrl: await prefsUrlFor(ownerId, BASE()),
+    });
     const mail = surveyEmail({ ...view, hostReward: reward ?? undefined, slideshow });
     try { await email.sendMail({ to: info.ownerEmail, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com' }); }
     catch (e) { await db.update(events).set({ feedbackSentAt: null }).where(eq(events.id, ev.id)); console.error(`[lifecycle] survey ${ev.id} failed: ${(e as Error).message}`); }
   }
+
+  // GUEST DELIVERY — the three messages a guest can receive (guest-delivery.ts). It rides this
+  // tick rather than bringing a timer of its own: the reveal instant every guest message is keyed
+  // to is quantised onto the same 15-minute grid (shared/reveal.ts), so this is the finest schedule
+  // any of it could have been promised on anyway. Its own errors are caught inside, so one
+  // unreadable event cannot take the host-side sweep down with it.
+  await guestSweep(now);
 }
 
 export function startLifecycle(): void {

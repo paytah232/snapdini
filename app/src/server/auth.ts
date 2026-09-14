@@ -19,13 +19,31 @@ export const verifyPassword = (hash: string, pw: string): Promise<boolean> =>
 // We store only the SHA-256 of the token; the raw value is what gets emailed.
 const hashToken = (raw: string): string => crypto.createHash('sha256').update(raw).digest('hex');
 
-export async function createEmailToken(userId: string, purpose: string): Promise<string> {
+// ttlMs is a parameter, not the constant, because the 30 minutes that is right for a sign-in link is
+// wrong for an unsubscribe link: people act on those weeks later, and a link that answers 'expired'
+// is not an unsubscribe facility. See email-prefs.ts.
+export async function createEmailToken(userId: string, purpose: string, ttlMs: number = TOKEN_TTL_MS): Promise<string> {
   const raw = crypto.randomBytes(32).toString('hex');
   const now = Date.now();
   await db.insert(emailTokens).values({
-    id: uuidv4(), userId, purpose, tokenHash: hashToken(raw), expiresAt: now + TOKEN_TTL_MS, createdAt: now,
+    id: uuidv4(), userId, purpose, tokenHash: hashToken(raw), expiresAt: now + ttlMs, createdAt: now,
   });
   return raw;
+}
+
+/**
+ * Whether a stored token row may still be acted on.
+ *
+ * One rule in one place, used by both lookups below. The purpose is checked HERE as well as in the
+ * query: a token is only ever valid for the thing it was minted for, and a check that lives only in
+ * some callers is how a token for one purpose eventually gets redeemed as another.
+ */
+export function tokenUsable(
+  row: { purpose: string; consumedAt: number | null; expiresAt: number } | undefined,
+  purpose: string,
+  now: number = Date.now(),
+): boolean {
+  return !!row && row.purpose === purpose && !row.consumedAt && row.expiresAt >= now;
 }
 
 // Validate + consume a token in one step. Returns the user row or null.
@@ -33,7 +51,7 @@ export async function consumeEmailToken(raw: string | undefined, purpose: string
   if (!raw) return null;
   const [row] = await db.select().from(emailTokens)
     .where(and(eq(emailTokens.tokenHash, hashToken(raw)), eq(emailTokens.purpose, purpose)));
-  if (!row || row.consumedAt || row.expiresAt < Date.now()) return null;
+  if (!tokenUsable(row, purpose)) return null;
   await db.update(emailTokens).set({ consumedAt: Date.now() }).where(eq(emailTokens.id, row.id));
   const [user] = await db.select().from(users).where(eq(users.id, row.userId));
   return user ?? null;
@@ -45,7 +63,7 @@ export async function peekEmailToken(raw: string | undefined, purpose: string): 
   if (!raw) return null;
   const [row] = await db.select().from(emailTokens)
     .where(and(eq(emailTokens.tokenHash, hashToken(raw)), eq(emailTokens.purpose, purpose)));
-  if (!row || row.consumedAt || row.expiresAt < Date.now()) return null;
+  if (!tokenUsable(row, purpose)) return null;
   const [user] = await db.select().from(users).where(eq(users.id, row.userId));
   return user ?? null;
 }
