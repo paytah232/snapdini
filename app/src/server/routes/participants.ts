@@ -43,6 +43,16 @@ export async function missionsFor(eventChallenges: string | null, setKey: string
   };
 }
 
+/**
+ * Whether a photo is one the guest will actually SEE in the gallery.
+ *
+ * The same rule routes/photos.ts renders by: with moderation on, only approved; with it off,
+ * anything not binned. Stated once, as a predicate, because the count we email a guest and the set
+ * we then show them disagreeing is not a cosmetic difference — it reads as photos we lost.
+ */
+export const guestSeesPhoto = (status: string, moderationEnabled: boolean): boolean =>
+  moderationEnabled ? status === 'approved' : status !== 'rejected';
+
 const isEmail = (s: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 
 // 23505 = unique_violation. The only unique constraint a guest can trip is
@@ -214,6 +224,7 @@ router.get('/me', async (req: Request, res: Response) => {
       allowDownloads: events.allowDownloads,
       noFlash:        events.noFlash,
       feedbackAskedAt: participants.feedbackAskedAt,
+      wantsPhotos:      participants.wantsPhotos,
     })
     .from(participants)
     .innerJoin(events, eq(events.id, participants.eventId))
@@ -243,6 +254,10 @@ router.get('/me', async (req: Request, res: Response) => {
       // Asked once, on whichever surface they saw first. Both the camera and the shared gallery
       // offer the ask, and neither should re-ask someone who already answered on the other.
       feedbackGiven:   !!p.feedbackAskedAt,
+      // Whether this guest has asked us to send them the photos. THE consent gate for every guest
+      // email (guest-delivery.ts) — the camera renders the control from this rather than from
+      // local state, so a guest who opted in on another device sees it already on.
+      wantsPhotos:     !!p.wantsPhotos,
       // True when the address we hold arrived with their payment rather than at join — the guest
       // never typed it here, so it is worth telling them which one their photos are tied to.
       emailFromPayment: !!p.upgradeEmail && (p.email || '').toLowerCase() === p.upgradeEmail.toLowerCase(),
@@ -256,6 +271,109 @@ router.get('/me', async (req: Request, res: Response) => {
 // ── POST /api/participants/feedback — how it was to be a guest ────────────────────────────────
 // Asked once, answered or dismissed. A rating alone is fine; the comment is optional, because most
 // people will not write one and demanding it just loses the rating too.
+// ── PUT /api/participants/email — attach an email to a roll already in progress ───────────────
+//
+// A guest's roll lives in the session token in THIS browser's localStorage. Open the same event in
+// a different browser and there is no session, so they join again — a second participant, a fresh
+// roll, and their photos stranded on an identity they can no longer reach.
+//
+// That is not a hypothetical. An in-app browser (Facebook's is the one people meet) forgets camera
+// permission between uses, so we tell guests to open the link in their real browser — and following
+// that advice is exactly what splits them in two. Reproduced by the product owner: photo taken in
+// the Facebook browser, opened in Chrome, arrived as a different person.
+//
+// An email is the one thing that survives the move, because the join route already recovers by it.
+// So a guest who has started shooting can attach one, and the switch becomes a resume.
+router.put('/email', async (req: Request, res: Response) => {
+  const sessionToken = String((req.body as { sessionToken?: unknown })?.sessionToken || '');
+  // Trimmed and capped the same way the join route does it — the UNIQUE index is on lower(email),
+  // and the two have to agree about what "the same address" means or recovery misses.
+  const raw = (req.body as { email?: unknown })?.email;
+  const cleanEmail = typeof raw === 'string' ? raw.trim().slice(0, 200) : '';
+  if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
+  if (!isEmail(cleanEmail)) return res.status(400).json({ error: 'Enter a valid email address' });
+
+  const [p] = await db.select().from(participants).where(eq(participants.sessionToken, sessionToken));
+  if (!p) return res.status(404).json({ error: 'Session not found' });
+
+  // Already theirs — nothing to do, and saying so beats an error for a guest who tapped twice.
+  if ((p.email || '').toLowerCase() === cleanEmail.toLowerCase()) return res.json({ ok: true, email: p.email });
+
+  try {
+    await db.update(participants).set({ email: cleanEmail }).where(eq(participants.id, p.id));
+    res.json({ ok: true, email: cleanEmail });
+  } catch (e) {
+    // (event_id, lower(email)) is UNIQUE — one address per event, so somebody else here is already
+    // using it. Their own roll is untouched; they just cannot claim this address.
+    if (isDuplicate(e)) {
+      return res.status(409).json({ error: 'Someone else at this event is already using that email address.' });
+    }
+    throw e;
+  }
+});
+
+// ── POST /api/participants/wants-photos — "send me the photos" ────────────────
+//
+// The ONE thing that lets us email a guest. Nothing else in the system creates that permission:
+// not the host's toggles, not having an address on file from a top-up payment, not having joined.
+// A guest who has not been here has wants_photos false and receives nothing, which is also why no
+// event that predates 0046 can mail anybody.
+//
+// The address is optional here because it is often already on the row — the join screen asks for
+// it, and a guest who paid for more shots has one from the payment. Passing one sets it the same
+// way PUT /email does, and hits the same wall: (event_id, lower(email)) is UNIQUE, so an address
+// somebody else at this event is already using cannot be attached to this roll.
+//
+// On that collision we do what email-my-photos does — proceed for this guest, do NOT store the
+// address, and say so. The consent is real and is recorded; what cannot happen is the address
+// moving off the roll it already identifies, because that roll is how the other guest gets back in
+// on a new device. The flag is there so the UI can tell them plainly: that address is spoken for at
+// this event, and the photos will go to whoever holds it.
+router.post('/wants-photos', async (req: Request, res: Response) => {
+  const body = req.body as { sessionToken?: unknown; wantsPhotos?: unknown; email?: unknown };
+  const sessionToken = String(body?.sessionToken || '');
+  if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
+
+  // Absent means yes: the only reason to call this is to ask. `false` is how a guest changes their
+  // mind, and it is honoured for every message — the sweep reads this column, not a copy of it.
+  const wantsPhotos = body.wantsPhotos === undefined ? true : body.wantsPhotos === true;
+
+  const [p] = await db.select().from(participants).where(eq(participants.sessionToken, sessionToken));
+  if (!p) return res.status(404).json({ error: 'Session not found' });
+
+  // Trimmed and capped exactly as the join route does it — the UNIQUE index is on lower(email), and
+  // the two have to agree about what "the same address" is or recovery misses.
+  const raw = typeof body.email === 'string' ? body.email.trim().slice(0, 200) : '';
+  if (raw && !isEmail(raw)) return res.status(400).json({ error: 'Enter a valid email address' });
+
+  let storedEmail = p.email;
+  let duplicateEmail = false;
+  if (raw && raw.toLowerCase() !== (p.email || '').toLowerCase()) {
+    try {
+      await db.update(participants).set({ email: raw }).where(eq(participants.id, p.id));
+      storedEmail = raw;
+    } catch (e) {
+      if (!isDuplicate(e)) throw e;
+      duplicateEmail = true;
+      console.warn(`[participants] ${p.id}: address in use by another guest — opting in without storing it`);
+    }
+  }
+
+  await db.update(participants).set({ wantsPhotos }).where(eq(participants.id, p.id));
+
+  res.json({
+    ok: true,
+    wantsPhotos,
+    email: storedEmail,
+    emailStored: !!storedEmail,
+    duplicateEmail,
+    // They said yes and we have nowhere to send it. The opt-in is kept — they may add an address
+    // later, and the sweep simply skips a row with no address — but the UI has to ask for one now
+    // or the guest will believe something is coming that cannot be.
+    needsEmail: wantsPhotos && !storedEmail,
+  });
+});
+
 router.post('/feedback', async (req: Request, res: Response) => {
   const sessionToken = String(req.body?.sessionToken || '');
   if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
@@ -293,6 +411,7 @@ router.post('/email-my-photos', async (req: Request, res: Response) => {
       eventName: events.name,
       joinCode:  events.joinCode,
       slug:      events.slug,
+      moderationEnabled: events.moderationEnabled,
     })
     .from(participants)
     .innerJoin(events, eq(events.id, participants.eventId))
@@ -320,10 +439,13 @@ router.post('/email-my-photos', async (req: Request, res: Response) => {
     }
   }
 
-  const [{ c: photoCount }] = await db
-    .select({ c: count() })
-    .from(photos)
-    .where(eq(photos.participantId, p.id));
+  // Counted through the SAME rule the gallery renders by, not raw rows. A flat count told a guest
+  // with five shots and three rejections 'You took 5 photos', then showed them two — which reads as
+  // photos we lost rather than photos a host binned, and is the sort of small lie that turns into a
+  // support email. Filtered here rather than in SQL so there is one copy of the rule, and the row
+  // set is bounded by the guest's own allowance (tens, not thousands).
+  const mine = await db.select({ status: photos.status }).from(photos).where(eq(photos.participantId, p.id));
+  const photoCount = mine.filter((r) => guestSeesPhoto(r.status, p.moderationEnabled)).length;
   const galPath    = p.slug ? `/gallery/${p.slug}` : `/gallery/${p.joinCode}`;
   const galUrl     = baseUrl(req) + galPath;
 
@@ -333,18 +455,13 @@ router.post('/email-my-photos', async (req: Request, res: Response) => {
       subject: `Your photos from ${p.eventName} 📷`,
       html: email.htmlEmail(`Your photos from ${p.eventName}`, `
         <p>Hi ${escapeHtml(p.name)},</p>
-        <p>You took <strong>${photoCount} photo${photoCount !== 1 ? 's' : ''}</strong> at <strong>${escapeHtml(p.eventName)}</strong>.</p>
+        ${photoCount
+          ? `<p>You took <strong>${photoCount} photo${photoCount !== 1 ? 's' : ''}</strong> at <strong>${escapeHtml(p.eventName)}</strong>.</p>`
+          // A guest whose shots are all still awaiting a host's approval has a real count of zero,
+          // and 'You took 0 photos' is both deflating and useless. Send them the gallery instead.
+          : `<p>Here's the gallery from <strong>${escapeHtml(p.eventName)}</strong>.</p>`}
         <p style="margin:24px 0"><a href="${galUrl}" class="btn">View Gallery →</a></p>
         <p style="color:#888;font-size:0.85em">Your photos appear under your name <strong>${escapeHtml(p.name)}</strong> in the gallery.</p>
-        <!-- Surface 2 of 3: a guest who asked for their photos has self-selected as engaged, which
-             makes this the warmest referral moment we get. Leads with the free tier, not a discount:
-             the barrier is not price, it is that a guest has no idea this is something they can run
-             themselves — nothing in the guest flow ever told them. -->
-        <hr style="border:none;border-top:1px solid #2a2418;margin:22px 0 16px" />
-        <p style="font-size:0.9em;color:#b8ab8d">
-          Hosting something yourself? Snapdini is <strong>free for up to 10 guests</strong> —
-          <a href="${baseUrl(req)}/?ref=${encodeURIComponent(p.joinCode)}">start your own event</a>.
-        </p>
       `),
     });
     res.json({ success: true });

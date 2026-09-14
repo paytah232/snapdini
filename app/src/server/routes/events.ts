@@ -4,10 +4,10 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { v4 as uuidv4 } from 'uuid';
 import QRCode from 'qrcode';
 import sharp from 'sharp';
-import { eq, and, or, sql, inArray, count, desc, isNotNull } from 'drizzle-orm';
+import { eq, and, or, sql, inArray, count, desc, isNotNull, isNull } from 'drizzle-orm';
 import { db } from '../db';
 import { parseChallengeSets, readSets, readTick, parseTick, serialiseSets, parseEventType, MAX_CHALLENGES, MAX_SETS } from '../challenges';
-import { events, participants, photos, shares, eventCohosts, users, type Event } from '../schema';
+import { events, participants, photos, shares, shareSends, eventCohosts, users, type Event } from '../schema';
 import { faceMatchingAvailable } from '../faces';
 import * as email from '../email';
 import * as auth from '../auth';
@@ -18,6 +18,9 @@ import { startSlideshow, slideshowInfo, toggleSlideshowFavourite, deleteSlidesho
 import { billingEnabled, quote, FREE_ALL_GUESTS, brandingRemovable, RETENTION_PAID_DAYS } from '../billing';
 import { sendWelcome } from '../lifecycle';
 import options from '../options';
+import { REVEAL_CUSTOM, ceilToRevealTick, zonedWallTimeToMs } from '../../../../shared/reveal';
+import { parseGuestDelivery, parseGuestSendScope, effectiveGuestScope, revealOpensAt,
+         clampGuestSendAt, sendGuestLink, type GuestTiming } from '../guest-delivery';
 
 const router = Router();
 
@@ -48,6 +51,54 @@ function sanitizeAspects(arr: unknown): string[] {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/** Turn the host's custom reveal choice into the instant to store, or into the reason it cannot be.
+ *
+ *  Resolved HERE from the wall-clock strings and the event's OWN timezone, deliberately not taken
+ *  as an epoch from the client the way starts_at is. The browser's zone is wherever the host
+ *  happens to be standing: a planner in Sydney setting the reveal for a Perth event would book it
+ *  two hours out, and nothing on either side would notice.
+ *
+ *  Returning an error rather than falling back to the delay is the point — a silent fallback saves
+ *  a reveal at a time the host did not choose and reports it as saved. */
+function resolveCustomReveal(date: unknown, time: unknown, timezone: string | null, purgeAt: number):
+  { at: number } | { error: string } {
+  const at = zonedWallTimeToMs(String(date ?? ''), String(time ?? ''), timezone || 'UTC');
+  if (at === null) return { error: 'Pick the date and time you want the photos revealed.' };
+  // Rounded before it is stored, never on the way out, so the instant the host was shown when they
+  // picked it is the instant every countdown and every gate reads back afterwards.
+  const rounded = ceilToRevealTick(at);
+  // Retention deletes the photos. A reveal booked past that unlocks an empty gallery — the one
+  // outcome worse than refusing to save.
+  if (rounded > purgeAt)
+    return { error: 'That is after the photos are deleted at the end of retention. Pick an earlier reveal, or extend retention first.' };
+  return { at: rounded };
+}
+
+/** Turn the host's "send the guests the link at…" choice into the instant to store.
+ *
+ *  Mirrors resolveCustomReveal above, and for the same reason: the wall time is resolved against
+ *  the EVENT'S timezone, not the browser's, so a planner in Sydney booking a Perth event does not
+ *  quietly move the send two hours. An explicit epoch is accepted too, for a caller that has
+ *  already done that work.
+ *
+ *  Then the one invariant this feature cannot bend: the send is CLAMPED UP to the reveal. A gallery
+ *  link that lands before the gallery opens sends a guest to a locked page, and a guest who gets
+ *  there once does not come back. Clamping rather than refusing is deliberate — refusing would
+ *  throw away the rest of a settings save over minutes the host can only have mistyped, and "as
+ *  early as you can" is the only thing an earlier time can mean. The caller reports the clamp so
+ *  the host is told, rather than shown a different time back without explanation.
+ */
+function resolveGuestSendAt(body: Record<string, unknown>, timezone: string | null, timing: GuestTiming):
+  { at: number; clamped: boolean } | { error: string } {
+  let at: number | null = null;
+  const raw = body.guestSendAt;
+  if (typeof raw === 'number' && raw > 0) at = raw;
+  else if (body.guestSendDate !== undefined || body.guestSendTime !== undefined)
+    at = zonedWallTimeToMs(String(body.guestSendDate ?? ''), String(body.guestSendTime ?? ''), timezone || 'UTC');
+  if (at === null) return { error: 'Pick the date and time you want your guests sent the link.' };
+  return clampGuestSendAt(ceilToRevealTick(at), revealOpensAt(timing));
+}
 
 function generateJoinCode(): string {
   // Cryptographically random (not Math.random) + 8 chars over a 32-symbol alphabet (~2^40)
@@ -123,11 +174,13 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
 
   const { name, blurb: rawBlurb, durationHours, maxPhotos, revealMode, slug: rawSlug,
           startDate, startTime, startsAt: startsAtMs, allowDownloads, noFlash,
-          revealDelayHours, moderationEnabled, timezone, maxGuests, videoSeconds } = req.body as {
+          revealDelayHours, revealDate, revealTime, moderationEnabled, timezone, maxGuests, videoSeconds, eventType } = req.body as {
     name?: string; blurb?: string; durationHours?: number | string; maxPhotos?: number | string;
     revealMode?: string; slug?: string; startDate?: string; startTime?: string;
     startsAt?: number; allowDownloads?: boolean; noFlash?: boolean; revealDelayHours?: number | string;
+    revealDate?: string; revealTime?: string;
     moderationEnabled?: boolean; timezone?: string; maxGuests?: number | string; videoSeconds?: number | string;
+    eventType?: string;
   };
   const blurb = typeof rawBlurb === 'string' && rawBlurb.trim() ? rawBlurb.trim().slice(0, 280) : null;
 
@@ -136,7 +189,8 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
 
   const validModes = ['instant', 'at_end', 'manual'];
   const mode = validModes.includes(revealMode as string) ? (revealMode as string) : 'instant';
-  // Reveal delay only applies to 'at_end'; clamp to 0..168h (one week).
+  // Reveal delay only applies to 'at_end'; clamp to 0..168h (one week). REVEAL_CUSTOM parses to
+  // NaN here and so lands on 0 — correct, because the absolute instant resolved below wins anyway.
   const revealDelay = mode === 'at_end' ? Math.min(Math.max(parseInt(revealDelayHours as string, 10) || 0, 0), 168) : 0;
 
   let slug: string | null = null;
@@ -182,6 +236,39 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
   );
   const entPaid = billingEnabled ? !q.requiresPayment : true;
 
+  const eventTz = (typeof timezone === 'string' && timezone) ? timezone.slice(0, 64) : null;
+  const purgeAt = expiresAt + entRetentionDays * DAY_MS;
+
+  // Resolved down here rather than beside the mode, because the ceiling it is checked against is
+  // the purge, and the purge is not known until the retention entitlement above is.
+  let revealAt: number | null = null;
+  if (mode === 'at_end' && String(revealDelayHours) === REVEAL_CUSTOM) {
+    const r = resolveCustomReveal(revealDate, revealTime, eventTz, purgeAt);
+    if ('error' in r) return res.status(400).json({ error: r.error });
+    revealAt = r.at;
+  }
+
+  // ── Guest delivery (0046) ──────────────────────────────────────────────────
+  // Every field is optional and every default is what a new event should do. Nothing here can mail
+  // anybody on its own: participants.wantsPhotos is the consent gate, and it starts false.
+  const gBody = req.body as Record<string, unknown>;
+  const guestDelivery  = gBody.guestDelivery  === undefined ? 'all_on_reveal' : parseGuestDelivery(gBody.guestDelivery);
+  const guestSendScope = gBody.guestSendScope === undefined ? 'all'           : parseGuestSendScope(gBody.guestSendScope);
+  let guestSendAt: number | null = null;
+  let guestSendAtClamped = false;
+  if (guestDelivery === 'scheduled') {
+    const g = resolveGuestSendAt(gBody, eventTz, {
+      revealMode: mode, revealedAt: null, revealHidden: false, revealAt, revealDelayHours: revealDelay,
+      startsAt, expiresAt, guestDelivery, guestSendAt: null, guestSendScope,
+    });
+    if ('error' in g) return res.status(400).json({ error: g.error });
+    guestSendAt = g.at;
+    guestSendAtClamped = g.clamped;
+  }
+  const guestMailThanks   = gBody.guestMailThanks   === undefined ? true  : gBody.guestMailThanks   === true;
+  const guestMailReminder = gBody.guestMailReminder === undefined ? false : gBody.guestMailReminder === true;
+  const guestMailLive     = gBody.guestMailLive     === undefined ? true  : gBody.guestMailLive     === true;
+
   let joinCode: string;
   let attempts = 0;
   do {
@@ -197,12 +284,18 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
     ownerUserId:     req.user ? req.user.id : null,
     name:            name.trim().slice(0, 80),
     blurb,
+    // What kind of event this is. It has existed in the schema since the mission packs landed, but
+    // nothing ever set it at creation — it could only be filled in as a side effect of opening the
+    // missions editor, so a brand-new event was always "unstated" and every default keyed off it
+    // (card decoration, tick glyph, mission pack) quietly fell back to the generic one.
+    eventType:       parseEventType(eventType),
     joinCode,
     slug:            slug || null,
     organizerCode:   uuidv4().replace(/-/g, ''),
     maxPhotos:       entMaxPhotos,
     revealMode:      mode,
     revealDelayHours: revealDelay,
+    revealAt,
     // Moderation only applies when photos aren't shown instantly.
     moderationEnabled: moderationEnabled === true && mode !== 'instant',
     startsAt,
@@ -221,13 +314,19 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
     allowDownloads:  allowDownloads !== false,
     noFlash:         noFlash === true,
     theme:           null,
-    timezone:        (typeof timezone === 'string' && timezone) ? timezone.slice(0, 64) : null,
+    timezone:        eventTz,
     aspectRatios:    JSON.stringify(entAspects),
     guestCap:        entGuestCap,
     videoSeconds:    entVideoSeconds,
     retentionDays:   entRetentionDays,
     paid:            entPaid,
-    purgeAt:         expiresAt + entRetentionDays * DAY_MS,
+    purgeAt,
+    guestDelivery,
+    guestSendScope,
+    guestSendAt,
+    guestMailThanks,
+    guestMailReminder,
+    guestMailLive,
     createdAt:       Date.now(),
   };
 
@@ -244,7 +343,13 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
     event: {
       id: event.id, name: event.name, maxPhotos: event.maxPhotos,
       revealMode: mode, startsAt, expiresAt,
+      guestDelivery, guestSendScope, guestSendAt,
+      guestMailThanks, guestMailReminder, guestMailLive,
     },
+    // True when the host asked for a send before the photos are revealed and we moved it to the
+    // reveal. The UI has to say so — showing a different time back without a word is how a host
+    // stops trusting what the form tells them.
+    guestSendAtClamped,
   });
 });
 
@@ -286,7 +391,11 @@ router.post('/demo', async (_req: Request, res: Response) => {
 
   const eventId = uuidv4();
   const organizerCode = uuidv4().replace(/-/g, '');
-  const expiresAt = now + 3 * 3_600_000; // 3h window
+  // 4h — the shortest length the form itself offers. It was 3h, a value no host could pick, so
+  // every demo on production sat at a duration the product does not otherwise admit to. A demo is a
+  // try-before-you-buy and wants to be short: long enough to shoot a few frames and see the gallery
+  // reveal, not long enough to accumulate a day of strangers' photos awaiting purge.
+  const expiresAt = now + 4 * 3_600_000;
   // Demo unlocks all aspect ratios so visitors can try them (free events default to 1:1).
   await db.insert(events).values({
     id: eventId,
@@ -299,6 +408,7 @@ router.post('/demo', async (_req: Request, res: Response) => {
     revealMode: 'instant',
     challenges: JSON.stringify({ sets: [{ key: DEMO_SET_KEY, label: 'Demo card', items: DEMO_MISSIONS }] }),
     revealDelayHours: 0,
+    revealAt: null,
     moderationEnabled: false,
     startsAt: now,
     expiresAt,
@@ -420,6 +530,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
     maxPhotos:      event.maxPhotos,
     revealMode:     event.revealMode,
     revealDelayHours: event.revealDelayHours,
+    revealAt:       event.revealAt,
     timezone:       event.timezone || null,
     aspectRatios:   event.aspectRatios ? JSON.parse(event.aspectRatios) : ['1:1'],
     // Per-event video length when billing is on; otherwise the global (self-host) setting.
@@ -578,6 +689,7 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     joinedAt: participants.joinedAt,
     requestedMoreAt: participants.requestedMoreAt,
     challengeSet: participants.challengeSet,
+    wantsPhotos: participants.wantsPhotos,
   }).from(participants).where(eq(participants.eventId, ev.id)).orderBy(participants.joinedAt);
   const [{ c: photoCount }] = await db.select({ c: count() }).from(photos).where(eq(photos.eventId, ev.id));
   // "Pending" only means "needs action" when moderation is ON. With it off, pending photos are
@@ -590,6 +702,41 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
   const joinPath = ev.slug ? `/e/${ev.slug}` : `/join/${ev.joinCode}`;
 
   // Flat shape consumed directly by admin.js (no nested `event`).
+  // How many tricks each guest has actually pulled off, for the participants list.
+  //
+  // ONE grouped query, not one per guest: a 150-guest event would otherwise be 150 round trips to
+  // render a single card, which is exactly the kind of thing that makes an admin page feel broken
+  // at the size where it matters most.
+  //
+  // Scoped to the card the guest is HOLDING, the same way the camera scopes their progress. A host
+  // can move somebody to a different card, and shots taken against the old card's tricks must not
+  // keep counting — otherwise the number here disagrees with the number in their camera.
+  const tricksByParticipant = new Map<string, number>();
+  if (readSets(ev.challenges).length) {
+    const offeredBySet = new Map<string, Set<string>>();
+    for (const set of readSets(ev.challenges)) offeredBySet.set(set.key, new Set(set.items.map((i) => i.id)));
+    const firstSet = readSets(ev.challenges)[0];
+    const doneRows = await db
+      .select({ participantId: photos.participantId, challengeId: photos.challengeId })
+      .from(photos)
+      .where(and(eq(photos.eventId, ev.id), isNotNull(photos.challengeId)));
+    const seen = new Map<string, Set<string>>();   // participant → distinct challenge ids
+    for (const r of doneRows) {
+      if (!r.challengeId) continue;
+      let set = seen.get(r.participantId);
+      if (!set) { set = new Set(); seen.set(r.participantId, set); }
+      set.add(r.challengeId);
+    }
+    for (const p of participantRows) {
+      const offered = offeredBySet.get(p.challengeSet || '') ?? offeredBySet.get(firstSet?.key ?? '') ?? new Set<string>();
+      const done = seen.get(p.id);
+      if (!done) continue;
+      let n = 0;
+      for (const id of done) if (offered.has(id)) n++;
+      if (n) tricksByParticipant.set(p.id, n);
+    }
+  }
+
   res.json({
     id:             ev.id,
     name:           ev.name,
@@ -601,6 +748,7 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     maxPhotos:      ev.maxPhotos,
     revealMode:     ev.revealMode,
     revealDelayHours: ev.revealDelayHours,
+    revealAt:       ev.revealAt,
     moderationEnabled: !!ev.moderationEnabled,
     ratingMode:     ev.ratingMode || 'favourite',
     timezone:       ev.timezone || null,
@@ -637,6 +785,24 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     retentionDays:  ev.retentionDays,
     paid:           !!ev.paid,
     amountPaidCents: ev.amountPaidCents,
+    // ── Guest delivery (0046) — current state, for the settings screen ──────
+    guestDelivery:      ev.guestDelivery,
+    // The scope a send would ACTUALLY use: 'favourites_manual' is a scope as much as a mode, and a
+    // stale guest_send_scope of 'all' must not be shown as though it would widen it.
+    guestSendScope:     effectiveGuestScope(ev),
+    guestSendAt:        ev.guestSendAt ?? null,
+    guestMailThanks:    !!ev.guestMailThanks,
+    guestMailReminder:  !!ev.guestMailReminder,
+    guestMailLive:      !!ev.guestMailLive,
+    // When the gallery opens to everyone, or null when only the host can open it. The same value
+    // the guest emails are keyed to, so the screen and the mail cannot disagree about the date.
+    guestReleaseAt:     revealOpensAt(ev),
+    // Non-null once each message has gone. The host's UI reads these as "sent", not as settings.
+    guestsSentAt:         ev.guestsSentAt ?? null,
+    guestThanksSentAt:    ev.guestThanksSentAt ?? null,
+    guestReminderSentAt:  ev.guestReminderSentAt ?? null,
+    // How many guests would actually be mailed: they asked AND we have somewhere to send it.
+    guestsWantingPhotos: participantRows.filter((r) => r.wantsPhotos && !!r.email).length,
     posterConfig:   readPosterConfig(ev.posterConfig),
     eventType:      ev.eventType ?? null,
     challengeSets:  readSets(ev.challenges),
@@ -649,6 +815,8 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
       id: p.id, name: p.name, email: p.email,
       photosTaken: p.photosTaken, joinedAt: p.joinedAt,
       challengeSet: p.challengeSet,
+      wantsPhotos: !!p.wantsPhotos,
+      tricksDone: tricksByParticipant.get(p.id) ?? 0,
     })),
     emailEnabled:   email.enabled,
   });
@@ -672,9 +840,14 @@ router.post('/:joinCode/highlights', requireOrganizer, async (req: Request, res:
 });
 
 // ── PUT /api/events/:joinCode/challenges — save the photo missions + event type ──
-// Mirrors the poster endpoint: a small bounded blob owned by the organizer. Event type lives here
-// rather than at creation because it belongs with theming, and asking at creation would add a
-// question to the one flow we most want frictionless.
+// Mirrors the poster endpoint: a small bounded blob owned by the organizer.
+//
+// This used to be the ONLY way event type was ever set — the reasoning being that asking at
+// creation would add a question to the flow we most want frictionless. The cost of that was
+// invisible and total: every event was created "unstated", so the mission packs, the tick glyphs
+// and the card decorations all fell back to generic unless a host happened to open the missions
+// editor. Nine packs and nine decorations, unreachable by default. Creation asks now; this endpoint
+// still updates it, because changing the type later must still retheme the cards.
 router.put('/:joinCode/challenges', requireOrganizer, async (req: Request, res: Response) => {
   const body = req.body as { eventType?: unknown; challenges?: unknown; tick?: unknown };
   const sets = parseChallengeSets(body.challenges);
@@ -741,12 +914,13 @@ router.post('/:joinCode/slideshow', requireOrganizer, async (req: Request, res: 
   const secondsPer = Number.isFinite(b.secondsPer) ? Number(b.secondsPer) : undefined;
   const quality = typeof b.quality === 'string' ? b.quality : undefined;
   const resolution = typeof (b as { resolution?: string }).resolution === 'string' ? (b as { resolution?: string }).resolution : undefined;
+  const order = typeof (b as { order?: string }).order === 'string' ? (b as { order?: string }).order : undefined;
   // Removing the Snapdini intro/outro is a paid add-on — only honour branding=false when entitled.
   const wantNoBranding = b.branding === false;
   if (wantNoBranding && !brandingRemovable(req.event!))
     return res.status(402).json({ error: 'Removing the Snapdini frames needs the add-on — purchase it first' });
   const branding = !wantNoBranding;
-  const job = startSlideshow(req.event!.id, { favouritesOnly, track, tracks, loopMusic, secondsPer, includeVideos, keepVideoAudio, quality, resolution, branding });
+  const job = startSlideshow(req.event!.id, { favouritesOnly, track, tracks, loopMusic, secondsPer, includeVideos, keepVideoAudio, quality, resolution, branding, order });
   res.json(job);
 });
 router.get('/:joinCode/slideshow', requireOrganizer, async (req: Request, res: Response) => {
@@ -897,40 +1071,140 @@ router.post('/:joinCode/allow-downloads', requireOrganizer, async (req: Request,
   res.json({ success: true, allowDownloads: allow });
 });
 
-// ── POST /api/events/:joinCode/email-gallery ──────────────────────────────────
+// ── Emailing a link, and remembering that you did ─────────────────────────────
+//
+// One route for both kinds of link, because they differ only in which URL goes in the button:
+// omit shareId and it is the event's standing gallery link; pass one and it is a curated share the
+// host made. Two routes would have meant two copies of the address parsing, the send loop, the
+// rate cap and the recording, to serve one nullable field.
+//
+// Every attempt is written to share_sends, successes and failures alike. Before this the route
+// sent and forgot, so "have I already sent this to Mum?" had no answer and a bounce left no trace.
 
-router.post('/:joinCode/email-gallery', requireOrganizer, async (req: Request, res: Response) => {
+/** Parse, validate and de-duplicate a submitted address list. Case-insensitive on the duplicate
+ *  check, since Mum@example.com and mum@example.com are one person and two rows would say
+ *  otherwise. */
+function parseAddresses(raw: unknown): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const e of Array.isArray(raw) ? raw : []) {
+    const addr = String(e).trim();
+    if (!isEmail(addr)) continue;
+    const key = addr.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(addr);
+  }
+  return out;
+}
+
+router.post('/:joinCode/email-link', requireOrganizer, async (req: Request, res: Response) => {
   if (!email.enabled) return res.status(503).json({ error: 'Email not configured on this server' });
-  const reqEmails = (req.body as { emails?: unknown }).emails;
-  const list = (Array.isArray(reqEmails) ? reqEmails : [])
-    .map((e) => String(e).trim()).filter(isEmail);
+  const body = req.body as { emails?: unknown; shareId?: unknown };
+  const list = parseAddresses(body.emails);
   if (list.length === 0) return res.status(400).json({ error: 'No valid email addresses provided' });
 
-  const ev       = req.event!;
-  const base     = baseUrl(req);
+  const ev      = req.event!;
+  const base    = baseUrl(req);
+  const wantedShare = typeof body.shareId === 'string' && body.shareId ? body.shareId : null;
+
+  // Look the share up rather than trusting the id: it scopes the query to THIS event, so an
+  // organizer code for one event cannot be used to mail out another event's share link.
+  let share: typeof shares.$inferSelect | null = null;
+  if (wantedShare) {
+    const [row] = await db.select().from(shares)
+      .where(and(eq(shares.id, wantedShare), eq(shares.eventId, ev.id)));
+    if (!row) return res.status(404).json({ error: 'That shared link no longer exists' });
+    share = row;
+  }
+
   const galPath  = ev.slug ? `/gallery/${ev.slug}` : `/gallery/${ev.joinCode}`;
-  const galUrl   = base + galPath;
+  const linkUrl  = share ? `${base}/s/${share.slug || share.id}` : base + galPath;
   const joinPath = ev.slug ? `/e/${ev.slug}` : `/join/${ev.joinCode}`;
   const joinUrl  = base + joinPath;
   const safeName = escapeHtml(ev.name);   // organizer-controlled → escape in outbound HTML
+  // The host's own name for the share, when they gave it one. It is their words in an email that
+  // carries our branding, so it is escaped like any other organizer-controlled string.
+  const shareLabel = share?.label ? escapeHtml(share.label) : '';
 
-  let sent = 0, errors = 0;
+  const subject = share
+    ? `${share.label || 'Photos'} from ${ev.name} 📷`
+    : `Gallery from ${ev.name} 📷`;
+
+  // A curated share is a selection someone chose to send, so the email says so and does NOT carry
+  // the join code — that invites people into the event itself, which is the opposite of the point
+  // of handing out a narrowed link.
+  const body_html = share
+    ? `
+      <p>${shareLabel ? `<strong>${shareLabel}</strong> from ` : 'Photos from '}${safeName} are ready to view.</p>
+      <p style="margin:24px 0"><a href="${linkUrl}" class="btn">View photos →</a></p>`
+    : `
+      <p>The event gallery is ready to view.</p>
+      <p style="margin:24px 0"><a href="${linkUrl}" class="btn">View Gallery →</a></p>
+      <p>Or share the event and join code <strong>${escapeHtml(ev.joinCode)}</strong> at:<br>
+      <a href="${joinUrl}">${joinUrl}</a></p>`;
+
+  // Two presses of Send used to be two identical emails to everyone: the address list was deduped
+  // within the request and nothing looked at what had already gone out. share_sends is that record,
+  // so read it — and it also holds the guest sends (guest-delivery.ts), so a host who types in an
+  // address their guest was already sent this link at does not send them a second copy of it.
+  //
+  // `resend: true` is the host saying they meant it — a bounce, or someone who deleted the mail —
+  // and is the only way an address that already has a delivered send for THIS link gets another.
+  //
+  // A ledger we cannot READ must not block a send the host asked for: the worst case there is the
+  // duplicate this guard exists to avoid, which is a smaller failure than a link nobody gets.
+  const resend = (req.body as { resend?: unknown }).resend === true;
+  let alreadySent = new Set<string>();
+  if (!resend) {
+    try {
+      const prior = await db.select({ email: shareSends.email }).from(shareSends).where(and(
+        eq(shareSends.eventId, ev.id),
+        share ? eq(shareSends.shareId, share.id) : isNull(shareSends.shareId),
+        eq(shareSends.ok, true),
+      ));
+      alreadySent = new Set(prior.map((r) => (r.email || '').trim().toLowerCase()));
+    } catch (e) { console.error('[email-link] could not read prior sends', e); }
+  }
+
+  const now = Date.now();
+  const rows: (typeof shareSends.$inferInsert)[] = [];
+  let sent = 0, errors = 0, skipped = 0;
   for (const addr of list.slice(0, 200)) {
+    if (alreadySent.has(addr.toLowerCase())) { skipped++; continue; }
+    let ok = true;
     try {
       await email.sendMail({
         to: addr,
-        subject: `Gallery from ${ev.name} 📷`,
-        html: email.htmlEmail(`Gallery from ${safeName}`, `
-          <p>The event gallery is ready to view.</p>
-          <p style="margin:24px 0"><a href="${galUrl}" class="btn">View Gallery →</a></p>
-          <p>Or share the event and join code <strong>${escapeHtml(ev.joinCode)}</strong> at:<br>
-          <a href="${joinUrl}">${joinUrl}</a></p>
-        `),
+        subject,
+        html: email.htmlEmail(share ? `${share.label || 'Photos'} from ${safeName}` : `Gallery from ${safeName}`, body_html),
       });
       sent++;
-    } catch { errors++; }
+    } catch { ok = false; errors++; }
+    rows.push({ id: uuidv4(), eventId: ev.id, shareId: share?.id ?? null, email: addr, ok, sentAt: now });
   }
-  res.json({ sent, errors });
+  // One insert rather than one per address: a 200-address send is a single round trip, and the
+  // whole batch either lands or does not. A failed WRITE must not fail the response — the mail has
+  // genuinely gone out by this point, and reporting an error would invite a re-send of all of it.
+  try { if (rows.length) await db.insert(shareSends).values(rows); }
+  catch (e) { console.error('[email-link] could not record sends', e); }
+
+  // `skipped` is addresses that already had this exact link. Reported rather than folded into
+  // `sent`, so the host can see that Mum was not emailed twice AND that she was emailed.
+  res.json({ sent, errors, skipped });
+});
+
+// Who this event's links have been emailed to. One query for the lot — the admin page groups them
+// by share client-side, which is cheaper than a request per link and keeps the ordering consistent.
+router.get('/:joinCode/link-sends', requireOrganizer, async (req: Request, res: Response) => {
+  const ev = req.event!;
+  const rows = await db.select().from(shareSends)
+    .where(eq(shareSends.eventId, ev.id))
+    .orderBy(desc(shareSends.sentAt))
+    .limit(1000);
+  res.json({
+    sends: rows.map((r) => ({ shareId: r.shareId, email: r.email, ok: r.ok, sentAt: r.sentAt })),
+  });
 });
 
 // ── PUT /api/events/:joinCode/settings — edit schedule / reveal / moderation ───
@@ -938,12 +1212,13 @@ router.post('/:joinCode/email-gallery', requireOrganizer, async (req: Request, r
 router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Response) => {
   const ev = req.event!;
   const { name, blurb, startDate, startTime, revealMode,
-          revealDelayHours, moderationEnabled, allowDownloads, noFlash, timezone, ratingMode, slug,
+          revealDelayHours, revealDate, revealTime, moderationEnabled, allowDownloads, noFlash, timezone, ratingMode, slug,
                   guestMayBuyShots, guestMayBuyVideo, guestMayBuyFrames, guestMayRequest, faceMatchingEnabled } = req.body as {
               guestMayBuyShots?: boolean; guestMayBuyVideo?: boolean; guestMayBuyFrames?: boolean;
     guestMayRequest?: boolean; faceMatchingEnabled?: boolean;
     name?: string; blurb?: string; startDate?: string; startTime?: string;
-    revealMode?: string; revealDelayHours?: number | string; moderationEnabled?: boolean;
+    revealMode?: string; revealDelayHours?: number | string; revealDate?: string; revealTime?: string;
+    moderationEnabled?: boolean;
     allowDownloads?: boolean; noFlash?: boolean; timezone?: string; ratingMode?: string; slug?: string;
   };
 
@@ -1053,6 +1328,59 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
   // settings save doesn't silently shorten retention the organizer paid to extend.
   const purgeAt  = expiresAt + (ev.retentionDays || RETENTION_DAYS) * DAY_MS;
 
+  // The custom reveal instant. Three cases, and the middle one is the one that has to be right:
+  //   · the key is absent — an older client, or a save that only touched the name, must not clear a
+  //     reveal the host set on another screen;
+  //   · a preset rung was chosen — that is the host asking for the delay rule back, so the absolute
+  //     instant goes;
+  //   · REVEAL_CUSTOM — re-resolved against the zone and end this save is writing, because moving
+  //     the event or its timezone changes what the host's own wall time means.
+  // Anything but 'at_end' has no schedule at all.
+  let revealAt: number | null = null;
+  if (mode === 'at_end') {
+    if (revealDelayHours === undefined) revealAt = ev.revealMode === 'at_end' ? ev.revealAt : null;
+    else if (String(revealDelayHours) === REVEAL_CUSTOM) {
+      const r = resolveCustomReveal(revealDate, revealTime, tz, purgeAt);
+      if ('error' in r) return res.status(400).json({ error: r.error });
+      revealAt = r.at;
+    }
+  }
+
+  // ── Guest delivery (0046) ──────────────────────────────────────────────────
+  // Every field is written only when its key is present, the same rule the guest-purchase toggles
+  // follow: a save from an older client, or one that only touched the name, must not switch a
+  // host's guest delivery to something they never chose.
+  const gBody = req.body as Record<string, unknown>;
+  const guestDelivery  = parseGuestDelivery(gBody.guestDelivery === undefined ? ev.guestDelivery : gBody.guestDelivery);
+  const guestSendScope = parseGuestSendScope(gBody.guestSendScope === undefined ? ev.guestSendScope : gBody.guestSendScope);
+  // Clamped against the reveal THIS SAVE is writing, not the one on the row. Moving the event, its
+  // timezone or its reveal moves the floor, and checking the old one would store a send the new
+  // reveal has just put in the past — which is the single failure this invariant exists to stop.
+  const guestTiming: GuestTiming = {
+    revealMode: mode, revealedAt: ev.revealedAt, revealHidden: ev.revealHidden,
+    revealAt, revealDelayHours: revealDelay, startsAt, expiresAt,
+    guestDelivery, guestSendAt: ev.guestSendAt, guestSendScope,
+  };
+  let guestSendAt: number | null = null;
+  let guestSendAtClamped = false;
+  if (guestDelivery === 'scheduled') {
+    const said = gBody.guestSendAt !== undefined || gBody.guestSendDate !== undefined || gBody.guestSendTime !== undefined;
+    if (!said) {
+      // Nothing new was said about the moment. Keep the stored one — but re-clamp it, because the
+      // reveal may have just moved past it.
+      if (ev.guestSendAt === null)
+        return res.status(400).json({ error: 'Pick the date and time you want your guests sent the link.' });
+      const c = clampGuestSendAt(ev.guestSendAt, revealOpensAt(guestTiming));
+      guestSendAt = c.at; guestSendAtClamped = c.clamped;
+    } else {
+      const g = resolveGuestSendAt(gBody, tz, guestTiming);
+      if ('error' in g) return res.status(400).json({ error: g.error });
+      guestSendAt = g.at; guestSendAtClamped = g.clamped;
+    }
+  }
+  // Any other mode has no scheduled moment at all, so a stored one is cleared rather than left to
+  // fire if the host ever switches back.
+
   // A rescheduled event is live again, so clear any archive marker. Retention can purge an unused
   // event's (empty) media before the organizer gets round to moving it; without this the event
   // would come back carrying purgedAt and read as archived forever. Safe because reschedule is only
@@ -1062,7 +1390,7 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
   await db.update(events).set({
     ...clearedPurgedAt,
     name: newName, blurb: newBlurb, startsAt, expiresAt, revealMode: mode,
-    revealDelayHours: revealDelay, moderationEnabled: moderation, allowDownloads: allowDl,
+    revealDelayHours: revealDelay, revealAt, moderationEnabled: moderation, allowDownloads: allowDl,
     noFlash: noFlashV,
     // Only written when the key is present: a settings save from an older client, or one that only
     // touches the name, must not silently switch guest top-ups off.
@@ -1071,14 +1399,72 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
     ...(typeof guestMayBuyFrames === 'boolean' ? { guestMayBuyFrames } : {}),
     ...(typeof guestMayRequest   === 'boolean' ? { guestMayRequest }   : {}),
     ...(typeof faceMatchingEnabled === 'boolean' && faceMatchingAvailable() ? { faceMatchingEnabled } : {}), timezone: tz, slug: newSlug, aspectRatios: aspects, ratingMode: rMode, purgeAt,
+    guestDelivery, guestSendScope, guestSendAt,
+    ...(typeof gBody.guestMailThanks   === 'boolean' ? { guestMailThanks:   gBody.guestMailThanks }   : {}),
+    ...(typeof gBody.guestMailReminder === 'boolean' ? { guestMailReminder: gBody.guestMailReminder } : {}),
+    ...(typeof gBody.guestMailLive     === 'boolean' ? { guestMailLive:     gBody.guestMailLive }     : {}),
   }).where(eq(events.id, ev.id));
 
   res.json({
     success: true, name: newName, startsAt, expiresAt, revealMode: mode,
-    revealDelayHours: revealDelay, moderationEnabled: moderation, allowDownloads: allowDl,
+    revealDelayHours: revealDelay, revealAt, moderationEnabled: moderation, allowDownloads: allowDl,
     noFlash: noFlashV, timezone: tz, slug: newSlug, aspectRatios: aspects ? JSON.parse(aspects) : ['1:1'], ratingMode: rMode,
     aspectsRefused,
+    guestDelivery, guestSendScope, guestSendAt,
+    guestMailThanks:   typeof gBody.guestMailThanks   === 'boolean' ? gBody.guestMailThanks   : !!ev.guestMailThanks,
+    guestMailReminder: typeof gBody.guestMailReminder === 'boolean' ? gBody.guestMailReminder : !!ev.guestMailReminder,
+    guestMailLive:     typeof gBody.guestMailLive     === 'boolean' ? gBody.guestMailLive     : !!ev.guestMailLive,
+    guestReleaseAt:    revealOpensAt(guestTiming),
+    // True when the moment the host asked for was before the reveal and we moved it up to it. The
+    // UI must say so: showing a different time back with no explanation is how a host learns to
+    // distrust the form.
+    guestSendAtClamped,
   });
+});
+
+// ── POST /api/events/:joinCode/send-guest-link — send the gallery link now ────
+//
+// The host's own button, and the only way the two manual delivery modes ever send anything. It
+// shares every rule with the sweep (guest-delivery.ts sendGuestLink) — the same recipients, the
+// same reveal check, the same empty-scope refusal — because a manual send that could reach a guest
+// the automatic one would not is a second set of rules to keep in step.
+//
+// One difference, deliberate: an empty scope is REPORTED here rather than emailed to the host. They
+// are looking at the answer. The sweep has no one in front of it, so it writes to them instead.
+router.post('/:joinCode/send-guest-link', requireOrganizer, async (req: Request, res: Response) => {
+  if (!email.enabled) return res.status(503).json({ error: 'Email not configured on this server' });
+  const ev = req.event!;
+  const scope = req.body?.scope === undefined ? effectiveGuestScope(ev) : parseGuestSendScope(req.body.scope);
+  const r = await sendGuestLink(ev, { scope, base: baseUrl(req) });
+
+  if (r.refused === 'read_failed')
+    return res.status(503).json({ error: 'Could not check who to send to — nothing was sent. Try again in a moment.', reason: r.refused });
+  if (r.refused === 'email_disabled')
+    return res.status(503).json({ error: 'Email not configured on this server', reason: r.refused });
+  if (r.refused === 'not_revealed')
+    return res.status(409).json({ error: 'The photos are not revealed yet, so the link would open on a locked page. Reveal them first.', reason: r.refused, recipients: r.recipients });
+  if (r.refused === 'empty_scope')
+    return res.status(409).json({
+      error: scope === 'favourites'
+        ? 'Nothing is starred yet, so the favourites link would be empty. Star some photos first.'
+        : 'There are no visible photos yet, so the link would be empty.',
+      reason: r.refused, scope, recipients: r.recipients, photoCount: 0,
+    });
+
+  // Not faults: nobody asked, or everybody already has it. Both are "there is nothing to do",
+  // which the host should be told plainly rather than as an error.
+  if (r.refused === 'no_recipients' || r.refused === 'already_sent')
+    return res.json({ sent: 0, skipped: r.recipients, errors: 0, scope: r.scope, photoCount: r.photoCount, recipients: r.recipients, reason: r.refused });
+
+  // Claim the send-once guard so the sweep does not follow this with a second copy. Only if it is
+  // still NULL — a host sending by hand after the automatic send has gone must not overwrite when
+  // that happened.
+  try {
+    await db.update(events).set({ guestsSentAt: Date.now() })
+      .where(and(eq(events.id, ev.id), isNull(events.guestsSentAt)));
+  } catch (e) { console.error('[send-guest-link] could not stamp guests_sent_at', e); }
+
+  res.json({ sent: r.sent, skipped: r.skipped, errors: r.errors, scope: r.scope, photoCount: r.photoCount, recipients: r.recipients });
 });
 
 // ── POST /api/events/:joinCode/moderate — approve / reject pending photos ──────

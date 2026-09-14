@@ -4,7 +4,12 @@
   import { tileAspect } from '$lib/ui';
   import { aspectValue, cropRect, shapeDelivered } from '$lib/frameShape';
   import { demoLinks } from '$lib/demo';
+  import { inAppBrowserName } from '$lib/inAppBrowser';
+  import { setParticipantEmail, setPhotoOptIn } from '$lib/events';
+  import { planOptIn, optInMessage } from '$lib/photoOptIn';
   import { saveMany, isIOS, type SaveManyProgress } from '$lib/saveImage';
+  import { savedSet, markSaved } from '$lib/saved';
+  import { watchTilt, glyphRotation, captureOrientation, requestTiltPermission } from '$lib/deviceTilt';
   import { goto, replaceState } from '$app/navigation';
   // Aliased: this component already has a `track` for the MediaStreamTrack.
   import { track as trackEvent } from '$lib/analytics';
@@ -52,6 +57,7 @@
   $: demoGalleryHref = ev ? demoNav.gallery : '';
   let joinName = '';
   let joinEmail = '';
+  let joinWantsPhotos = false;
   let joining = false;
   let fatal = '';
 
@@ -105,6 +111,9 @@
   let showFeedback = false;
   let screenFlash = false;       // selfie screen-flash
   let torchSupported = false;    // hardware torch (back camera, Android Chrome)
+  let torchOn = false;           // what the LAMP is doing, read back from the track — not our intent
+  let torchRefused = false;      // proven, on this device, not to work at all
+  let torchToldOnce = false;
   let flashArmed = false;        // when armed, the torch fires for the shot (and lights video)
   let fillActive = false;
   // Every phone camera blinks the screen when the shutter fires, and without it there was almost
@@ -114,11 +123,26 @@
   // leave the viewfinder covered.
   let blinking = false;
   let blinkTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Counted, not just flagged.
+   *
+   *  The blink is a CSS keyframe animation on an element that exists only while `blinking` is true.
+   *  Setting `blinking = true` when it is ALREADY true is a no-op as far as Svelte is concerned —
+   *  the node is never re-created, so the keyframes never replay, and with `forwards` fill the
+   *  element is sitting at opacity 0 by then. Two shots inside the 180ms window therefore produced
+   *  one blink, which at any steady shooting rate reads as "it only works every second time".
+   *
+   *  Bumping a counter that the markup keys on forces a genuinely new element each time, so the
+   *  animation restarts from the top however fast the shutter is pressed. */
+  let blinkSeq = 0;
   function shutterBlink() {
     clearTimeout(blinkTimer);
+    blinkSeq++;
     blinking = true;
     blinkTimer = setTimeout(() => (blinking = false), 180);
   }
+  // Remembered per device, like the shape and the video quality. A composition aid you turned on is
+  // a way of working, not a per-visit whim — and a guest who finds it gone after a refresh assumes
+  // the button did not work rather than that it was deliberately forgotten.
   let gridOn = false;
   let brightness = 1;            // preview/photo brightness (CSS filter), 1 = normal
   let track: MediaStreamTrack | null = null;
@@ -147,8 +171,18 @@
   // document rather than this component because the toast is position:fixed and rendered outside
   // this subtree, so a variable set here would never reach it.
   const TOAST_LIFT = '156px';
+  // …and higher still while the camera-check panel is up, which sits at 190px and is tall enough to
+  // overlap a message lifted to 156. Measured rather than guessed at: the panel's height changes
+  // with what it is saying (asking, testing, or listing three results), so a second constant would
+  // be right for one of those three and wrong for the others.
+  let benchEl: HTMLElement | undefined;
+  let benchH = 0;
+  $: if (benchEl && (benchPrompt || benchRunning || benchResult)) benchH = benchEl.offsetHeight;
+  $: toastLift = (benchPrompt || benchRunning || benchResult) && benchH
+    ? `${190 + benchH + 12}px`
+    : TOAST_LIFT;
   $: if (typeof document !== 'undefined') {
-    document.documentElement.style.setProperty('--toast-bottom', screen === 'camera' ? TOAST_LIFT : '');
+    document.documentElement.style.setProperty('--toast-bottom', screen === 'camera' ? toastLift : '');
   }
 
   async function diagnoseMic() {
@@ -186,7 +220,7 @@
   let videoShapeToldOnce = false;   // said once per visit, not once per tap
 
   // upload queue
-  interface QueueItem { id: string; blob: Blob; mediaType: 'photo' | 'video'; source: 'capture' | 'upload'; ext: string; status: 'pending' | 'uploading' | 'done' | 'error'; error?: string; progress?: number; size: number; durationSecs?: number; w?: number; h?: number; retries?: number; uploadId?: string; challengeId?: string; doneChunks?: number[]; }
+  interface QueueItem { id: string; blob: Blob; mediaType: 'photo' | 'video'; source: 'capture' | 'upload'; ext: string; status: 'pending' | 'uploading' | 'done' | 'error'; error?: string; progress?: number; size: number; durationSecs?: number; w?: number; h?: number; retries?: number; uploadId?: string; challengeId?: string; doneChunks?: number[]; captureOrientation?: 'portrait' | 'landscape'; captureShape?: string; }
   const MAX_UPLOAD_RETRIES = 5;   // auto-retry a failing upload this many times (with backoff) before asking the user
   // ── Photo missions ─────────────────────────────────────────────────────────
   //
@@ -198,6 +232,27 @@
   // ignores the list entirely still just takes photos, which is the point of a disposable camera.
   let missions: { id: string; text: string }[] = [];
   let missionsDone: string[] = [];
+  /** Ticks WE made, before the server had seen the upload.
+   *
+   *  The list is fetched every time it is opened, and a guest opens it straight after pulling a
+   *  trick off — often within the same second, while the photo is still going up. The reply is then
+   *  from before the photo landed, and replacing our list with it unticked a trick they had just
+   *  watched complete, with the confetti barely finished. It stayed unticked for as long as the
+   *  list was open, because nothing re-fetches while it is.
+   *
+   *  So a server answer may only ADD to what we know, never take away one of these. They are
+   *  dropped when the trick stops being offered (a host moving the guest to another card) or when
+   *  the upload turns out to be impossible (untickMission). */
+  let missionsDoneLocal: string[] = [];
+
+  /** Fold a server answer in without losing a tick it has not caught up on yet. */
+  function applyServerDone(done: unknown) {
+    const fromServer = Array.isArray(done) ? (done as string[]) : [];
+    // Local ticks survive only while their trick is still on the card being held.
+    const offered = new Set(missions.map((m) => m.id));
+    missionsDoneLocal = missionsDoneLocal.filter((id) => offered.has(id));
+    missionsDone = [...new Set([...fromServer, ...missionsDoneLocal])];
+  }
   let armed: string | null = null;
   let missionsOpen = false;
   // The host's chosen mark. Falls back to a plain circle rather than guessing from the event type:
@@ -217,6 +272,76 @@
   let uploading = false;
   let capturing = false;          // one capture at a time (guards rapid double-taps)
   const iosDevice = isIOS();      // decided once: the control it hides must not flicker
+  // Which app's embedded browser this is, if any. Decided once — the UA does not change.
+  const inAppName = inAppBrowserName();
+  let myEmail: string | null = null;      // from /me; null when they joined without one
+  let emailDraft = '';
+  let emailBusy = false;
+  let emailNoteDismissed = false;
+  // The warning only matters once there is something to LOSE. Before the first shot, switching
+  // browsers costs nothing, and a notice about it is noise on a screen they have just arrived at.
+  $: switchRisk = !!inAppName && !emailNoteDismissed && (serverRemaining < (ev?.maxPhotos ?? 0) || galleryPhotos.length > 0);
+  async function attachEmail() {
+    if (!sessionToken || emailBusy) return;
+    const v = emailDraft.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) { showToast("That email doesn't look right", true); return; }
+    emailBusy = true;
+    try {
+      const r = await setParticipantEmail(sessionToken, v);
+      myEmail = r.email;
+      showToast('Saved — use that address when you reopen and your photos come with you');
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Could not save that', true);
+    } finally { emailBusy = false; }
+  }
+
+  // "Email me the photos when the event ends". Seeded from /me and from the join reply so a guest
+  // who reopens the link is never asked again for something they already asked for.
+  let wantsPhotos = false;
+  let optInAsking = false;        // the inline address field is open
+  let optInBusy = false;
+  let optInDraft = '';
+  let optInHeadline = '';         // what the last answer said; '' until they act this session
+  let optInNote = '';
+  // Falls back to a line built from the address on file, because wantsPhotos can arrive from /me
+  // with no answer of our own to quote — without this the opted-in card renders a bare tick.
+  $: optInLine = optInHeadline || optInMessage({ wantsPhotos: true, email: myEmail }).headline;
+
+  async function requestPhotoOptIn() {
+    if (!sessionToken || optInBusy) return;
+    const plan = planOptIn({ hasEmail: !!myEmail, asking: optInAsking, draft: optInDraft });
+    // One tap and no dialog whenever we already know where to send — asking again for an address
+    // we are holding is the thing that makes people close the page.
+    if (plan.kind === 'ask') { optInAsking = true; return; }
+    if (plan.kind === 'badEmail') { showToast("That email doesn't look right", true); return; }
+    optInBusy = true;
+    try {
+      const r = await setPhotoOptIn(sessionToken, true, plan.email);
+      wantsPhotos = r.wantsPhotos;
+      // Only when it was actually stored. A collision leaves the address on nobody's row, and
+      // pretending otherwise would have the switch-browsers note promise a recovery that cannot
+      // work — that address reopens the OTHER guest's roll, not this one.
+      if (r.email) myEmail = r.email;
+      ({ headline: optInHeadline, note: optInNote } = optInMessage(r, plan.email));
+      optInAsking = false;
+      optInDraft = '';
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Could not save that', true);
+    } finally { optInBusy = false; }
+  }
+
+  async function undoPhotoOptIn() {
+    if (!sessionToken || optInBusy) return;
+    optInBusy = true;
+    try {
+      const r = await setPhotoOptIn(sessionToken, false);
+      wantsPhotos = r.wantsPhotos;
+      optInHeadline = '';
+      optInNote = '';
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Could not change that', true);
+    } finally { optInBusy = false; }
+  }
   let saveToDevice = false;       // also save a copy of each capture to the user's device
   let saveNote = false;           // transient "saving copies" hint (auto-hides)
   let retryTimer: ReturnType<typeof setInterval> | undefined;
@@ -271,6 +396,12 @@
 
   onMount(async () => {
     try {
+      orientMq = window.matchMedia('(orientation: landscape)');
+      orientMq.addEventListener('change', () => { readOrientation(); readTilt(); });
+      readOrientation();
+      stopTilt = watchTilt(readTilt);
+    } catch { /* no matchMedia: the notice simply never shows */ }
+    try {
       ev = await getEvent(identifier);
     } catch {
       fatal = 'Event not found';
@@ -285,7 +416,15 @@
     // applyEventTheme is contrast-guarded and falls back to the warm default for no-theme events.
     applyEventTheme(ev.theme);
     allowedAspects = ev.aspectRatios?.length ? ev.aspectRatios : ['1:1'];
-    aspect = allowedAspects[0];
+    // The guest's own choice, if they have one and this event still offers it. It used to reset to
+    // the event's first shape on every load, so picking Full and then refreshing — or just coming
+    // back to the camera later in the night — silently put them back on 1:1 and they shot the next
+    // few square without noticing.
+    //
+    // Validated against allowedAspects rather than trusted: the shapes on offer are the host's
+    // setting, and a preference carried in from another event (or from before this host changed
+    // theirs) may no longer be one of them. Anything not on offer falls back to the first.
+    aspect = allowedAspects.includes(savedAspect()) ? savedAspect() : allowedAspects[0];
     document.title = `${ev.name} — Snapdini`;
 
     if (ev.isUpcoming) { screen = 'upcoming'; return; }
@@ -330,9 +469,11 @@
         canAskHost = !!me.canAskHost;
         faceMatching = !!me.faceMatching;
         feedbackDone = !!me.feedbackGiven;
+        wantsPhotos = !!me.wantsPhotos;
         allowDownloads = me.allowDownloads;
+        myEmail = me.participant?.email ?? null;
         missions = Array.isArray(me.challenges) ? me.challenges : [];
-        missionsDone = Array.isArray(me.challengesDone) ? me.challengesDone : [];
+        applyServerDone(me.challengesDone);
         if (me.challengeTick) missionTick = me.challengeTick;
         await enterCamera();
         return;
@@ -371,6 +512,83 @@
   // photo: several files go into one share, which offers "Save N Images". Chunked, because every
   // file has to be in memory to be shared and a full roll at once is a dead tab.
   $: myShotCount = galleryPhotos.filter((p) => p.isOwn).length;
+  // What this device already has, so the roll can say which shots are already yours to keep.
+  // Per-browser; see lib/saved.ts for exactly what the tick claims.
+  let saved: Set<string> = new Set();
+  // Loaded when the event arrives, not on mount: the marks are keyed by join code and `ev` is
+  // fetched. Guarded on the code so re-assigning `ev` (a refresh, a poll) does not re-read on
+  // every tick.
+  // ── Landscape ────────────────────────────────────────────────────────────────
+  //
+  // The camera UI is built portrait: turn the phone and the controls scatter, the viewfinder
+  // letterboxes and the trick list runs off the bottom. What we CANNOT do is stop it — locking the
+  // orientation needs screen.orientation.lock(), which browsers only honour in fullscreen or an
+  // installed PWA, and a plain tab is neither. (The manifest asks for portrait, which covers the
+  // installed case and nothing else.)
+  //
+  // So: say so, once, and let them carry on. The photos are unaffected — capture reads the video
+  // track, not the page layout — and saying that plainly is the point of the notice. A blocking
+  // "rotate your device" wall would be a lie about a thing that still works.
+  //
+  // Guarded on a coarse pointer because a desktop is permanently "landscape" and must never see it.
+  let isLandscape = false;
+  let landscapeDismissed = false;
+  let orientMq: MediaQueryList | null = null;
+  // The Samsung-camera trick: when the PHONE turns but the page does not — rotation lock on — the
+  // layout stays exactly where it is and only the glyphs spin, so nothing moves under the thumb but
+  // everything reads upright. Zero whenever the page has turned by itself, because then it is
+  // already upright and rotating would tip it back over. See lib/deviceTilt.ts.
+  //
+  // Icons only, never text blocks or the viewfinder: a rotated paragraph in a portrait column is
+  // unreadable in a different way, and the viewfinder must keep showing the frame as it will be
+  // captured.
+  let glyphRot = 0;
+  let stopTilt: (() => void) | null = null;
+  function readTilt() { glyphRot = glyphRotation(); }
+  // Both notices are absolutely positioned at the same spot, so exactly one may be up. Landscape
+  // wins: it explains what the guest is looking at right now.
+  $: landscapeNote = isLandscape && !landscapeDismissed;
+  // Where the banner ENDS, published to CSS so the control rail can sit below it rather than under
+  // it. Measured rather than assumed: the text wraps to one line or two depending on the width, and
+  // a guessed offset is wrong on half of phones.
+  //
+  // The bottom edge, not the height — offsetTop included. Publishing height alone silently lost the
+  // banner's own top offset (8px, or more on a phone with a display cutout, since it clears the
+  // safe area). Measured clearance was 4px instead of the 12 the rule asks for, and on a notched
+  // phone that offset grows while the rail's top does not — which closes the gap and puts the
+  // banner back on top of the icons. That is the bug we just fixed, latent again.
+  let noteEl: HTMLElement | undefined;
+  let noteBottom = 0;
+  let noteRO: ResizeObserver | null = null;
+
+  const measureNote = () => {
+    if (noteEl) noteBottom = noteEl.offsetTop + noteEl.offsetHeight;
+  };
+
+  // Watched rather than measured once. A reactive statement only re-runs when the values it
+  // MENTIONS change, so `$: noteBottom = noteEl.offsetTop + noteEl.offsetHeight` re-measures when
+  // the banner appears and never again — and the banner can change size after that without Svelte
+  // having any reason to notice. A web font finishing its load is the obvious way: the text
+  // re-flows from two lines to one, the banner shrinks, and the rail is left sitting 20px too far
+  // down with a gap under the banner. A ResizeObserver watches the thing itself, so the answer
+  // cannot go stale however the size came to change.
+  $: if (noteEl && landscapeNote) {
+    measureNote();
+    if (!noteRO && typeof ResizeObserver !== 'undefined') {
+      noteRO = new ResizeObserver(measureNote);
+      noteRO.observe(noteEl);
+    }
+  }
+  $: if (!landscapeNote && noteRO) { noteRO.disconnect(); noteRO = null; }
+  $: noteVar = landscapeNote && noteBottom ? `${noteBottom}px` : '52px';
+  function readOrientation() {
+    try { isLandscape = !!orientMq?.matches && window.matchMedia('(pointer: coarse)').matches; }
+    catch { isLandscape = false; }
+  }
+
+  let savedFor = '';
+  $: if (ev && ev.joinCode !== savedFor) { savedFor = ev.joinCode; saved = savedSet(ev.joinCode); }
+
   let bulkSaving = false;
   let bulkProgress = '';
   let bulkDone = '';
@@ -380,10 +598,12 @@
     bulkSaving = true; bulkProgress = `0/${mine.length}`;
     try {
       const items = mine.map((p) => ({
+        id: p.id,
         url: p.url,
         filename: `snapdini-${new Date(p.takenAt).toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${p.mediaType === 'video' ? 'mp4' : 'jpg'}`,
       }));
       const r = await saveMany(items, (pr: SaveManyProgress) => (bulkProgress = `${pr.done}/${pr.total}`));
+      if (r.savedIds.length && ev) saved = markSaved(ev.joinCode, r.savedIds);
       if (r.cancelled) { showToast(r.saved ? `Stopped — ${r.saved} saved` : 'Stopped'); bulkDone = ''; }
       else {
         showToast(`${r.saved} photo${r.saved === 1 ? '' : 's'} saved`);
@@ -401,9 +621,29 @@
     try {
       const me = await getMe(sessionToken);
       if (Array.isArray(me.challenges)) missions = me.challenges;
-      if (Array.isArray(me.challengesDone)) missionsDone = me.challengesDone;
+      // Merged, not assigned — see missionsDoneLocal. `missions` is set first, because the merge
+      // uses it to decide which local ticks are still on offer.
+      applyServerDone(me.challengesDone);
       if (me.challengeTick) missionTick = me.challengeTick;
     } catch { /* keep what we have */ }
+  }
+
+  /** Is the camera actually still running?
+   *
+   *  `stream` being non-null is not the same thing. Hand off to the phone's own camera app — which
+   *  is what "use my own camera" does — and the OS takes the hardware; our tracks end but the
+   *  MediaStream object survives, so a `!stream` check says everything is fine while the viewfinder
+   *  is black. Recording then produced a black clip, and the frame-rate warning fired on top of it
+   *  offering 720p, because a dead track reports no frames. One dead check, three symptoms. */
+  function streamIsLive(): boolean {
+    const t = stream?.getVideoTracks?.()[0];
+    return !!t && t.readyState === 'live';
+  }
+
+  /** Bring the camera back if it died while something else had it. */
+  function resumeIfDead() {
+    if (screen !== 'camera' || cameraError || cameraPaused || cameraStarting) return;
+    if (!streamIsLive()) startCamera();
   }
 
   function onVisibility() {
@@ -411,9 +651,8 @@
       if (recording) toggleRecord();   // saves the clip; iOS would otherwise corrupt it
       if (screen === 'camera') stopCamera();
     } else {
-      if (screen === 'camera' && !stream && !cameraError && !cameraPaused) {
-        startCamera();   // auto-resume on return — unless the user manually turned the camera off
-      }
+      resumeIfDead();   // liveness, not merely "is there a stream object"
+
       // Returning to the app is exactly when a host's edit has most likely happened behind you.
       if (screen === 'camera') void refreshMissions();
     }
@@ -435,6 +674,9 @@
     // Leave the rest of the app's toasts where they belong.
     if (typeof document !== 'undefined') document.documentElement.style.removeProperty('--toast-bottom');
     clearInterval(undoTimer);
+    try { orientMq?.removeEventListener('change', readOrientation); } catch { /* ignore */ }
+    stopTilt?.();
+    noteRO?.disconnect();
     // onDestroy also runs during SSR, where `document` is undefined — guard it.
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
     if (typeof navigator !== 'undefined') navigator.mediaDevices?.removeEventListener?.('devicechange', refreshCameras);
@@ -446,11 +688,26 @@
   async function doJoin() {
     if (!joinName.trim()) { showToast('Enter your name', true); return; }
     if (joinEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(joinEmail)) { showToast("That email doesn't look right", true); return; }
+    // Asked HERE, and nowhere else, because iOS only grants it from inside a user gesture — and
+    // this tap is already the one that leads to the camera prompt, so the two land together as one
+    // short run rather than surprising someone later. Not awaited before the join proceeds: a
+    // guest who declines still gets their camera, they just lose the upright icons and the
+    // "shot sideways" note. Android shows nothing at all.
+    void requestTiltPermission().then((ok) => { if (ok) { stopTilt?.(); stopTilt = watchTilt(readTilt); } });
     joining = true;
     try {
       // Last line of defence: if this browser already holds a session for the event, use it instead
       // of creating a second participant. Cheap, and it closes any path bfcache handling misses.
-      if (await restoreIfSessionExists()) return;
+      // The tick has to survive this path too: a guest whose browser still holds a session never
+      // reaches the join call below, and without this their opt-in is silently dropped by the one
+      // branch nobody tests — the second time they open the link.
+      if (await restoreIfSessionExists()) {
+        if (joinWantsPhotos && sessionToken) {
+          if (myEmail || joinEmail.trim()) void optInFromJoin(sessionToken);
+          else optInAsking = true;
+        }
+        return;
+      }
       const r = await joinEvent(identifier, joinName.trim(), joinEmail.trim() || undefined);
       sessionToken = r.sessionToken;
       serverRemaining = r.photosRemaining;
@@ -458,11 +715,19 @@
       canAskHost = !!r.canAskHost;
       faceMatching = !!r.faceMatching;
       feedbackDone = !!r.feedbackGiven;
+      wantsPhotos = !!r.wantsPhotos;
       missions = Array.isArray(r.challenges) ? r.challenges : [];
-      missionsDone = Array.isArray(r.challengesDone) ? r.challengesDone : [];
+      applyServerDone(r.challengesDone);
       if (r.challengeTick) missionTick = r.challengeTick;
       saveSession(r.joinCode, r.sessionToken);
       trackEvent('joined', undefined, r.joinCode);
+      // Not awaited: the camera must open at the speed it always has, and a failed opt-in is
+      // recoverable from the roll. Ticking the box with no address is not thrown away either
+      // — it opens the ask in their roll rather than nagging on a screen they are leaving.
+      if (joinWantsPhotos) {
+        if (joinEmail.trim()) void optInFromJoin(r.sessionToken);
+        else optInAsking = true;
+      }
       if (r.recovered) showToast(`Welcome back! You've ${photosRemaining} shot${photosRemaining === 1 ? '' : 's'} left.`);
       await enterCamera();
     } catch (e) {
@@ -470,6 +735,21 @@
     } finally {
       joining = false;
     }
+  }
+
+  // The join screen's tick, applied once the roll exists. Silent on failure by design: this is a
+  // nice-to-have riding on the back of joining, and a toast about it would land on top of the
+  // camera permission prompt.
+  async function optInFromJoin(token: string) {
+    // Sent WITH the address rather than relying on the row already holding it: on the recovery
+    // path above, joinEvent never ran, so an address typed on this screen exists nowhere else.
+    const typed = joinEmail.trim();
+    try {
+      const r = await setPhotoOptIn(token, true, typed || undefined);
+      wantsPhotos = r.wantsPhotos;
+      if (r.email) myEmail = r.email;
+      ({ headline: optInHeadline, note: optInNote } = optInMessage(r, typed));
+    } catch { /* the roll carries the same button */ }
   }
 
   async function enterCamera() {
@@ -480,6 +760,7 @@
     // before would keep writing to Files invisibly with nothing on screen to turn it off.
     if (ev && !iosDevice) { try { saveToDevice = localStorage.getItem('savedev_' + ev.joinCode) === '1'; } catch { /* ignore */ } }
     try { const q = localStorage.getItem('snap_vidq'); if (q === 'high' || q === 'standard' || q === 'smooth' || q === 'phone') videoQuality = q; } catch { /* ignore */ }
+    try { gridOn = localStorage.getItem('snap_grid') === '1'; } catch { /* ignore */ }
     await startCamera();
     restoreQueue();
     if (typeof window !== 'undefined') {
@@ -514,8 +795,29 @@
     // Chrome); iOS Safari never does. Detect it so we don't show a fake focus ring.
     const caps = (track?.getCapabilities?.() ?? {}) as Record<string, unknown>;
     focusSupported = 'pointsOfInterest' in caps || 'focusMode' in caps;
-    // Hardware torch (back camera on Android Chrome). iOS Safari never exposes it.
-    torchSupported = 'torch' in caps && !!caps.torch;   // a fresh stream always starts with the torch physically off
+    // Hardware torch (back camera). Two sources, because one of them lies.
+    //
+    // getCapabilities() is the documented answer, and it is what Chrome and Brave give. The
+    // DuckDuckGo browser on Android strips `torch` out of it — capability dictionaries are a
+    // fingerprinting surface, so it hardens them — and trusting that alone hid the flash button
+    // entirely on a device whose lamp may well work. getSupportedConstraints() is the second
+    // opinion: it says what the ENGINE understands rather than what this camera reports.
+    //
+    // Either one is enough to offer the control; whether it actually works is settled on first use
+    // by setTorch(), which verifies and withdraws the button if the lamp never comes on. Offering
+    // it and finding out beats never offering it.
+    //
+    // Gated on the back camera now that a global signal can vote yes: front cameras have no lamp,
+    // and without this the selfie view would show both the torch button and the screen-flash one.
+    let engineKnowsTorch = false;
+    // Cast: `torch` is non-standard, so it is absent from MediaTrackSupportedConstraints — which is
+    // exactly why it has to be read defensively rather than trusted.
+    try {
+      const sc = navigator.mediaDevices?.getSupportedConstraints?.() as { torch?: boolean } | undefined;
+      engineKnowsTorch = !!sc?.torch;
+    } catch { /* ignore */ }
+    torchSupported = !torchRefused && facing === 'environment' && (('torch' in caps && !!caps.torch) || engineKnowsTorch);
+    torchOn = false;   // a fresh stream always starts with the torch physically off
     cameraError = ''; cameraDenied = false;
     // Clear the microphone verdict only when we actually GOT a microphone. Clearing it on every
     // successful attach wiped what askForMic() had just learned — the camera comes up fine without
@@ -770,6 +1072,7 @@
     track = null;
     focusSupported = false;
     torchSupported = false;   // (the hardware torch turns off with the track; flashArmed stays as the user's choice)
+    torchOn = false;          // stopping the track kills the lamp, so our record of it must follow
   }
 
   // Quick front/back toggle. Clears any specific device pick so it follows facing again.
@@ -838,12 +1141,70 @@
   let lensSheet = false;
   async function chooseLens(id: string) { lensSheet = false; await pickCamera(id); }
 
-  // Drive the hardware torch on/off (where supported). Used as a flash pulse for photos and a
-  // continuous light for video.
+  /** What the track says the lamp is doing, or null when it does not report a torch setting at all.
+   *
+   *  The null case matters: a browser can drive the torch perfectly well and still not list it in
+   *  getSettings(). Treating a missing key as "off" would let us declare a working flash broken. */
+  function readTorch(): boolean | null {
+    try {
+      const st = track?.getSettings?.() as { torch?: boolean } | undefined;
+      return st && 'torch' in st ? !!st.torch : null;
+    } catch { return null; }
+  }
+
+  // Said once, and only after the lamp has actually failed to light. Withdraws the button too —
+  // a control that provably does nothing is worse than no control.
+  function noteTorchRefused() {
+    torchRefused = true;
+    torchSupported = false;
+    flashArmed = false;
+    if (torchToldOnce) return;
+    torchToldOnce = true;
+    showToast('This browser won’t let us use the flash.');
+    reportClientError('camera: torch refused by browser', 'camera', ev?.joinCode);
+  }
+
+  /** The ⚡ button. Arms the flash for the next shot — and, mid-recording, drives the lamp there
+   *  and then.
+   *
+   *  It used to only ever set the flag, so pressing it during a take did visibly nothing: the lamp
+   *  was driven once at the start of the clip and once at the end, and the button in between was a
+   *  control with no wire behind it. applyConstraints works on a live track and the recorder reads
+   *  the same track regardless, so there is no reason it cannot follow along. */
+  function toggleFlash() {
+    flashArmed = !flashArmed;
+    if (recording && torchSupported && !ev?.noFlash) void setTorch(flashArmed);
+  }
+
+  // Drive the hardware torch on/off. Used as a flash pulse for photos and a continuous light for
+  // video.
+  //
+  // This used to be one applyConstraints call with a bare catch, which failed in three ways at
+  // once: it never checked whether the lamp obeyed, it only knew one of the two constraint
+  // spellings, and when the lamp stayed ON there was no way back — a guest reported turning the
+  // flash on in Brave and being unable to turn it off, with the app still showing it as off. The
+  // lamp only died when they navigated away, which is the clue: releasing the track releases it.
   async function setTorch(on: boolean) {
     if (!track || !torchSupported) return;
-    try { await track.applyConstraints({ advanced: [{ torch: on } as MediaTrackConstraintSet] }); }
-    catch { /* unsupported mid-stream — ignore */ }
+    // `advanced` is the documented spelling and what Chrome wants; the plain form is what some
+    // engines accept. Advanced constraints are also best-effort by definition, so a browser may
+    // accept the call and do nothing — hence the read-back rather than trusting a resolved promise.
+    for (const c of [{ advanced: [{ torch: on }] }, { torch: on }] as unknown as MediaTrackConstraints[]) {
+      try { await track.applyConstraints(c); } catch { continue; }
+      const got = readTorch();
+      if (got === null || got === on) { torchOn = on; return; }
+    }
+    if (on) { noteTorchRefused(); return; }
+    // Turning it OFF is the case we cannot simply give up on: a lamp stuck on drains the battery
+    // and is alarming to be holding. Re-acquiring the stream physically releases it — the same
+    // thing that happens on navigating away, which is how the guest eventually got theirs off.
+    //
+    // NOT while recording, though: startCamera() replaces the track the MediaRecorder is reading,
+    // which would end the clip. A lamp that stays lit for the rest of a ten-second take is a far
+    // smaller problem than losing the take, and the stop path turns it off a moment later anyway.
+    if (recording) { torchOn = readTorch() !== false; return; }
+    await startCamera();
+    torchOn = readTorch() === true;
   }
 
   // Photo ↔ Video. Re-acquires the stream so each mode runs at its own resolution
@@ -930,9 +1291,10 @@
     // acquiring a stream because the recording happens in an app we do not control at all.
     if (v) videoShapeLive = false;
     applyViewfinderAspect();   // the framing differs by mode; do not make them wait for a re-attach
-    // In phone mode, switching to video means "open the phone's camera" — that is the whole point
-    // of picking it, and re-acquiring a browser stream we are not going to record from is waste.
-    if (v && videoQuality === 'phone') { nativeVideoInput?.click(); return; }
+    // Phone mode used to launch the native camera the instant you entered video mode. Entering a
+    // mode is not the same as starting a recording — the guest is still choosing a shape, checking
+    // the trick list, or pointing the thing — so it now behaves like every other quality: you get a
+    // viewfinder, and the record button is what hands over. (toggleRecord does the handing over.)
     await startCamera();
     // Offer the capability check only once video is actually RUNNING. It used to be raised before
     // the switch was attempted, so a switch that failed and fell back to photos left a "check my
@@ -959,8 +1321,12 @@
     videoQuality = q;
     lowFpsWarned = false;   // let a fresh warning fire if the new quality still struggles
     try { localStorage.setItem('snap_vidq', q); } catch { /* ignore */ }
-    // PHONE mode has no resolution to re-acquire — it hands straight to the native camera instead.
-    if (q === 'phone') { if (videoMode) nativeVideoInput?.click(); return; }
+    // PHONE mode has no resolution of ours to re-acquire — the recording happens in an app we do
+    // not control. Note what this deliberately does NOT do: launch that app. Choosing an option in
+    // a settings menu set the camera going immediately, which is a setting behaving like a button.
+    // The two buttons that mean "start now" — the record button, and "Use phone camera" on the
+    // capability prompt — call nativeVideoInput themselves.
+    if (q === 'phone') return;
     if (videoMode) await startCamera();   // re-acquire at the new resolution
   }
 
@@ -998,7 +1364,9 @@
   // A tap (no real movement) falls through to tap-to-focus.
   let brightnessHud = false;
   // tracking: pointer is down; horizontal: we've committed to a horizontal brightness drag.
-  let bTracking = false, bHorizontal = false, bAbandoned = false;
+  // bSweeping: the drag has committed to the brightness axis. Not "horizontal" — which axis that
+  // is depends on which way up the phone is being held; see onGesturePointerMove.
+  let bTracking = false, bSweeping = false, bAbandoned = false;
   let bStartX = 0, bStartY = 0, bStartBright = 1;
   let bHudTimer: ReturnType<typeof setTimeout>;
   const BRIGHT_MIN = 0.5, BRIGHT_MAX = 1.6;
@@ -1008,31 +1376,59 @@
 
   function onGesturePointerDown(e: PointerEvent) {
     if (cameraError) return;
-    bTracking = true; bHorizontal = false; bAbandoned = false;
+    bTracking = true; bSweeping = false; bAbandoned = false;
     bStartX = e.clientX; bStartY = e.clientY; bStartBright = brightness;
     // Don't capture yet — a vertical swipe must stay with the browser (pull-to-refresh / scroll).
   }
   function onGesturePointerMove(e: PointerEvent) {
     if (!bTracking || bAbandoned) return;
-    const dx = e.clientX - bStartX, dy = e.clientY - bStartY;
-    if (!bHorizontal) {
-      // Decide direction once past a small threshold. Vertical → hand it back to the browser.
-      if (Math.abs(dy) > 8 && Math.abs(dy) >= Math.abs(dx)) { bAbandoned = true; return; }
-      if (Math.abs(dx) > 8 && Math.abs(dx) > Math.abs(dy)) {
-        bHorizontal = true;
-        try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    const rawX = e.clientX - bStartX, rawY = e.clientY - bStartY;
+
+    // Brightness follows the HAND, not the document.
+    //
+    // It is a sideways sweep — across the picture, the way a native camera does exposure. That is a
+    // page-X drag only while the page is the same way up as the person. Hold a phone sideways with
+    // its rotation locked and the page does not turn, so the person's sideways is the page's
+    // VERTICAL: sweeping across the picture produced no brightness change at all, and the direction
+    // that did work ran up and down, which is the "feels vertical" of it. Worse, the sweep they
+    // meant was being read as a vertical drag and handed back to the browser as a scroll.
+    //
+    // The RELATIVE rotation, not the phone's absolute one. Turn a phone with auto-rotate on and the
+    // whole browser turns with it — page-sideways and person-sideways stay the same thing, and
+    // swapping the axes there would break the case that already worked. Only a phone turned inside
+    // a page that did NOT turn needs the swap, and glyphRot is exactly that quantity: it is zero
+    // whenever the layout has already followed the device. (It is also why the glyphs only
+    // counter-rotate in that same case.)
+    const rel = glyphRot;
+    const along  = rel === -90 ? -rawY : rel === 90 ? rawY : rawX;   // the brightness axis
+    const across = rel === 0 ? rawY : rawX;                          // the scroll axis, left to the browser
+
+    const el = e.currentTarget as HTMLElement;
+    // Sensitivity must not depend on which way up the phone is. Dividing by the element's WIDTH
+    // meant that turning the phone — where the width goes from about 390 to 844 — more than halved
+    // how much a given sweep did, so the control did not feel different, it felt dead. The short
+    // edge is the same number in either orientation, so the gesture is too.
+    const vw = el.clientWidth || window.innerWidth;
+    const vh = el.clientHeight || window.innerHeight;
+    const extent = Math.min(vw, vh) || 360;
+
+    if (!bSweeping) {
+      // Decide direction once past a small threshold. Across → hand it back to the browser.
+      if (Math.abs(across) > 8 && Math.abs(across) >= Math.abs(along)) { bAbandoned = true; return; }
+      if (Math.abs(along) > 8 && Math.abs(along) > Math.abs(across)) {
+        bSweeping = true;
+        try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
       } else return;
     }
-    const w = (e.currentTarget as HTMLElement).clientWidth || window.innerWidth;
-    const next = bStartBright + (dx / w) * 1.5;
+    const next = bStartBright + (along / extent) * 1.5;
     brightness = Math.round(Math.min(BRIGHT_MAX, Math.max(BRIGHT_MIN, next)) * 100) / 100;
     showHud();
   }
   function onGesturePointerUp(e: PointerEvent) {
     if (!bTracking) return;
-    const wasHorizontal = bHorizontal, abandoned = bAbandoned;
-    bTracking = false; bHorizontal = false; bAbandoned = false;
-    if (wasHorizontal) { hideHudSoon(); return; }
+    const wasSweeping = bSweeping, abandoned = bAbandoned;
+    bTracking = false; bSweeping = false; bAbandoned = false;
+    if (wasSweeping) { hideHudSoon(); return; }
     if (!abandoned && focusSupported) tapFocus(e as unknown as MouseEvent);   // a tap → focus
   }
   function resetBrightness() { brightness = 1; showHud(); hideHudSoon(); }
@@ -1042,6 +1438,95 @@
     if (document.fullscreenElement) document.exitFullscreen();
     else el?.requestFullscreen?.().catch(() => {});
   }
+
+  /** Pin the app upright, for real, where the platform allows it.
+   *
+   *  screen.orientation.lock() is refused outright in an ordinary browser tab — a page cannot
+   *  decide which way up the phone is held. It IS allowed once the document is fullscreen, which
+   *  this camera can be, so "keep it upright" is a genuine capability here rather than a request we
+   *  pass on to the guest. (The manifest asks for portrait too, which covers the installed-app case
+   *  and nothing else.)
+   *
+   *  iOS Safari has never shipped the API at all, so there the offer is simply not made — see
+   *  canLockPortrait. Offering a button that cannot work is worse than offering nothing. */
+  let goingFullscreen = false;
+  /** Offer it only where it can be done. iOS Safari will not take an arbitrary element fullscreen —
+   *  only a <video> — so there the button is simply absent, which is better than one that does
+   *  nothing when pressed. */
+  const canGoFullscreen = () => typeof document !== 'undefined'
+    && typeof document.documentElement.requestFullscreen === 'function';
+
+  /** Wait for fullscreen to actually BE fullscreen.
+   *
+   *  requestFullscreen() resolves when the request is accepted, which is not the same moment the
+   *  document is fullscreen — and orientation.lock() refuses outright unless it already is. Calling
+   *  one straight after the other therefore loses the race on a real phone: the screen goes
+   *  fullscreen and the lock throws, which is exactly what it did. Wait for the event instead, with
+   *  a timeout so a browser that never fires it cannot hang the button. */
+  function fullscreenSettled(): Promise<void> {
+    if (document.fullscreenElement) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => { document.removeEventListener('fullscreenchange', done); clearTimeout(t); resolve(); };
+      const t = setTimeout(done, 700);
+      document.addEventListener('fullscreenchange', done);
+    });
+  }
+
+  /** Go fullscreen, and try to pin the rotation while we are there.
+   *
+   *  The button used to say it would lock the phone to portrait, and on a real Android it went
+   *  fullscreen and then the lock threw — so it delivered something useful while announcing a
+   *  failure. The two are not equally reliable: fullscreen works, and screen.orientation.lock() is
+   *  refused by plenty of phones even from inside fullscreen (notably any phone whose OWN rotation
+   *  lock is already on). So the button promises the part that works, and the lock is attempted
+   *  quietly as a bonus. Nothing is said if it does not happen, because nothing was claimed. */
+  async function goFullscreen() {
+    goingFullscreen = true;
+    try {
+      const el = document.getElementById('cam-root');
+      if (!document.fullscreenElement) {
+        await el?.requestFullscreen?.();
+        await fullscreenSettled();
+      }
+      if (!document.fullscreenElement) throw new Error('refused');
+      landscapeDismissed = true;
+      // Opportunistic, and deliberately not awaited into the failure path above.
+      try {
+        await (window.screen?.orientation as unknown as { lock?: (o: string) => Promise<void> } | undefined)
+          ?.lock?.('portrait');
+      } catch { /* most phones refuse; fullscreen was the point */ }
+    } catch {
+      showToast('Your browser wouldn’t go fullscreen — turning the phone upright is the other fix.', true);
+    } finally { goingFullscreen = false; }
+  }
+
+  /** The shape the viewfinder is actually FRAMED to, as a CSS aspect-ratio, or '' when it is showing
+   *  the whole sensor frame.
+   *
+   *  One source of truth, because two things are sized from it: the video element, and the
+   *  rule-of-thirds grid. The grid used to be pinned to the viewfinder's full box while the video sat
+   *  letterboxed inside it — so with any shape selected the thirds were thirds of the SCREEN, not of
+   *  the picture, which is both useless for composing and visibly out of square with the frame.
+   *
+   *  Deliberately reads videoShapeLive rather than the requested shape: in video mode the crop only
+   *  exists where the camera agreed to it, and drawing a framed grid over an unframed picture would
+   *  be the same lie applyViewfinderAspect exists to avoid.
+   *
+   *  A PLAIN FUNCTION, with the reactive value derived from it — not the other way round. The
+   *  reactive statement alone was not enough: setAspect() assigns `aspect` and then calls
+   *  applyViewfinderAspect() in the same synchronous block, and Svelte has not recomputed anything
+   *  by then. So the video was sized from the PREVIOUS shape while the grid, being bound in the
+   *  markup, had already moved to the new one — changing the shape appeared to resize the grid and
+   *  leave the picture alone. The function gives the imperative caller today's answer; the reactive
+   *  line keeps the markup in step. */
+  function toggleGrid() {
+    gridOn = !gridOn;
+    try { localStorage.setItem('snap_grid', gridOn ? '1' : '0'); } catch { /* the choice just will not stick */ }
+  }
+
+  const framedFor = (a: string): string =>
+    a !== 'full' && (!videoMode || videoShapeLive) ? a.replace(':', ' / ') : '';
+  $: framedAspect = framedFor(aspect);
 
   function applyViewfinderAspect() {
     if (!videoEl) return;
@@ -1061,9 +1546,9 @@
     s.width = '100%';
     s.maxWidth = '100%';
     s.maxHeight = '';
-    const framed = aspect !== 'full' && (!videoMode || videoShapeLive);
+    const framed = framedFor(aspect);   // computed now, not last tick — see framedFor
     if (!framed) { s.aspectRatio = ''; s.height = '100%'; }
-    else { s.aspectRatio = aspect.replace(':', ' / '); s.height = 'auto'; }
+    else { s.aspectRatio = framed; s.height = 'auto'; }
   }
 
   /** Make the CAMERA deliver the chosen shape, so a clip is genuinely cropped to it.
@@ -1150,8 +1635,14 @@
     if (a === aspect) return;
     await setAspect(a);
   }
+  /** The shape this guest last chose, device-wide like the video quality. '' when they never have. */
+  function savedAspect(): string {
+    try { return localStorage.getItem('snap_aspect') || ''; } catch { return ''; }
+  }
+
   async function setAspect(a: string) {
     aspect = a;
+    try { localStorage.setItem('snap_aspect', a); } catch { /* the choice just will not stick */ }
     // A photo crops in the canvas, so the new framing is true the instant it is picked. In video the
     // camera has to agree first — drop the framing until applyRecordShape has read the answer back,
     // rather than flicking to the new shape and possibly away from it again.
@@ -1186,12 +1677,20 @@
       const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/jpeg', 1.0));
       if (blob) enqueue(blob, 'photo', 'jpg', 'capture', { w: canvas.width, h: canvas.height });
     } finally {
-      if (useFlash) setTorch(false);   // flash off again after the shot
+      // Keyed on the lamp, not on our intent: if the guest disarmed the flash mid-shot, `useFlash`
+      // is already false and the lamp would have been left burning.
+      if (torchOn) setTorch(false);
       capturing = false;
     }
   }
 
   function toggleRecord() {
+    // "Use my own camera" has to mean it everywhere, not just on the switch into video mode.
+    // setMode() honoured it; this did not — so the setting persisted, the settings sheet said
+    // "my own camera", and pressing record quietly recorded in the browser anyway. Which is the
+    // one thing the guest had just chosen not to do, and they chose it because in-browser
+    // recording was stuttering on their phone.
+    if (!recording && videoQuality === 'phone') { nativeVideoInput?.click(); return; }
     if (!stream) return;
     if (!recording) {
       // Codec order matters more than any quality setting here, and it was backwards. VP8 was
@@ -1236,7 +1735,7 @@
       }, 1000);
     } else {
       mediaRecorder?.stop();
-      if (flashArmed && torchSupported) setTorch(false);
+      if (torchOn) setTorch(false);
       stopFpsMonitor();
       recording = false; clearInterval(recTimer);
       // If the clip stuttered, apply the queued quality downgrade now (re-acquires the stream).
@@ -1291,11 +1790,23 @@
   // the app (often deliberately, for 4K the browser cannot manage) and cannot be re-trimmed, so the
   // server keeps it even when it runs over. Defaults to 'capture' — the strict side.
   function enqueue(blob: Blob, mediaType: 'photo' | 'video', ext: string, source: 'capture' | 'upload' = 'capture', extra?: { durationSecs?: number; w?: number; h?: number }) {
+    // Read at the moment of the shot and carried on the item, never read again at upload time: a
+    // queued capture can sit in IndexedDB across a reload and go up hours later, by which point the
+    // phone's current orientation says nothing about how this was framed. 'unknown' is not sent —
+    // absent and unknown are the same claim, and the server stores NULL for both.
+    const shotAs = source === 'capture' ? captureOrientation() : 'unknown';
+    // The shape ASKED for, recorded whether or not the camera obliged. A photo is cropped here in
+    // the canvas and always arrives correct, so it has nothing to record; a clip is cropped by the
+    // camera, which on iOS and Firefox simply declines — and then this is the only surviving trace
+    // that the guest chose a shape at all, and the only thing that lets the server finish the job.
+    const shotShape = mediaType === 'video' && source === 'capture' ? aspect : undefined;
     // Whatever was armed at the moment of the shot, not at the moment of upload: a guest may well
     // arm the next mission while this one is still going up.
     const challengeId = armed ?? undefined;
     const id = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
-    queue = [...queue, { id, blob, mediaType, source, ext, status: 'pending', size: blob.size, challengeId, ...extra }];
+    queue = [...queue, { id, blob, mediaType, source, ext, status: 'pending', size: blob.size, challengeId,
+                         captureOrientation: shotAs === 'unknown' ? undefined : shotAs,
+                         captureShape: shotShape, ...extra }];
     trackEvent('photo_captured', { kind: mediaType, source }, ev?.joinCode);
     // Persist to IndexedDB immediately so the capture survives an outage / reload / closed tab.
     if (sessionToken && ev) putCapture({ id, joinCode: ev.joinCode, sessionToken, blob, mediaType, source, ext, createdAt: Date.now() }).catch(() => {});
@@ -1307,6 +1818,7 @@
     // impossible, untickMission() takes it back rather than leaving a tick that is a lie.
     if (challengeId && !missionsDone.includes(challengeId)) {
       missionsDone = [...missionsDone, challengeId];
+      missionsDoneLocal = [...missionsDoneLocal, challengeId];
       confetti?.burst();
       const left = missions.filter((m) => !missionsDone.includes(m.id)).length;
       showToast(left ? `Nice one — ${left} to go` : 'That’s the whole act. Well done.');
@@ -1322,6 +1834,8 @@
   function untickMission(challengeId: string | undefined) {
     if (!challengeId || !missionsDone.includes(challengeId)) return;
     missionsDone = missionsDone.filter((m) => m !== challengeId);
+    // Both, or the next refresh would put it straight back.
+    missionsDoneLocal = missionsDoneLocal.filter((m) => m !== challengeId);
   }
 
   function saveToDeviceCopy(blob: Blob, ext: string) {
@@ -1355,6 +1869,10 @@
     const input = e.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     input.value = '';   // allow re-picking the same file
+    // Whatever else happens below — even if they backed out without filming — the phone's camera
+    // app has had the hardware, so take it back. Not every browser fires visibilitychange for that
+    // handoff, which is why this does not rely on it.
+    setTimeout(resumeIfDead, 300);
     if (!file) return;
     if (photosRemaining <= 0) { showToast('No shots left on your roll', true); return; }
     const dur = await readVideoDuration(file);
@@ -1420,6 +1938,8 @@
       form.append('sessionToken', sessionToken!);
       form.append('source', item.source);
       if (item.challengeId) form.append('challengeId', item.challengeId);
+      if (item.captureOrientation) form.append('captureOrientation', item.captureOrientation);
+      if (item.captureShape) form.append('captureShape', item.captureShape);
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/photos');
       xhr.upload.onprogress = (e) => { if (e.lengthComputable) { item.progress = Math.round((e.loaded / e.total) * 100); queue = queue; } };
@@ -1485,7 +2005,7 @@
     }
     const complete = () => fetch('/api/photos/complete', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
-      body: JSON.stringify({ sessionToken, uploadId, total, ext: item.ext, mediaType: item.mediaType, source: item.source, challengeId: item.challengeId }),
+      body: JSON.stringify({ sessionToken, uploadId, total, ext: item.ext, mediaType: item.mediaType, source: item.source, challengeId: item.challengeId, captureOrientation: item.captureOrientation, captureShape: item.captureShape }),
     });
     let res = await complete();
     if (res.status === 409) {   // server missing some parts → resend them, then retry complete
@@ -1610,6 +2130,7 @@
       // so it ticks quietly rather than firing confetti at someone who is not looking.
       if (item.challengeId && !missionsDone.includes(item.challengeId)) {
         missionsDone = [...missionsDone, item.challengeId];
+        missionsDoneLocal = [...missionsDoneLocal, item.challengeId];
       }
       if (item.challengeId && armed === item.challengeId) armed = null;
       delCapture(item.id).catch(() => {});   // uploaded → drop from the offline queue
@@ -1734,7 +2255,15 @@
       // mission's text (`challenge`), not its id. The server re-derives the list for us on the
       // delete; take it wholesale, exactly as the join/refresh paths do. Without this the trick
       // list kept a tick the server had already dropped until the guest reloaded the page.
-      if (Array.isArray(d?.challengesDone)) missionsDone = d.challengesDone;
+      // Wholesale, NOT merged — the one case where the server has to be able to take a tick away.
+      // A local tick is there precisely because the server had not caught up; here it has, and it
+      // is telling us the trick is undone. Pruning the local list too, or the next refresh would
+      // hand the tick straight back.
+      if (Array.isArray(d?.challengesDone)) {
+        const done = d.challengesDone as string[];
+        missionsDoneLocal = missionsDoneLocal.filter((id) => done.includes(id));
+        missionsDone = done;
+      }
       galleryPhotos = galleryPhotos.filter((p) => p.id !== id);
       showToast('Deleted — that shot is back on your roll');
     } catch { showToast('Could not delete that one — try again', true); }
@@ -1885,6 +2414,16 @@
       <label for="join-email">Email <span class="muted">(optional)</span></label>
       <input id="join-email" bind:value={joinEmail} type="email" inputmode="email" autocomplete="email" placeholder="you@example.com" />
       <p class="join-hint">Add your email to get your photos afterwards and pick up where you left off.</p>
+      <!-- Beside the address rather than after the button, because it is a statement ABOUT the
+           address. Nothing here is required and nothing blocks the join: the hint under it says so
+           in words, since a checkbox next to an empty optional field reads as a trap otherwise. -->
+      <label class="join-optin" for="join-wants">
+        <input id="join-wants" type="checkbox" bind:checked={joinWantsPhotos} />
+        <span>Email me the photos when the event ends</span>
+      </label>
+      <p class="join-hint">{joinWantsPhotos && !joinEmail.trim()
+        ? 'Pop your email in above so we know where to send them.'
+        : 'You can opt in later — there’s a button with your photos.'}</p>
       <button class="btn primary" on:click={doJoin} disabled={joining}>{joining ? 'Joining…' : 'Join & open camera'}</button>
       {#if ev?.joinCode}<a class="manage-link" href={`/admin/${ev.joinCode}`}>Organising this event? Manage it →</a>{/if}
     </div>
@@ -1896,7 +2435,10 @@
        call sites depended on it. -->
   <input bind:this={nativeVideoInput} type="file" accept="video/*" capture="environment"
          on:change={nativeVideoPicked} style="display:none" />
-  <div id="cam-root" class="cam">
+  <!-- The counter-rotation is published as a variable rather than applied here: rotating this
+       element would rotate the viewfinder and the layout with it, which is the thing we are
+       specifically not doing. Individual glyphs opt in. -->
+  <div id="cam-root" class="cam" style="--glyph-rot: {glyphRot}deg; --note-bottom: {noteVar}">
     <div class="viewfinder">
       <!-- svelte-ignore a11y-media-has-caption -->
       <!-- Mirrored on the front camera, because that is what a phone does and what people expect
@@ -1920,7 +2462,7 @@
         </div>
       {/if}
       {#if fillActive}<div class="fill"></div>{/if}
-      {#if blinking}<div class="blink" aria-hidden="true"></div>{/if}
+      {#if blinking}{#key blinkSeq}<div class="blink" aria-hidden="true"></div>{/key}{/if}
       <Confetti bind:this={confetti} colors={ev?.theme?.accent ? [ev.theme.accent, '#f4e4c1', '#e8825a', '#7fb3a3'] : undefined} />
       <div class="topbar">
         {#if ev?.isDemo}
@@ -1937,6 +2479,12 @@
         {:else}
           <div class="evname"><Logo word={false} color={ev?.theme?.accent ?? ''} /> {ev?.name}</div>
         {/if}
+        <!-- The trick list and the counter are ONE group, pinned to the right together.
+             As three separate children of a space-between row they were spread across the full
+             width, which is invisible on a 390px phone — everything is cramped anyway — and obvious
+             at 844px, where the trick pill drifted into the middle of the picture, miles from the
+             counter it belongs beside. -->
+        <div class="topright">
         {#if missions.length && !videoMode}
           <!-- One small pill is the whole affordance. The camera screen has to stay a camera: a
                permanent list would compete with the viewfinder, so the list lives behind this. -->
@@ -1955,7 +2503,60 @@
           </div>
         {/if}
         <div class="counter" class:low={photosRemaining <= 5}>{photosRemaining}<small>left</small></div>
+        </div>
       </div>
+      <!-- A sibling of the in-app-browser note below, never nested inside it: it lived in that
+           block's body while that block was gated on `!landscapeNote`, so it could only render on
+           the condition that it was not showing. Which is to say, never. -->
+      {#if landscapeNote}
+        <div class="landnote" bind:this={noteEl}>
+          <div class="sw-t">
+            <p class="sw-h">↻ Snapdini works best upright</p>
+            <!-- "screen", not "viewfinder": this is read by someone at a party, and it is the word
+                 they would use. And it offers the thing that actually works — see goFullscreen. -->
+            <p class="sw-s">Turn off auto-rotate, or use your phone's rotation lock, to keep it
+              that way. Staying sideways is fine too — fullscreen helps, and your photos come out
+              right either way.</p>
+            {#if canGoFullscreen()}
+              <button class="sw-act" on:click={goFullscreen} disabled={goingFullscreen}>
+                {goingFullscreen ? 'Opening…' : '⛶ Go fullscreen'}
+              </button>
+            {/if}
+          </div>
+          <button class="switchnote-x" on:click={() => (landscapeDismissed = true)} aria-label="Dismiss">✕</button>
+        </div>
+      {/if}
+      {#if switchRisk && !landscapeNote}
+        <!-- The trap this closes, reproduced by the product owner: a roll lives in the session token
+             in THIS browser's storage. We tell people to open the link in their real browser,
+             because an in-app browser forgets camera permission between uses — and following that
+             advice starts them again as a second guest, with the photos they already took stranded
+             on an identity they can no longer reach.
+             An email is the only thing that crosses, because the join route already recovers by it.
+             So the email leads here, rather than being the footnote it is on the join screen. -->
+        <div class="switchnote">
+          <div class="sw-t">
+            {#if myEmail}
+              <p class="sw-h">Opening in your browser? Use <b>{myEmail}</b></p>
+              <p class="sw-s">{inAppName}’s browser keeps asking for the camera. Your real browser
+                asks once — just enter the same email there and your {galleryPhotos.length || 'existing'}
+                shot{galleryPhotos.length === 1 ? '' : 's'} come with you.</p>
+            {:else}
+              <p class="sw-h">Add your email before you switch browsers</p>
+              <p class="sw-s">You joined without one, so opening this link anywhere else would start
+                you again as a new guest — and the shots you have already taken would stay behind.</p>
+              <div class="sw-row">
+                <input type="email" inputmode="email" autocomplete="email" bind:value={emailDraft}
+                       placeholder="you@example.com" aria-label="Your email, so your photos move with you" />
+                <button class="btn primary sm" on:click={attachEmail} disabled={emailBusy}>
+                  {emailBusy ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            {/if}
+          </div>
+          <button class="switchnote-x" on:click={() => (emailNoteDismissed = true)} aria-label="Dismiss">✕</button>
+        </div>
+      {/if}
       {#if micDenied}
         <!-- A headline, the consequence, then the steps — instead of one paragraph of prose that
              nobody reads standing in a room full of people. The fix is behind a summary because it
@@ -2020,7 +2621,7 @@
       {/if}
       <div class="rail">
         {#if facing === 'user'}<button class="ctrl" on:click={() => (screenFlash = !screenFlash)} class:active={screenFlash} title="Flash" aria-label="Flash">⚡</button>{/if}
-        {#if torchSupported && !ev?.noFlash}<button class="ctrl" on:click={() => (flashArmed = !flashArmed)} class:active={flashArmed} title="Flash" aria-label="Flash">⚡</button>{/if}
+        {#if torchSupported && !ev?.noFlash}<button class="ctrl" on:click={toggleFlash} class:active={flashArmed} title="Flash" aria-label="Flash">⚡</button>{/if}
         <!-- Offered in BOTH modes now that a clip really is cropped to it: the camera delivers the
              shape (applyRecordShape) instead of the recorder being handed a wide frame. It is put
              away only on a camera that has actually refused — there a shape is a photo setting
@@ -2097,7 +2698,7 @@
                 <span class="sm-label">Grid</span>
                 <span class="sm-desc">Rule-of-thirds lines to help you frame the shot.</span>
               </span>
-              <button class="ctrl" on:click={() => (gridOn = !gridOn)} class:active={gridOn} aria-pressed={gridOn} title="Grid">⊞</button>
+              <button class="ctrl" on:click={toggleGrid} class:active={gridOn} aria-pressed={gridOn} title="Grid">⊞</button>
             </div>
 
             <div class="sm-row">
@@ -2163,7 +2764,13 @@
           </div>
         </div>
       {/if}
-      {#if gridOn}<div class="grid"><span></span><span></span><span></span><span></span></div>{/if}
+      <!-- Sized from framedAspect, exactly as the video above it is, so the thirds land on the
+           picture rather than on the page. -->
+      {#if gridOn}
+        <div class="grid" style={framedAspect ? `aspect-ratio:${framedAspect};height:auto` : 'height:100%'}>
+          <span></span><span></span><span></span><span></span>
+        </div>
+      {/if}
       {#if recording}<div class="rec">● {Math.floor(recSecs / 60)}:{String(recSecs % 60).padStart(2, '0')}{#if videoMaxSecs > 0} / {Math.floor(videoMaxSecs / 60)}:{String(videoMaxSecs % 60).padStart(2, '0')}{/if}</div>{/if}
       {#if cameraStarting && !cameraError}
         <div class="cam-loading" transition:fade={{ duration: 120 }}>
@@ -2209,6 +2816,14 @@
             <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="3.5"/></svg>
           </span>
           <p>Camera is off.</p>
+          <!-- Why this button is worth pressing, said here rather than on the button itself, where
+               it would be a wall of text on a control nobody has decided to use yet.
+               It is a real thing and not a nicety: we release the camera on the way out, but a
+               browser that keeps a tab alive in the background can hold the hardware open anyway,
+               and a live camera is about the most expensive thing a phone can be quietly doing. -->
+          <p class="off-why">Worth doing before you put your phone away. We let go of the camera
+            when you leave, but plenty of browsers hang onto it anyway — and a camera left running
+            is the quickest way to flatten a battery. Off is off, so you can snap all night.</p>
           <button class="btn primary" on:click={toggleCameraPower}>Turn camera on</button>
         </div>
       {/if}
@@ -2291,7 +2906,7 @@
       </div>
     {/if}
     {#if benchPrompt || benchRunning || benchResult}
-      <div class="bench-panel">
+      <div class="bench-panel" bind:this={benchEl}>
         {#if benchRunning}
           <div class="bench-title">Checking your camera…</div>
           <div class="bench-sub">Testing {benchStep === 'high' ? '4K' : benchStep === 'standard' ? '1080p' : '720p'}</div>
@@ -2412,7 +3027,8 @@
                goes in the tile slot because the bin belongs ON the photo. Own photos only for the
                editable caption — this roll holds nothing else, but the guard is the rule, not the
                filter that happens to be upstream of it. -->
-          <PhotoCard photo={p} shotNumber={shownPhotos.length - i}
+          <PhotoCard photo={p} shotNumber={shownPhotos.length - i} saved={saved.has(p.id)}
+                     tileAr={tileAspect(allowedAspects)}
                      captionMode={p.isOwn ? 'edit' : 'static'}
                      on:open={() => { lbIndex = i; lbOpen = true; }}
                      on:caption={() => openCaption(p)}>
@@ -2437,6 +3053,36 @@
       <div class="empty">
         <span class="big">{galleryRevealed ? '📷' : '🔒'}</span>
         <p class="muted">You haven’t taken any photos yet.</p>
+      </div>
+    {/if}
+    <!-- The real entry point, and deliberately not on the camera screen: nothing new goes near the
+         shutter. Here a guest is already looking at their own shots, which is the moment they think
+         about keeping them — and it is the only way back for someone who skipped the address on the
+         join screen, so it registers one as well as setting the flag. -->
+    {#if sessionToken}
+      <div class="optin">
+        {#if wantsPhotos}
+          <p class="optin-h">✓ {optInLine}</p>
+          {#if optInNote}<p class="optin-note">{optInNote}</p>{/if}
+          <button class="optin-undo" on:click={undoPhotoOptIn} disabled={optInBusy}>
+            {optInBusy ? 'Changing…' : 'Actually, no thanks'}
+          </button>
+        {:else if optInAsking}
+          <p class="optin-h">Where should we send them?</p>
+          <div class="optin-row">
+            <input type="email" inputmode="email" autocomplete="email" bind:value={optInDraft}
+                   placeholder="you@example.com"
+                   aria-label="Your email, so we can send your photos when the event ends" />
+            <button class="btn primary sm" on:click={requestPhotoOptIn} disabled={optInBusy}>
+              {optInBusy ? 'Saving…' : 'Send them'}
+            </button>
+          </div>
+          <button class="optin-undo" on:click={() => { optInAsking = false; optInDraft = ''; }}>Not now</button>
+        {:else}
+          <button class="optin-cta" on:click={requestPhotoOptIn} disabled={optInBusy}>
+            📬 {optInBusy ? 'One sec…' : 'Want your shots when the event ends?'}
+          </button>
+        {/if}
       </div>
     {/if}
     <!-- Below the roll on purpose: this is the "what next", read after a guest has looked at their
@@ -2485,6 +3131,7 @@
   <!-- After the reveal this roll can show OTHER people's photos too (Mine / All / Others), so
        saving follows the host's download setting rather than "it is in my gallery". -->
   {#if lbOpen}<Lightbox photos={shownPhotos} index={lbIndex} captionMode="own"
+              on:saved={(e) => { if (ev) saved = markSaved(ev.joinCode, [e.detail]); }}
                         allowSave={allowDownloads}
                         on:caption={(e) => openCaption(e.detail)}
                         on:photochange={hideToast}
@@ -2615,6 +3262,10 @@
   }
   .cam-error { position: absolute; inset: 0; z-index: 12; display: flex; flex-direction: column; align-items: center;
     justify-content: center; gap: 14px; text-align: center; padding: 32px; background: rgba(0,0,0,0.85); color: #fff; }
+  /* Quieter than the "Camera is off" line above it: that is the state, this is the reasoning, and
+     the reasoning should not shout as loudly as the fact. Held near 34em so it does not run to
+     full width on a phone in landscape, where the line would otherwise be unreadably long. */
+  .off-why { margin: -4px 0 0; max-width: 34em; font-size: 0.82rem; line-height: 1.5; opacity: 0.78; }
   /* z-index 3: above the video + gesture layer, but below the controls (z 6) — so the black
      mask covers only the camera image while the top bar, counter and menus stay visible. */
   .cam-loading { position: absolute; inset: 0; z-index: 3; display: flex; align-items: center; justify-content: center; background: #000; }
@@ -2633,16 +3284,30 @@
   /* Full-stage gesture layer: drag left/right to set brightness, tap to focus. Sits above the
      video but below the controls (z 6). touch-action:none stops the browser hijacking the swipe. */
   .gesture-layer { position: absolute; inset: 0; z-index: 2; background: transparent; touch-action: pan-y; -webkit-tap-highlight-color: transparent; }
+  /* Centred, but never wide enough to reach the control rail on the right.
+     At its natural ~262px it clears the rail on a 390px phone by 10px and OVERLAPS it by 5px on a
+     360px one, which is a very common Android width — so the collision depended on the handset.
+     Reserving the rail's column (14px offset + 40px button, plus room to breathe) makes it a
+     property of the layout instead of a coincidence of screen size. The bar below shrinks to suit,
+     which costs nothing: it is a relative level, not a measurement anybody reads off in pixels. */
   .bright-hud { position: absolute; top: 70px; left: 50%; transform: translateX(-50%); z-index: 5;
+    max-width: calc(100% - 140px);
     display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 999px;
     background: rgba(0,0,0,0.6); color: #fff; backdrop-filter: blur(4px); }
   .bright-hud > span:first-child { font-size: 1rem; }
-  .bright-bar { width: 120px; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.25); overflow: hidden; }
+  /* Shrinkable, so the cap above takes it out of the bar rather than out of the readout or the
+     reset button — a number cut in half is unreadable, a shorter bar is just a shorter bar. */
+  .bright-bar { width: 120px; min-width: 44px; flex: 0 1 120px; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.25); overflow: hidden; }
   .bright-fill { height: 100%; background: var(--accent); }
-  .bright-val { font-family: var(--font-mono); font-size: 0.72rem; min-width: 38px; text-align: right; }
+  .bright-val { font-family: var(--font-mono); font-size: 0.72rem; min-width: 38px; text-align: right; flex: none; }
   .focus-ring { position: absolute; z-index: 4; width: 76px; height: 76px; margin: -38px 0 0 -38px; border: 2px solid #fff;
     border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,.3); pointer-events: none; animation: focuspulse 0.85s ease-out forwards; }
   @keyframes focuspulse { 0% { transform: scale(1.4); opacity: 0; } 25% { transform: scale(1); opacity: 1; } 100% { transform: scale(0.9); opacity: 0; } }
+  /* Deliberately NOT inset for a notch. Tried it, reverted it: growing the top padding pushed the
+     counter and the trick badge down into the control rail, which is pinned at top:64px and does
+     not move with them. Clearing a cutout would mean moving the rail too, and the rail's position
+     is load-bearing for the landscape layout — a lot of moving parts to dodge a hole whose position
+     the browser will not tell us anyway (see the note below on what the insets actually give you). */
   .topbar { position: absolute; top: 0; left: 0; right: 0; z-index: 6; padding: 16px 20px; display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; background: linear-gradient(to bottom, rgba(0,0,0,0.6), transparent); pointer-events: none; }
   .evname { display: inline-flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: 0.85rem; color: #fff; }
   .demo-nav { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -2669,10 +3334,39 @@
     min-width: 52px;
   }
   .bin-secs { font-variant-numeric: tabular-nums; opacity: .75; }
-  .counter { font-family: var(--font-mono); font-size: 1.5rem; font-weight: bold; color: #fff; text-align: right; line-height: 1; }
+  .topright { display: flex; align-items: flex-start; gap: 14px; }
+  /* Centred, not right-aligned. The word sits under a number that changes width as the roll runs
+     down — 24, then 9, then 3 — and aligning their right edges left it visibly off-centre under
+     every count but the widest one. */
+  .counter { font-family: var(--font-mono); font-size: 1.5rem; font-weight: bold; color: #fff; text-align: center; line-height: 1; }
   .counter.low { color: var(--danger); } .counter small { display: block; font-size: 0.6rem; opacity: 0.7; text-transform: uppercase; }
   .rail { position: absolute; top: 64px; right: 14px; display: flex; flex-direction: column; gap: 10px; z-index: 6; }
-  .ctrl { width: 40px; height: 40px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.25); background: rgba(0,0,0,0.45); color: #fff; font-size: 0.95rem; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  /* ── Turning with the phone ──────────────────────────────────────────────────
+     Glyphs turn, the layout does not — what a native camera app does when you rotate the phone
+     with rotation lock on. --glyph-rot is 0 unless the PHONE is sideways while the PAGE is not, so
+     on every ordinary device this is a no-op rotation of zero degrees.
+
+     What can and cannot simply be turned, because a transform does NOT reflow anything:
+     - A round control turns freely. Its box is square and its outline is a circle, so nothing about
+       the layout notices and only the character inside appears to move.
+     - A compact block (the shot counter, the trick count) turns in place. Its box stays put and the
+       visual is close enough to square that it does not reach its neighbours.
+     - A WIDE control cannot, and does not try. Turn a 140px-wide pill and the layout still reserves
+       140px of width while the visual now stands 140px TALL from the same centre — which is how the
+       Photo/Video switch would end up sitting across the shutter. It stays put instead; see .modes.
+       A native camera leaves its mode strip alone too. */
+  .rot { display: inline-block; transform: rotate(var(--glyph-rot, 0deg)); transition: transform 0.2s ease; }
+  @media (prefers-reduced-motion: reduce) { .rot { transition: none; } }
+
+  /* Compact enough to turn where they stand. */
+  .counter, .mwrap { transform: rotate(var(--glyph-rot, 0deg)); transition: transform 0.2s ease; }
+  @media (prefers-reduced-motion: reduce) { .counter, .mwrap { transition: none; } }
+  /* The count and its caption are stacked, so turning the pair together lays them out side by side
+     and upright — the label stays with the thing it labels instead of being turned apart from it. */
+
+  .ctrl { width: 40px; height: 40px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.25); background: rgba(0,0,0,0.45); color: #fff; font-size: 0.95rem; cursor: pointer; display: flex; align-items: center; justify-content: center;
+          transform: rotate(var(--glyph-rot, 0deg)); transition: transform 0.2s ease; }
+  @media (prefers-reduced-motion: reduce) { .ctrl { transition: none; } }
   .ctrl.active { border-color: var(--accent); background: rgba(245,197,24,0.25); }
   .ctrl.tiny { width: 34px; height: 34px; font-size: 0.85rem; flex: none; }
   .ctrl:disabled { opacity: 0.35; cursor: default; }
@@ -2697,19 +3391,96 @@
   .sm-select { width: 100%; background: rgba(0,0,0,0.5); color: #fff; border: 1px solid rgba(255,255,255,0.3);
     border-radius: 8px; padding: 9px 10px; font: inherit; font-size: 0.85rem; }
   .sm-note { font-size: 0.74rem; color: rgba(255,255,255,0.75); padding-top: 12px; }
-  .grid { position: absolute; inset: 0; pointer-events: none; } .grid span { position: absolute; background: rgba(255,255,255,0.2); }
+  /* Full width and vertically centred — the same box the video gets from the flex viewfinder, so
+     the two stay in register at every shape. */
+  .grid { position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%); pointer-events: none; } .grid span { position: absolute; background: rgba(255,255,255,0.2); }
   .grid span:nth-child(1) { left: 33.3%; top: 0; bottom: 0; width: 1px; } .grid span:nth-child(2) { left: 66.6%; top: 0; bottom: 0; width: 1px; }
   .grid span:nth-child(3) { top: 33.3%; left: 0; right: 0; height: 1px; } .grid span:nth-child(4) { top: 66.6%; left: 0; right: 0; height: 1px; }
   /* Clear of the topbar — at top:16px a long event name sat straight over the timer. */
   .rec { position: absolute; top: 64px; left: 50%; transform: translateX(-50%); z-index: 7; color: #fff; background: rgba(0,0,0,0.5); padding: 4px 12px; border-radius: 999px; font-family: var(--font-mono); }
   /* Keeps the shutter row from reflowing when the flip button is hidden mid-recording. */
   .round-spacer { display: inline-block; width: 44px; height: 44px; }
+  /* Deliberately does NOT turn or move with the phone. It is the widest control on the screen and
+     sits directly above the shutter, so turning it in place would stand it on end through the
+     shutter, and moving it aside is worse still — the thing you reach for stops being where you
+     left it. A native camera leaves its mode strip exactly where it is for the same reason; only
+     the round glyphs turn. */
   .modes { position: absolute; bottom: 108px; left: 50%; transform: translateX(-50%); display: flex; background: rgba(0,0,0,0.5); border-radius: 999px; padding: 3px; z-index: 10; }
   .modes button { padding: 5px 14px; border-radius: 999px; border: none; background: transparent; color: rgba(255,255,255,0.6); font-size: 0.78rem; font-weight: 600; cursor: pointer; -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; user-select: none; outline: none; }
   .modes button.on { background: #fff; color: #111; }
   .bottombar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 8; padding: 20px;
     background: linear-gradient(transparent, rgba(0,0,0,0.65)); display: flex; align-items: center; justify-content: space-between; }
-  .round { width: 52px; height: 52px; border-radius: 50%; border: none; background: rgba(255,255,255,0.15); color: #fff; font-size: 1.3rem; cursor: pointer; position: relative; }
+
+  /* ── Landscape: odd, but it has to WORK ──────────────────────────────────────
+     We tell people the camera is built upright and offer fullscreen, and some of them will shoot
+     sideways anyway. Warning someone is not the same as leaving them a broken screen.
+
+     The whole problem is that landscape has no height. A phone is about 390px tall that way, and
+     the vertical rail needs 6 icons x 40px + 5 gaps = 290px starting 64px down, so it ends at 354 —
+     while the bottom bar starts at 298. Those 56px of overlap were the flip button sitting on top
+     of settings, and the fullscreen icon falling off the bottom entirely.
+
+     There is no shortage of WIDTH: the same phone is 844px across. So the rail runs that way,
+     where all six fit in one row with room to spare and nothing is near the bottom bar.
+
+     THIS BLOCK MUST STAY BELOW THE BASE RULES IT OVERRIDES. A media query adds no specificity, so
+     an equal-specificity rule later in the file simply wins — which is what happened: sitting
+     higher up, the .rail override applied and the .bottombar and .modes ones silently did nothing,
+     measuring as 20px and 108px in a browser that was matching the query perfectly.
+
+     Scoped to phones: a tablet in landscape has the height for the normal layout, hence max-height,
+     and pointer:coarse keeps it away from a narrow desktop window entirely. */
+  @media (orientation: landscape) and (pointer: coarse) and (max-height: 560px) {
+    .rail {
+      left: 14px;                  /* room to wrap into, should a sixth icon ever not fit */
+      /* row-REVERSE, so the first control keeps the corner. In portrait the rail is a column
+         running down from the top-right, so the flash is the one in the corner and that is where
+         the hand goes looking for it. Plain `row` packed right put the LAST icon in the corner and
+         threw the flash to the far side of the screen — the list read as inverted, because from the
+         anchor outwards it was. Reversed, the order off the corner is identical in both layouts. */
+      flex-direction: row-reverse;
+      justify-content: flex-start; /* main-start of row-reverse IS the right edge */
+      flex-wrap: wrap;
+      gap: 8px;
+      /* Clear of the banner, which takes ~80px of a 390px viewport and sits ABOVE this (z 11 vs 6).
+         Without this the banner did not merely cover the icons, it took their taps:
+         elementFromPoint at each button's centre returned the banner rather than the control.
+         --note-bottom is the banner's measured BOTTOM EDGE, published by the banner itself: its
+         text wraps at some widths and not others, and it clears the safe area by a margin that
+         depends on the phone. Falls back to the normal offset when no banner is up. */
+      top: calc(var(--note-bottom, 52px) + 12px);
+    }
+    /* Give the picture back some of the height the bar spends on padding. The buttons keep their
+       size — they are what people are aiming at. */
+    .bottombar { padding: 10px 14px; }
+    /* Keep the pills the same distance off the shutter as they are in portrait.
+       The pills are positioned from the bottom of the screen, and the shutter's top edge is
+       (its own height + the bar's padding) up from there, so:
+
+           gap = bottom - shutter_height - bar_padding
+
+       Portrait is 108 - 76 - 20 = 12px. Halving the padding above pushed the shutter's top edge
+       10px DOWN without moving the pills, which opened that to 22px — the same 10px, showing up as
+       a gap instead of as bar height. Taking 10 off `bottom` puts it back: 98 - 76 - 10 = 12px.
+       (And note the earlier attempt at 84px went the wrong way entirely: a smaller `bottom` is
+       LOWER, which is what put the pills on top of the shutter.) */
+    .modes { bottom: 98px; }
+    /* Sideways the rail runs ACROSS the top right, straight through where this sits, so the width
+       cap cannot save it — there is nothing to the side any more. It goes below the rail instead,
+       off the same measured banner edge, where the gap between the rail and the mode pills is wide
+       open. */
+    .bright-hud { top: calc(var(--note-bottom, 52px) + 64px); max-width: calc(100% - 32px); }
+  }
+
+  /* The WHOLE control turns, not the character inside it.
+     Rotating just the glyph left everything hung off the button behind: the hold-for-more "…" kept
+     its corner and spun on the spot, so the flip control came apart into two pieces pointing
+     different ways. A circular button can turn as a unit — its outline is identical at any angle —
+     and then the glyph and everything positioned against it keep their arrangement and turn
+     together, which is the point. */
+  .round { width: 52px; height: 52px; border-radius: 50%; border: none; background: rgba(255,255,255,0.15); color: #fff; font-size: 1.3rem; cursor: pointer; position: relative;
+    transform: rotate(var(--glyph-rot, 0deg)); transition: transform 0.2s ease; }
+  @media (prefers-reduced-motion: reduce) { .round { transition: none; } }
   .badge { position: absolute; top: -4px; right: -4px; background: var(--accent); color: var(--accent-ink, #111); border-radius: 999px; min-width: 18px; height: 18px; font-size: 0.65rem; font-weight: bold; display: flex; align-items: center; justify-content: center; padding: 0 4px; }
   .badge.error { background: #c0392b; color: #fff; }
   /* A hold-for-more marker, the same idea as the dot iOS puts on a control that has a long press.
@@ -2721,6 +3492,9 @@
        phone, so "tap or hold" either shrinks to unreadable or pushes the rail off the screen. The
        one-time tip spells the gesture out in words once; this is the reminder afterwards. */
     content: '\2026'; position: absolute; right: 6px; bottom: 1px;
+    /* No rotation of its own: it is positioned against a button that now turns as a unit, so it is
+       carried round already. Turning it again would spin it on the spot inside a control that had
+       itself moved — the two rotations cancelling into the wrong place. */
     font-size: .8rem; line-height: 1; color: rgba(255,255,255,.9);
     text-shadow: 0 1px 3px rgba(0,0,0,.8); pointer-events: none;
   }
@@ -2770,6 +3544,43 @@
     background: rgba(0,0,0,.72); border: 1px solid rgba(255,255,255,.22); backdrop-filter: blur(6px);
     color: #fff; font-size: .86rem; line-height: 1.4;
   }
+  /* Ordinary page content in the roll, never an overlay — see .oos-panel.oos-inline for what
+     happens when a card in here inherits the gallery's own min-height. */
+  .optin {
+    max-width: 720px; margin: 0 auto 14px; padding: 12px 14px;
+    border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .optin-h { margin: 0; font-size: .88rem; font-weight: 600; color: var(--text); line-height: 1.4; }
+  .optin-note { margin: 0; font-size: .78rem; color: var(--text-muted); line-height: 1.45; }
+  /* 44px everywhere: this is read one-handed, in the dark, at a party. */
+  .optin-cta {
+    min-height: 44px; padding: 10px 14px; width: 100%; cursor: pointer;
+    border: 1px solid var(--accent); border-radius: 10px; background: transparent;
+    color: var(--text); font-size: .88rem; font-weight: 600; text-align: center;
+  }
+  .optin-cta:disabled { opacity: .6; }
+  /* Wraps rather than shrinks: at 360px a side-by-side field and button leave the field too narrow
+     to see what you typed, which is the one thing you need to check before tapping send. */
+  .optin-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .optin-row input {
+    flex: 1 1 180px; min-width: 0; min-height: 44px; padding: 10px 12px; font: inherit; font-size: 1rem;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2);
+    color: var(--text); -webkit-text-fill-color: var(--text);
+  }
+  .optin-row .btn { min-height: 44px; flex: 0 0 auto; }
+  .optin-undo {
+    align-self: flex-start; min-height: 44px; padding: 4px 2px; background: none; border: none;
+    cursor: pointer; color: var(--text-muted); font-size: .82rem; text-decoration: underline;
+  }
+  /* Qualified with .join to outrank `.join label` and `.join input` above — those are written for
+     the stacked name/email fields, and unqualified they flatten this row back to a block label with
+     a full-width checkbox, which renders as a grey stripe across the card. */
+  .join .join-optin {
+    display: flex; align-items: center; gap: 10px; min-height: 44px; margin: 12px 0 0;
+    text-align: left; font-size: .84rem; color: var(--text); cursor: pointer; line-height: 1.35;
+  }
+  .join .join-optin input { width: 20px; height: 20px; flex: none; padding: 0; accent-color: var(--accent); }
   .full-gallery {
     display: block; max-width: 720px; margin: 0 auto 14px; padding: 12px 16px; text-align: center;
     border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
@@ -2945,6 +3756,58 @@
   .home-btn.quiet { background: rgba(0,0,0,.32); font-weight: 600; opacity: .82; }
   .home-btn.quiet:hover { opacity: 1; }
   /* Sits where the armed strip does, and clears the control rail the same way. */
+  .sw-act {
+    margin-top: 8px; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--accent); background: rgba(245,197,24,0.18); color: #fff;
+    font: inherit; font-size: 0.78rem; font-weight: 600;
+  }
+  .sw-act:disabled { opacity: 0.6; cursor: default; }
+  .switchnote, .landnote {
+    position: absolute; left: 12px; right: 12px; max-width: 460px; top: 104px; z-index: 8;
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 10px 10px 11px 13px; border-radius: 12px;
+    background: rgba(0, 0, 0, .8); border: 1px solid rgba(240, 180, 41, .6);
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    color: #fff; font-size: .78rem; pointer-events: auto;
+  }
+  /* The landscape notice is a BANNER, not a floating card, and the two differences both matter.
+     It only ever renders in landscape (see landscapeNote), so this needs no media query.
+
+     Stacking: the shared rule above puts these at z-index 8, which is under the mode pills (10) and
+     level with the bottom bar — so in landscape, where the viewport is short, the shutter and the
+     pills drew straight over the top of it. It goes above the controls instead (11), while staying
+     under the settings sheet (20), the lens picker and the camera-error screen (12), which are all
+     things a guest has deliberately opened and must not have a banner sitting on.
+
+     Position: pinned to the top edge, full width, deliberately covering the title and the trick
+     list. Those are the least urgent things on screen at the moment the UI has gone sideways, and
+     the alternative is overlapping the controls, which are the most urgent. */
+  .landnote {
+    /* Clear of the top edge, and of a notch, which in landscape is on the side. Flush to the edge
+       with only its bottom corners rounded, it read as a panel sliding off the top of the screen
+       rather than a banner sitting on it — all four corners visible is what makes it look placed. */
+    top: max(8px, env(safe-area-inset-top, 0px));
+    left: max(8px, env(safe-area-inset-left, 0px));
+    right: max(8px, env(safe-area-inset-right, 0px));
+    max-width: none;
+    z-index: 11;
+    /* Tighter than the floating card: a landscape viewport is short, and every row this takes is a
+       row of picture. */
+    padding: 8px 10px 9px 13px;
+    align-items: center;
+  }
+  /* Sits inside the banner rather than under it, so the whole thing stays one line tall. */
+  .landnote .sw-act { margin-top: 0; margin-left: 10px; flex: none; }
+  .landnote .sw-t { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 10px; }
+
+  .sw-t { flex: 1; min-width: 0; }
+  .sw-h { margin: 0; font-weight: 700; font-size: .84rem; }
+  .sw-s { margin: 3px 0 0; opacity: .85; line-height: 1.45; }
+  .sw-row { display: flex; gap: 6px; margin-top: 8px; }
+  .sw-row input { flex: 1; min-width: 0; font: inherit; font-size: .82rem; padding: 7px 9px;
+    border-radius: 8px; border: 1px solid rgba(255,255,255,.28); background: rgba(255,255,255,.08); color: #fff; }
+  .switchnote-x { flex: none; width: 22px; height: 22px; border-radius: 50%; border: none;
+    background: rgba(255,255,255,.16); color: #fff; font-size: .7rem; line-height: 1; cursor: pointer; }
   .micnote {
     /* Clear of the topbar rather than level with it: at 58px this sat straight over the trick-list
        pill and its caption. The pill is the thing a guest is mid-way through using when a mic note
