@@ -88,6 +88,8 @@ router.post('/', shotUpload.single('screenshot'), requireTurnstile('contact'), a
   if (email.enabled && SUPPORT_EMAIL) {
     try {
       await email.sendMail({
+        // Our own inbox. Suppression is about people we mail; this is someone mailing US.
+        always: true,
         to: SUPPORT_EMAIL,
         subject: `Snapdini ${label} — ${name || 'someone'}`,
         replyTo: from || undefined,

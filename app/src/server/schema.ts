@@ -482,3 +482,25 @@ export const emailSuppressions = pgTable('email_suppressions', {
   detail: text('detail'),
   createdAt: ms('created_at').notNull(),
 });
+
+/** What a guest asked us to stop sending. See 0048_guest_unsubscribes.sql.
+ *
+ *  Keyed by (event, address) rather than by guest id: the request belongs to the ADDRESS, and a
+ *  host who deletes a guest and re-imports their spreadsheet must not resurrect someone who
+ *  already said stop. A 'all'-scoped row is mirrored into emailSuppressions — that is the table
+ *  the send paths consult — and this row records that it was a request rather than a bounce. */
+export const guestUnsubscribes = pgTable('guest_unsubscribes', {
+  eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
+  email: text('email').notNull(),                          // lower-cased
+  scope: text('scope').notNull(),                          // 'event' | 'all'
+  source: text('source').notNull(),                        // 'one-click' | 'page'
+  inviteToken: text('invite_token'),
+  /** Asked for AFTER the unsubscribe has taken effect, never as a condition of it. */
+  feedbackReason: text('feedback_reason'),
+  feedbackComment: text('feedback_comment'),
+  createdAt: ms('created_at').notNull(),
+  updatedAt: ms('updated_at').notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.eventId, t.email] }),
+  emailIdx: index('idx_guest_unsubscribes_email').on(t.email),
+}));

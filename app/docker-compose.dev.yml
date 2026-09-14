@@ -60,6 +60,10 @@ services:
       # Setting the API key here by mistake fails EVERY verification with no visible symptom
       # beyond delivery state never updating, so it is worth checking twice.
       - MAILGUN_WEBHOOK_SIGNING_KEY=${MAILGUN_WEBHOOK_SIGNING_KEY:-}
+      # The monthly send allowance (Mailgun free = 3000/calendar month) and the percentage at which
+      # the ops digest starts warning. Reported only; nothing here ever blocks a send.
+      - MAILGUN_MONTHLY_LIMIT=${MAILGUN_MONTHLY_LIMIT:-}
+      - MAILGUN_BUDGET_WARN_PCT=${MAILGUN_BUDGET_WARN_PCT:-}
       # System address the contact form emails (e.g. support@snapdini.com).
       - SUPPORT_EMAIL=${SUPPORT_EMAIL:-}
       # Bot check (Cloudflare Turnstile). Unset secret = feature entirely inert, so this is safe

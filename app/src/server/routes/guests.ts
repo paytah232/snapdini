@@ -21,6 +21,7 @@ import { parseCsv, guessMapping, buildImport, isEmail, identityKey, MAX_IMPORT_R
 import { verifySignature, normaliseEvent, webhookConfigured, tokenSeen, rememberToken,
          INVITE_VAR, INVITE_TAG } from '../mailgun';
 import { shouldApply, suppressionReason, normaliseAddress, type DeliveryStatus } from '../delivery';
+import { blocksFor, partitionRecipients, unsubscribeHeaders, unsubscribePageUrl } from '../unsubscribe';
 
 const router = Router();
 
@@ -51,10 +52,10 @@ async function listPayload(eventId: string) {
     .limit(5000);
 
   const addresses = guests.map((g) => g.email).filter((e): e is string => !!e);
-  const suppressed = addresses.length
-    ? await db.select().from(emailSuppressions).where(inArray(emailSuppressions.email, addresses))
-    : [];
-  const byAddress = new Map(suppressed.map((s) => [s.email, s]));
+  // Both reasons an address will not be mailed, in one shape. A guest who used the body link to
+  // stop mail about THIS event has not bounced and is not globally suppressed, so reading only the
+  // global table would show them as perfectly mailable right up until the send skipped them.
+  const blocked = await blocksFor(eventId, addresses);
 
   // Invites come back newest-first, so the FIRST one seen for a guest is their latest.
   const latest = new Map<string, typeof invites[number]>();
@@ -63,7 +64,7 @@ async function listPayload(eventId: string) {
   return {
     guests: guests.map((g) => {
       const last = latest.get(g.id);
-      const sup = g.email ? byAddress.get(g.email) : undefined;
+      const sup = g.email ? blocked.get(g.email) : undefined;
       return {
         id: g.id, name: g.name, email: g.email, phone: g.phone, notes: g.notes,
         createdAt: g.createdAt,
@@ -71,7 +72,7 @@ async function listPayload(eventId: string) {
           ? { status: last.status, reason: last.reason, provider: last.provider,
               sentAt: last.sentAt, updatedAt: last.updatedAt }
           : null,
-        suppressed: sup ? { reason: sup.reason, detail: sup.detail, since: sup.createdAt } : null,
+        suppressed: sup ? { reason: sup.reason, detail: sup.detail, since: sup.since, scope: sup.scope } : null,
       };
     }),
     invites: invites.slice(0, 500).map((i) => ({
@@ -267,7 +268,12 @@ router.post('/:joinCode/guests/import', requireOrganizer, async (req: Request, r
  *  Everything interpolated is organizer-controlled and therefore escaped. The event name and the
  *  guest's name both come from a text box someone else typed into, and this string ends up as HTML
  *  in somebody's inbox. */
-function inviteHtml(ev: { name: string; joinCode: string }, guestName: string | null, joinUrl: string): string {
+function inviteHtml(
+  ev: { name: string; joinCode: string },
+  guestName: string | null,
+  joinUrl: string,
+  unsubUrl: string,
+): string {
   const safeEvent = escapeHtml(ev.name);
   const hello = guestName ? `<p>Hi ${escapeHtml(guestName)},</p>` : '';
   return email.htmlEmail(`You're invited to ${safeEvent}`, `
@@ -279,7 +285,9 @@ function inviteHtml(ev: { name: string; joinCode: string }, guestName: string | 
     <p>Or go to <a href="${joinUrl}">${escapeHtml(joinUrl)}</a> and enter the code
        <strong>${escapeHtml(ev.joinCode)}</strong>.</p>
     <p style="color:#888;font-size:13px">You are getting this because the host of ${safeEvent} added
-       you to their guest list. If it was not meant for you, you can ignore it.</p>
+       you to their guest list. If it was not meant for you, you can ignore it &mdash; or
+       <a href="${unsubUrl}" style="color:#888">unsubscribe</a>, and choose whether that means this
+       event or every Snapdini email.</p>
   `);
 }
 
@@ -306,11 +314,10 @@ router.post('/:joinCode/guests/invite', requireOrganizer, async (req: Request, r
   // THE suppression check. Every send path in this feature goes through it, and it runs as one
   // query against the whole batch rather than per address — a per-address check is the kind of
   // thing that gets skipped "just for the resend button" and quietly un-protects the domain.
-  const addresses = rows.map((g) => g.email as string);
-  const blocked = new Map(
-    (await db.select().from(emailSuppressions).where(inArray(emailSuppressions.email, addresses)))
-      .map((s) => [s.email, s]),
-  );
+  // It covers both refusals: the global list (bounces, complaints, "never email me again") and the
+  // people who asked to hear nothing more about THIS event.
+  const blocked = await blocksFor(ev.id, rows.map((g) => g.email as string));
+  const { mailable, skipped: refused } = partitionRecipients(rows, blocked);
 
   const base = baseUrl(req);
   const joinUrl = base + (ev.slug ? `/e/${ev.slug}` : `/join/${ev.joinCode}`);
@@ -318,22 +325,20 @@ router.post('/:joinCode/guests/invite', requireOrganizer, async (req: Request, r
   const now = Date.now();
 
   const inserts: (typeof guestInvites.$inferInsert)[] = [];
-  const skipped: { email: string; name: string | null; reason: string }[] = [];
+  // Not silently. The host is told, by address and by reason, that these people were not mailed.
+  // "We sent 19 of your 20" with no explanation is how a guest ends up never being invited and
+  // nobody finding out until the day.
+  const skipped: { email: string; name: string | null; reason: string }[] = refused.map((r) => ({
+    email: r.guest.email as string, name: r.guest.name, reason: r.block.reason,
+  }));
   let sent = 0, failed = 0;
 
-  for (const g of rows) {
+  for (const g of mailable) {
     const address = g.email as string;
-    const block = blocked.get(address);
-    if (block) {
-      // Not silently. The host is told, by address and by reason, that this person was not mailed.
-      // "We sent 19 of your 20" with no explanation is how a guest ends up never being invited and
-      // nobody finding out until the day.
-      skipped.push({ email: address, name: g.name, reason: block.reason });
-      continue;
-    }
 
     // Minted BEFORE the send, so it exists even if the provider's response never arrives. This is
-    // the id the webhook will come back with.
+    // the id the webhook will come back with, AND the bearer token in this guest's unsubscribe
+    // links — one token, because a second scheme would be a second thing to expire and get wrong.
     const token = uuidv4();
     const row: typeof guestInvites.$inferInsert = {
       id: uuidv4(), eventId: ev.id, guestId: g.id, email: address,
@@ -343,9 +348,15 @@ router.post('/:joinCode/guests/invite', requireOrganizer, async (req: Request, r
     };
     try {
       const r = await email.sendMail({
-        to: address, subject, html: inviteHtml(ev, g.name, joinUrl),
+        to: address, subject, html: inviteHtml(ev, g.name, joinUrl, unsubscribePageUrl(base, token)),
         variables: { [INVITE_VAR]: token },
         tag: INVITE_TAG,
+        // Both halves, because they serve different people. The header is what a mail client turns
+        // into its own one-press unsubscribe, sitting beside the report-spam button; the body link
+        // is for the guest who wants to choose between this event and all of it. These are cold
+        // addresses off a host's spreadsheet — without an unsubscribe the only lever the recipient
+        // has is "mark as spam", and that one is charged to our sending reputation.
+        headers: unsubscribeHeaders(base, token),
       });
       row.provider = r.provider;
       row.providerMessageId = r.messageId;

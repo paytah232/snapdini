@@ -1,4 +1,6 @@
 import nodemailer from 'nodemailer';
+import { blocksFor } from './unsubscribe';
+import { normaliseAddress } from './delivery';
 
 // Two interchangeable transports: SMTP (any provider) or Mailgun's HTTP API. Mailgun is
 // preferred when configured; otherwise SMTP; otherwise email is disabled (dev logs links).
@@ -37,6 +39,23 @@ interface Mail {
   variables?: Record<string, string>;
   /** A Mailgun tag, so one kind of mail can be told from another in Mailgun's own dashboard. */
   tag?: string;
+  /** Extra RFC 5322 headers on the message itself. This exists for List-Unsubscribe and
+   *  List-Unsubscribe-Post (RFC 8058), which are headers rather than body content precisely so the
+   *  mail CLIENT can offer the unsubscribe in its own chrome — right next to the report-spam button
+   *  the recipient would otherwise reach for. Carried by both transports: Mailgun takes arbitrary
+   *  headers as `h:`-prefixed form fields, nodemailer takes a headers object. */
+  headers?: Record<string, string>;
+  /** The event this message belongs to, when it belongs to one. Supplying it widens the suppression
+   *  check from the global list to "and this event's own opt-outs" — someone who said stop about
+   *  Jo's wedding has not said stop about Sam's birthday. */
+  eventId?: string;
+  /** Send even to a suppressed address.
+   *
+   *  For the handful of messages where NOT sending is the greater harm: a sign-in or verification
+   *  link the person asked for seconds ago (suppressing it locks them out of their own account),
+   *  and anything addressed to our own support inbox. Everything else is suppressible by default,
+   *  which is the point — the next email someone adds is compliant without having to remember. */
+  always?: boolean;
 }
 
 /** What a send tells us about itself.
@@ -47,16 +66,31 @@ interface Mail {
  *
  *  `provider` is recorded against every invite, because it is what decides whether 'sent' means
  *  "we are waiting to hear" or "we will never hear". */
-export interface SendResult { provider: 'mailgun' | 'smtp'; messageId: string | null }
+export interface SendResult {
+  provider: 'mailgun' | 'smtp';
+  messageId: string | null;
+  /** Nothing was sent: the address is on the suppression list, or opted out of this event.
+   *
+   *  Returned rather than thrown on purpose. Callers stamp one-shot guards and write ledger rows
+   *  around these calls; an exception would leave a claim un-made and the sweep would try the same
+   *  suppressed address again on every tick, forever. A quiet, inspectable "no" lets a caller
+   *  record the truth instead. */
+  suppressed?: true;
+}
 
 const unbracket = (id: string | null | undefined): string | null =>
   (id ? id.replace(/^</, '').replace(/>$/, '') || null : null);
 
-async function sendViaMailgun({ to, subject, html, replyTo, variables, tag }: Mail): Promise<SendResult> {
+async function sendViaMailgun({ to, subject, html, replyTo, variables, tag, headers }: Mail): Promise<SendResult> {
   const base = process.env.MAILGUN_BASE || 'https://api.mailgun.net'; // EU: https://api.eu.mailgun.net
   const domain = process.env.MAILGUN_DOMAIN as string;
   const form = new URLSearchParams({ from: FROM, to, subject, html });
   if (replyTo) form.set('h:Reply-To', replyTo);
+  // `h:` = a header to set on the outgoing message. Worth knowing where this sits relative to
+  // o:tracking below: with tracking off, Mailgun injects no unsubscribe of its own, so whatever is
+  // passed here is the ONLY unsubscribe the message will carry. There is no provider fallback
+  // behind it, and a send that drops these headers has no one-click unsubscribe at all.
+  for (const [k, v] of Object.entries(headers || {})) form.set(`h:${k}`, v);
   // `v:` = custom variable, `o:` = send option. Mailgun caps all o:/h:/v:/t: parameters at 16KB
   // combined, which the short token and tag used here are nowhere near.
   for (const [k, v] of Object.entries(variables || {})) form.set(`v:${k}`, v);
@@ -84,10 +118,23 @@ async function sendViaMailgun({ to, subject, html, replyTo, variables, tag }: Ma
   return { provider: 'mailgun', messageId: unbracket(body?.id) };
 }
 
-export async function sendMail({ to, subject, html, replyTo, variables, tag }: Mail): Promise<SendResult> {
-  if (mailgunConfigured) return sendViaMailgun({ to, subject, html, replyTo, variables, tag });
+export async function sendMail({ to, subject, html, replyTo, variables, tag, headers, eventId, always }: Mail): Promise<SendResult> {
+  // ONE place, so every sender is covered — including the ones nobody has written yet.
+  //
+  // This check used to live in exactly one route (the guest invite), which meant a guest who chose
+  // "never email me from Snapdini again" carried on receiving the gallery link, the thank-you, the
+  // release reminder and every lifecycle message. The unsubscribe worked; it just did not reach
+  // anything. Nine call sites each remembering to ask is nine chances to forget, so the transport
+  // asks instead.
+  if (!always) {
+    const blocked = await blocksFor(eventId ?? '', [to]);
+    if (blocked.get(normaliseAddress(to))) {
+      return { provider: mailgunConfigured ? 'mailgun' : 'smtp', messageId: null, suppressed: true };
+    }
+  }
+  if (mailgunConfigured) return sendViaMailgun({ to, subject, html, replyTo, variables, tag, headers });
   if (transporter) {
-    const info = await transporter.sendMail({ from: FROM, to, subject, html, replyTo });
+    const info = await transporter.sendMail({ from: FROM, to, subject, html, replyTo, headers });
     return { provider: 'smtp', messageId: unbracket(info?.messageId) };
   }
   throw new Error('Email not configured — set MAILGUN_API_KEY+MAILGUN_DOMAIN, or SMTP_HOST/USER/PASS');
@@ -114,7 +161,9 @@ export async function sendAuthLink(
   }
 
   try {
-    await sendMail({ to, subject: copy.subject, html: authHtml(copy, link) });
+    // Never suppressed: this is a link the person asked for seconds ago, and withholding it locks
+    // them out of their own account. It is also purely transactional — nothing is being sold.
+    await sendMail({ to, subject: copy.subject, html: authHtml(copy, link), always: true });
     return { delivered: true, devLink: devFallback };
   } catch (err) {
     // Common in dev: the Mailgun sandbox only delivers to *authorised* recipients,

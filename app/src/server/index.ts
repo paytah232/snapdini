@@ -38,6 +38,7 @@ import sharesRoutes from './routes/shares';
 import cohostsRoutes from './routes/cohosts';
 import surveyRoutes from './routes/survey';
 import emailPrefsRoutes from './routes/email-prefs';
+import unsubscribeRoutes from './routes/unsubscribe';
 import { ensureAdminFromEnv } from './auth';
 import pkg from '../../package.json';
 
@@ -345,6 +346,18 @@ app.use('/api/survey', surveyRoutes);
 // refused is an unsubscribe that did not happen. The token is 32 random bytes, so the /api backstop
 // is the only ceiling it needs.
 app.use('/api/email-prefs', emailPrefsRoutes);
+// The guest unsubscribe, reached from an invite. Same reasoning as the preference centre above —
+// an unsubscribe that gets refused is an unsubscribe that did not happen — plus one of its own: the
+// one-click endpoint is posted to by a MAIL CLIENT (RFC 8058), and Gmail and Yahoo's bulk-sender
+// rules judge the sender on whether it works. The token is a uuid v4 tied to one invite, so the
+// /api backstop is the only ceiling it needs.
+//
+// The urlencoded parser is here rather than global: a one-click POST carries
+// `List-Unsubscribe=One-Click` as a form body, and while the handler deliberately ignores it, an
+// unparsed body left in the socket is a needless way for a client to hang. 1KB, because that is all
+// the standard ever sends. Raising express.urlencoded across the whole product to serve one
+// endpoint would widen the body ceiling everywhere for nothing.
+app.use('/api/guest-unsubscribe', express.urlencoded({ extended: false, limit: '1kb' }), unsubscribeRoutes);
 // Bundled royalty-free backing tracks — public + immutable, served for the slideshow track preview.
 app.use('/api/music', express.static(MUSIC_DIR, { immutable: true, maxAge: '7d' }));
 

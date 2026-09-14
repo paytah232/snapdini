@@ -57,6 +57,13 @@ services:
       # Setting the API key here by mistake fails EVERY verification with no visible symptom
       # beyond delivery state never updating, so it is worth checking twice.
       - MAILGUN_WEBHOOK_SIGNING_KEY=${MAILGUN_WEBHOOK_SIGNING_KEY:-}
+      # The monthly send allowance, and how close to it the daily ops digest starts warning.
+      # Mailgun's free plan is 3000 messages a calendar month; a paid plan is not, which is why
+      # this is a variable rather than a constant that would quietly lie about the headroom.
+      # Reported only — nothing here ever blocks a send, because silently refusing a host's
+      # invites is a worse outcome than an overage.
+      - MAILGUN_MONTHLY_LIMIT=${MAILGUN_MONTHLY_LIMIT:-}
+      - MAILGUN_BUDGET_WARN_PCT=${MAILGUN_BUDGET_WARN_PCT:-}
       - SUPPORT_EMAIL=${SUPPORT_EMAIL:-}
       # Bot check (Cloudflare Turnstile). Unset secret = feature entirely inert, so this is safe
       # to carry before keys exist. These MUST be listed here: the compose files pass env

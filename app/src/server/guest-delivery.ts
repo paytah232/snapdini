@@ -464,7 +464,7 @@ export async function sendGuestLink(
       galleryUrl, timezone: ev.timezone, scope, photoCount,
     });
     let ok = true;
-    try { await email.sendMail({ to: r.email, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com' }); sent++; }
+    try { await email.sendMail({ to: r.email, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com', eventId: ev.id }); sent++; }
     catch (e) { ok = false; errors++; console.error(`[guest-delivery] link to ${r.email} failed: ${(e as Error).message}`); }
     sends.push({ email: r.email, ok });
   }
@@ -552,7 +552,7 @@ async function sweepEventEnd(now: number): Promise<void> {
     });
     let sent = 0, errors = 0;
     for (const m of messages) {
-      try { await email.sendMail({ to: m.to, subject: m.subject, html: m.html, replyTo: 'support@snapdini.com' }); sent++; }
+      try { await email.sendMail({ to: m.to, subject: m.subject, html: m.html, replyTo: 'support@snapdini.com', eventId: ev.id }); sent++; }
       catch (e) { errors++; console.error(`[guest-delivery] event-end to ${m.to} failed: ${(e as Error).message}`); }
     }
     // Nothing got through at all — the transport is down rather than one address being bad. Give
@@ -594,7 +594,7 @@ async function sweepReminder(now: number): Promise<void> {
         guestName: firstName(r.name), eventName: ev.name, hostName: owner?.name || '',
         galleryUrl, timezone: ev.timezone, releaseAt: opens,
       });
-      try { await email.sendMail({ to: r.email, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com' }); sent++; }
+      try { await email.sendMail({ to: r.email, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com', eventId: ev.id }); sent++; }
       catch (e) { errors++; console.error(`[guest-delivery] reminder to ${r.email} failed: ${(e as Error).message}`); }
     }
     if (sent === 0 && errors > 0) await unclaim(ev.id, 'guestReminderSentAt');

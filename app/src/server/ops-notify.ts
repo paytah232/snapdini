@@ -1,5 +1,6 @@
 import { get, all, run } from './db';
 import * as email from './email';
+import { describeUsage, monthUsage, type MonthUsage } from './email-budget';
 
 // Operator (support@) notifications, separate from customer lifecycle emails. Two tiers:
 //   • Instant alerts for things that need attention now (unhappy survey, client-error spike).
@@ -29,7 +30,9 @@ async function setState(key: string, value: string): Promise<void> {
 
 async function mail(subject: string, bodyHtml: string): Promise<void> {
   if (!support() || !email.enabled) return;
-  try { await email.sendMail({ to: support(), subject, html: email.htmlEmail(subject, bodyHtml) }); }
+  // Addressed to our own support inbox, not to a member of the public — there is no one here to
+  // have unsubscribed, and an ops alert that suppresses itself is an outage nobody hears about.
+  try { await email.sendMail({ to: support(), subject, html: email.htmlEmail(subject, bodyHtml), always: true }); }
   catch (e) { console.error('[ops] mail failed:', (e as Error).message); }
 }
 
@@ -97,18 +100,39 @@ async function composeAndSendDigest(now: number, force: boolean): Promise<void> 
 
   const totalMsgs = msgs.reduce((s, m) => s + Number(m.n), 0);
   const newSurveys = Number(surv?.n ?? 0);
-  // Nothing pending and no fresh feedback → stay silent (unless force-previewing).
-  if (!force && totalMsgs === 0 && openErr === 0 && newSurveys === 0) { await setState('ops:last_digest_date', localDate(now)); await setState('ops:last_digest_at', String(now)); return; }
+
+  // The month's email allowance. Read before the silence check below, because running out of it is
+  // exactly the kind of thing that happens on a quiet week — no support messages, no errors, and
+  // the invites nobody complained about yet are the ones that stopped going out. A budget that
+  // only ever reported when something ELSE was already wrong would miss its own emergency.
+  let budget: MonthUsage | null = null;
+  try { budget = await monthUsage(now); }
+  catch (e) { console.error('[ops] email budget:', (e as Error).message); }
+
+  // Nothing pending and no fresh feedback → stay silent (unless force-previewing, or the allowance
+  // needs saying something about).
+  const quiet = totalMsgs === 0 && openErr === 0 && newSurveys === 0 && (!budget || budget.level === 'ok');
+  if (!force && quiet) { await setState('ops:last_digest_date', localDate(now)); await setState('ops:last_digest_at', String(now)); return; }
 
   const age = (ms: number) => { const d = Math.floor((now - ms) / 86_400_000); return d <= 0 ? 'today' : `${d}d ago`; };
   const msgLines = msgs.length
     ? msgs.map((m) => `<li><b>${Number(m.n)}</b> ${m.kind}${Number(m.n) > 1 ? 's' : ''} — oldest ${age(Number(m.oldest))}</li>`).join('')
     : '<li>None 🎉</li>';
 
-  await mail(`Snapdini daily summary — ${totalMsgs} to action${openErr ? `, ${openErr} open errors` : ''}`, `
+  // The allowance leads the SUBJECT when it is in trouble: a line halfway down a digest is read
+  // after the fact, and the whole point of this number is to be seen before the month runs out.
+  const budgetFlag = budget && budget.level !== 'ok' ? `${budget.level === 'over' ? '🛑 email allowance SPENT' : '⚠️ email allowance low'} — ` : '';
+  const budgetLine = budget
+    ? `<p><b>Email allowance:</b> ${describeUsage(budget)}<br>
+       <span style="color:#a39b8c;font-size:.85rem">Counts invites (${budget.invites}) and gallery/share sends (${budget.shares}).
+       Account and lifecycle mail is not recorded per recipient, so treat this as a floor.</span></p>`
+    : '<p><b>Email allowance:</b> could not be read this morning.</p>';
+
+  await mail(`${budgetFlag}Snapdini daily summary — ${totalMsgs} to action${openErr ? `, ${openErr} open errors` : ''}`, `
     <p><b>Outstanding actions</b></p>
     <ul>${msgLines}</ul>
     <p><b>Open client errors:</b> ${openErr}</p>
+    ${budgetLine}
     ${newSurveys ? `<p><b>New survey responses (24h):</b> ${newSurveys} · avg overall ${surv?.avg_overall ? Number(surv.avg_overall).toFixed(1) : '—'}/5 · avg NPS ${surv?.avg_nps ? Number(surv.avg_nps).toFixed(1) : '—'}${Number(surv?.low ?? 0) ? ` · <b>${surv?.low} unhappy</b>` : ''}</p>` : ''}
     <p><b>Events starting in the next 7 days:</b> ${upcoming}</p>
     <p style="margin-top:16px"><a class="btn" href="${BASE()}/siteadmin">Open Site admin</a></p>
