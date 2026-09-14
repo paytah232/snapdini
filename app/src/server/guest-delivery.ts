@@ -371,9 +371,12 @@ async function tellHostScopeIsEmpty(ev: Event, scope: GuestSendScope, waiting: n
   if (!owner) return;
   const reviewUrl = `${BASE()}/admin/${ev.joinCode}/review`;
   const who = waiting === 1 ? '1 guest' : `${waiting} guests`;
+  // escapeForHost, because this subject is also passed as htmlEmail's TITLE, which interpolates it
+  // raw. The body below already escaped it; the heading did not.
+  const safeName = escapeForHost(ev.name);
   const subject = scope === 'favourites'
-    ? `Nothing starred yet for ${ev.name}`
-    : `No photos to send for ${ev.name}`;
+    ? `Nothing starred yet for ${safeName}`
+    : `No photos to send for ${safeName}`;
   const body = scope === 'favourites'
     ? `<p>We were about to send your guests the favourites link for <strong>${escapeForHost(ev.name)}</strong>, but nothing is starred yet — so we have sent nothing rather than an empty page.</p>
        <p>${who} asked for their photos. Star the ones you want them to see, then send the link from the event page.</p>`

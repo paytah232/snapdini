@@ -1,6 +1,7 @@
 import { get, all, run } from './db';
 import * as email from './email';
 import { describeUsage, monthUsage, type MonthUsage } from './email-budget';
+import { escapeHtml } from './lib';
 
 // Operator (support@) notifications, separate from customer lifecycle emails. Two tiers:
 //   • Instant alerts for things that need attention now (unhappy survey, client-error spike).
@@ -53,10 +54,25 @@ export async function notifyUnhappySurvey(
   const line = (k: string, v: number | null) => { if (v !== null) rows.push(`<tr><td style="padding:2px 12px 2px 0;color:#a39b8c">${k}</td><td><b>${v}</b></td></tr>`); };
   line('Overall (1–5)', r.overall); line('Setup (1–5)', r.setup); line('Guest experience (1–5)', r.guestExperience);
   line('Value (1–5)', r.value); line('NPS (0–10)', r.nps);
+  // ESCAPED, and this is the one place in the product where forgetting it mattered most: the
+  // trigger is POST /api/survey/:token, which needs no session — only a token from an emailed link
+  // — and the words land in the operator's own inbox, where a link is trusted precisely because
+  // the mail came from us. htmlEmail() interpolates both title and body raw (every other caller
+  // pre-escapes), so the escaping has to happen here. Mail clients strip <script>, so the realistic
+  // damage is injected markup and a forged link rather than script — but anything that renders this
+  // mail in a browser-like preview (a ticket queue, a webmail with a permissive sanitiser) closes
+  // that gap for us.
   let comments = '';
-  try { const c = r.comments ? JSON.parse(r.comments) as Record<string, string> : {}; comments = Object.entries(c).map(([k, v]) => `<p style="margin:6px 0"><b>${k}:</b> ${String(v)}</p>`).join(''); } catch { /* */ }
-  await mail(`⚠️ Unhappy feedback — ${ev.name}`, `
-    <p>A guest left low feedback for <b>${ev.name}</b> (<code>${ev.joinCode}</code>)${r.contactOptIn ? ' and <b>opted in to be contacted</b>.' : '.'}</p>
+  try {
+    const c = r.comments ? JSON.parse(r.comments) as Record<string, string> : {};
+    comments = Object.entries(c)
+      .map(([k, v]) => `<p style="margin:6px 0"><b>${escapeHtml(k)}:</b> ${escapeHtml(v)}</p>`)
+      .join('');
+  } catch { /* */ }
+  // The event name is host-supplied, 80 chars, unstripped, and settable on a free signup.
+  const safeName = escapeHtml(ev.name);
+  await mail(`⚠️ Unhappy feedback — ${safeName}`, `
+    <p>A guest left low feedback for <b>${safeName}</b> (<code>${escapeHtml(ev.joinCode)}</code>)${r.contactOptIn ? ' and <b>opted in to be contacted</b>.' : '.'}</p>
     <table style="border-collapse:collapse;margin:10px 0">${rows.join('')}</table>
     ${comments || '<p style="color:#a39b8c">(no written comments)</p>'}
     <p style="margin-top:16px"><a class="btn" href="${BASE()}/siteadmin">Open Site admin</a></p>

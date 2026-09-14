@@ -137,6 +137,33 @@ docker compose up -d
 **Three new settings, and every one of them is optional** — the release works with none of them set,
 so trap 2 only applies if you want one. It is a large release, so here is what changes under you.
 
+#### ⚠ If you send mail over SMTP, read this one first
+
+`nodemailer` moves 6.x → 10.x in this release (along with `sharp` 0.33 → 0.35 and `multer` 1.x → 2.x,
+which need nothing from you). **nodemailer 9 turned on TLS certificate validation by default.**
+
+If your SMTP server presents a self-signed certificate, or one whose name does not match the host
+you connect to — which is common on a LAN relay or a mail container on the same Docker network —
+sending will start failing after this upgrade with a certificate error. Nothing else changes, and
+**this does not affect you at all if you send through Mailgun**: that path is an HTTPS API call and
+never touches nodemailer.
+
+Two ways out, in order of preference:
+
+1. **Fix the certificate.** Point `SMTP_HOST` at the name the certificate is actually issued for, or
+   give the relay a real certificate. This is the one that leaves you encrypted *and* authenticated.
+2. **Tell it to accept the certificate anyway**, if the relay is on a network you control and you
+   accept that a machine on that network could impersonate it:
+
+   ```yaml
+     app:
+       environment:
+         - SMTP_TLS_REJECT_UNAUTHORIZED=false
+   ```
+
+Verify either way by sending yourself a test — see [Verifying](#verifying). A send that fails this
+way fails loudly in the app logs with a certificate error, so you will not be left guessing.
+
 #### Guest list & invite delivery tracking
 Adds a **guest list** per event (add by hand or import a CSV), Snapdini-branded **invite emails**,
 and per-recipient **delivery tracking**. Nothing to configure to get the list and the invites:

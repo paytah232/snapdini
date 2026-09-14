@@ -84,9 +84,16 @@ for (const k of ['MAILGUN_API_KEY', 'MAILGUN_DOMAIN']) delete process.env[k];
 process.env.SMTP_HOST = 'smtp.test';
 process.env.SMTP_USER = 'user';
 process.env.SMTP_PASS = 'pass';
-require('nodemailer').createTransport = () => ({
+// nodemailer 10 is a dual CJS/ESM build: its CommonJS entry sets __esModule and exposes a SEPARATE
+// `default` object, so email.ts's `import nodemailer from 'nodemailer'` now resolves to
+// module.exports.default rather than module.exports itself, which is what v6 handed back. Patching
+// only one of them leaves the real transport in place and the test dials smtp.test for real.
+const smtpStub = () => ({
   sendMail: async ({ to }: { to: string }) => { sent.push({ to, via: 'smtp' }); return { messageId: '<smtp-1>' }; },
 });
+const nodemailerMod = require('nodemailer');
+nodemailerMod.createTransport = smtpStub;
+if (nodemailerMod.default) nodemailerMod.default.createTransport = smtpStub;
 delete require.cache[emailPath];
 const smtpEmail = require('../email');
 

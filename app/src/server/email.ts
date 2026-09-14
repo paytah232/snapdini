@@ -17,14 +17,37 @@ export const enabled = smtpConfigured || mailgunConfigured;
 export const provider: 'mailgun' | 'smtp' | null =
   mailgunConfigured ? 'mailgun' : smtpConfigured ? 'smtp' : null;
 
+/**
+ * Accept an SMTP certificate that does not verify.
+ *
+ * nodemailer 9 turned certificate validation ON by default, which is the right default and which
+ * breaks a shape of deployment this project genuinely has: a relay on the same Docker network or
+ * LAN, presenting a self-signed certificate or one issued for a different name. Before 1.5.0 those
+ * sends worked; after it they fail with a certificate error.
+ *
+ * So the escape hatch is explicit and opt-in rather than a silent `rejectUnauthorized: false`. It
+ * has to be TYPED to turn off — any other value, including empty, leaves validation on — because
+ * the failure mode of getting this wrong is a connection that looks encrypted and authenticates
+ * nobody. Fixing the certificate is the better answer and the docs say so; this is for the
+ * operator who has weighed it up on a network they control.
+ */
+const smtpRejectUnauthorized = process.env.SMTP_TLS_REJECT_UNAUTHORIZED !== 'false';
+
 const transporter = smtpConfigured
   ? nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: parseInt(process.env.SMTP_PORT || '587'),
       secure: process.env.SMTP_SECURE === 'true',
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      tls: { rejectUnauthorized: smtpRejectUnauthorized },
     })
   : null;
+
+if (smtpConfigured && !smtpRejectUnauthorized) {
+  // Said once, at boot, so it appears in the logs of the deployment it applies to rather than
+  // living only in a config file nobody reads twice.
+  console.warn('[email] SMTP_TLS_REJECT_UNAUTHORIZED=false — the SMTP certificate is NOT verified.');
+}
 
 const FROM = process.env.SMTP_FROM
   || process.env.SMTP_USER

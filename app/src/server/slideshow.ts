@@ -3,7 +3,10 @@ import { randomUUID } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import sharp from 'sharp';
+// sharp 0.35 dropped the `sharp.*` TYPE namespace (its declarations are now flat named
+// exports), so the instance type comes in by name. The default export is unchanged, so
+// runtime uses like sharp.strategy.attention below still read the same.
+import sharp, { type Sharp } from 'sharp';
 
 const NCPU = Math.max(2, os.cpus().length);   // use the box's cores for filtering + encoding
 import { and, asc, desc, eq, lt } from 'drizzle-orm';
@@ -44,7 +47,7 @@ async function renderCard(
     <rect width="${W}" height="${H}" fill="${hasBg ? 'rgba(0,0,0,0.6)' : (opts.bg || '#0f0f0f')}"/>
     ${chip}${rows}${footer}
   </svg>`;
-  let pipeline: sharp.Sharp;
+  let pipeline: Sharp;
   if (hasBg) {
     // Smart crop: focus on the most salient region (faces/subjects) instead of a centre crop, so
     // people aren't sliced off the edges of the intro card's event image.
