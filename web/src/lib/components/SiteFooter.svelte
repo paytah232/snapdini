@@ -77,8 +77,17 @@
   .fl { display: flex; gap: 18px; font-size: .85rem; color: var(--text-muted); align-items: center; flex-wrap: wrap; }
   .fl a, .fl :global(.linklike) { color: var(--text-muted); text-decoration: none; background: none; border: none; cursor: pointer; font: inherit; }
   .fl a:hover, .fl :global(.linklike):hover { color: var(--text); }
-  .uses { flex-basis: 100%; order: 3; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline;
-    padding-top: 16px; margin-top: 4px; border-top: 1px solid var(--border); font-size: .8rem; }
+  /* Pulled out to the footer's own edges. The footer's rule is drawn on its border box and so spans
+     the full 1080px; this one sat inside the 24px padding and came out 48px narrower — two
+     horizontal rules stacked in one component at two different widths, which reads as a mistake
+     rather than as a nested divider. The negative margin and the matching padding cancel, so the
+     links still line up with everything above them — and the basis has to carry the 48px too,
+     because flex-basis:100% is 100% of the CONTENT box, which left the rule pulled to the correct
+     left edge and still 48px short on the right. */
+  .uses { flex-basis: calc(100% + 48px); order: 3; display: flex; flex-wrap: wrap; gap: 6px 14px;
+    align-items: baseline;
+    padding-top: 16px; margin-top: 4px; margin-inline: -24px; padding-inline: 24px;
+    border-top: 1px solid var(--border); font-size: .8rem; }
   .uses-label { color: var(--text); font-weight: 600; margin-right: 4px; }
   .uses a { color: var(--text-muted); text-decoration: none; }
   .uses a:hover { color: var(--text); text-decoration: underline; }
