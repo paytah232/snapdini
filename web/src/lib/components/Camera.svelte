@@ -2390,6 +2390,9 @@
       </div>
     {/if}
     <div class="join" class:card={ev?.theme?.headerImage}>
+      <!-- Deliberately NOT a link, unlike the mark in the site header. This one wears the host's
+           own accent and is their event's branding, not our chrome — a guest who just scanned a QR
+           should not be one tap from leaving the event they were invited to. -->
       <div class="join-logo"><Logo color={ev?.theme?.accent ?? ''} /></div>
       <h1>{ev?.name}</h1>
       {#if ev?.blurb}<p class="blurb">{ev.blurb}</p>{/if}

@@ -50,6 +50,51 @@
   // existing must not be stranded there.
   $: if (sub > subCount) sub = subCount;
 
+  /**
+   * Put the top of the new page in view.
+   *
+   * Every one of these controls lives at the BOTTOM of the card, and swapping the card does not move
+   * the scroll position — so pressing Next left you looking at the middle of the next question, or
+   * at blank space below a shorter one, and you had to scroll up to find out what you had been
+   * asked. The strip is the target rather than the document top: it carries which step you are on,
+   * and the card's heading sits directly beneath it.
+   *
+   * After a tick, because the new card has to exist before it can be scrolled to.
+   */
+  /**
+   * The running total, kept in view once the real one has scrolled away.
+   *
+   * The total sits above the step strip, which is fine on a laptop and useless on a phone: it is
+   * off the top of the screen for the whole of every step, so the one number that changes as you
+   * pick things is the one number you cannot see. A pill appears only while the real total is out
+   * of view, so on a short step — or any desktop — nothing is doubled up.
+   */
+  let totalEl: HTMLElement | null = null;
+  let totalOut = false;
+  function watchTotal(node: HTMLElement) {
+    totalEl = node;
+    if (typeof IntersectionObserver !== 'function') return;   // no observer, no pill: it is an extra, not the source
+    // rootMargin, not a bare threshold: with threshold 0 a two-pixel sliver of the total still
+    // counts as visible, so the pill held off while the number was unreadable. Pulling the top edge
+    // in by 30px means "effectively gone" rather than "gone to the last pixel".
+    const io = new IntersectionObserver(([e]) => { totalOut = !e.isIntersecting; },
+                                        { threshold: 0, rootMargin: '-30px 0px 0px 0px' });
+    io.observe(node);
+    return { destroy() { io.disconnect(); totalOut = false; } };
+  }
+  function backToTotal() {
+    const still = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    totalEl?.scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'start' });
+  }
+
+  async function scrollToStepTop() {
+    await tick();
+    const el = document.querySelector('.steps');
+    if (!el) return;   // "show me everything at once" has no strip and nothing to jump between
+    const still = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    el.scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'start' });
+  }
+
   function nextStep() {
     if (!canAdvance) {
       // Take them to the one thing standing in the way, rather than absorbing the press silently.
@@ -58,19 +103,23 @@
       el?.focus();
       return;
     }
-    if (sub < subCount) { sub += 1; return; }
-    if (step < LAST_STEP) { step += 1; sub = 1; }
+    markMailSeen();
+    if (sub < subCount) { sub += 1; void scrollToStepTop(); return; }
+    if (step < LAST_STEP) { step += 1; sub = 1; void scrollToStepTop(); }
   }
   function prevStep() {
-    if (sub > 1) { sub -= 1; return; }
-    if (step > 1) { step -= 1; sub = subsFor(step, !!billing?.billingEnabled); }
+    markMailSeen();
+    if (sub > 1) { sub -= 1; void scrollToStepTop(); return; }
+    if (step > 1) { step -= 1; sub = subsFor(step, !!billing?.billingEnabled); void scrollToStepTop(); }
   }
   /** Jump straight back to a finished step from the strip. Backwards only — a step ahead of this
    *  one has not been filled in, and Next is where its checks live. */
   function goToStep(n: number) {
     if (n >= step || n < 1) return;
+    markMailSeen();
     step = n;
     sub = 1;
+    void scrollToStepTop();
   }
 
   import Toggle from '$lib/components/Toggle.svelte';
@@ -323,6 +372,21 @@
   $: guestDeliveryLabel = (GUEST_DELIVERY_OPTIONS.find((o) => o.value === guestDelivery)?.label ?? '').toLowerCase();
   $: guestLiveAutomatic = guestDelivery === 'all_on_reveal' || guestDelivery === 'scheduled';
   $: guestReminderOffered = reminderCanFire(guestEndsAt, guestReleaseMs);
+  // Both optional rows on the email page are HIDDEN when they do not apply, rather than shown
+  // disabled. What that costs is the one thing a disabled row was doing: telling you it exists. So
+  // the page remembers what it offered when you last left it, and says so when that changes.
+  //
+  // Everything that can change it — the event's length (step 2), the reveal (4a), the delivery mode
+  // and send time (4b) — sits BEFORE the email page, and goToStep only travels backwards, so a host
+  // always walks forward through it again after a change. Nothing has to drag them back; the row
+  // just has to announce itself when they arrive.
+  let mailSeen: { reminder: boolean; live: boolean } | null = null;
+  const onMailPage = () => step === 4 && sub === 3;
+  /** Called on the way OUT, not in: on the way in, "what was here last time" is still the question. */
+  function markMailSeen() { if (onMailPage()) mailSeen = { reminder: guestReminderOffered, live: guestLiveAutomatic }; }
+  $: mailNewReminder = !!mailSeen && guestReminderOffered && !mailSeen.reminder;
+  $: mailNewLive     = !!mailSeen && guestLiveAutomatic  && !mailSeen.live;
+  $: mailHasNew      = mailNewReminder || mailNewLive;
   $: guestThanksDated = releaseDateKnown(guestEndsAt, guestReleaseMs);
   // Labels rather than raw instants in the markup: revealMomentLabel takes a number, and every one
   // of these can legitimately be null (a manual reveal, a half-typed date), so the null is answered
@@ -745,7 +809,10 @@
        putting a title on a design that does not have one. -->
   <h1 class="sr-only">Create or join an event</h1>
   <div class="top">
-    <a class="brand" href={loggedIn ? '/dashboard' : '/'}><Logo /></a>
+    <!-- Home, like the mark on every other page. It used to go to /dashboard when signed in, which
+         made it the one logo in the product that did something different — and pointless here,
+         since "← My events" is the next element along and goes exactly there. -->
+    <a class="brand" href="/"><Logo /></a>
     {#if loggedIn}<a class="myevents" href="/dashboard">← My events</a>{/if}
   </div>
 
@@ -772,7 +839,7 @@
            row means "bad news"; a standing "Free" is the same promise kept, and it is the only
            place the gift is ever counted up. -->
       {#if quote}
-        <div class="wiz-total">
+        <div class="wiz-total" use:watchTotal>
           <span class="wt-l">Running total</span>
           {#if quote.requiresPayment}
             <span class="wt-v">{money(quote.amountCents)}</span>
@@ -1396,7 +1463,11 @@
               <h2 class="fx-name"><label for="allow-downloads">Allow downloads</label></h2>
               <Toggle id="allow-downloads" bind:checked={allowDownloads} />
             </div>
-            <p class="fx-copy">Guests can save single photos and grab the whole event as a zip. Turn
+            <!-- Not "as a zip": the gallery asks each guest how they want them, and a phone gets
+                 individual files because a zip there needs an extractor (see saveImage.ts). Naming
+                 one of the two answers in the HOST's switch describes something half their guests
+                 will not see — and the format is not what this decision is about anyway. -->
+            <p class="fx-copy">Guests can save single photos, or take the whole gallery at once. Turn
               it off and the gallery is look-only — everyone still sees the photos.</p>
           </div>
         </div>
@@ -1491,8 +1562,9 @@
     {#if !guided || sub === 3}
     <div class="card">
       <div class="card-title">What we email your guests{#if guided}<span class="sub-of">3 of 3</span>{/if}</div>
-      <p class="lead-note mail-lead">Only guests who asked for their photos are ever emailed, and
-        they get them whatever you choose here. All changeable later.</p>
+      <p class="lead-note mail-lead">Only guests who asked for their photos are emailed at all, and
+        they get them either way. These three decide what else those emails say, and you can change
+        any of it later.</p>
 
       <div class="mail-opt">
         <div class="field toggle-field">
@@ -1502,39 +1574,46 @@
         <!-- Not "email guests when the event ends": that would be a lie when this is off. The email
              is the guest's own doing — they asked for their photos — and this only decides what
              else it carries. -->
-        <p class="field-hint">Goes out when the event ends.{#if !guestThanksDated}{' '}No release moment
-          is fixed yet, so it would be the thank-you on its own.{/if}</p>
+        <p class="field-hint">Goes out when the event ends.{#if !guestThanksDated}{' '}Right now that
+          is also when the photos appear, so there is no later moment to promise and it would be the
+          thank-you on its own — a reveal delay, back on “When can people see the photos?”, gives it
+          a date.{/if}</p>
       </div>
 
-      <!-- Always here, never replaced by a sentence. A control that vanishes on one event and
-           appears on another reads as a bug; off and unavailable, with the reason under it, reads
-           as the answer to a question the host was about to ask. -->
-      <div class="mail-opt" class:unavailable={!guestReminderOffered}>
-        <div class="field toggle-field">
-          <span class="tf-label"><label for="g-reminder">Day-before reminder</label></span>
-          <Toggle id="g-reminder" bind:checked={guestMailReminder} disabled={!guestReminderOffered} />
+      {#if guestReminderOffered}
+        <div class="mail-opt" class:fresh={mailNewReminder}>
+          <div class="field toggle-field">
+            <span class="tf-label"><label for="g-reminder">Day-before reminder</label>{#if mailNewReminder}<span class="fresh-pill">new</span>{/if}</span>
+            <Toggle id="g-reminder" bind:checked={guestMailReminder} />
+          </div>
+          <p class="field-hint">Goes out 24 hours before the gallery opens — {guestReminderLabel}.</p>
         </div>
-        <p class="field-hint">
-          {#if guestReminderOffered}Goes out 24 hours before the gallery opens — {guestReminderLabel}.
-          {:else}Not available — {guestReminderWhyNot}{/if}
-        </p>
-      </div>
+      {/if}
 
-      <div class="mail-opt" class:unavailable={!guestLiveAutomatic}>
-        <div class="field toggle-field">
-          <span class="tf-label"><label for="g-live">The gallery link</label></span>
-          <Toggle id="g-live" checked={guestLiveAutomatic} disabled />
-        </div>
-        <p class="field-hint">
-          {#if guestLiveAutomatic}This is how “{guestDeliveryLabel}” actually reaches
+      {#if guestLiveAutomatic}
+        <div class="mail-opt" class:fresh={mailNewLive}>
+          <div class="field toggle-field">
+            <span class="tf-label"><label for="g-live">The gallery link</label>{#if mailNewLive}<span class="fresh-pill">new</span>{/if}</span>
+            <Toggle id="g-live" checked disabled />
+          </div>
+          <p class="field-hint">This is how “{guestDeliveryLabel}” actually reaches
             them{#if guestReleaseLabel}{' '}— {guestReleaseLabel}{/if}. It is the delivery you chose
-            on the last page, so it is not a separate switch.
-          {:else}You send this one yourself, from your event page, whenever you are ready.{/if}
-        </p>
-      </div>
+            on the last page, so it is not a separate switch.</p>
+        </div>
+      {/if}
     </div>
     {/if}
 
+    {/if}
+
+    <!-- Last step already shows the itemised quote, so the pill would be repeating what is on
+         screen. Everywhere else it is the only copy of the number in view. -->
+    {#if guided && quote && totalOut && step !== LAST_STEP}
+      <button type="button" class="total-pill" on:click={backToTotal}
+              aria-label="Running total, {quote.requiresPayment ? money(quote.amountCents) : 'free'} — scroll back to it">
+        <span class="tp-l">Total</span>
+        <span class="tp-v" class:free={!quote.requiresPayment}>{quote.requiresPayment ? money(quote.amountCents) : 'Free'}</span>
+      </button>
     {/if}
 
     {#if !guided || step === LAST_STEP}
@@ -1928,15 +2007,21 @@
      weight as its own explanation, so a column of these read as prose with switches in it. */
   /* The page's own words, ruled off from the switches. Without the line the lead read as a caption
      on the first toggle rather than as a statement about all of them. */
+  /* A row that was not here last time the host looked. The page hides what does not apply, so an
+     appearance is a real change and worth pointing at once. */
+  .fresh-pill {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.58rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: #111; background: var(--accent); padding: 3px 7px; border-radius: 999px; margin-left: 8px;
+  }
+  .mail-opt.fresh { border-left: 2px solid var(--accent); padding-left: 12px; margin-left: -14px; }
+
   .mail-lead {
     margin-bottom: 0;
     padding-bottom: 14px;
     border-bottom: 1px solid var(--border);
   }
   .mail-lead + .mail-opt { margin-top: 14px; }
-  /* Off and out of reach, but still legible — it is explaining itself, not greyed into nothing. */
-  .mail-opt.unavailable .tf-label > label { color: var(--text-muted); }
-  .mail-off { margin: 0 0 14px; }
 
   /* Which of step 1's pages this is. The strip above counts the five steps and cannot show this,
      and three presses of Next against a dot that never moves reads as a stuck button. */
@@ -2090,6 +2175,8 @@
   .more .card { border: none; border-top: 1px solid var(--border); border-radius: 0; margin: 0; }
   /* ── The guided path ─────────────────────────────────────────────────────── */
   .steps {
+    /* So scrollIntoView does not put the strip flush against the top edge. */
+    scroll-margin-top: 14px;
     display: flex; align-items: flex-start; gap: 4px; margin: 0 0 14px;
   }
   .stepdot {
@@ -2129,6 +2216,27 @@
      somewhere to go when they cannot shrink further. */
   .field-row { flex-wrap: wrap; }
   .field-row > .field { min-width: 0; flex: 1 1 140px; }
+
+  .total-pill {
+    position: fixed;
+    right: 14px;
+    /* Clear of the home indicator on a phone, and of the Next button, which is in the page flow. */
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    z-index: 30;
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 9px 15px;
+    font: inherit;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
+    cursor: pointer;
+  }
+  .total-pill:hover { border-color: var(--accent); }
+  .total-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tp-l { font-size: 0.72rem; color: var(--text-muted); }
+  .tp-v { font-size: 0.95rem; font-weight: 800; color: var(--accent); }
+  .tp-v.free { color: var(--success, #51cf66); }
 
   .wiz-total {
     display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;

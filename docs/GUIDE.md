@@ -155,7 +155,7 @@ would have enjoyed it. Only the **Custom URL** stays collapsed under *Other sett
 - **Manual** — nothing appears until you press Reveal.
 - **Moderate photos** — offered on any non-instant event. Nothing a guest takes reaches the gallery
   until you say yes to it.
-- **Allow downloads** — guests can save single photos and take the whole event as a zip. Off makes
+- **Allow downloads** — guests can save single photos, or take the whole gallery at once. Off makes
   the gallery look-only; everyone still sees the photos.
 
 *2 of 3 — How do your guests get their copy?* The email, which can never arrive before the gallery

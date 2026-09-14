@@ -53,12 +53,18 @@ const options = {
   // Capture aspect ratios. 1:1 is the free standard; the rest are flagged `pro` for
   // plan-gating once billing exists (not enforced yet). The event picks which to allow;
   // one = locked, several = the guest chooses on the camera.
+  // Square first, then widest to narrowest, then Full.
+  //
+  // The order is the order they are DRAWN in, at a shared height — so the row reads as a
+  // progression rather than a bag of options. Square also leads because it is the one every event
+  // gets and the one the copy beside it names first; having it last put the free baseline at the
+  // far end of a row of paid extras.
   aspectRatios: [
-    { value: 'full', label: 'Full',          pro: true  },
-    { value: '9:16', label: 'Tall · 9:16',   pro: true  },
+    { value: '1:1',  label: 'Square · 1:1',  pro: false },
     { value: '4:5',  label: 'Portrait · 4:5', pro: true },
     { value: '3:4',  label: 'Classic · 3:4', pro: true  },
-    { value: '1:1',  label: 'Square · 1:1',  pro: false },
+    { value: '9:16', label: 'Tall · 9:16',   pro: true  },
+    { value: 'full', label: 'Full',          pro: true  },
   ],
   // Photo curation mode. 'favourite' = one-tap ★ (default). 'stars' = 1–5 rating
   // where 5★ is an instant favourite; share rules can then gate on "N★ or greater".
