@@ -112,10 +112,23 @@
     if (sub > 1) { sub -= 1; void scrollToStepTop(); return; }
     if (step > 1) { step -= 1; sub = subsFor(step, !!billing?.billingEnabled); void scrollToStepTop(); }
   }
-  /** Jump straight back to a finished step from the strip. Backwards only — a step ahead of this
-   *  one has not been filled in, and Next is where its checks live. */
+  /** The furthest step reached. Anything up to it has been filled in and can be jumped to. */
+  let maxStep = 1;
+  $: if (step > maxStep) maxStep = step;
+
+  /**
+   * Jump to any step already reached, in either direction.
+   *
+   * It used to travel backwards only, on the reasoning that a step ahead had not been filled in —
+   * true of a step nobody has visited, and false of one you have just walked back from. Going back
+   * to check the name and then having to press Next three times to return is a tax on looking.
+   *
+   * Forward still obeys the one real gate: the name. Clear it on step 1 and the strip cannot carry
+   * you past it any more than the button can.
+   */
   function goToStep(n: number) {
-    if (n >= step || n < 1) return;
+    if (n < 1 || n > maxStep || n === step) return;
+    if (n > step && !canAdvance) return;
     markMailSeen();
     step = n;
     sub = 1;
@@ -385,8 +398,7 @@
   /** Called on the way OUT, not in: on the way in, "what was here last time" is still the question. */
   function markMailSeen() { if (onMailPage()) mailSeen = { reminder: guestReminderOffered, live: guestLiveAutomatic }; }
   $: mailNewReminder = !!mailSeen && guestReminderOffered && !mailSeen.reminder;
-  $: mailNewLive     = !!mailSeen && guestLiveAutomatic  && !mailSeen.live;
-  $: mailHasNew      = mailNewReminder || mailNewLive;
+  $: mailHasNew      = mailNewReminder;
   $: guestThanksDated = releaseDateKnown(guestEndsAt, guestReleaseMs);
   // Labels rather than raw instants in the markup: revealMomentLabel takes a number, and every one
   // of these can legitimately be null (a manual reveal, a half-typed date), so the null is answered
@@ -861,15 +873,16 @@
                Two branches rather than one <svelte:element>: a div carrying a click handler is a
                control that no keyboard or screen reader can reach, and the honest fix is to not
                make it a control at all when it is not one. -->
-          {#if i + 1 < step}
-            <button class="stepdot done" type="button"
-                    aria-label={`Back to step ${i + 1}, ${t}`}
+          {#if i + 1 <= maxStep && i + 1 !== step}
+            <button class="stepdot visited" class:done={i + 1 < step} type="button"
+                    aria-label={`Go to step ${i + 1}, ${t}`}
                     on:click={() => goToStep(i + 1)}>
-              <span class="sd-n">✓</span>
+              <span class="sd-n">{i + 1 < step ? '✓' : i + 1}</span>
               <span class="sd-t">{t}</span>
             </button>
           {:else}
-            <div class="stepdot" class:on={i + 1 === step} aria-current={i + 1 === step ? 'step' : undefined}>
+            <div class="stepdot" class:on={i + 1 === step} class:visited={i + 1 <= maxStep}
+                 aria-current={i + 1 === step ? 'step' : undefined}>
               <span class="sd-n">{i + 1}</span>
               <span class="sd-t">{t}</span>
             </div>
@@ -1562,9 +1575,13 @@
     {#if !guided || sub === 3}
     <div class="card">
       <div class="card-title">What we email your guests{#if guided}<span class="sub-of">3 of 3</span>{/if}</div>
-      <p class="lead-note mail-lead">Only guests who asked for their photos are emailed at all, and
-        they get them either way. These three decide what else those emails say, and you can change
-        any of it later.</p>
+      <!-- No row for the gallery link. It is not a choice — it IS the delivery chosen on the last
+           page, and a permanently-on switch you cannot move is a row that wastes a reader's
+           attention to tell them something they already decided. It is named here in a sentence
+           instead, and guest_mail_live is still derived from the delivery mode on submit. -->
+      <p class="lead-note mail-lead">The gallery link itself is already covered — “{guestDeliveryLabel}”
+        sends it{#if guestLiveAutomatic && guestReleaseLabel}{' '}on {guestReleaseLabel}{/if}. These
+        are the extra messages, and only guests who asked for their photos are emailed at all.</p>
 
       <div class="mail-opt">
         <div class="field toggle-field">
@@ -1590,17 +1607,6 @@
         </div>
       {/if}
 
-      {#if guestLiveAutomatic}
-        <div class="mail-opt locked" class:fresh={mailNewLive}>
-          <div class="field toggle-field">
-            <span class="tf-label"><label for="g-live">The gallery link</label>{#if mailNewLive}<span class="fresh-pill">new</span>{/if}</span>
-            <Toggle id="g-live" checked disabled />
-          </div>
-          <p class="field-hint">This is how “{guestDeliveryLabel}” actually reaches
-            them{#if guestReleaseLabel}{' '}— {guestReleaseLabel}{/if}. It is the delivery you chose
-            on the last page, so it is not a separate switch.</p>
-        </div>
-      {/if}
     </div>
     {/if}
 
@@ -2009,8 +2015,8 @@
      on the first toggle rather than as a statement about all of them. */
   /* A row that was not here last time the host looked. The page hides what does not apply, so an
      appearance is a real change and worth pointing at once. */
-  /* The gallery-link row is locked to the delivery mode, and the trick list needs an event type
-     before it can do anything. Pressing either does nothing, so neither should offer a hand. */
+  /* The trick list needs an event type before it can do anything, so pressing it does nothing and
+     it should not offer a hand. */
   .locked .tf-label > label { cursor: default; }
 
   .fresh-pill {
@@ -2202,7 +2208,9 @@
     border-top: 2px solid var(--border); padding-top: 8px;
     color: var(--text-muted); font-size: 0.75rem; text-align: center;
   }
-  .stepdot.on, .stepdot.done { border-top-color: var(--accent); }
+  /* Filled as far as you have BEEN, not as far as you are — walking back to step 1 should not make
+     the progress you already made disappear. */
+  .stepdot.on, .stepdot.visited { border-top-color: var(--accent); }
   .stepdot.on { color: var(--text); font-weight: 700; }
   .sd-n {
     width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center;
@@ -2210,7 +2218,7 @@
     background: var(--surface-2); border: 1px solid var(--border);
   }
   .stepdot.on .sd-n { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); }
-  .stepdot.done .sd-n { color: var(--accent); border-color: var(--accent); }
+  .stepdot.visited .sd-n { color: var(--accent); border-color: var(--accent); }
   /* The labels are the first thing to go when there is no room — the numbers and the track still
      say where you are, and four words squeezed to two characters each say nothing. */
   @media (max-width: 460px) { .sd-t { display: none; } }
