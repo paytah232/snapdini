@@ -2,6 +2,8 @@
   import { postJson } from '$lib/api';
   import { showToast } from '$lib/toast';
   import type { BillingConfig, BillingQuote, AppOptions } from '$lib/types';
+  import { retentionIncludedDays, retentionLabel } from '$lib/featureUpsell';
+  import { retentionFloorFor, upgradeRetentionFor } from '$lib/upgradePlan';
 
   export let code: string;
   export let orgCode: string;
@@ -23,6 +25,25 @@
   const money = (c: number) => `$${(c / 100).toFixed(2)}`;
   const allAspects = () => (options?.aspectRatios ?? []).map((a) => a.value);
   const hasAllShapes = allAspects().filter((v) => v !== '1:1').every((v) => aspectRatios.includes(v));
+
+  // OWNS the pack, which is not the same question as "has every shape". Pricing charges the pack
+  // for ANY non-square shape (billing.ts hasNonSquare), while hasAllShapes asks for ALL of them —
+  // so a host holding just 4:5 was shown an UNTICKED "Unlock all frame sizes" box and, underneath
+  // it, a $5 line for the pack. It read as a charge for something they had declined. Same rule as
+  // the admin page's framePackOwned, deliberately.
+  $: framePackOwned = aspectRatios.some((a) => a !== '1:1');
+
+  // Lines whose value the host has NOT raised in this panel: they are already on the event. The
+  // features are free below the paid tier and chargeable above it, so an upgrade re-prices things
+  // that were gifted — which is correct, and looked like a mistake because nothing said so.
+  $: ownedShots    = !!quote && quote.maxPhotos <= maxPhotos;
+  $: ownedVideo    = !!quote && quote.videoSeconds > 0 && quote.videoSeconds <= videoSeconds;
+  $: ownedDuration = !!quote && quote.durationHours <= durationHours;
+  $: ownedRetention = !!quote && quote.retentionDays <= retentionDays;
+  $: anyOwnedCharged = !!quote && (
+    (ownedShots && !!quote.shotsCents) || (framePackOwned && !!quote.frameCents) ||
+    (ownedVideo && !!quote.videoCents) || (ownedDuration && !!quote.durationCents) ||
+    (ownedRetention && !!quote.retentionCents));
 
   // Base add-on prices, mirroring the server tiers.
   //
@@ -66,11 +87,13 @@
   // A free event PAYS for anything past a week; a paid event gets a month INCLUDED. This label used
   // featuresFreeAt() and so printed the price exactly backwards: "free" on the event that is
   // charged $3, "+$3" on the event that already includes it.
-  const retIncludedFor = (guests: number) =>
-    guests > billing.freeAllGuests ? (billing.retentionPaidDays ?? 31) : (billing.retentionFreeDays ?? 7);
+  //
+  // The allowance itself is the wizard's, not a second copy: a local re-statement of a rule that
+  // already runs backwards to everything around it is how it got printed inside out the first time.
+  const retIncludedFor = (guests: number) => retentionIncludedDays(billing, guests);
   const retCostFor = (days: number, guests: number) => (days <= retIncludedFor(guests) ? 0 : retAddon(days));
   const retLabelPriced = (days: number, guests: number) => {
-    const base = retLabel(days);
+    const base = retentionLabel(days);
     if (days === retentionDays) return `${base} — current`;
     // Both sides priced at the SELECTED guest tier, because that tier is what decides how much is
     // included — pricing the current value at the old tier would show a charge for something the
@@ -109,17 +132,28 @@
   // Reactive to the SELECTED guest tier: stepping up to a paid tier includes a month, so a week is
   // no longer on offer and the selection moves up to what is now included rather than silently
   // keeping the free event's 7 days.
-  $: retentionFloor = Math.max(retentionDays, retIncludedFor(uGuests));
+  $: retentionFloor = retentionFloorFor(billing, retentionDays, uGuests);
   // Numbers, like the others — only maxDays was ever read out of the tier objects.
   $: retentionChoices = atOrAbove(billing.retentionTiers.map((t) => t.maxDays), retentionFloor);
-  $: if (uRet < retentionFloor) uRet = retentionFloor;
-  const retLabel = (d: number) => d <= 7 ? '1 week' : d <= 31 ? '1 month' : d <= 92 ? '3 months' : d <= 182 ? '6 months' : '1 year';
   // Duration is a paid add-on, so it belongs here too — offer lengths ≥ the current event length.
   const durationChoices = atOrAbove((options?.durations ?? []).map((d) => Number(d.value)), durationHours);
   const durLabel = (h: number) => (options?.durations ?? []).find((d) => Number(d.value) === h)?.label ?? `${h}h`;
 
   // selections (default to current)
   let uGuests = guestCap, uShots = maxPhotos, uVideo = videoSeconds, uRet = retentionDays, uFrames = hasAllShapes, uDuration = durationHours;
+  /** Has the host actually picked a keep-length here? Until they have, the number in the control
+   *  belongs to the guest tier they are looking at, and has to be free to go back down with it. */
+  let uRetTouched = false;
+  // The selection follows the tier back DOWN again, which the panel used not to do. This was
+  // `if (uRet < retentionFloor) uRet = retentionFloor`, a one-way ratchet: the Guests dropdown
+  // only lists tiers at or above this event's, but the SELECTION moves freely inside that list, so
+  // a host who opened the paid tier and changed their mind was left holding its included month —
+  // and a month on a free event is a $3 add-on nobody asked for. See upgradeRetentionFor(): the
+  // tier's number is the tier's to take back, the host's is not.
+  //
+  // Down here rather than beside retentionFloor above because `$: x = …` on a variable declared
+  // later is a use-before-declaration in TypeScript.
+  $: uRet = upgradeRetentionFor(billing, uRet, retentionDays, uGuests, uRetTouched);
   let quote: BillingQuote | null = null;
   let busy = false;
 
@@ -178,7 +212,7 @@
 {#if billing.billingEnabled && canOfferMore}
   <div class="card">
     <div class="card-title">⬆️ Upgrade this event</div>
-    <p class="cur">Now: up to <b>{guestCap}</b> guests · <b>{maxPhotos}</b> shots · {videoSeconds ? `${videoSeconds}s video` : 'no video'} · {retentionDays}-day keep{#if amountPaidCents}  · paid {money(amountPaidCents)}{/if}</p>
+    <p class="cur">Now: up to <b>{guestCap}</b> guests · <b>{maxPhotos}</b> shots · {videoSeconds ? `${videoSeconds}s video` : 'no video'} · {retentionDays}-day keep{#if amountPaidCents}{' '}· paid {money(amountPaidCents)}{/if}</p>
 
     <div class="grid">
       {#if guestChoices.length > 1}
@@ -198,7 +232,7 @@
       {/if}
       {#if retentionChoices.length > 1}
         <label class="u"><span>Keep photos</span>
-          <select bind:value={uRet}>{#each retentionChoices as d}<option value={d}>{retLabelPriced(d, uGuests)}</option>{/each}</select>
+          <select bind:value={uRet} on:change={() => (uRetTouched = true)}>{#each retentionChoices as d}<option value={d}>{retLabelPriced(d, uGuests)}</option>{/each}</select>
         </label>
       {/if}
       {#if durationChoices.length > 1}
@@ -207,9 +241,18 @@
         </label>
       {/if}
     </div>
-    {#if !hasAllShapes}
+    {#if framePackOwned}
+      <!-- Already on the event, so this is a statement rather than a question. It was previously
+           hidden entirely when hasAllShapes, which left the $5 line below it with no explanation
+           and no control anywhere near it. -->
+      <!-- The space that joins these two sentences lives INSIDE the block, on the same line as the
+           opening tag. Svelte trims a block whose content starts on the next line, which is how
+           this rendered as "on your event.They are included". -->
+      <p class="chk owned-note">Frame sizes are already on your event.{#if !featuresFreeAt(uGuests)}{' '}They
+        are included free below {billing.freeAllGuests + 1} guests and charged above it.{/if}</p>
+    {:else if !hasAllShapes}
       <label class="chk"><input type="checkbox" bind:checked={uFrames} />
-        Unlock all frame sizes (frame pack){#if featuresFreeAt(uGuests)} <span class="was">{money(billing.framePackCents)}</span>{:else} <span class="addon">+{money(billing.framePackCents)}</span>{/if}
+        Unlock all frame sizes (frame pack){#if featuresFreeAt(uGuests)}{' '}<span class="was">{money(billing.framePackCents)}</span>{:else} <span class="addon">+{money(billing.framePackCents)}</span>{/if}
       </label>
     {/if}
 
@@ -225,12 +268,19 @@
         </div>
         <ul class="quote-lines">
           <li><span>Event pass · up to {quote.maxGuests} guests</span>{#if quote.baseCents}<span>{money(quote.baseCents)}</span>{:else}<span class="incl">Free</span>{/if}</li>
-          {#if quote.maxPhotos > billing.shotsFree}<li><span>Extra shots · {quote.maxPhotos}/guest</span>{#if quote.shotsCents}<span>{money(quote.shotsCents)}</span>{:else}<span class="was">{money(shotsAddon(quote.maxPhotos))}</span>{/if}</li>{/if}
-          {#if quote.framePack}<li><span>Frame-sizes pack</span>{#if quote.frameCents}<span>{money(quote.frameCents)}</span>{:else}<span class="was">{money(billing.framePackCents)}</span>{/if}</li>{/if}
-          {#if quote.videoSeconds > 0}<li><span>Video clips · {quote.videoSeconds}s</span>{#if quote.videoCents}<span>{money(quote.videoCents)}</span>{:else}<span class="was">{money(videoBase(quote.videoSeconds))}</span>{/if}</li>{/if}
-          {#if quote.durationCents}<li><span>Extended event · {Math.round(quote.durationHours / 24)} days</span><span>{money(quote.durationCents)}</span></li>{/if}
-          {#if quote.retentionCents}<li><span>Photo retention · {quote.retentionDays} days</span><span>{money(quote.retentionCents)}</span></li>{/if}
+          {#if quote.maxPhotos > billing.shotsFree}<li class:owned={ownedShots}><span>Extra shots · {quote.maxPhotos}/guest{#if ownedShots}<em class="yours">already yours</em>{/if}</span>{#if quote.shotsCents}<span>{money(quote.shotsCents)}</span>{:else}<span class="was">{money(shotsAddon(quote.maxPhotos))}</span>{/if}</li>{/if}
+          {#if quote.framePack}<li class:owned={framePackOwned}><span>Frame-sizes pack{#if framePackOwned}<em class="yours">already yours</em>{/if}</span>{#if quote.frameCents}<span>{money(quote.frameCents)}</span>{:else}<span class="was">{money(billing.framePackCents)}</span>{/if}</li>{/if}
+          {#if quote.videoSeconds > 0}<li class:owned={ownedVideo}><span>Video clips · {quote.videoSeconds}s{#if ownedVideo}<em class="yours">already yours</em>{/if}</span>{#if quote.videoCents}<span>{money(quote.videoCents)}</span>{:else}<span class="was">{money(videoBase(quote.videoSeconds))}</span>{/if}</li>{/if}
+          {#if quote.durationCents}<li class:owned={ownedDuration}><span>Extended event · {Math.round(quote.durationHours / 24)} days{#if ownedDuration}<em class="yours">already yours</em>{/if}</span><span>{money(quote.durationCents)}</span></li>{/if}
+          {#if quote.retentionCents}<li class:owned={ownedRetention}><span>Photo retention · {quote.retentionDays} days{#if ownedRetention}<em class="yours">already yours</em>{/if}</span><span>{money(quote.retentionCents)}</span></li>{/if}
         </ul>
+        {#if anyOwnedCharged}
+          <!-- The whole point of the marks. Without this the breakdown reads as a list of things
+               being added, when most of it is a list of things being RE-PRICED. -->
+          <p class="owned-foot">“Already yours” means it is on your event now. Everything is
+            included free for up to {billing.freeAllGuests} guests — above that it is charged, which
+            is why these appear.</p>
+        {/if}
       </div>
     {/if}
 
@@ -277,4 +327,11 @@
   .quote-lines { list-style: none; margin: 8px 0 0; padding: 0; font-size: 0.85rem; color: var(--text-muted); }
   .quote-lines li { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
   .quote-lines .incl { color: var(--success); font-weight: 700; }
+  .quote-lines .yours {
+    font-style: normal; font-size: 0.72rem; font-weight: 600; margin-left: 6px;
+    padding: 1px 6px; border-radius: 999px;
+    background: var(--surface-2); color: var(--text-muted); white-space: nowrap;
+  }
+  .owned-foot { margin: 8px 0 0; font-size: 0.75rem; line-height: 1.45; color: var(--text-muted); }
+  .owned-note { color: var(--text-muted); }
 </style>

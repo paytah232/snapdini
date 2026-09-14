@@ -23,8 +23,7 @@ import BILLING_SRC from '../../../app/src/server/billing.ts?raw';
 import {
   featuresFreeAt, framePackPrice, guestBaseCents, durationAddonCents, priceAria, priceTag,
   retentionChoices, retentionIncludedDays, retentionLabel, retentionPrice, shotsAddonCents,
-  shotsPrice, videoAddonCents, videoPrice,
-} from './featureUpsell';
+  shotsPrice, videoAddonCents, videoPrice, retentionFor } from './featureUpsell';
 
 /** One `export const NAME = <literal>;` out of billing.ts, evaluated. Scalars and array literals
  *  only — everything publicBillingConfig() serves is one or the other. */
@@ -298,5 +297,61 @@ describe('the little price beside a choice', () => {
     expect(priceTag({ kind: 'included' }, money)).toEqual({ text: 'free', cls: 'incl' });
     expect(priceTag({ kind: 'included' }, money, 'included').text).toBe('included');
     expect(priceAria({ kind: 'included' }, money, 'included')).toBe('included');
+  });
+});
+
+// ── Going back down ──────────────────────────────────────────────────────────
+//
+// The form carried a one-way ratchet: raise retention to whatever the tier includes, never lower
+// it. That fixed the upgrade and broke the reverse. Free → paid → free left the paid tier's month
+// selected, and a month on the FREE tier is a chargeable add-on — so a host who only looked at the
+// paid option and changed their mind was quoted for an upgrade they never chose. The tier picked
+// the number; the tier never put it back.
+describe('retention when the guest count moves between tiers', () => {
+  const FREE = 7, PAID = 31;
+
+  it('follows the tier in both directions while the host has not chosen', () => {
+    expect(retentionFor(FREE, PAID, false)).toBe(PAID);   // free → paid: they have paid for a month
+    expect(retentionFor(PAID, FREE, false)).toBe(FREE);   // …and back: the bug, in one line
+  });
+
+  it('goes all the way back, so nothing is charged for', () => {
+    // The exact reported path: start free, look at a paid tier, return to free.
+    let days = FREE;
+    days = retentionFor(days, PAID, false);
+    days = retentionFor(days, FREE, false);
+    expect(days).toBe(FREE);
+  });
+
+  it("keeps a length the host actually picked", () => {
+    // Deliberately bought a year, then edited the guest count. It must survive.
+    expect(retentionFor(365, FREE, true)).toBe(365);
+    expect(retentionFor(365, PAID, true)).toBe(365);
+    expect(retentionFor(92, FREE, true)).toBe(92);
+  });
+
+  it('still lifts a chosen length that a tier has overtaken', () => {
+    // Chose a week on the free tier, then went paid, where a month is included. Leaving them on 7
+    // would sell them a week they had already beaten — the fault the original ratchet existed for.
+    expect(retentionFor(FREE, PAID, true)).toBe(PAID);
+  });
+
+  it('never returns less than the tier includes', () => {
+    for (const touched of [true, false]) {
+      for (const current of [1, 7, 31, 92, 182, 365]) {
+        for (const included of [FREE, PAID]) {
+          expect(retentionFor(current, included, touched)).toBeGreaterThanOrEqual(included);
+        }
+      }
+    }
+  });
+
+  it('is settled: applying it twice changes nothing', () => {
+    for (const touched of [true, false]) {
+      for (const current of [7, 31, 365]) {
+        const once = retentionFor(current, PAID, touched);
+        expect(retentionFor(once, PAID, touched)).toBe(once);
+      }
+    }
   });
 });

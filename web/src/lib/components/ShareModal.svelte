@@ -61,7 +61,7 @@
   <div class="sheet" tabindex="-1" use:modalFocus>
     <div class="head"><span>📤 Share</span><button class="x" on:click={() => dispatch('close')} aria-label="Close">✕</button></div>
 
-    <p class="sum">Sharing <b>{kindText(share.kind, share.count)}</b>. Anyone with the link can view — no account needed.{#if excludesRejected} <b>Rejected photos are never included.</b>{/if}</p>
+    <p class="sum">Sharing <b>{kindText(share.kind, share.count)}</b>. Anyone with the link can view — no account needed.{#if excludesRejected}{' '}<b>Rejected photos are never included.</b>{/if}</p>
 
     <label class="fld"><span>Name</span>
       <input bind:value={label} maxlength="80" placeholder="e.g. Sam &amp; Riley's wedding" />

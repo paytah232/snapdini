@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, createEventDispatcher, tick } from 'svelte';
   import { modalFocus } from '$lib/ui';
+  import Toggle from '$lib/components/Toggle.svelte';
   import { showToast } from '$lib/toast';
   import { savePoster, type EventTheme } from '$lib/events';
   import { DEFAULT_EVENT_THEME } from '$lib/theme';
@@ -2123,7 +2124,7 @@
               <p class="layout-hint" style="margin-top:8px">One sheet per set. Print the sheet you're looking at, or all {printSets.length} at once — or turn off the card identifiers below, shuffle and hand them out at random.</p>
             </div>
           {/if}
-          <label class="chk"><input type="checkbox" bind:checked={cardIds} /><span>Print the card identifier on every card <span class="sub">({sheets[0]?.label ?? 'Card A'}, …)</span></span></label>
+          <div class="chk"><label for="p-card-ids">Print the card identifier on every card <span class="sub">({sheets[0]?.label ?? 'Card A'}, …)</span></label><Toggle id="p-card-ids" bind:checked={cardIds} /></div>
         {/if}
 
         {/if}
@@ -2134,10 +2135,10 @@
           <div class="bg-row">
             <button class="seg" on:click={resetCardLayout}>↺ Reset card layout</button>
           </div>
-          <label class="chk"><input type="checkbox" bind:checked={cardShowQr} /><span>Show the QR code</span></label>
-          <label class="chk"><input type="checkbox" bind:checked={cardShowLink} /><span>Show the join link / code beside it</span></label>
-          <label class="chk"><input type="checkbox" bind:checked={cardRound} /><span>Rounded corners <span class="sub">(off = the card edge matches the cut line)</span></span></label>
-          <label class="chk"><input type="checkbox" bind:checked={cardInkSaver} /><span>Plain white cards <span class="sub">(saves ink — four to a sheet adds up)</span></span></label>
+          <div class="chk"><label for="p-card-qr">Show the QR code</label><Toggle id="p-card-qr" bind:checked={cardShowQr} /></div>
+          <div class="chk"><label for="p-card-link">Show the join link / code beside it</label><Toggle id="p-card-link" bind:checked={cardShowLink} /></div>
+          <div class="chk"><label for="p-card-round">Rounded corners <span class="sub">(off = the card edge matches the cut line)</span></label><Toggle id="p-card-round" bind:checked={cardRound} /></div>
+          <div class="chk"><label for="p-card-ink">Plain white cards <span class="sub">(saves ink — four to a sheet adds up)</span></label><Toggle id="p-card-ink" bind:checked={cardInkSaver} /></div>
         </div>
 
         <label class="fld"><span>Note beside the QR</span><input bind:value={cardCaption} maxlength="70" placeholder="(blank to hide)" /></label>
@@ -2324,9 +2325,11 @@
           <option value="none">Nothing (QR only)</option>
         </select>
       </div>
-      <label class="chk"><input type="checkbox" bind:checked={showFooterUrl} /><span>Show the link along the bottom</span></label>
-      <label class="chk"><input type="checkbox" bind:checked={showBrand} /><span>Show the Snapdini mark at the top</span></label>
-      <label class="chk"><input type="checkbox" bind:checked={qrPanel} disabled={!qrSafe} /><span>White card behind the QR</span></label>
+      <div class="chk"><label for="p-footer-url">Show the link along the bottom</label><Toggle id="p-footer-url" bind:checked={showFooterUrl} /></div>
+      <div class="chk"><label for="p-brand">Show the Snapdini mark at the top</label><Toggle id="p-brand" bind:checked={showBrand} /></div>
+      <!-- Disabled, not hidden: the note under it explains why, and a control that vanishes on a
+           dark background reads as a bug. The switch dims itself; the label says the rest. -->
+      <div class="chk" class:off={!qrSafe}><label for="p-qr-panel">White card behind the QR</label><Toggle id="p-qr-panel" bind:checked={qrPanel} disabled={!qrSafe} /></div>
       {#if qrOverImage}
         <p class="layout-hint">Over a photo the card stays — the code could land on anything from a bright sky to a dark suit, and that cannot be measured in advance.</p>
       {:else if !qrSafe}
@@ -2374,7 +2377,7 @@
            decoration the design is already using. -->
       <!-- Closed by default: it is the advanced half of this step, and open it pushed the controls
            that most hosts actually want below the fold on a phone. -->
-      <details class="fld grp"><summary>Place your own{#if decorItems.length} <span class="grp-n">{decorItems.length}</span>{/if}</summary>
+      <details class="fld grp"><summary>Place your own{#if decorItems.length}{' '}<span class="grp-n">{decorItems.length}</span>{/if}</summary>
         <p class="layout-hint">Drop individual motifs wherever you like. These sit <b>on top of</b> the decoration above, not instead of it — to remove that one, set it to <b>None</b>.</p>
         <div class="sub-h">Motif to place</div>
         <div class="bg-row">
@@ -2396,7 +2399,7 @@
               <li class:on={selectedKey === `decor:${i}`}>
                 <button class="d-pick" on:click={() => (selectedKey = `decor:${i}`)}>
                   <span class="d-n">{DECOR_KINDS.find((d) => d.key === it.kind)?.label ?? it.kind}</span>
-                  <span class="d-m">{Math.round(it.scale * 100)}%{#if it.rot} · {Math.round((it.rot * 180) / Math.PI)}°{/if}</span>
+                  <span class="d-m">{Math.round(it.scale * 100)}%{#if it.rot}{' '}· {Math.round((it.rot * 180) / Math.PI)}°{/if}</span>
                 </button>
                 <button class="d-x" on:click={() => removeDecor(i)} aria-label="Remove this one" title="Remove">🗑</button>
               </li>
@@ -2451,12 +2454,12 @@
           </div>
           <!-- Offered only for a plain colour: an image background IS the design, so there is
                nothing sensible to mean by not printing it. -->
-          <label class="chk" style="margin-top:8px">
-            <input type="checkbox" bind:checked={printBg} />
-            <span>Print this colour
+          <div class="chk" style="margin-top:8px">
+            <label for="p-print-bg">Print this colour
               <span class="sub">Off: the colour is your card stock — shown here while you design, left off what prints.</span>
-            </span>
-          </label>
+            </label>
+            <Toggle id="p-print-bg" bind:checked={printBg} />
+          </div>
           {#if lightOnStock}
             <p class="stock-note">
               Your text is lighter than the card. That needs a printer that can lay down white —
@@ -2666,16 +2669,15 @@
   .fld { display: block; margin-top: 10px; font-size: 0.78rem; color: var(--text-muted); }
   .fld > span { display: block; margin-bottom: 4px; }
   .fld input, .fld select { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font: inherit; font-size: 0.85rem; box-sizing: border-box; background: var(--surface); color: var(--text); }
-  /* A checkbox row is a box plus a label that WILL wrap at 360px, so three things matter:
-     · align-items:flex-start pins the box to the first line instead of floating it halfway down a
-       three-line label;
-     · flex:none + an explicit square stops a long label squashing the box to a sliver;
-     · the label is ONE flex item. It used to be two — the bare text node and the <span class="sub">
-       became separate flex children, which is what sat a sub-note BESIDE its label, each wrapping
-       in its own column, rather than under it. */
-  .chk { display: flex; align-items: flex-start; gap: 10px; margin-top: 10px; font-size: 0.82rem; line-height: 1.35; cursor: pointer; }
-  .chk > input[type="checkbox"] { flex: none; width: 16px; height: 16px; margin: 1px 0 0; accent-color: var(--accent); }
-  .chk > span { flex: 1; min-width: 0; }
+  /* A switch row is a label that WILL wrap at 360px plus a 46px switch, so two things matter:
+     · align-items:flex-start pins the switch to the label's FIRST line instead of floating it
+       halfway down a three-line label;
+     · the label is ONE flex item (flex:1, min-width:0). It used to be two — the bare text node and
+       the <span class="sub"> became separate flex children, which is what sat a sub-note BESIDE
+       its label, each wrapping in its own column, rather than under it. */
+  .chk { display: flex; align-items: flex-start; gap: 10px; margin-top: 10px; font-size: 0.82rem; line-height: 1.35; }
+  .chk > label { flex: 1; min-width: 0; cursor: pointer; }
+  .chk.off > label { opacity: 0.5; cursor: not-allowed; }
   .chk .sub { display: block; margin-top: 2px; }
   .bg-row { display: flex; gap: 6px; flex-wrap: wrap; }
   .seg { padding: 7px 11px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--text); cursor: pointer; font-size: 0.8rem; }

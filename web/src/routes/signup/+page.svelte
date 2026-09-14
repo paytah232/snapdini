@@ -189,7 +189,7 @@
     {#if awaitingEmail}
       <h1>Check your email</h1>
       <p class="sub">We've sent a confirmation link to <b class="to">{awaitingEmail}</b>. Open it and
-      your account is ready.{#if fromCreate} We'll bring you straight back here to finish your event.{/if}</p>
+      your account is ready.{#if fromCreate}{' '}We'll bring you straight back here to finish your event.{/if}</p>
     {:else if fromCreate}
       <h1>Your event is almost ready</h1>
       <p class="sub">Create your account and confirm your email — we'll take you straight back to

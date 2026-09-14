@@ -21,6 +21,8 @@
   import type { AppOptions, BillingConfig } from '$lib/types';
   import UpgradePanel from '$lib/components/UpgradePanel.svelte';
   import HelpTip from '$lib/components/HelpTip.svelte';
+  import Toggle from '$lib/components/Toggle.svelte';
+  import TimeField from '$lib/components/TimeField.svelte';
   import ShareModal from '$lib/components/ShareModal.svelte';
   import ShareLinkRow from '$lib/components/ShareLinkRow.svelte';
   import GuestList from '$lib/components/GuestList.svelte';
@@ -773,13 +775,18 @@
 
 
   async function onAllowDownloads(e: Event) {
-    const checked = (e.currentTarget as HTMLInputElement).checked;
+    // Captured BEFORE the await, the way setGuestFlag above does it. A DOM event's currentTarget is
+    // null once dispatch has finished, so reading it in the catch threw a TypeError instead of
+    // reverting — and because that throw happened inside the catch, the error toast on the next
+    // line never ran either. A failed save left the switch showing ON and said nothing at all.
+    const input = e.currentTarget as HTMLInputElement;
+    const checked = input.checked;
     try {
       await setAllowDownloads(code, orgCode, checked);
       showToast(checked ? 'Downloads enabled' : 'Downloads disabled');
       if (ev) ev = { ...ev, allowDownloads: checked };
     } catch (err) {
-      (e.currentTarget as HTMLInputElement).checked = !checked;
+      input.checked = !checked;
       showToast(err instanceof Error ? err.message : 'Failed', true);
     }
   }
@@ -1296,7 +1303,7 @@
       <p>Still trying to reach the server…</p>
       <p class="hint" style="margin:6px 0 14px">
         Your event is safe and nothing you have done is lost — this page just cannot get an answer
-        yet. It keeps trying on its own{#if bootAttempt > 1} (attempt {bootAttempt}){/if}, so you can
+        yet. It keeps trying on its own{#if bootAttempt > 1}{' '}(attempt {bootAttempt}){/if}, so you can
         leave it open.
       </p>
       <button class="btn primary" on:click={() => location.reload()}>Reload now</button>
@@ -1439,26 +1446,20 @@
 
       <div class="toggle-row">
         <div>
-          <div class="t-label">Allow downloads</div>
+          <label class="t-label" for="c-downloads">Allow downloads</label>
           <div class="t-sub">Participants can download photos</div>
         </div>
-        <label class="switch">
-          <input type="checkbox" checked={ev.allowDownloads !== false} on:change={onAllowDownloads} />
-          <span class="track"></span>
-        </label>
+        <Toggle id="c-downloads" checked={ev.allowDownloads !== false} on:change={onAllowDownloads} />
       </div>
       <div class="divider"></div>
 
         <div class="toggle-row">
           <div>
-            <div class="t-label">Guests can buy more shots</div>
+            <label class="t-label" for="c-buy-shots">Guests can buy more shots</label>
             <div class="t-sub">A guest who runs out can top up their own roll for A$3. You're not charged.</div>
           </div>
-          <label class="switch">
-            <input type="checkbox" checked={guestBuyOn}
-                   on:change={(e) => setGuestFlag('guestMayBuyShots', e)} />
-            <span class="track"></span>
-          </label>
+          <Toggle id="c-buy-shots" checked={guestBuyOn}
+                  on:change={(e) => setGuestFlag('guestMayBuyShots', e)} />
         </div>
         <div class="divider"></div>
 
@@ -1466,7 +1467,7 @@
           <div>
             <!-- "more" on its own said nothing — more of what? It is shots, and the ask is a
                  signal rather than an automatic grant, so the copy has to say both. -->
-            <div class="t-label">Guests can ask you for more shots</div>
+            <label class="t-label" for="c-ask-shots">Guests can ask you for more shots</label>
             <div class="t-sub">
               A guest who runs out can send you a request — it costs them nothing and grants nothing
               on its own.
@@ -1486,27 +1487,21 @@
               </details>
             </div>
           </div>
-          <label class="switch">
-            <input type="checkbox" checked={guestAskOn}
-                   on:change={(e) => setGuestFlag('guestMayRequest', e)} />
-            <span class="track"></span>
-          </label>
+          <Toggle id="c-ask-shots" checked={guestAskOn}
+                  on:change={(e) => setGuestFlag('guestMayRequest', e)} />
         </div>
         <div class="divider"></div>
 
         {#if faceAvailable}
         <div class="toggle-row">
           <div>
-            <div class="t-label">Let guests find photos of themselves</div>
+            <label class="t-label" for="c-face">Let guests find photos of themselves</label>
             <div class="t-sub">
               A guest can upload a selfie to find the photos they appear in. Only guests who opt in are
               recognised, and their face data is deleted the moment they withdraw. Off unless you turn it on.
             </div>
           </div>
-          <label class="switch">
-            <input type="checkbox" checked={faceOn} on:change={(e) => setGuestFlag('faceMatchingEnabled', e)} />
-            <span class="track"></span>
-          </label>
+          <Toggle id="c-face" checked={faceOn} on:change={(e) => setGuestFlag('faceMatchingEnabled', e)} />
         </div>
         <div class="divider"></div>
         {/if}
@@ -1526,7 +1521,7 @@
           <div>
             <div class="t-label">Move to a new date</div>
             <div class="t-sub">
-              No guests joined{#if ev.rescheduleUntil} — move it any time before {new Date(ev.rescheduleUntil).toLocaleDateString()}{/if}
+              No guests joined{#if ev.rescheduleUntil}{' '}— move it any time before {new Date(ev.rescheduleUntil).toLocaleDateString()}{/if}
             </div>
           </div>
           {#if !showResched}<button class="btn sm" on:click={() => { showResched = true; }}>Reschedule</button>{/if}
@@ -1536,7 +1531,7 @@
             <p class="refund-hint">Everything you paid for carries over.</p>
             <div class="row2">
               <div class="field"><label for="r-date">New start date</label><input id="r-date" type="date" bind:value={rDate} min={reschedMinDate} max={reschedMaxDate} /></div>
-              <div class="field"><label for="r-time">New start time</label><input id="r-time" type="time" step={REVEAL_TICK_MS / 1000} bind:value={rTime} /></div>
+              <div class="field"><label for="r-time">New start time</label><TimeField id="r-time" bind:value={rTime} /></div>
             </div>
             <div class="refund-actions">
               <button class="btn ghost sm" on:click={() => (showResched = false)} disabled={reschedBusy}>Never mind</button>
@@ -1607,7 +1602,7 @@
         <div class="field"><label for="s-date">Start date</label><input id="s-date" type="date" bind:value={sDate} max={reschedMaxDate} disabled={startFieldsLocked} /></div>
         <!-- The same 15-minute grid the reveal uses. An event ends at start + duration and a reveal
              is checked on that tick, so minutes finer than it were never actually honoured. -->
-        <div class="field"><label for="s-time">Start time</label><input id="s-time" type="time" step={REVEAL_TICK_MS / 1000} bind:value={sTime} disabled={startFieldsLocked} /></div>
+        <div class="field"><label for="s-time">Start time</label><TimeField id="s-time" bind:value={sTime} disabled={startFieldsLocked} /></div>
       </div>
       {#if startFieldsLocked}
         <p class="hint" style="margin:-4px 0 10px">
@@ -1671,7 +1666,7 @@
             <div class="field">
               <label for="s-reveal-time">Reveal time</label>
               <!-- Stepped by the tick so a phone's wheel only offers moments that can be honoured. -->
-              <input id="s-reveal-time" type="time" step={REVEAL_TICK_MS / 1000} bind:value={sRevealTime} />
+              <TimeField id="s-reveal-time" bind:value={sRevealTime} snap="up" />
             </div>
           </div>
           <p class="hint reveal-note">
@@ -1689,24 +1684,18 @@
       {#if sReveal !== 'instant'}
         <div class="toggle-row">
           <div>
-            <div class="t-label">Moderate photos</div>
+            <label class="t-label" for="s-moderation">Moderate photos</label>
             <div class="t-sub">Approve each photo before it appears in the gallery</div>
           </div>
-          <label class="switch">
-            <input type="checkbox" bind:checked={sModeration} />
-            <span class="track"></span>
-          </label>
+          <Toggle id="s-moderation" bind:checked={sModeration} />
         </div>
       {/if}
       <div class="toggle-row">
         <div>
-          <div class="t-label">No flash</div>
+          <label class="t-label" for="s-no-flash">No flash</label>
           <div class="t-sub">Disable the camera flash for guests (handy in dark venues to avoid harsh shots)</div>
         </div>
-        <label class="switch">
-          <input type="checkbox" bind:checked={sNoFlash} />
-          <span class="track"></span>
-        </label>
+        <Toggle id="s-no-flash" bind:checked={sNoFlash} />
       </div>
       <div class="divider gd-div"></div>
 
@@ -1743,7 +1732,7 @@
             <label for="s-guest-send-time">Send time</label>
             <!-- The same 15-minute grid as the reveal — a send is checked on that tick, so finer
                  minutes are precision we could not honour. -->
-            <input id="s-guest-send-time" type="time" step={REVEAL_TICK_MS / 1000} bind:value={sGuestSendTime} />
+            <TimeField id="s-guest-send-time" bind:value={sGuestSendTime} snap="up" />
           </div>
         </div>
         <p class="hint reveal-note">
@@ -1766,29 +1755,23 @@
           <!-- Not "email guests when the event ends": that would be a lie when this is off. The
                email is the guest's own doing — they asked for their photos — and this only decides
                what else it carries. -->
-          <div class="t-label">Add a thank-you and the release date</div>
+          <label class="t-label" for="s-mail-thanks">Add a thank-you and the release date</label>
           <div class="t-sub">
             Guests who asked for their photos will get them either way — this adds a thank-you and
-            tells them when the full gallery opens.{#if !sGuestThanksDated}
-              No release moment is fixed yet, so right now it would be the thank-you on its own.{/if}
+            tells them when the full gallery opens.{#if !sGuestThanksDated}{' '}No
+              release moment is fixed yet, so right now it would be the thank-you on its own.{/if}
           </div>
         </div>
-        <label class="switch">
-          <input type="checkbox" bind:checked={sGuestMailThanks} />
-          <span class="track"></span>
-        </label>
+        <Toggle id="s-mail-thanks" bind:checked={sGuestMailThanks} />
       </div>
 
       {#if sGuestReminderOffered}
         <div class="toggle-row">
           <div>
-            <div class="t-label">Remind them the day before</div>
+            <label class="t-label" for="s-mail-reminder">Remind them the day before</label>
             <div class="t-sub">Goes out 24 hours before the gallery opens — {sGuestReminderLabel}.</div>
           </div>
-          <label class="switch">
-            <input type="checkbox" bind:checked={sGuestMailReminder} />
-            <span class="track"></span>
-          </label>
+          <Toggle id="s-mail-reminder" bind:checked={sGuestMailReminder} />
         </div>
       {:else}
         <!-- Said, not silently missing: a switch that is simply absent reads as a bug to a host who
@@ -1798,7 +1781,7 @@
 
       <div class="toggle-row">
         <div>
-          <div class="t-label">Tell them the photos are live</div>
+          <label class="t-label" for="s-mail-live">Tell them the photos are live</label>
           <div class="t-sub">
             {#if sGuestReleaseLabel}
               Goes out with the link to the gallery the moment the photos are released — {sGuestReleaseLabel}.
@@ -1807,10 +1790,7 @@
             {/if}
           </div>
         </div>
-        <label class="switch">
-          <input type="checkbox" bind:checked={sGuestMailLive} />
-          <span class="track"></span>
-        </label>
+        <Toggle id="s-mail-live" bind:checked={sGuestMailLive} />
       </div>
 
       <div class="gd-now">
@@ -1837,7 +1817,7 @@
             Email isn't switched on for this event, so nothing can be sent from here.
           {:else}
             Sends your saved setting — {savedSendScope === 'favourites' ? 'just your favourites' : 'the whole gallery'}
-            — to every guest who asked for their photos.{#if settingsDirty} Save your settings first if you have just changed that.{/if}
+            — to every guest who asked for their photos.{#if settingsDirty}{' '}Save your settings first if you have just changed that.{/if}
           {/if}
         </p>
         {#if guestSendNote}
@@ -2607,26 +2587,19 @@
 
   /* Toggle rows */
   .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
-  .t-label { font-weight: 700; font-size: 0.9rem; }
+  /* Block, because half of these rows now label a Toggle and a <label> is inline by default —
+     which would sit the title on the same line as the sub-text under it. */
+  .t-label { display: block; font-weight: 700; font-size: 0.9rem; }
+  label.t-label { cursor: pointer; }
   .t-sub { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
   .divider { height: 1px; background: var(--border); margin: 4px 0; }
-
-  /* Switch */
-  .switch { position: relative; display: inline-block; width: 44px; height: 26px; flex-shrink: 0; }
-  .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
-  .track { position: absolute; inset: 0; background: var(--surface-2); border: 1px solid var(--border);
-    border-radius: 20px; transition: background 0.15s; }
-  .track::before { content: ''; position: absolute; left: 3px; top: 3px; width: 18px; height: 18px;
-    background: var(--text-muted); border-radius: 50%; transition: transform 0.15s, background 0.15s; }
-  .switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
-  .switch input:checked + .track::before { transform: translateX(18px); background: #111; }
 
   /* Fields */
   .field { margin-bottom: 12px; }
   .field > label { display: block; font-size: 0.8rem; font-weight: 600; margin-bottom: 6px; }
   .field-row { display: flex; gap: 12px; }
   .field-row .field { flex: 1; }
-  input[type='text'], input[type='date'], input[type='time'], input[type='email'], input[list],
+  input[type='text'], input[type='date'], input[type='email'], input[list],
   select, textarea {
     width: 100%; padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--border);
     border-radius: var(--radius-sm); color: var(--text); font: inherit; font-size: 0.9rem;

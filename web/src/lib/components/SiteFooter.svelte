@@ -40,7 +40,7 @@
 
 {#if compact}
   <div class="version">
-    © 2026 Snapdini{#if version} · v{version}{/if} ·
+    © 2026 Snapdini{#if version}{' '}· v{version}{/if} ·
     <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> ·
     <a href={GITHUB} target="_blank" rel="noopener noreferrer">GitHub</a>
     {#if supportVisible} · <a href={COFFEE} target="_blank" rel="noopener noreferrer">☕ Buy me a coffee</a>{/if}

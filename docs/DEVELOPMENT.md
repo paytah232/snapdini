@@ -527,6 +527,50 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   ladder to fall off. The pricing UI never offers a number this high; only a hand-made request gets
   there. Covered by `retention-pricing.test.ts`.
 
+- **A space before a `{#if}` is not a space.** Svelte trims the whitespace at the start of a block's
+  content, so `…event ends.{#if cond} No release moment…{/if}` renders as **"ends.No release
+  moment"**. It bit twice in one afternoon, in prose nobody re-reads after writing it, and it is
+  invisible in the source — the space is right there. Two things make it hard to catch: it does not
+  happen in every construct, so a single counter-example "proves" it is fine; and it is a rendering
+  fault, so no test, type-check or linter sees it.
+  - The fix is an explicit `{' '}` **inside** the block: an expression is a node, not whitespace, so
+    it survives, and it renders nothing when the branch is skipped. Moving the space *outside* the
+    block looks equivalent and is not — `on its own {#if n > 1}(attempt {n}){/if}, so you can` then
+    reads "on its own , so you can" whenever the branch is false.
+  - To sweep for it: text ending in a non-space, immediately followed by `{#if`/`{#each`/`{:else}`,
+    whose content starts with whitespace. There were 16 across nine files.
+
+- **`step` on `<input type="time">` only validates — it does not constrain the picker.** An off-grid
+  value is still accepted into the field; it merely fails `checkValidity()`, which nothing surfaces.
+  And the picker widget belongs to the browser, so Chrome's list and Android's dial offer five-minute
+  options whatever `step` says. Every time field therefore goes through `TimeField.svelte`, which
+  keeps the native control (it is the one people know, and on a phone it is a wheel their thumb
+  understands) and snaps the value after the change, out loud.
+  - The rule is `$lib/timeGrid.ts`, and it has a **direction**, which is the part worth keeping
+    straight. A start time snaps **down** — doors opening a few minutes early cost nothing, while
+    rounding 9:50 up to 10:00 locks out somebody at the door at 9:55. A reveal or a scheduled guest
+    send snaps **up**, because early is the mistake with no undo: the photos are already out. That
+    is the same reasoning `ceilToRevealTick` encodes server-side.
+
+- **Scoped styles do not cross a component boundary.** Moving a control into a shared component
+  silently orphans the page's `input { … }` rule, and the control renders as a raw browser widget
+  beside styled neighbours. `svelte-check` catches it as an unused selector — which is the only
+  reason it was caught — so treat "Unused CSS selector" on a rule you did not touch as a signal that
+  markup moved, not as lint noise. `Toggle.svelte` and `TimeField.svelte` both carry their own
+  styling, built from the same tokens.
+
+- **A `disabled` button is not an inert button.** It consumes nothing: the tap falls through to
+  whatever is behind it, and on a phone the browser reads that as the start of a text selection and
+  throws its own Copy/Search menu over the app. It is also, usually, a control that states a
+  condition ("Name your event to continue") and then does nothing when you do what it says. Prefer
+  `aria-disabled` plus a handler that takes the person to whatever is blocking them — same muted
+  look, same announcement to a screen reader, no dead tap.
+
+- **A toggle is for a setting, not for a selection.** `Toggle.svelte`'s header carries the rule, and
+  the exceptions are the interesting part: consent stays a checkbox (an affirmative act should not be
+  a switch that can be nudged), and choosing several things from a list stays a checkbox, because a
+  column of switches reads as ten settings rather than one question with ten answers.
+
 ## Releasing (maintainers)
 
 Two images are published per release — `snapdini-app` (Express API) and `snapdini-web` (SvelteKit).

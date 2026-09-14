@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Toggle from '$lib/components/Toggle.svelte';
   import { onMount, onDestroy, tick } from 'svelte';
   import { lensName, lensFacing } from '$lib/lensName';
   import { tileAspect } from '$lib/ui';
@@ -2417,10 +2418,10 @@
       <!-- Beside the address rather than after the button, because it is a statement ABOUT the
            address. Nothing here is required and nothing blocks the join: the hint under it says so
            in words, since a checkbox next to an empty optional field reads as a trap otherwise. -->
-      <label class="join-optin" for="join-wants">
-        <input id="join-wants" type="checkbox" bind:checked={joinWantsPhotos} />
-        <span>Email me the photos when the event ends</span>
-      </label>
+      <div class="join-optin">
+        <label for="join-wants">Email me the photos when the event ends</label>
+        <Toggle id="join-wants" bind:checked={joinWantsPhotos} />
+      </div>
       <p class="join-hint">{joinWantsPhotos && !joinEmail.trim()
         ? 'Pop your email in above so we know where to send them.'
         : 'You can opt in later — there’s a button with your photos.'}</p>
@@ -2720,7 +2721,7 @@
               <div class="sm-row col">
                 <span class="sm-labelwrap">
                   <span class="sm-label">Camera</span>
-                  <span class="sm-desc">Switch between the cameras on this device.{#if recording} Stop recording to change.{/if}</span>
+                  <span class="sm-desc">Switch between the cameras on this device.{#if recording}{' '}Stop recording to change.{/if}</span>
                 </span>
                 <select class="sm-select" aria-label="Choose camera" value={deviceId ?? ''} disabled={recording} on:change={(e) => pickCamera(e.currentTarget.value)}>
                   {#each cameras as c}<option value={c.id}>{c.label}</option>{/each}
@@ -3092,7 +3093,7 @@
          load-time redirect gets there first, so this is the during-the-event route. -->
     {#if galleryRevealed && othersCount > 0 && ev?.joinCode}
       <a class="full-gallery" href="/gallery/{ev.joinCode}">
-        🖼 See everyone's photos{#if faceMatching} — and find the ones you're in{/if} →
+        🖼 See everyone's photos{#if faceMatching}{' '}— and find the ones you're in{/if} →
       </a>
     {/if}
     <!-- The same offer, in the gallery: this is where a guest lands after a failed upload, and
@@ -3577,10 +3578,13 @@
      the stacked name/email fields, and unqualified they flatten this row back to a block label with
      a full-width checkbox, which renders as a grey stripe across the card. */
   .join .join-optin {
-    display: flex; align-items: center; gap: 10px; min-height: 44px; margin: 12px 0 0;
-    text-align: left; font-size: .84rem; color: var(--text); cursor: pointer; line-height: 1.35;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    min-height: 44px; margin: 12px 0 0;
+    text-align: left; font-size: .84rem; color: var(--text); line-height: 1.35;
   }
-  .join .join-optin input { width: 20px; height: 20px; flex: none; padding: 0; accent-color: var(--accent); }
+  /* The label carries the tap target now — a switch is small, and this is the one thing on the join
+     screen a guest is being asked to decide. */
+  .join .join-optin label { cursor: pointer; margin: 0; }
   .full-gallery {
     display: block; max-width: 720px; margin: 0 auto 14px; padding: 12px 16px; text-align: center;
     border: 1px solid var(--border); border-radius: 12px; background: var(--surface);

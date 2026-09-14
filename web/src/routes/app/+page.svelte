@@ -28,9 +28,53 @@
 
   // Step 1 is the only one that can be incomplete in a way that matters — everything else has a
   // working default. Blocking "Next" on an empty name beats creating "Untitled".
-  $: canAdvance = step !== 1 || !!name.trim();
-  function nextStep() { if (canAdvance && step < LAST_STEP) step += 1; }
-  function prevStep() { if (step > 1) step -= 1; }
+  $: canAdvance = !(step === 1 && sub === 1) || !!name.trim();
+  // Two of the five steps ask more than one thing, and both used to ask it all on one screen. They
+  // are paged instead, behind the same Next button, so the strip above still counts five steps and
+  // nobody has to learn a second kind of progress.
+  //
+  // A plain function rather than only a reactive value, because going BACKWARDS needs the count of
+  // the step being entered, and a `$:` has not recomputed at the moment the assignment runs.
+  //
+  // `paid` is a PARAMETER, not read from scope. Svelte tracks what a reactive statement mentions
+  // directly, not what a function it calls happens to read — so `$: subCount = subsFor(step)` only
+  // ever recomputed when `step` changed, and billing arrives from /api/config after first paint.
+  // The count stayed at its pre-billing value and step 1 silently lost its guests-and-price page.
+  const subsFor = (st: number, paid: boolean): number =>
+    st === 1 ? (paid ? 3 : 2)   // without billing there is no guest/price page to show
+    : st === 4 ? 3
+    : 1;
+  $: subCount = subsFor(step, !!billing?.billingEnabled);
+  let sub = 1;
+  // billing arrives from /api/config after first paint; a host standing on a page that just stopped
+  // existing must not be stranded there.
+  $: if (sub > subCount) sub = subCount;
+
+  function nextStep() {
+    if (!canAdvance) {
+      // Take them to the one thing standing in the way, rather than absorbing the press silently.
+      const el = document.getElementById('event-name') as HTMLInputElement | null;
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el?.focus();
+      return;
+    }
+    if (sub < subCount) { sub += 1; return; }
+    if (step < LAST_STEP) { step += 1; sub = 1; }
+  }
+  function prevStep() {
+    if (sub > 1) { sub -= 1; return; }
+    if (step > 1) { step -= 1; sub = subsFor(step, !!billing?.billingEnabled); }
+  }
+  /** Jump straight back to a finished step from the strip. Backwards only — a step ahead of this
+   *  one has not been filled in, and Next is where its checks live. */
+  function goToStep(n: number) {
+    if (n >= step || n < 1) return;
+    step = n;
+    sub = 1;
+  }
+
+  import Toggle from '$lib/components/Toggle.svelte';
+  import TimeField from '$lib/components/TimeField.svelte';
   import { getConfig, getMe, api } from '$lib/api';
   import { track } from '$lib/analytics';
   import { createEvent, joinEvent, REVEAL_CUSTOM, REVEAL_TICK_MS,
@@ -38,7 +82,7 @@
   import { GUEST_DELIVERY_DEFAULT, GUEST_DELIVERY_OPTIONS, guestReleaseAt, releaseDateKnown,
            reminderCanFire, reminderFiresAt, revealInstant, scheduledSendIssue, scopeFor,
            type GuestDelivery, type GuestSendScope } from '$lib/guestDelivery';
-  import { EVENT_TYPES, DEFAULT_COUNT, packFor, pickChallenges, tickFor } from '$lib/challenges';
+  import { EVENT_TYPES, DEFAULT_COUNT, packFor, pickChallenges, tickFor, varySets } from '$lib/challenges';
   import { saveSession } from '$lib/session';
   import { showToast } from '$lib/toast';
   import Logo from '$lib/components/Logo.svelte';
@@ -48,6 +92,7 @@
   import { aspectValue } from '$lib/frameShape';
   import { durationAddonCents, featuresFreeAt, framePackPrice, guestBaseCents, priceAria,
            priceTag, retentionChoices, retentionIncludedDays, retentionLabel, retentionPrice,
+           retentionFor,
            shotsAddonCents, shotsPrice, videoAddonCents, videoPrice } from '$lib/featureUpsell';
   import HelpTip from '$lib/components/HelpTip.svelte';
 
@@ -111,9 +156,6 @@
   };
   $: retentionIncluded = retentionIncludedDays(billing, Number(maxGuests));
   $: retentionOptions = retentionChoices(billing, Number(maxGuests));
-  // Moving up to a paid tier includes a month. Without this the form kept asking for 7 days, so the
-  // host silently got a week they had already paid to beat.
-  $: if (retentionDays < retentionIncluded) retentionDays = retentionIncluded;
 
   // ── The drawings on the features step ─────────────────────────────────────
   //
@@ -167,7 +209,16 @@
   let eventType: string | null = null;
   // Only ever on screen once a type is chosen. Not reset when the type changes: a host who took the
   // list off did not ask for it back because they moved from Wedding to Engagement.
-  let seedMissions = true;
+  // OFF. It changes what a guest sees — a list of shots to hunt for appears in their camera — and
+  // a default that alters somebody else's screen is not a default we get to make. The host opts in.
+  let seedMissions = false;
+  /** Several cards instead of one, so guests are not all hunting the same five shots. Off for the
+   *  same reason seedMissions is: it changes what a guest is handed. */
+  let trickVariety = false;
+  /** How many cards "change it up" makes. Three is enough for a room to feel different without
+   *  making the host's print job a chore — and varySets guarantees the must-haves are on all of
+   *  them, so nobody's cake goes unphotographed because of which table got which card. */
+  const VARIETY_SETS = 3;
   let slug = '';
   let slugFeedback: { text: string; cls: 'ok' | 'err' | 'muted' } | null = null;
   let slugCheckTimer: ReturnType<typeof setTimeout> | undefined;
@@ -178,6 +229,22 @@
   let durationHours: number | string = '';
   let maxPhotos: number | string = '';
   let retentionDays = 7;
+  // Two real shots from the pack this event type would actually get, so the example is the thing
+  // itself rather than a description of it. Deterministic: pickChallenges with no mood and no
+  // shuffle returns the pack in order, so the words do not reshuffle under a host reading them.
+  $: trickExamples = eventType
+    ? pickChallenges(packFor(eventType), { count: 2, allowVideo: false }).map((c) => c.text)
+    : [];
+
+  /** Has the host actually picked a retention length? Until they have, the number on screen belongs
+   *  to the tier, not to them, and must be free to go back down when the tier does. */
+  let retentionTouched = false;
+  // Below the declaration, not beside retentionIncluded above, because `$: x = …` on a variable
+  // declared later is a use-before-declaration in TypeScript.
+  // Retention follows the tier until the host says otherwise — see retentionFor(). A bare
+  // "raise it to the allowance" ratchet lived here and could not be undone: free → paid → free left
+  // the paid tier's month selected on a tier that CHARGES for it.
+  $: retentionDays = retentionFor(retentionDays, retentionIncluded, retentionTouched);
   let timezone = '';
   // Held separately from `timezone` so a drift between the two can be shown. A silent mismatch
   // means the event starts at the wrong time and nobody finds out until the day.
@@ -191,17 +258,19 @@
   // The picker lives inside the collapsed disclosure on step 3, so "Change" has to get to that
   // step, open the panel and take the host there.
   //
-  // The step change is not a nicety: this link is on step 2, and on the guided path the disclosure
-  // is not in the document at all while step 2 is on screen — so the query below found nothing and
-  // the only control that says what the event's times MEAN did nothing at all when clicked.
+  /** Is the timezone picker showing on the "When" step? */
+  let tzOpen = false;
+  // It used to live in step 3's collapsed "Other settings", so this button had to carry the host
+  // THERE — `if (guided) step = 3` — to reach it. That was a one-way trip: the step strip then
+  // marked step 2 finished, and Next carried on to step 4, so somebody who only wanted to check
+  // what their times meant was quietly moved two steps past the form they were filling in.
+  //
+  // A control belongs on the page whose words refer to it. It opens here now and nothing moves.
   async function openTimezone() {
-    if (guided) step = 3;
-    await tick();
-    const details = document.querySelector('details.more') as HTMLDetailsElement | null;
-    if (details) details.open = true;
+    tzOpen = true;
     await tick();
     const el = document.querySelector('#timezone');
-    el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     (el?.querySelector('input') as HTMLInputElement | null)?.focus();
   }
   // The start rendered the way GUESTS will see it — in the event's zone, not the browser's.
@@ -244,6 +313,15 @@
   $: guestSendMoved = guestSendAt !== null && guestSendAt !== guestChosenSendAt;
   $: guestSendIssue = guestDelivery === 'scheduled' ? scheduledSendIssue(guestSendAt, guestRevealAt) : null;
   $: guestReleaseMs = guestReleaseAt(guestDelivery, guestRevealAt, guestSendAt);
+  // "Photos are live" was never a third, separate decision — it is the MECHANISM of the two
+  // automatic delivery modes. sweepLive is gated on events.guest_mail_live, and guestLinkAt names a
+  // moment only for all_on_reveal and scheduled. So on those two, switching it off silently
+  // cancelled the delivery the host had just chosen — "Everything, as soon as photos are revealed"
+  // and then nothing ever sent — and on the two manual modes it did nothing at all, because the
+  // host presses the button themselves. It has no honest off state, so it is shown locked, saying
+  // which of the two it is.
+  $: guestDeliveryLabel = (GUEST_DELIVERY_OPTIONS.find((o) => o.value === guestDelivery)?.label ?? '').toLowerCase();
+  $: guestLiveAutomatic = guestDelivery === 'all_on_reveal' || guestDelivery === 'scheduled';
   $: guestReminderOffered = reminderCanFire(guestEndsAt, guestReleaseMs);
   $: guestThanksDated = releaseDateKnown(guestEndsAt, guestReleaseMs);
   // Labels rather than raw instants in the markup: revealMomentLabel takes a number, and every one
@@ -326,18 +404,18 @@
   // "check your email", and the verification link opens a NEW TAB — where sessionStorage does not
   // exist. The draft has to outlive the tab that created it, so it is stamped and expires instead.
   const DRAFT_FIELDS = () => ({
-    name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, timezone,
+    name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, retentionTouched, timezone,
     maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
-    revealDelayHours, revealDate, revealTime, moderationEnabled, eventType, seedMissions,
+    revealDelayHours, revealDate, revealTime, moderationEnabled, eventType, seedMissions, trickVariety,
     guestDelivery, guestSendScope, guestSendDate, guestSendTime,
     guestMailThanks, guestMailReminder, guestMailLive,
   });
   function restoreDraft() {
     const d = readDraft();
     if (!d) return false;
-    ({ name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, timezone,
+    ({ name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, retentionTouched, timezone,
        maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
-       revealDelayHours, revealDate, revealTime, moderationEnabled, eventType, seedMissions,
+       revealDelayHours, revealDate, revealTime, moderationEnabled, eventType, seedMissions, trickVariety,
        guestDelivery, guestSendScope, guestSendDate, guestSendTime,
        guestMailThanks, guestMailReminder, guestMailLive } = { ...DRAFT_FIELDS(), ...d });
     return true;
@@ -462,8 +540,16 @@
     try {
       // allowVideo mirrors the editor's own per-event gate rather than assuming, so this is the
       // same list the editor would have produced for this event rather than a near-miss.
-      const items = pickChallenges(packFor(type), { count: DEFAULT_COUNT, allowVideo: videoSeconds > 0 })
-        .map((c) => ({ id: c.id, text: c.text }));
+      const pack = packFor(type);
+      const opts = { count: DEFAULT_COUNT, allowVideo: videoSeconds > 0 };
+      // varySets is the admin editor's own helper, not a second implementation: every card shares a
+      // core of the pack's must-haves and only the remainder varies, so coverage of the moments a
+      // host would actually regret missing does not come down to which table got which card.
+      const sets = trickVariety
+        ? varySets(pack, { ...opts, sets: VARIETY_SETS })
+            .map((st) => ({ ...st, items: st.items.map((c) => ({ id: c.id, text: c.text })) }))
+        : [{ key: 'a', label: 'Card A',
+             items: pickChallenges(pack, opts).map((c) => ({ id: c.id, text: c.text })) }];
       void fetch(`/api/events/${encodeURIComponent(code)}/challenges`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'x-organizer-code': organizerCode },
@@ -472,7 +558,7 @@
         body: JSON.stringify({
           eventType: type,
           tick: tickFor(type),
-          challenges: { sets: [{ key: 'a', label: 'Card A', items }] },
+          challenges: { sets },
         }),
       }).catch(() => { /* their list, not their event — the admin page rebuilds it in two taps */ });
     } catch { /* as above: nothing here may reach the host as a failed creation */ }
@@ -568,7 +654,9 @@
         // Never sent as on when the gap cannot carry it: the host was not shown the switch, so they
         // did not choose it, and a setting nobody chose must not be stored as theirs.
         guestMailReminder: guestReminderOffered && guestMailReminder,
-        guestMailLive,
+        // Derived, not the raw toggle: the control is locked to the delivery mode, so storing
+        // anything else would let the sweep and the screen disagree about the same event.
+        guestMailLive: guestLiveAutomatic,
         timezone,
         aspectRatios,
         maxGuests,
@@ -698,18 +786,38 @@
 
       <div class="steps" aria-label="Step {step} of {LAST_STEP}">
         {#each STEP_TITLES as t, i}
-          <div class="stepdot" class:on={i + 1 === step} class:done={i + 1 < step}>
-            <span class="sd-n">{i + 1 < step ? '✓' : i + 1}</span>
-            <span class="sd-t">{t}</span>
-          </div>
+          <!-- A finished step is a button; the current one and anything ahead of it are not.
+               Going back to check something you have already answered should not cost four taps on
+               Back, but a step nobody has filled in has no checks behind it yet — Next is where
+               those live, so the strip only ever travels backwards.
+
+               Two branches rather than one <svelte:element>: a div carrying a click handler is a
+               control that no keyboard or screen reader can reach, and the honest fix is to not
+               make it a control at all when it is not one. -->
+          {#if i + 1 < step}
+            <button class="stepdot done" type="button"
+                    aria-label={`Back to step ${i + 1}, ${t}`}
+                    on:click={() => goToStep(i + 1)}>
+              <span class="sd-n">✓</span>
+              <span class="sd-t">{t}</span>
+            </button>
+          {:else}
+            <div class="stepdot" class:on={i + 1 === step} aria-current={i + 1 === step ? 'step' : undefined}>
+              <span class="sd-n">{i + 1}</span>
+              <span class="sd-t">{t}</span>
+            </div>
+          {/if}
         {/each}
       </div>
     {/if}
 
     <!-- 1 ── The essentials: name + (when billing's on) who's coming, video & live price. -->
     {#if !guided || step === 1}
+
+    <!-- 1a ── What the event IS. -->
+    {#if !guided || sub === 1}
     <div class="card">
-      <div class="card-title">Your event</div>
+      <div class="card-title">Your event{#if guided}<span class="sub-of">1 of {subCount}</span>{/if}</div>
 
       <div class="field">
         <label for="event-name">Event name</label>
@@ -746,25 +854,78 @@
           your event works exactly the same either way, and you can say later.
         </p>
       </div>
+    </div>
+    {/if}
 
-      {#if eventType}
+    <!-- 1b ── What a GUEST ends up looking at. Both of these change their screen, not yours, which
+         is why they are a page of their own rather than a footnote under the name: a host should
+         have to look at them and decide, and the shot list in particular is off until they do. -->
+    {#if !guided || sub === 2}
+    <div class="card">
+      <div class="card-title">What your guests see{#if guided}<span class="sub-of">2 of {subCount}</span>{/if}</div>
+
+      <!-- "Trick list" is what it is called on the event page, in the guest's camera and in the
+           guide. The wizard used to switch on an unnamed "list of shots to hunt for", so a host
+           turned something on here and then went looking for it under a different name.
+
+           One row, always shown, rather than a branch: without an event type there is nothing to
+           build a list FROM, so the switch dims (Toggle handles that itself) and the line beneath
+           says why. A control that is simply absent reads as a bug. -->
+      <div class="field">
+        <div class="toggle-field">
+          <span class="tf-label"><label for="seed-missions">Trick list</label></span>
+          <Toggle id="seed-missions" bind:checked={seedMissions} disabled={!eventType} />
+        </div>
+        <p class="field-hint">
+          {#if eventType}
+            <!-- No {#if} around the examples: Svelte trims whitespace at a block boundary, so the
+                 space before the dash was eaten and it rendered "not to miss— “…". Every pack ships
+                 more than two shots, and this branch only runs with a type chosen, so there is
+                 nothing to guard against. -->
+            A few shots not to miss — “{trickExamples[0]}”, “{trickExamples[1]}” — that guests tick
+            off in their camera. Edit or print it later.
+          {:else}
+            Pick a kind of event on the previous page and we'll suggest shots to match.
+          {/if}
+        </p>
+      </div>
+
+      <!-- It changes what a guest's phone DOES, which is this page's subject and not "Other
+           settings" two steps away. -->
+      <div class="field toggle-field">
+        <span class="tf-label">
+          <label for="no-flash">No flash</label>
+          <HelpTip text={`Stops guests' phones firing the bright rear camera flash — handy for ceremonies, dark venues or anywhere a flash would be disruptive. The gentle front-camera selfie flash still works.`} />
+        </span>
+        <Toggle id="no-flash" bind:checked={noFlash} />
+      </div>
+
+      {#if eventType && seedMissions}
+        <!-- Only once the list exists: a control for varying something that is switched off is a
+             question about nothing. -->
         <div class="field">
-          <label class="pack-toggle">
-            <input type="checkbox" bind:checked={seedMissions} />
-            <span>Give my guests a list of shots to hunt for</span>
-          </label>
+          <div class="toggle-field">
+            <span class="tf-label"><label for="trick-variety">Change it up</label></span>
+            <Toggle id="trick-variety" bind:checked={trickVariety} />
+          </div>
           <p class="field-hint">
-            A handful of photo ideas — "someone laughing properly", "the whole room in one shot" —
-            that guests tick off as they take them. You can change the list, or print it for the
-            tables, from your event page afterwards.
+            Make {VARIETY_SETS} different cards instead of one, so guests aren't all hunting the same
+            shots. The must-haves stay on every card. Add, edit or remove any of them later.
           </p>
         </div>
       {/if}
 
       <div class="field">
-        <label for="event-blurb">Welcome blurb <span class="hint">(optional — shown under the title on the join screen)</span></label>
+        <label for="event-blurb">Welcome blurb <span class="hint">(optional — shown on the join screen)</span></label>
         <textarea id="event-blurb" maxlength="280" rows="2" placeholder="e.g. Snap away — every photo's a surprise until the big reveal!" bind:value={blurb}></textarea>
       </div>
+    </div>
+    {/if}
+
+    <!-- 1c ── How big it is, and therefore what it costs. -->
+    {#if !guided || sub === 3}
+    <div class="card">
+      <div class="card-title">How many guests?{#if guided}<span class="sub-of">3 of {subCount}</span>{/if}</div>
 
       {#if billing?.billingEnabled}
         <p class="field-hint" style="margin:0 0 12px">Events for up to {billing.freeAllGuests} guests are <b>free, with every feature</b>. Bigger events are a one-off pass. <b>Longer events, and keeping the photos longer, are paid on any size.</b></p>
@@ -812,6 +973,7 @@
         {/if}
       {/if}
     </div>
+    {/if}
 
     {#if draftRestored}
       <div class="draft-back">✓ Welcome back — your event details are just as you left them.</div>
@@ -833,7 +995,7 @@
           <!-- Same grid as the reveal, and for the same reason: the event's END is start + duration,
                and a reveal is checked on a 15-minute tick — so a 7:07 start quietly becomes a 7:15
                reveal anyway. Offering minutes we cannot honour is offering precision we do not have. -->
-          <input id="start-time" type="time" step={REVEAL_TICK_MS / 1000} bind:value={startTime} />
+          <TimeField id="start-time" bind:value={startTime} />
         </div>
       </div>
         <!-- The timezone picker lives in Advanced settings, which meant this card never said what
@@ -844,6 +1006,12 @@
           <button type="button" class="tz-name" on:click={openTimezone}
                   title="Change the event's timezone">{timezone || '…'}</button>{#if startPreview} — starts {startPreview}{/if}
         </p>
+        {#if tzOpen || !guided}
+          <div class="field tz-field">
+            <label for="timezone">Timezone <span class="hint">(type to search)</span></label>
+            <SearchableSelect id="timezone" options={timezones} bind:value={timezone} placeholder="e.g. Australia/Brisbane" />
+          </div>
+        {/if}
         {#if tzMismatch}
           <div class="tz-warn">
             <p class="tz-msg">Your device is in <b>{deviceTz}</b> but this event is set to <b>{timezone}</b>.</p>
@@ -1055,7 +1223,7 @@
               <button type="button" class="fx-chip" class:on={retentionDays === r.days}
                       aria-pressed={retentionDays === r.days}
                       aria-label={billing?.billingEnabled ? `Keep photos ${r.label}, ${priceAria(retentionPrice(r), money, r.included ? 'included' : 'free')}` : `Keep photos ${r.label}`}
-                      on:click={() => (retentionDays = r.days)}>
+                      on:click={() => { retentionDays = r.days; retentionTouched = true; }}>
                 <span class="fc-t">{r.label}</span>
                 {#if billing?.billingEnabled}<span class="fc-p" class:was={tag.cls === 'was'} class:add={tag.cls === 'add'}
                       class:incl={tag.cls === 'incl'}>{tag.text}</span>{/if}
@@ -1070,7 +1238,7 @@
          photos appear. Collapsed on both paths now — the step is no longer empty without it, which
          was the only reason it was ever forced open. -->
     <details class="more">
-      <summary>Other settings <span class="sum-hint">custom URL, timezone, reveal…</span></summary>
+      <summary>Other settings <span class="sum-hint">custom URL</span></summary>
 
       <div class="card">
         <div class="field">
@@ -1092,108 +1260,162 @@
           {/if}
         </div>
 
-        <div class="field">
-          <label for="timezone">Timezone <span class="hint">(type to search)</span></label>
-          <SearchableSelect id="timezone" options={timezones} bind:value={timezone} placeholder="e.g. Australia/Brisbane" />
-        </div>
-
-        <div class="field toggle-field">
-          <span class="tf-label">
-            <label for="allow-downloads">Allow downloads</label>
-            <HelpTip text={`When on, guests can save individual photos from the shared gallery and download the whole event as a zip. Turn it off to make the gallery view-only — people can still see the photos, just not download them.`} />
-          </span>
-          <label class="toggle">
-            <input id="allow-downloads" type="checkbox" bind:checked={allowDownloads} />
-            <span class="toggle-track"></span>
-          </label>
-        </div>
-
-        <div class="field toggle-field">
-          <span class="tf-label">
-            <label for="no-flash">No flash</label>
-            <HelpTip text={`Stops guests' phones firing the bright rear camera flash — handy for ceremonies, dark venues or anywhere a flash would be disruptive. The gentle front-camera selfie flash still works.`} />
-          </span>
-          <label class="toggle">
-            <input id="no-flash" type="checkbox" bind:checked={noFlash} />
-            <span class="toggle-track"></span>
-          </label>
-        </div>
       </div>
 
-      <div class="card">
-        <div class="card-title">Reveal mode</div>
-        <div class="reveal-options">
-          {#each options?.revealModes ?? [] as m}
-            <button
-              type="button"
-              class="reveal-opt"
-              class:selected={revealMode === m.value}
-              on:click={() => (revealMode = m.value)}
-            >
-              <span class="opt-icon">{m.icon || ''}</span>
-              {m.label}
-              <br /><small>{m.desc || ''}</small>
-            </button>
-          {/each}
-        </div>
-
-        {#if revealMode === 'at_end'}
-          <div class="field" style="margin-top:14px">
-            <label for="reveal-delay">Reveal delay after the event ends</label>
-            <select id="reveal-delay" bind:value={revealDelayHours} on:change={onRevealDelayChange}>
-              {#each options?.revealDelays ?? [] as r}
-                <option value={r.value}>{r.label}</option>
-              {/each}
-              <option value={REVEAL_CUSTOM}>Pick an exact date &amp; time…</option>
-            </select>
-          </div>
-
-          {#if wantsCustomReveal}
-            <div class="field-row reveal-custom">
-              <div class="field">
-                <label for="reveal-date">Reveal date</label>
-                <input id="reveal-date" type="date" min={todayStr} bind:value={revealDate} />
-              </div>
-              <div class="field">
-                <label for="reveal-time">Reveal time</label>
-                <!-- Stepped by the tick, so the wheel on a phone only offers moments that can
-                     actually be honoured and the rounding below almost never has to say anything. -->
-                <input id="reveal-time" type="time" step={REVEAL_TICK_MS / 1000} bind:value={revealTime} />
-              </div>
-            </div>
-            <p class="hint reveal-note">
-              {#if actualRevealAt === null}
-                Pick the date and time — it's read in the event's timezone{timezone ? ` (${timezone})` : ''}.
-              {:else}
-                Photos appear from <b>{revealMomentLabel(actualRevealAt, timezone)}</b>.
-                {#if revealMoved}
-                  Reveals are checked every {REVEAL_TICK_MS / 60000} minutes, so yours moves to the next check.
-                {/if}
-              {/if}
-            </p>
-          {/if}
-        {/if}
-
-        {#if revealMode !== 'instant'}
-          <div class="field toggle-field" style="margin-top:14px">
-            <label for="moderation">
-              Moderate photos <span class="hint">(you approve each before it shows)</span>
-            </label>
-            <label class="toggle">
-              <input id="moderation" type="checkbox" bind:checked={moderationEnabled} />
-              <span class="toggle-track"></span>
-            </label>
-          </div>
-        {/if}
-      </div>
     </details>
 
     {/if}
 
-    <!-- 4 ── How the guests get the photos, and what they are told about it. -->
+    <!-- 4 ── When the photos appear, how the guests get them, and what they are told.
+         Reveal used to live two steps back, inside a COLLAPSED "Other settings" dropdown, which
+         got it wrong twice over: it is not a custom setting — it decides whether anybody sees
+         anything — and the card below ("Everything, as soon as photos are revealed") is written in
+         terms of a choice the host could not see from here. Cause and effect now sit together, in
+         that order. Moderation rides with it because it is the same decision: who sees what, when. -->
     {#if !guided || step === 4}
+
+    <!-- 4a ── THE GALLERY: when it unlocks, and what is allowed into it. -->
+    {#if !guided || sub === 1}
     <div class="card">
-      <div class="card-title" id="guest-delivery-q">How should your guests get the photos?</div>
+      <div class="card-title">When can people see the photos?{#if guided}<span class="sub-of">1 of 3</span>{/if}</div>
+      <!-- These two pages were one screen, and a host reading them back to back could not tell why
+           they were being asked twice. They are two different things and the lead line on each now
+           says which: this page is the GALLERY — the page itself, and who may look at it. The next
+           one is the EMAIL we send guests, which can only ever happen after this. -->
+      <p class="lead-note">The gallery is where every photo ends up. This decides when it opens, and
+        whether you check each shot on the way in.</p>
+      <div class="reveal-options">
+        {#each options?.revealModes ?? [] as m}
+          <button
+            type="button"
+            class="reveal-opt"
+            class:selected={revealMode === m.value}
+            on:click={() => (revealMode = m.value)}
+          >
+            <span class="opt-icon">{m.icon || ''}</span>
+            {m.label}
+            <br /><small>{m.desc || ''}</small>
+          </button>
+        {/each}
+      </div>
+
+      {#if revealMode === 'at_end'}
+        <div class="field" style="margin-top:14px">
+          <label for="reveal-delay">Reveal delay after the event ends</label>
+          <select id="reveal-delay" bind:value={revealDelayHours} on:change={onRevealDelayChange}>
+            {#each options?.revealDelays ?? [] as r}
+              <option value={r.value}>{r.label}</option>
+            {/each}
+            <option value={REVEAL_CUSTOM}>Pick an exact date &amp; time…</option>
+          </select>
+        </div>
+
+        {#if wantsCustomReveal}
+          <div class="field-row reveal-custom">
+            <div class="field">
+              <label for="reveal-date">Reveal date</label>
+              <input id="reveal-date" type="date" min={todayStr} bind:value={revealDate} />
+            </div>
+            <div class="field">
+              <label for="reveal-time">Reveal time</label>
+              <!-- Stepped by the tick, so the wheel on a phone only offers moments that can
+                   actually be honoured and the rounding below almost never has to say anything. -->
+              <TimeField id="reveal-time" bind:value={revealTime} snap="up" />
+            </div>
+          </div>
+          <p class="hint reveal-note">
+            {#if actualRevealAt === null}
+              Pick the date and time — it's read in the event's timezone{timezone ? ` (${timezone})` : ''}.
+            {:else}
+              Photos appear from <b>{revealMomentLabel(actualRevealAt, timezone)}</b>.
+              {#if revealMoved}
+                Reveals are checked every {REVEAL_TICK_MS / 60000} minutes, so yours moves to the next check.
+              {/if}
+            {/if}
+          </p>
+        {/if}
+      {/if}
+
+    </div>
+
+    {#if revealMode !== 'instant'}
+      <!-- Given the feature-card treatment from step 3, because it is that kind of decision and as
+           a bare switch under the reveal options it read as a footnote to them. It is not one: it
+           decides whether a photo a guest takes is ever seen by anybody, which makes it the most
+           consequential control on this page. -->
+      <div class="card">
+        <section class="fx-item">
+          <div class="fx-head">
+            <div class="fx-art" aria-hidden="true">
+              <!-- A shot waiting (dashed, unresolved), then the same shot approved — the same
+                   before/after grammar as the video card's still-then-clip on step 3. -->
+              <svg class="fx-svg" viewBox="0 0 78 40">
+                <rect class="s-track" x="1" y="7" width="25" height="25" rx="4" />
+                <circle class="s-track" cx="13.5" cy="17" r="3.5" />
+                <path class="s-track" d="M6 27.5c1.5-3.5 11.5-3.5 13 0" />
+                <path class="s-line" d="M31 20h8m-3-3 3 3-3 3" />
+                <rect class="s-fill" x="46" y="7" width="25" height="25" rx="4" />
+                <path class="s-check" d="M52.5 19.5l4.5 4.5 8-9" />
+              </svg>
+            </div>
+            <div class="fx-say">
+              <!-- Switch on the TITLE row, not as a third column of .fx-head. As a column it took
+                   46px out of the text for the card's whole height, and at 420px the sentence
+                   wrapped to six lines beside an otherwise empty switch. -->
+              <div class="fx-titlerow">
+                <h2 class="fx-name"><label for="moderation">Moderate photos</label></h2>
+                <Toggle id="moderation" bind:checked={moderationEnabled} />
+              </div>
+              <p class="fx-copy">Nothing a guest takes reaches the gallery until you have said yes to
+                it. Worth it for a work do or anything public; most private events never need it.</p>
+            </div>
+          </div>
+        </section>
+      </div>
+    {/if}
+
+    <!-- Downloads sits with moderation because it answers the same question the page asks: what can
+         people DO with these photos. It was in step 3's collapsed "Other settings", two steps from
+         the card about who may see them. -->
+    <div class="card">
+      <section class="fx-item">
+        <div class="fx-head">
+          <div class="fx-art" aria-hidden="true">
+            <!-- A photo with an arrow leaving it. -->
+            <svg class="fx-svg" viewBox="0 0 78 40">
+              <rect class="s-line" x="8" y="4" width="30" height="30" rx="4" />
+              <circle class="s-line" cx="19" cy="15" r="3.5" />
+              <path class="s-line" d="M12 29c2-5 16-5 18 0" />
+              <path class="s-fillstroke" d="M55 8v17" />
+              <path class="s-fillstroke" d="M48.5 18.5 55 25l6.5-6.5" />
+              <path class="s-line" d="M45 31h20" />
+            </svg>
+          </div>
+          <div class="fx-say">
+            <div class="fx-titlerow">
+              <h2 class="fx-name"><label for="allow-downloads">Allow downloads</label></h2>
+              <Toggle id="allow-downloads" bind:checked={allowDownloads} />
+            </div>
+            <p class="fx-copy">Guests can save single photos and grab the whole event as a zip. Turn
+              it off and the gallery is look-only — everyone still sees the photos.</p>
+          </div>
+        </div>
+      </section>
+    </div>
+    {/if}
+
+    <!-- 4b ── THE EMAIL: a copy sent to each guest who asked for one. -->
+    {#if !guided || sub === 2}
+    <div class="card">
+      <div class="card-title" id="guest-delivery-q">How do your guests get their copy?{#if guided}<span class="sub-of">2 of 3</span>{/if}</div>
+      <!-- Names the previous page's answer, which is what stops the two reading as rival settings
+           for the same thing. Saying the rest out loud — that nothing here opens the gallery any
+           sooner — was belt and braces for a worry the sentence above already settles. -->
+      <p class="lead-note">
+        {#if guestRevealLabel}Your gallery opens <b>{guestRevealLabel}</b>. This is the email that
+        goes to guests who asked for their photos.
+        {:else}This is the email that goes to guests who asked for their photos.{/if}
+      </p>
       <!-- The same card shape as Reveal mode: the host has already made one choice that looks
            exactly like this, so this is a decision they recognise rather than a fourth widget. -->
       <div class="reveal-options" role="group" aria-labelledby="guest-delivery-q">
@@ -1238,7 +1460,7 @@
             <label for="guest-send-time">Send time</label>
             <!-- The same 15-minute grid as the reveal: a send is checked on that tick, so finer
                  minutes are precision we could not honour. -->
-            <input id="guest-send-time" type="time" step={REVEAL_TICK_MS / 1000} bind:value={guestSendTime} />
+            <TimeField id="guest-send-time" bind:value={guestSendTime} snap="up" />
           </div>
         </div>
         <p class="hint reveal-note">
@@ -1257,66 +1479,61 @@
       {/if}
     </div>
 
+    <!-- Collapsed, because three toggles with a paragraph each is more than this step can carry
+         above the fold — and none of them CHANGES what a guest receives. A guest who asked for
+         their photos gets them whatever is set here; these only decide what else the message
+         carries. The summary states the count so a host can see it is set without opening it. -->
+    {/if}
+
+    <!-- 4c ── The three emails. A page, not a disclosure: these decide what lands in a guest's
+         inbox, which is not a detail to be tucked away, and a summary counting "2 of 3 on" was
+         counting a switch that this event cannot even use. -->
+    {#if !guided || sub === 3}
     <div class="card">
-      <div class="card-title">What we email your guests</div>
+      <div class="card-title">What we email your guests{#if guided}<span class="sub-of">3 of 3</span>{/if}</div>
+      <p class="lead-note mail-lead">Only guests who asked for their photos are ever emailed, and
+        they get them whatever you choose here. All changeable later.</p>
 
       <div class="mail-opt">
         <div class="field toggle-field">
-          <span class="tf-label"><label for="g-thanks">Add a thank-you and the release date</label></span>
-          <label class="toggle">
-            <input id="g-thanks" type="checkbox" bind:checked={guestMailThanks} />
-            <span class="toggle-track"></span>
-          </label>
+          <span class="tf-label"><label class="mail-name" for="g-thanks">Thank-you &amp; release date</label></span>
+          <Toggle id="g-thanks" bind:checked={guestMailThanks} />
         </div>
-        <!-- Not "email guests when the event ends": that would be a lie when this is off. The
-             email is the guest's own doing — they asked for their photos — and this toggle only
-             decides what else it carries. -->
-        <p class="field-hint">
-          Guests who asked for their photos will get them either way — this adds a thank-you and
-          tells them when the full gallery opens.{#if !guestThanksDated}
-            No release moment is fixed yet, so right now it would be the thank-you on its own.{/if}
-        </p>
+        <!-- Not "email guests when the event ends": that would be a lie when this is off. The email
+             is the guest's own doing — they asked for their photos — and this only decides what
+             else it carries. -->
+        <p class="field-hint">Goes out when the event ends.{#if !guestThanksDated}{' '}No release moment
+          is fixed yet, so it would be the thank-you on its own.{/if}</p>
       </div>
 
-      {#if guestReminderOffered}
-        <div class="mail-opt">
-          <div class="field toggle-field">
-            <span class="tf-label"><label for="g-reminder">Remind them the day before</label></span>
-            <label class="toggle">
-              <input id="g-reminder" type="checkbox" bind:checked={guestMailReminder} />
-              <span class="toggle-track"></span>
-            </label>
-          </div>
-          <p class="field-hint">Goes out 24 hours before the gallery opens — {guestReminderLabel}.</p>
-        </div>
-      {:else}
-        <!-- Said, not silently missing. A control that is simply absent reads as a bug to anyone
-             who has seen it before, or on another event. -->
-        <p class="field-hint mail-off">No day-before reminder — {guestReminderWhyNot}</p>
-      {/if}
-
-      <div class="mail-opt">
+      <!-- Always here, never replaced by a sentence. A control that vanishes on one event and
+           appears on another reads as a bug; off and unavailable, with the reason under it, reads
+           as the answer to a question the host was about to ask. -->
+      <div class="mail-opt" class:unavailable={!guestReminderOffered}>
         <div class="field toggle-field">
-          <span class="tf-label"><label for="g-live">Tell them the photos are live</label></span>
-          <label class="toggle">
-            <input id="g-live" type="checkbox" bind:checked={guestMailLive} />
-            <span class="toggle-track"></span>
-          </label>
+          <span class="tf-label"><label class="mail-name" for="g-reminder">Day-before reminder</label></span>
+          <Toggle id="g-reminder" bind:checked={guestMailReminder} disabled={!guestReminderOffered} />
         </div>
         <p class="field-hint">
-          {#if guestReleaseLabel}
-            Goes out with the link to the gallery the moment the photos are released — {guestReleaseLabel}.
-          {:else}
-            Goes out with the link to the gallery, the moment your photos are released.
-          {/if}
+          {#if guestReminderOffered}Goes out 24 hours before the gallery opens — {guestReminderLabel}.
+          {:else}Not available — {guestReminderWhyNot}{/if}
         </p>
       </div>
 
-      <p class="field-hint mail-foot">
-        Only guests who asked for their photos are ever emailed, and every one of these can be
-        changed on your event page afterwards.
-      </p>
+      <div class="mail-opt" class:unavailable={!guestLiveAutomatic}>
+        <div class="field toggle-field">
+          <span class="tf-label"><label class="mail-name" for="g-live">The gallery link</label></span>
+          <Toggle id="g-live" checked={guestLiveAutomatic} disabled />
+        </div>
+        <p class="field-hint">
+          {#if guestLiveAutomatic}This is how “{guestDeliveryLabel}” actually reaches
+            them{#if guestReleaseLabel}{' '}— {guestReleaseLabel}{/if}. It is the delivery you chose
+            on the last page, so it is not a separate switch.
+          {:else}You send this one yourself, from your event page, whenever you are ready.{/if}
+        </p>
+      </div>
     </div>
+    {/if}
 
     {/if}
 
@@ -1358,12 +1575,17 @@
 
     {#if guided}
       <div class="wiz-nav">
-        {#if step > 1}
+        {#if step > 1 || sub > 1}
           <button class="btn ghost" on:click={prevStep}>← Back</button>
         {/if}
         {#if step < LAST_STEP}
-          <button class="btn primary grow" on:click={nextStep} disabled={!canAdvance}>
-            {step === 1 && !name.trim() ? 'Name your event to continue' : 'Next →'}
+          <!-- aria-disabled, NOT disabled. A disabled button swallows nothing and consumes nothing:
+               the tap falls through it to whatever is behind, and on a phone the browser reads that
+               as the start of a text selection and throws up its own Copy/Search menu over the app.
+               It is also a control that says "Name your event to continue" and then does nothing
+               when you do exactly what it says. Pressing it now takes you to the field. -->
+          <button class="btn primary grow" on:click={nextStep} aria-disabled={!canAdvance || undefined}>
+            {step === 1 && sub === 1 && !name.trim() ? 'Name your event to continue' : 'Next →'}
           </button>
         {/if}
       </div>
@@ -1411,6 +1633,7 @@
   .draft-back { margin: 0 0 14px; padding: 10px 12px; border-radius: 10px; font-size: .84rem;
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+  .tz-field { margin-top: 10px; }
   .tz-line { margin: 2px 0 10px; font-size: .82rem; color: var(--text-muted); }
   .tz-warn { margin: 0 0 12px; padding: 9px 12px; border-radius: 10px; font-size: .82rem;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
@@ -1513,8 +1736,17 @@
     color: var(--text-muted);
     font-size: 0.75em;
   }
+  /* The note explains the two inputs above it, and it used to be pulled INTO them: the row's first
+     .field still carried the standard 16px bottom margin while the second (a :last-child) carried
+     none, so the row's box ended lower than the time input, and a -4px top margin on the note then
+     dragged it back up. Measured result: 16px under the dropdown, 10px under the time input — the
+     explanation sat tighter to its control than the controls sat to each other. The row owns its
+     own spacing now and the note keeps the section's 16px rhythm. */
+  .reveal-custom > .field {
+    margin-bottom: 0;
+  }
   .reveal-note {
-    margin: -4px 0 0;
+    margin: 16px 0 0;
     line-height: 1.5;
   }
   /* Date and time pickers are the two controls a host is most likely to be poking at one-handed on
@@ -1605,46 +1837,6 @@
   }
   .tf-label { display: flex; align-items: center; gap: 7px; }
   .tf-label label { margin-bottom: 0; }
-  .toggle {
-    position: relative;
-    display: inline-block;
-    width: 46px;
-    height: 26px;
-    flex-shrink: 0;
-  }
-  .toggle input {
-    position: absolute;
-    opacity: 0;
-    width: 0;
-    height: 0;
-  }
-  .toggle-track {
-    position: absolute;
-    inset: 0;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    transition: background 0.15s;
-  }
-  .toggle-track::before {
-    content: '';
-    position: absolute;
-    width: 18px;
-    height: 18px;
-    left: 3px;
-    top: 3px;
-    background: var(--text-muted);
-    border-radius: 50%;
-    transition: transform 0.15s, background 0.15s;
-  }
-  .toggle input:checked + .toggle-track {
-    background: var(--accent);
-    border-color: var(--accent);
-  }
-  .toggle input:checked + .toggle-track::before {
-    transform: translateX(20px);
-    background: #111;
-  }
 
   /* Aspect ratio checkboxes */
   .aspect-options {
@@ -1674,14 +1866,26 @@
      choice the host has already seen the shape of twice rather than a third visual language.
      min-height is the tap target, not the look: nine of these wrap to four rows on a 360px phone,
      which is where most of this form is filled in, and a wrapped row of 34px chips is a mis-tap. */
+  /* A grid, not a wrapping flex row — the same move, for the same reason, as .fx-choices below.
+     Flexed, nine chips of nine different widths made every row end somewhere different and the last
+     one stretch to fill what was left, so "Christmas / holiday party" ended up a full-width banner
+     under two half-width neighbours. Equal columns say the choices are equal, which they are, and a
+     lone chip on the last row stays one column wide instead of growing into a recommendation
+     nobody made. */
   .type-options {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
     gap: 8px;
   }
   .type-opt {
+    /* Centred and stretched: with equal columns the labels have to sit consistently, and grid makes
+       every cell the height of the tallest so a two-line label no longer shunts its row. */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
     min-height: 44px;
-    padding: 8px 14px;
+    padding: 8px 12px;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -1707,10 +1911,36 @@
   .mail-opt .toggle-field { margin-bottom: 0; }
   /* The reminder when it cannot be offered. Same size as the hints it sits among, indented to the
      left edge of the rows so it reads as that row's absence rather than as a footnote. */
+  /* The switch's name, told apart from the sentence under it. As a plain label it sat at the same
+     weight as its own explanation, so a column of these read as prose with switches in it. */
+  /* The page's own words, ruled off from the switches. Without the line the lead read as a caption
+     on the first toggle rather than as a statement about all of them. */
+  .mail-lead {
+    margin-bottom: 0;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .mail-lead + .mail-opt { margin-top: 14px; }
+  .mail-name { font-weight: 700; font-size: 0.92rem; color: var(--text); }
+  /* Off and out of reach, but still legible — it is explaining itself, not greyed into nothing. */
+  .mail-opt.unavailable .mail-name { color: var(--text-muted); }
   .mail-off { margin: 0 0 14px; }
-  .mail-foot { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
-  .pack-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; }
-  .pack-toggle input { width: 18px; height: 18px; }
+
+  /* Which of step 1's pages this is. The strip above counts the five steps and cannot show this,
+     and three presses of Next against a dot that never moves reads as a stuck button. */
+  /* The strip's finished steps are real buttons now, so they need the button reset the div never
+     needed — and a cursor that says they can be pressed. */
+  button.stepdot {
+    font: inherit; color: inherit; background: none; border: 0; padding: 0;
+    cursor: pointer; text-align: inherit;
+  }
+  button.stepdot:hover .sd-t { color: var(--text); }
+  button.stepdot:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+
+  .sub-of {
+    float: right; font-size: 0.72rem; font-weight: 600; color: var(--text-muted);
+    letter-spacing: 0.02em; padding-top: 4px;
+  }
 
   /* Reveal mode cards */
   .reveal-options {
@@ -1778,6 +2008,10 @@
     background: var(--surface-2);
     color: var(--text);
     border-color: var(--border);
+  }
+  .btn[aria-disabled='true'] {
+    opacity: 0.5;
+    /* Not `cursor: not-allowed` — it IS allowed, it just goes somewhere else. */
   }
   .btn:disabled {
     opacity: 0.6;
@@ -1917,6 +2151,22 @@
   .fx-art { flex: 0 0 78px; color: var(--text-muted); }
   .fx-svg { display: block; width: 78px; height: 40px; }
   .fx-say { flex: 1 1 0; min-width: 0; }
+  /* Name left, control right, with the description free to use the full width underneath. */
+  .fx-titlerow { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .fx-titlerow .fx-name { margin-bottom: 0; }
+  /* One feature to a card here, so nothing above to rule off against. */
+  .card > .fx-item:only-of-type { border-top: 0; padding: 0; }
+  .fx-item .fx-copy { margin-top: 5px; }
+  .fx-item .fx-name label { cursor: pointer; }
+
+  /* One line under a page's title saying what this page is FOR — the thing that stops "when do the
+     photos appear" and "how do guests get them" reading as two settings for the same job. */
+  .lead-note {
+    margin: 0 0 16px;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+  }
   .fx-name { margin: 0 0 5px; font-size: 0.95rem; font-weight: 800; color: var(--text); }
   .fx-copy { margin: 0; font-size: 0.8rem; line-height: 1.5; color: var(--text-muted); }
 
@@ -1977,6 +2227,8 @@
   .s-ghost { fill: none; stroke: currentColor; stroke-width: 1.4; opacity: 0.45; }
   .s-fill { fill: color-mix(in srgb, var(--accent) 18%, transparent); stroke: var(--accent); stroke-width: 1.6; }
   .s-play { fill: var(--accent); }
+  .s-fillstroke { fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .s-check { fill: none; stroke: var(--accent); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
   .s-track { fill: none; stroke: currentColor; stroke-width: 1.3; stroke-dasharray: 2 3; opacity: 0.5; }
   .s-tick { fill: currentColor; opacity: 0.6; }
   .s-dot { fill: currentColor; opacity: 0.55; }

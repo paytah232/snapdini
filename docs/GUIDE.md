@@ -89,30 +89,48 @@ Your events and account home.
 The form walks you through **five steps** — *Your event · When it runs · Make it yours · Your guests ·
 Ready* — with a step strip across the top. **Show me everything at once** on the first step drops the walkthrough
 and puts every field on one page; **Walk me through it instead** puts it back. Nothing is gated: the
-steps are an order to answer the questions in, not permission to proceed.
+steps are an order to answer the questions in, not permission to proceed — and a step you have
+finished is a button, so you can jump straight back to it rather than pressing Back four times.
 
-**1 · Your event**
+**1 · Your event** — three short pages behind the same **Next**, because it used to ask three
+unrelated things on one screen: what the event *is*, what its guests get, and how big it is.
+
+*1 of 3 — Your event*
 - **Event name**.
-- **What kind of event is it?** — a row of chips (wedding, birthday, corporate, baby shower, hens,
+- **What kind of event is it?** — a grid of chips (wedding, birthday, corporate, baby shower, hens,
   engagement, graduation, Christmas, or *Any event*). Optional, and tap it again to clear it. It is
   asked here because the rest of the event is built from the answer: the photo ideas we offer, the
   mark guests tick a shot off with, the decoration on the printed cards, and which poster design is
   put first. You can still set or change it later.
-- **Give my guests a list of shots to hunt for** — appears once a type is picked, and starts the
-  event with a ready-made [trick list](#manage-an-event--admincode) you can edit or print later.
-- **Welcome blurb** (optional) — shown under the title on the join screen, and used as the poster's
-  default message.
-- **Expected guests** — sets the tier.
-- **Live total** — when billing is on, an itemised quote updates on every change; free-tier features
-  show a struck-through price.
+
+*2 of 3 — What your guests see* — everything on this page changes what appears on a **guest's**
+screen, which is why it is a page of its own rather than a footnote.
+- **Trick list** — starts the event with a ready-made [trick list](#manage-an-event--admincode). It
+  is **off until you turn it on**: it puts a list of shots in your guests' camera, and a default that
+  changes somebody else's screen is not a default we get to make. The examples shown are the real
+  first two shots from the pack your event type would get.
+- **Change it up** (once the trick list is on) — makes three different cards instead of one, so
+  guests are not all hunting the same shots. The must-haves stay on every card, so coverage of the
+  moments you would actually regret missing does not come down to which table got which card. Add,
+  edit or remove any of them later.
+- **No flash** — stops guests' phones firing the bright rear flash. The gentle front-camera selfie
+  flash still works.
+- **Welcome blurb** (optional) — shown on the join screen, and used as the poster's default message.
+
+*3 of 3 — How many guests?* — **Expected guests** sets the tier, and an itemised **live total**
+updates on every change; free-tier features show a struck-through price.
 
 **2 · When it runs**
-- **Start date** and **Start time**. The time picker steps in **15 minutes**, which is the same grid
-  the reveal runs on — an event ending at 7:07 would have its reveal checked at 7:15 anyway, so
-  offering minutes we cannot honour would be offering precision that does not exist.
-- A line under the fields says which **timezone** the times are read in, with the resolved start
-  spelled out. If your device is in a different zone from the event, it says so and offers to switch.
-  The times you type are always the event's local times, never your phone's.
+- **Start date** and **Start time**. The time picker is your phone's own, and it lands on the
+  **15-minute** grid the whole product runs on — pick 9:07 and it becomes 9:00, and it tells you it
+  did. The grid is not a nicety: the sweeps that open a gallery and send an email wake on it, so a
+  moment between ticks is one we cannot honour. Start times round **down**, because doors opening a
+  few minutes early cost nothing while rounding 9:50 up to 10:00 would lock out somebody at the door
+  at 9:55.
+- **Times are in …** — says which **timezone** the times are read in, with the resolved start spelled
+  out. Press the zone to change it **on this page**. If your device is in a different zone from the
+  event it says so and offers to switch. The times you type are always the event's local times,
+  never your phone's.
 - **Duration** — short events are free; longer is a paid add-on.
 
 **3 · Make it yours** — the things that change the day, one card each with what they cost (or, on a
@@ -120,27 +138,41 @@ free-tier event, a count of what you are *not* paying): **Video clips**, **Shots
 shapes** (Square is always free; the rest are the frame pack on paid tiers) and **Keep them longer**
 (retention). The name is deliberate — everything the product actually sells used to sit behind a
 disclosure marked *Advanced settings*, a label that reads as "not for you" to exactly the host who
-would have enjoyed it. The plumbing stays collapsed under **Other settings**: **Custom URL** (a
-pretty `/e/<name>` link with a live availability check — blank uses the automatic one), **Timezone**,
-**Allow downloads** and **No flash**. Then **Reveal mode**:
+would have enjoyed it. Only the **Custom URL** stays collapsed under *Other settings* — a pretty
+`/e/<name>` link with a live availability check; blank uses the automatic one.
 
+**4 · Your guests** — what happens *after* the party, in three pages.
+
+*1 of 3 — When can people see the photos?* The gallery itself: when it opens, and what is allowed in.
 - **Instant** — photos appear as they are taken.
 - **At the end** — plus a **reveal delay** of *immediately · 1 hour · 3 hours · 12 hours · 24 hours ·
   2 days · 3 days · 1 week* after the event ends, **or "Pick an exact date & time…"** for a moment of
-  your own. A custom moment is read in the **event's** timezone (not the browser's) and rounded
-  **up** onto the next 15-minute tick — rounding to the nearest would show the photos *before* the
-  moment you chose, and an early reveal is the one mistake that cannot be undone. The form tells you
-  the exact instant it will use before you create anything, and refuses a reveal booked after the
-  photos are deleted at the end of retention.
+  your own. A custom moment is read in the **event's** timezone and rounded **up** onto the next
+  15-minute tick — both in the picker and again on the server. Up, not down: an early reveal is the
+  one mistake that cannot be undone, because the photos are already out. The form tells you the
+  exact instant before you create anything, and refuses a reveal booked after the photos are deleted
+  at the end of retention.
 - **Manual** — nothing appears until you press Reveal.
-- **Moderate photos** — offered on any non-instant event.
+- **Moderate photos** — offered on any non-instant event. Nothing a guest takes reaches the gallery
+  until you say yes to it.
+- **Allow downloads** — guests can save single photos and take the whole event as a zip. Off makes
+  the gallery look-only; everyone still sees the photos.
 
-**4 · Your guests** — what happens *after* the party: **How should your guests get the photos?**,
-**Which photos do they get?**, and the three messages we may send them. It is a step of its own
-rather than another row among the settings, because it is a decision about the days after the event
-and folding it in with custom URLs and frame shapes is how it would never be read. Nothing here is
-final — every answer is on your event page afterwards. Full detail under [Getting the photos to your
+*2 of 3 — How do your guests get their copy?* The email, which can never arrive before the gallery
+opens. **How should your guests get the photos?** and, on the two manual settings, **Which photos do
+they get?** and the send time. Full detail under [Getting the photos to your
 guests](#getting-the-photos-to-your-guests-in-manage).
+
+*3 of 3 — What we email your guests.* Only guests who asked for their photos are ever emailed, and
+they get them whatever you choose here.
+- **Thank-you & release date** — goes out when the event ends.
+- **Day-before reminder** — 24 hours before the gallery opens. Shown even when your event cannot use
+  it, switched off with the reason underneath, rather than quietly missing.
+- **The gallery link** — *not a separate switch*. It is how the delivery you chose on the previous
+  page actually reaches them, so it is shown locked: on for the two automatic settings, and off for
+  the two where you press send yourself.
+
+Nothing here is final — every answer is on your event page afterwards.
 
 **5 · Ready** — a summary of what you are about to create and what it costs, then **Create event**.
 Free events go straight to the manager; paid events go through Stripe Checkout and activate on

@@ -172,3 +172,26 @@ export function priceAria(
   if (price.kind === 'paid') return `plus ${money(price.cents)}`;
   return includedText;
 }
+
+/**
+ * What the retention control should read after the guest count moves.
+ *
+ * The form used to carry a one-way ratchet: `if (retentionDays < included) retentionDays = included`.
+ * It solved the upgrade — a paid tier includes a month, and without it the host was left asking for
+ * the week they had just paid to beat — and created the opposite fault going the other way. Free →
+ * paid → free left 31 days standing, and 31 days on the free tier is a CHARGEABLE add-on, so the
+ * host was quoted for an upgrade nobody asked for. The tier had picked it; the tier never put it
+ * back.
+ *
+ * So the answer depends on who chose the number:
+ *
+ *  · nobody did (`touched` false) — the value is just the tier's allowance wearing a number, and it
+ *    follows the allowance in BOTH directions. Going back to free goes back to free.
+ *  · the host did — their choice stands, and is only ever raised to meet an allowance that has
+ *    overtaken it. Somebody who deliberately bought a year does not lose it by editing their guest
+ *    count, and never silently drops BELOW what their tier already includes.
+ */
+export function retentionFor(current: number, included: number, touched: boolean): number {
+  if (!touched) return included;
+  return current < included ? included : current;
+}

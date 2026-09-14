@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { getSlideshow, startSlideshowJob, uploadSlideshowAudio, favouriteSlideshow, deleteSlideshowVersion, slideshowDownloadUrl, buyBrandingRemoval, type SlideshowStatus, type SlideshowOrder } from '$lib/events';
   import { showToast } from '$lib/toast';
+  import Toggle from '$lib/components/Toggle.svelte';
   const money = (c: number) => `$${(c / 100).toFixed(2)}`;
 
   async function toggleFav(id: string) {
@@ -224,14 +225,22 @@
          before the favourite filter runs. Asked for by name and by number, rather than left to a
          generic toggle the host has no reason to connect to the clips they starred. -->
     {#if favouritesOnly && favouriteClips > 0}
-      <label class="chk offer"><input type="checkbox" bind:checked={includeVideos} />
-        <span>{favouriteClips} of your favourites {favouriteClips === 1 ? 'is a video clip' : 'are video clips'} —
-          include {favouriteClips === 1 ? 'it' : 'them'}? <small>(capped at 6s each)</small></span></label>
+      <div class="chk offer">
+        <label for="ss-videos-fav">{favouriteClips} of your favourites {favouriteClips === 1 ? 'is a video clip' : 'are video clips'} —
+          include {favouriteClips === 1 ? 'it' : 'them'}? <small>(capped at 6s each)</small></label>
+        <Toggle id="ss-videos-fav" bind:checked={includeVideos} />
+      </div>
     {:else if !favouritesOnly && (st?.videoCount ?? 0) > 0}
-      <label class="chk"><input type="checkbox" bind:checked={includeVideos} /> Include video clips <small>({st?.videoCount}, capped at 6s each)</small></label>
+      <div class="chk">
+        <label for="ss-videos">Include video clips <small>({st?.videoCount}, capped at 6s each)</small></label>
+        <Toggle id="ss-videos" bind:checked={includeVideos} />
+      </div>
     {/if}
     {#if videoN > 0}
-      <label class="chk sub"><input type="checkbox" bind:checked={keepVideoAudio} /> Keep the clips' sound <small>(mixed under the backing track, if any)</small></label>
+      <div class="chk sub">
+        <label for="ss-clip-sound">Keep the clips' sound <small>(mixed under the backing track, if any)</small></label>
+        <Toggle id="ss-clip-sound" bind:checked={keepVideoAudio} />
+      </div>
     {/if}
 
     <div class="fld"><span>Order</span>
@@ -266,7 +275,10 @@
     {#if st}
       <div class="branding-opt">
         {#if st.brandingRemovable}
-          <label class="chk"><input type="checkbox" bind:checked={removeBranding} /> Remove the Snapdini intro &amp; outro frames</label>
+          <div class="chk">
+            <label for="ss-branding">Remove the Snapdini intro &amp; outro frames</label>
+            <Toggle id="ss-branding" bind:checked={removeBranding} />
+          </div>
         {:else}
           <div class="bo-row">
             <div class="bo-text">
@@ -305,7 +317,7 @@
 
         {#if selectedTracks.length}
           <div class="chosen">
-            <div class="chosen-h">Plays in this order{#if durKnown} · ~{fmtDur(Math.round(musicTotalSecs))} of music{/if}:</div>
+            <div class="chosen-h">Plays in this order{#if durKnown}{' '}· ~{fmtDur(Math.round(musicTotalSecs))} of music{/if}:</div>
             {#each selectedTracks as id, i (id)}
               <div class="chosen-row">
                 <span class="chosen-name">{i + 1}. {trackLabel(id)}</span>
@@ -314,7 +326,10 @@
                 <button class="mv" on:click={() => removeTrack(i)} aria-label="Remove">✕</button>
               </div>
             {/each}
-            <label class="chk loop"><input type="checkbox" bind:checked={loopMusic} /> Loop music to fill the whole show</label>
+            <div class="chk loop">
+              <label for="ss-loop">Loop music to fill the whole show</label>
+              <Toggle id="ss-loop" bind:checked={loopMusic} />
+            </div>
             {#if musicWarn}
               <p class="warn">⚠ Your music (~{fmtDur(Math.round(musicTotalSecs))}) is shorter than the show (~{fmtDur(estSeconds + CARDS_SECS)}). The end will be silent — turn on looping or add another track. You can still generate.</p>
             {/if}
@@ -412,11 +427,15 @@
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
   .card-title { font-weight: 800; font-size: 0.95rem; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
   .exp { font-size: 0.62rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; }
-  .chk { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; margin-bottom: 10px; }
+  /* Label left, switch hard right. justify-content rather than a flex:1 label so the tap target
+     stays the width of the words — these sit in a narrow card and a full-width label would put a
+     dead strip of clickable nothing between the text and the switch. */
+  .chk { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+         font-size: 0.85rem; margin-bottom: 10px; }
+  .chk label { cursor: pointer; }
   .chk.sub { margin-left: 22px; margin-top: -4px; font-size: 0.8rem; color: var(--text-muted); }
-  .chk.offer { align-items: flex-start; gap: 10px; min-height: 44px; padding: 9px 10px; line-height: 1.4;
+  .chk.offer { align-items: center; gap: 10px; min-height: 44px; padding: 9px 10px; line-height: 1.4;
                border-radius: var(--radius-sm); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
-  .chk.offer input { margin-top: 2px; width: 20px; height: 20px; flex: none; }
   .fld { display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 12px; }
   .fld > span { display: block; margin-bottom: 4px; }
   .fld select { width: 100%; padding: 9px 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font: inherit; font-size: 0.88rem; }
@@ -467,7 +486,7 @@
   .mv { width: 28px; height: 26px; flex: none; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--text); cursor: pointer; font-size: 0.8rem; }
   .mv:disabled { opacity: 0.4; cursor: default; }
   .mv:not(:disabled):hover { border-color: var(--accent); }
-  .chk.loop { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 0.82rem; }
+  .chk.loop { margin-top: 10px; margin-bottom: 0; font-size: 0.82rem; }
   .warn { margin: 8px 0 0; font-size: 0.78rem; line-height: 1.4; color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--surface)); border-radius: var(--radius-sm); padding: 8px 10px; }
   .branding-opt { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; font-size: 0.82rem; }
   .bo-label { color: var(--text-muted); }
