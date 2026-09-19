@@ -54,6 +54,14 @@ describe('robots.txt on the canonical host', () => {
       expect(txt).toContain(`Disallow: ${p}`);
     }
   });
+
+  it('keeps crawlers off /demo, because FETCHING it creates an event', () => {
+    // /demo is not private — it is a public page whose address is printed on posters. It is listed
+    // for a different reason than everything above it: a GET of it mints a throwaway demo event, so
+    // a crawl is a write. The page only does that from client-side script and answers noindex of
+    // its own, but a crawler should not be invited to try.
+    expect(txt).toContain('Disallow: /demo');
+  });
 });
 
 describe('robots.txt on a preview host', () => {

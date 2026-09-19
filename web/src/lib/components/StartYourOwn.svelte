@@ -33,15 +33,25 @@
 </aside>
 
 <style>
+  /* max-width alone does nothing below 720px, so on every phone these ran edge-to-edge while the
+     photo cards beside them sat 10px in (.pgrid's padding) — the panels read as full-bleed bands
+     rather than cards. `min(720px, 100% - 20px)` keeps the centred 720px cap where there is room
+     and gives the same 10px gutter where there is not, with no media query. 20px because these are
+     SIBLINGS of .pgrid, so half its padding each side puts their edges on the cards' edges. */
   .syo {
     display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
-    max-width: 720px; margin: 34px auto 8px; padding: 16px 18px;
+    /* 14px top, matching .optin and .full-gallery above it rather than the 34px this carried.
+       Adjacent margins collapse to the LARGER, so a 34px top against their 14px bottom produced one
+       gap two and a half times every other gap in the stack — which reads as a missing card, not as
+       breathing space. Nothing justified the odd value; the cards above and below are the same kind
+       of thing and now sit the same distance apart. */
+    max-width: min(720px, 100% - 20px); margin: 14px auto 8px; padding: 16px 18px;
     border: 1px solid var(--border); border-radius: 14px; background: var(--surface);
   }
   .syo-copy { display: flex; flex-direction: column; gap: 2px; font-size: .92rem; }
   .syo-copy span { color: var(--text-muted); font-size: .85rem; }
   .syo-cta {
-    background: var(--accent); color: var(--accent-ink, #111); text-decoration: none;
+    background: var(--accent-fill); color: var(--accent-ink, #111); text-decoration: none;
     font-weight: 700; font-size: .88rem; padding: 9px 16px; border-radius: 10px; white-space: nowrap;
   }
   .syo-cta:hover { filter: brightness(1.06); }

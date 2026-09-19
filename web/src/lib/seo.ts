@@ -51,8 +51,12 @@ export const robotsHeader = (indexable: boolean): string | null =>
  * invites discovery of URLs on a host that should not be in the index at all.
  */
 export function robotsTxt(opts: { indexable: boolean; origin: string }): string {
+  // '/demo' is disallowed because fetching it MINTS AN EVENT. It is a normal, public, linkable
+  // page — it goes on printed posters — but every crawl of it would create a throwaway demo row
+  // and skew the demo counts. The page itself also answers noindex, and it only does its work from
+  // client-side script, so a crawler that ignores this file still creates nothing.
   const blocked = ['/app', '/dashboard', '/admin', '/siteadmin', '/gallery', '/join', '/e/', '/login',
-                   '/signup', '/contact', '/api/'];
+                   '/signup', '/contact', '/api/', '/demo'];
   if (!opts.indexable) {
     return [
       '# This deployment is not the canonical site (SEO_INDEXABLE is not set).',

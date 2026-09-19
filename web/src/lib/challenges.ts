@@ -294,6 +294,39 @@ export const PACKS: Pack[] = [
     ],
   },
   {
+    /* The only pack that is not about a single night in one room. A trip is days long and the
+       photographs nobody takes are the ordinary ones — the breakfast you ate every morning, the
+       view from the train, the person always last out of the room. That is what this list is for:
+       the shots you do not think to take until you are home and find you have forty of the
+       landmark and none of the week. */
+    key: 'travel', label: 'Trip or holiday',
+    challenges: [
+      C('trip-window',      'The view out of the window',            ['classic']),
+      C('trip-breakfast',   'Breakfast, wherever it happened',       ['classic']),
+      C('trip-in-transit',  'Someone asleep in transit',             ['fun', 'silly']),
+      C('trip-map',         'Working out where you are',             ['fun', 'social']),
+      C('trip-street',      'A street that looks nothing like home',  ['classic']),
+      C('trip-food',        'The best thing anyone ate',             ['classic', 'social']),
+      C('trip-worst-meal',  'And the worst',                         ['silly', 'fun']),
+      C('trip-lost',        'The moment you were properly lost',     ['fun']),
+      C('trip-local',       'A local who helped you out',            ['heartfelt', 'social']),
+      C('trip-sign',        'A sign nobody can read',                ['silly', 'fun']),
+      C('trip-feet',        'Everyone\u2019s shoes at the end of a long day', ['fun', 'social']),
+      C('trip-weather',     'The weather turning',                   ['classic']),
+      C('trip-early',       'Whoever got up first',                  ['fun']),
+      C('trip-last-out',    'Whoever is always last out of the room', ['silly', 'social']),
+      C('trip-group',       'The whole group, with the thing you came to see', ['classic', 'social']),
+      C('trip-quiet',       'A quiet minute nobody staged',          ['heartfelt']),
+      C('trip-bag',         'The bag that was definitely too heavy', ['silly']),
+      C('trip-souvenir',    'The daftest thing anyone bought',       ['silly', 'fun']),
+      C('trip-highest',     'The highest point you reached',         ['classic']),
+      C('trip-ask-best',    'Ask someone their best bit so far',     ['social'], true),
+      C('trip-last-night',  'The last night',                        ['heartfelt']),
+      C('trip-way-home',    'On the way home',                       ['heartfelt', 'classic']),
+    ],
+  },
+  {
+
     key: 'graduation', label: 'Graduation',
     challenges: [
       C('grad-certificate', 'The graduate with their certificate',  ['classic']),
@@ -596,4 +629,28 @@ export function varyOne(pack: Pack, existing: Challenge[][], opts: PickOpts & { 
   // Never hand back a short card because the video cap or the pool ran dry.
   if (out.length < per) for (const c of usable) { if (out.length >= per) break; if (!out.some((o) => o.id === c.id)) out.push(c); }
   return out;
+}
+
+// ── What a save actually did ────────────────────────────────────────────────
+//
+// Deleting a card is not only an edit to a list: guests are HOLDING the printed cards, and their
+// row names one by key. PUT /challenges reseats everyone whose card just went away and answers with
+// how many — `reseated`. Nothing read it, so the one consequence a host cannot see from the editor
+// (their guests are about to be asked "which card are you?" again, mid-event) was the one thing the
+// save did not mention. It is said here, on the same toast, because that is the moment the host is
+// still looking.
+
+/** The toast for a saved trick list. `reseated` is the server's count of guests whose card this
+ *  save took away — zero on every save that only added or reworded. */
+export function missionsSavedMessage(o: { sets: number; reseated: number }): string {
+  const base = o.sets
+    ? `Saved — ${o.sets} card${o.sets === 1 ? '' : 's'} ready to print`
+    : 'Trick list cleared';
+  if (!(o.reseated > 0)) return base;
+  const who = `${o.reseated} guest${o.reseated === 1 ? '' : 's'}`;
+  // Two different facts, and a host needs the right one: with cards left, those guests get the
+  // "which card are you?" question again; with none left, there is no card to ask about.
+  return o.sets
+    ? `${base} — ${who} will be asked which card they are holding`
+    : `${base} — ${who} no longer ${o.reseated === 1 ? 'has' : 'have'} a card`;
 }

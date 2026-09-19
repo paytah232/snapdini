@@ -4,6 +4,7 @@ import {
   packFor, pickChallenges, customChallenge, isCustomId, type Mood,
   CLIP_TRICKS_ENABLED, offeredChallenges,
   TICKS_OUTLINE, TICKS_EMOJI, DEFAULT_TICK, tickFor, cleanTick, varySets, varyOne, MAX_SETS,
+  missionsSavedMessage,
 } from './challenges';
 
 // Seeded so "shuffle" is deterministic here — a flaky content test is worse than no test.
@@ -12,7 +13,7 @@ const seeded = (seed: number) => () => { seed = (seed * 1103515245 + 12345) & 0x
 describe('the library itself', () => {
   it('covers every event type we market a landing page for, plus a general default', () => {
     expect(PACKS.map((p) => p.key).sort()).toEqual(
-      ['baby-shower', 'birthday', 'christmas', 'corporate', 'engagement', 'general', 'graduation', 'hens', 'wedding']);
+      ['baby-shower', 'birthday', 'christmas', 'corporate', 'engagement', 'general', 'graduation', 'hens', 'travel', 'wedding']);
   });
   it('the general pack assumes nothing about the occasion', () => {
     // It is the default for an event with no declared type, so a mention of a cake or a couple
@@ -347,5 +348,39 @@ describe('varyOne — adding a card', () => {
       expect(got.some((x) => x.video), p.key).toBe(false);
       expect(new Set(got.map((x) => x.id)).size, p.key).toBe(8);
     }
+  });
+});
+
+// ── What a save tells the host ───────────────────────────────────────
+
+describe('missionsSavedMessage', () => {
+  it('says nothing extra on a save that moved nobody', () => {
+    // Which is every save that only added or reworded a trick — the common case.
+    expect(missionsSavedMessage({ sets: 2, reseated: 0 })).toBe('Saved \u2014 2 cards ready to print');
+    expect(missionsSavedMessage({ sets: 1, reseated: 0 })).toBe('Saved \u2014 1 card ready to print');
+    expect(missionsSavedMessage({ sets: 0, reseated: 0 })).toBe('Trick list cleared');
+  });
+
+  it('names the guests a deleted card moved', () => {
+    // The server counts them (`reseated`) precisely because the host cannot see it from the editor:
+    // those guests are holding a printed card and will be asked which one again, mid-event.
+    const m = missionsSavedMessage({ sets: 2, reseated: 5 });
+    expect(m).toContain('5 guests');
+    expect(m).toContain('which card');
+  });
+
+  it('counts one guest as one', () => {
+    expect(missionsSavedMessage({ sets: 2, reseated: 1 })).toContain('1 guest will be asked');
+  });
+
+  it('says there is no card left when the list is cleared', () => {
+    expect(missionsSavedMessage({ sets: 0, reseated: 3 }))
+      .toBe('Trick list cleared \u2014 3 guests no longer have a card');
+    expect(missionsSavedMessage({ sets: 0, reseated: 1 }))
+      .toBe('Trick list cleared \u2014 1 guest no longer has a card');
+  });
+
+  it('is not fooled by a server that omits the count', () => {
+    expect(missionsSavedMessage({ sets: 2, reseated: NaN })).toBe('Saved \u2014 2 cards ready to print');
   });
 });

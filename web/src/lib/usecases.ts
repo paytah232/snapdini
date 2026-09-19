@@ -27,6 +27,12 @@ export type UseCase = {
   missionsText: string;
   ctaTitle: string;
   ctaText: string;
+  /** A key into SAMPLE_SETS (lib/samples.ts) — real photos from an event of THIS kind.
+   *
+   *  Optional, and deliberately: a page with no photos of its own is better than a page showing
+   *  somebody else's wedding while claiming to be about a birthday. Pages without a set simply
+   *  render no strip. */
+  photos?: string;
 };
 
 const REVEAL: Feature = {
@@ -39,7 +45,7 @@ const NOAPP: Feature = {
 };
 const SHARED: Feature = {
   ic: '🖼️', t: 'One shared gallery',
-  d: 'Every guest’s shots collect in a single gallery you can browse, favourite and download together — including a full zip.',
+  d: 'Every guest’s shots collect in a single gallery you can browse, favourite and download — one photo, or the whole event in one go.',
 };
 
 export const usecases: Record<string, UseCase> = {
@@ -61,7 +67,7 @@ export const usecases: Record<string, UseCase> = {
       { q: 'Do wedding guests need to install anything?', a: 'No. They scan the QR code or tap a link and the camera opens right in their phone’s browser — no app store, no sign-up. Ideal for guests of every age.' },
       { q: 'Is it free for a wedding?', a: 'It’s free for up to 10 guests with every feature. Most weddings use a one-off paid pass for more guests — starting at A$5 — with optional add-ons for extra shots, photo frame sizes and short video clips.' },
       { q: 'Can we hide the photos until after the wedding?', a: 'Yes — choose the end-of-event reveal and the whole gallery stays hidden, then reappears at once when your event ends. Or show photos live as they’re taken. Your choice.' },
-      { q: 'Can we download all the wedding photos afterwards?', a: 'Yes. Every shot lands in one gallery you can browse, favourite and download — including a single zip of the entire wedding.' },
+      { q: 'Can we download all the wedding photos afterwards?', a: 'Yes. Every shot lands in one gallery you can browse, favourite and download — a single photo, or the entire wedding in one go.' },
       { q: 'How many shots does each guest get?', a: 'You decide when you set up the event — a limited roll keeps it fun and intentional, just like a real disposable camera. You can top up shots any time.' },
     ],
     packKey: 'wedding',
@@ -69,6 +75,7 @@ export const usecases: Record<string, UseCase> = {
     missionsText: 'Choose the moments you’d hate to come home without and they print on the table cards. Guests tick each one off in the camera as they shoot it, which is how you end up with the cake before it was cut and your great-aunt on the dance floor — frames nobody working the room could be standing next to. Each guest has one roll and sees nothing until the reveal, so spending a shot on the list is a decision they actually make.',
     ctaTitle: 'Set up your wedding camera in a minute.',
     ctaText: 'Create your event free, print the table QR, and have it ready before the first guest arrives.',
+    photos: 'wedding',
   },
 
   'birthday-party-camera': {
@@ -90,13 +97,14 @@ export const usecases: Record<string, UseCase> = {
       { q: 'Is there a free option for a birthday party?', a: 'Yes — free for up to 10 guests with all features. Bigger parties are a one-off pass from A$5, with optional add-ons for extra shots and short video clips.' },
       { q: 'Can guests take video clips too?', a: 'Yes, short video clips can be enabled as an add-on alongside photos — great for blowing out candles and party moments.' },
       { q: 'When do the party photos appear?', a: 'You choose: reveal everything at once when the party ends, or show photos live as they’re taken.' },
-      { q: 'Can everyone download the photos after?', a: 'Yes — one shared gallery for the whole party, with a full zip download.' },
+      { q: 'Can everyone download the photos after?', a: 'Yes — one shared gallery for the whole party, and you can take the lot in one go.' },
     ],
     packKey: 'birthday',
     missionsTitle: 'Give the party something to hunt for.',
     missionsText: 'A list on the table turns the guests into photographers with a job. The candles still lit, the worst party hat, the face when the present comes out of the bag — they tick each one off in the camera as they get it. Nobody can shoot the same thing twenty times and keep the best one, so what comes back is the first honest attempt.',
     ctaTitle: 'Get the party shooting.',
     ctaText: 'Create your event free and share one QR code with everyone — the gallery builds itself.',
+    photos: 'birthday',
   },
 
   'corporate-event-photo-sharing': {
@@ -110,14 +118,14 @@ export const usecases: Record<string, UseCase> = {
       { ic: '🏢', t: 'Every angle of the event', d: 'Keynotes, booths, breakout rooms and the after-party — captured by attendees, not just one photographer.' },
       { ic: '🔗', t: 'No app, no logins', d: 'Attendees scan a QR and shoot in-browser. No accounts, no IT tickets, no friction — exactly what an event needs.' },
       SHARED,
-      { ic: '🎬', t: 'Instant recap material', d: 'Download the full gallery as a zip or build a slideshow for the wrap-up email and socials.' },
+      { ic: '🎬', t: 'Instant recap material', d: 'Take the full gallery in one go, or build a slideshow for the wrap-up email and socials.' },
     ],
     faqs: [
       { q: 'How does corporate event photo sharing work with Snapdini?', a: 'You create an event and display a QR code (on slides, signage or lanyards). Attendees scan to open a browser camera, and all photos collect in one shared gallery you can download for recaps and marketing.' },
       { q: 'Do attendees need to install an app or create an account?', a: 'No — they scan a QR or open a link and shoot in the browser. No app, no login, no IT involvement.' },
       { q: 'Can we remove Snapdini branding for a company event?', a: 'Yes. Frame branding can be removed as a paid add-on, and the poster/QR and theme can be styled to match your event.' },
       { q: 'Can we control who sees the photos?', a: 'Yes — enable moderation to approve shots before they appear, choose when the gallery is revealed, and control downloads.' },
-      { q: 'Can we get all the photos for marketing afterwards?', a: 'Yes — download the whole event as a zip, or generate a slideshow video for the recap.' },
+      { q: 'Can we get all the photos for marketing afterwards?', a: 'Yes — download the whole event in one go, or generate a slideshow video for the recap.' },
       { q: 'Is it suitable for large conferences?', a: 'Yes — pick a guest tier to match attendance, and top up shots or capacity any time during the event.' },
     ],
     packKey: 'corporate',
@@ -146,7 +154,7 @@ export const usecases: Record<string, UseCase> = {
       { q: 'Is it free for a baby shower?', a: 'Yes — free for up to 10 guests with all features. Larger gatherings are a one-off pass from A$5.' },
       { q: 'Can we share the gallery with family who couldn’t come?', a: 'Yes — create a share link to the gallery so distant family can see (and download) the photos too.' },
       { q: 'When do the photos appear?', a: 'You choose — reveal them all at once when the shower ends, or show them live as they’re taken.' },
-      { q: 'Can we download all the photos afterwards?', a: 'Yes — one shared gallery with a full zip download to keep forever.' },
+      { q: 'Can we download all the photos afterwards?', a: 'Yes — one shared gallery, and you can download the whole thing to keep forever.' },
     ],
     packKey: 'baby-shower',
     missionsTitle: 'A gentle list for the tables.',
@@ -173,7 +181,7 @@ export const usecases: Record<string, UseCase> = {
       { q: 'Do guests need an app?', a: 'No — scan the QR or tap the link and the camera opens in the browser. Works on any phone, no install.' },
       { q: 'Is it free?', a: 'Free for up to 10 guests with all features. Bigger groups are a one-off pass from A$5, with optional add-ons for extra shots and short videos.' },
       { q: 'Can we keep the photos private until the end?', a: 'Yes — choose the end-of-night reveal so nothing shows until the party’s over, then it all reappears at once.' },
-      { q: 'Can we get all the photos afterwards?', a: 'Yes — one shared gallery with a full zip download for the bride to keep.' },
+      { q: 'Can we get all the photos afterwards?', a: 'Yes — one shared gallery, and the whole lot downloads in one go for the bride to keep.' },
     ],
     packKey: 'hens',
     missionsTitle: 'One list, however the day splits up.',
@@ -200,7 +208,7 @@ export const usecases: Record<string, UseCase> = {
       { q: 'Do guests need to install an app?', a: 'No — they scan a QR or tap a link and shoot in the browser. Nothing to download.' },
       { q: 'Is it free?', a: 'Free for up to 10 guests with all features; larger parties are a one-off pass from A$5.' },
       { q: 'Can we use it again for the wedding?', a: 'Yes — set up a fresh event for the wedding when the time comes. Same simple QR, new gallery.' },
-      { q: 'Can everyone download the photos?', a: 'Yes — one shared gallery with a full zip download.' },
+      { q: 'Can everyone download the photos?', a: 'Yes — one shared gallery, and everything downloads in one go.' },
     ],
     packKey: 'engagement',
     missionsTitle: 'A dry run for the wedding list.',
@@ -227,7 +235,7 @@ export const usecases: Record<string, UseCase> = {
       { q: 'Do guests need an app?', a: 'No — scan the QR or tap the link to shoot in the browser. No install, any phone.' },
       { q: 'Is it free?', a: 'Free for up to 10 guests with all features; larger gatherings are a one-off pass from A$5.' },
       { q: 'Can family who couldn’t attend see the photos?', a: 'Yes — create a share link to the gallery so distant family can view and download.' },
-      { q: 'Can we download everything afterwards?', a: 'Yes — one shared gallery with a full zip to keep.' },
+      { q: 'Can we download everything afterwards?', a: 'Yes — one shared gallery, and you can download the whole thing to keep.' },
     ],
     packKey: 'graduation',
     missionsTitle: 'Decide what gets photographed.',
@@ -254,13 +262,47 @@ export const usecases: Record<string, UseCase> = {
       { q: 'Do guests need an app?', a: 'No — they scan a QR or tap a link and shoot in the browser. No install, any phone.' },
       { q: 'Is it good for an office Christmas party?', a: 'Yes — no logins or accounts for attendees, optional moderation, and you can remove Snapdini branding and theme it for the company.' },
       { q: 'Is there a free option?', a: 'Free for up to 10 guests with all features; larger parties are a one-off pass from A$5.' },
-      { q: 'Can we download all the photos?', a: 'Yes — one shared gallery with a full zip download.' },
+      { q: 'Can we download all the photos?', a: 'Yes — one shared gallery, and everything downloads in one go.' },
     ],
     packKey: 'christmas',
     missionsTitle: 'Something for the tables besides crackers.',
     missionsText: 'A work Christmas party needs a reason for people to get up and mix, and a shot list is a cheap one. The worst jumper, a cracker mid-pull, someone from a team you never work with — each one ticks off in the app as it is taken. One roll each and no previews, so the photos are all first takes and they look like it.',
     ctaTitle: 'Capture the holiday party.',
     ctaText: 'Create your event free, share one QR, and collect everyone’s photos from the night in one gallery.',
+  },
+
+  // The one page here that is not about a party. Everything else on the site assumes a room, a date
+  // and a host handing out a QR; a trip is a week, a group chat and four people who each came home
+  // with two hundred photos nobody else has seen. Same product, different problem — and it is the
+  // reason the NZ and Japan photos exist on the site at all.
+  'group-travel-photo-app': {
+    slug: 'group-travel-photo-app',
+    title: 'Group Travel Photo App — Shared Trip Photo Album',
+    desc: 'A group travel photo app that collects everyone\u2019s holiday photos in one shared album. Each traveller gets a limited roll, no app to install, and the whole trip is revealed together at the end. Free for groups up to 10.',
+    eyebrow: 'For trips & holidays',
+    h1: 'One shared album for the <em>whole trip</em>.',
+    lede: 'Everyone shoots. Nobody shares. Six months later the photos are still sitting on four different phones. Snapdini is a group travel photo app that gives the whole trip one camera and one shared album \u2014 and hands it back at the end, in one place.',
+    features: [
+      { ic: '\ud83e\uddf3', t: 'Nobody has to chase anyone', d: 'No \u201ccan you send me that one?\u201d six weeks later. Every traveller\u2019s shots land in the same gallery as they go, and the whole lot downloads in one go.' },
+      NOAPP,
+      { ic: '\ud83d\udcf8', t: 'A roll a day, not a thousand frames',
+        d: 'A limited roll makes people look before they shoot. What comes back is the trip as it happened \u2014 not four hundred near-identical shots of the same view nobody will ever sort through.' },
+      SHARED,
+    ],
+    faqs: [
+      { q: 'How does a group travel photo app work?', a: 'You create an event for the trip and share one link or QR with everyone travelling. Each person opens a camera in their browser, shoots their roll, and every photo collects in one shared gallery you can all browse and download.' },
+      { q: 'Is there a group travel photo app everyone has to download?', a: 'No \u2014 that is the point. It opens in the browser on any phone \u2014 handy when half the group is on iPhone, half on Android, and somebody is roaming on a bad connection.' },
+      { q: 'Can we see the photos during the trip, or only at the end?', a: 'Either. Set the gallery to reveal as you go, so the group sees today\u2019s photos tonight \u2014 or hold it all back and unwrap the whole trip on the last night.' },
+      { q: 'How long can a trip event run for?', a: 'As long as you need. The free tier covers a short trip and up to 10 travellers; longer trips and bigger groups are a one-off pass, with options to keep the gallery up for months afterwards.' },
+      { q: 'What about photos taken where there is no signal?', a: 'Shots are taken in the browser and upload when the phone next has a connection, so a day up a mountain or on a train still ends up in the gallery.' },
+      { q: 'Can everyone download the photos afterwards?', a: 'Yes \u2014 one gallery for the trip, and anyone in the group can take a single photo or the whole set in one go.' },
+    ],
+    packKey: 'travel',
+    missionsTitle: 'Give the trip a shot list.',
+    missionsText: 'A list turns the group into photographers with a job, and it catches the things nobody thinks to photograph until they are home: the breakfast you ate every single morning, the view from the train, whoever is always last out of the room. Each one ticks off in the camera as it is taken, so the album comes back with the ordinary days in it, not just the postcard stops.',
+    ctaTitle: 'Collect the whole trip in one place.',
+    ctaText: 'Create an event free, share one link with the group, and stop chasing people for their photos.',
+    photos: 'travel',
   },
 };
 

@@ -12,24 +12,26 @@ open-source, and self-hostable.**
   <img src="docs/screenshots/hero-reveal.gif" alt="Scan a QR code, shoot a limited roll, and the whole gallery reappears when the event ends" width="760">
 </p>
 
+<div align="center">
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/camera.png" alt="In-browser camera with a limited roll — no app to install" width="100%"></td>
-    <td width="50%"><img src="docs/screenshots/gallery.png" alt="Every guest's photos in one shared gallery" width="100%"></td>
+    <td width="50%" align="center"><img src="docs/screenshots/camera.jpg" alt="In-browser camera with a limited roll — no app to install" width="260"></td>
+    <td width="50%" align="center"><img src="docs/screenshots/gallery.jpg" alt="Every guest's photos in one shared gallery" width="260"></td>
   </tr>
   <tr>
     <td align="center"><b>Guests scan &amp; shoot</b><br><sub>A limited roll, right in the browser</sub></td>
     <td align="center"><b>One shared gallery</b><br><sub>Reveal at the end, download the lot</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/screenshots/create-event.png" alt="Create an event in about a minute" width="100%"></td>
-    <td width="50%"><img src="docs/screenshots/poster.png" alt="Printable QR table poster with the logo in the code" width="100%"></td>
+    <td width="50%" align="center"><img src="docs/screenshots/create-event.png" alt="Create an event in about a minute" width="260"></td>
+    <td width="50%" align="center"><img src="docs/screenshots/poster.png" alt="Printable QR table poster with the logo in the code" width="260"></td>
   </tr>
   <tr>
     <td align="center"><b>Set up in a minute</b><br><sub>Name it, pick the roll size &amp; reveal</sub></td>
     <td align="center"><b>Print the QR poster</b><br><sub>Drop it on the tables — guests join in a tap</sub></td>
   </tr>
 </table>
+</div>
 
 ## What you get
 
@@ -42,15 +44,19 @@ open-source, and self-hostable.**
   exact moment you pick), or manually when you press the button. Optional moderation holds every
   photo until you approve it.
 - **One shared gallery**, plus share links scoped to the whole gallery, your favourites, or photos
-  you hand-pick. Downloads as a zip, or straight into the phone's own photo library.
+  you hand-pick. Downloads as a zip, or straight into the phone's own photo library — and you can
+  take just the highlights, just the ones guests hearted, or both.
+- **Guests heart each other's photos.** A tap on anything they can see, counted live, and those
+  counts become a download of their own. On by default; a host can switch it off per event.
 - **A guest list that tells you what arrived.** Add guests by hand or import a spreadsheet, send
   branded invites, and see what happened to each one — delivered, bounced, reported as spam — in the
   mail server's own words. (Per-recipient delivery state needs Mailgun and a webhook key; without
   them an invite honestly reads "sent, delivery unknown".) Guests can ask for their own photos and
   get them when the gallery opens, and a one-click unsubscribe plus a suppression list keep the
   sending domain out of trouble.
-- **Print for the tables.** A poster designer that also prints *trick cards* — a short list of shots
-  for guests to hunt down and tick off in the camera as they take them.
+- **Print for the tables.** A poster designer — A6 through A2, rendered at whatever the paper it is
+  going on can actually resolve — that also prints *trick cards*: a short list of shots for guests
+  to hunt down and tick off in the camera as they take them.
 - **A slideshow of the night**, rendered server-side with your own music.
 - **Themes, a custom `/e/<name>` link, co-hosts, and a retention window** after which the photos and
   guest data are deleted.
@@ -95,7 +101,7 @@ your TLS / reverse proxy at that, and make sure the address it serves is exactly
 - **Set `SEO_INDEXABLE=1` on exactly one deployment** — the public one named in `BASE_URL`. Unset
   means `noindex`, which is the right default for a staging copy and the reason a preview host
   cannot outrank your real one.
-- **Pin a version** with `IMAGE_TAG` in `.env` (e.g. `IMAGE_TAG=1.4.3`; default `latest`). Point at
+- **Pin a version** with `IMAGE_TAG` in `.env` (e.g. `IMAGE_TAG=1.5.0`; default `latest`). Point at
   your own registry with `IMAGE_PREFIX`.
 - **Upgrades**: run `./upgrade.sh [version]`, or see **[UPGRADING.md](UPGRADING.md)**.
   DB migrations apply on boot, but `pull && up -d` alone is not always enough — a release can add
@@ -151,6 +157,7 @@ all in Docker. Building from source, developing, or publishing your own images? 
 | **[docs/GUIDE.md](docs/GUIDE.md)** | Every page and every control, grouped by who uses it. Start here to learn the app. |
 | **[UPGRADING.md](UPGRADING.md)** | The traps `pull && up -d` does not close, plus per-release notes. |
 | **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** | Architecture, the dev stack, the gotchas worth knowing before you change something, and how releases are cut. |
+| **[docs/DELIVERY-TRACKING.md](docs/DELIVERY-TRACKING.md)** | Turning on Mailgun delivery tracking: the webhook signing key, which events to subscribe, and how to tell it is working. |
 | **[TESTING.md](TESTING.md)** | The manual QA checklist, and what the automated suites already cover. |
 
 ## Support

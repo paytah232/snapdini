@@ -9,13 +9,24 @@ renders on GitHub. Until the files exist, the README doesn't reference them (no 
 
 ## The shot list
 
+**Formats are chosen by measurement, not habit.** `create-event.png` is flat UI — a palette PNG is
+44KB there and a JPEG is 87KB. The other two are photographs, where that reverses hard: `camera` is
+71KB as JPEG against 260KB as PNG, and `gallery` 176KB against 445KB. So screenshots of *chrome*
+stay PNG and screenshots of *photos* are JPEG. Re-measure if you replace one rather than assuming
+the extension.
+
+
 | File | What it shows | How to grab it |
 |---|---|---|
 | `hero-reveal.gif` | **The money shot.** Scan QR → browser camera opens → a photo "develops" into the shared gallery. | Screen-record the demo flow on a phone (or browser device-mode). 8–15s, loops. See GIF tips below. |
-| `camera.png` | The in-browser camera with the **limited-roll counter** — proves "no app". | Phone screenshot, or Chrome DevTools device mode (iPhone) on `/join/<demo>`. Portrait. |
-| `gallery.png` | The **shared gallery** grid, full of event photos. | Desktop or mobile, the demo gallery with a few shots in it. |
+| `camera.jpg` | The in-browser camera with the **limited-roll counter** — proves "no app". | Phone screenshot, or Chrome DevTools device mode (iPhone) on `/join/<demo>`. Portrait. |
+| `gallery.jpg` | The **shared gallery** grid, full of event photos. | Desktop or mobile, the demo gallery with a few shots in it. |
 | `create-event.png` | The **create-event form** — shows how fast setup is (name, shots, reveal). | Desktop, `/app`. Crop to the card. |
 | `poster.png` | The **printable QR table poster** (logo-in-QR). | From the manager → poster/QR view; screenshot the poster preview. |
+
+**Set an explicit pixel `width` on each `<img>`, never `width="100%"`.** In a half-width table cell
+that renders a portrait phone screenshot at roughly 445×965 on GitHub — two of them fill a screen.
+The grid below uses `width="260"`.
 
 Keep stills **landscape ~1400×900** (or portrait ~750×1334 for phone shots), PNG, and run them
 through an optimizer (TinyPNG / `oxipng`) so the repo stays light.
@@ -43,22 +54,24 @@ Once the files are in, splice this into the root `README.md` right after the int
   <img src="docs/screenshots/hero-reveal.gif" alt="Scan a QR code, shoot a limited roll, and the whole gallery reappears when the event ends" width="760">
 </p>
 
+<div align="center">
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/camera.png" alt="In-browser camera with a limited roll — no app to install" width="100%"></td>
-    <td width="50%"><img src="docs/screenshots/gallery.png" alt="Every guest's photos in one shared gallery" width="100%"></td>
+    <td width="50%" align="center"><img src="docs/screenshots/camera.jpg" alt="In-browser camera with a limited roll — no app to install" width="260"></td>
+    <td width="50%" align="center"><img src="docs/screenshots/gallery.jpg" alt="Every guest's photos in one shared gallery" width="260"></td>
   </tr>
   <tr>
     <td align="center"><b>Guests scan &amp; shoot</b><br><sub>A limited roll, right in the browser</sub></td>
     <td align="center"><b>One shared gallery</b><br><sub>Reveal at the end, download the lot</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/screenshots/create-event.png" alt="Create an event in about a minute" width="100%"></td>
-    <td width="50%"><img src="docs/screenshots/poster.png" alt="Printable QR table poster with the logo in the code" width="100%"></td>
+    <td width="50%" align="center"><img src="docs/screenshots/create-event.png" alt="Create an event in about a minute" width="260"></td>
+    <td width="50%" align="center"><img src="docs/screenshots/poster.png" alt="Printable QR table poster with the logo in the code" width="260"></td>
   </tr>
   <tr>
     <td align="center"><b>Set up in a minute</b><br><sub>Name it, pick the roll size &amp; reveal</sub></td>
     <td align="center"><b>Print the QR poster</b><br><sub>Drop it on the tables — guests join in a tap</sub></td>
   </tr>
 </table>
+</div>
 ```

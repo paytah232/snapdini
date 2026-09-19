@@ -7,9 +7,14 @@
   import MissionList from '$lib/components/MissionList.svelte';
   import { appearance, setAppearance } from '$lib/appearance';
   import { usecases, type UseCase } from '$lib/usecases';
+  import { SAMPLE_SETS } from '$lib/samples';
   import ScrollDepth from '$lib/components/ScrollDepth.svelte';
 
   export let content: UseCase;
+  /* Empty for a page with no set of its own, which renders no strip at all — see UseCase.photos.
+     Resolved from the key rather than listing filenames per page, so the four files a set points at
+     are changed in one place when better photos turn up. */
+  $: photos = (content.photos && SAMPLE_SETS[content.photos]) || [];
 
   let version = '';
   let loggedIn = false;
@@ -97,6 +102,21 @@
     <a class="btn ghost" href="/">See how it works →</a>
   </div>
   <p class="note">No app to install. <b>Free</b> for up to 10 guests.</p>
+  <!-- Real photos from an event of this kind. The claim on every one of these pages is "this suits
+       YOUR sort of event", and four birthday photos make that case faster than the paragraph above
+       them. Decorative: the words already say everything these say, so they carry no alt text and
+       are hidden from screen readers rather than read out as four empty images. -->
+  {#if photos.length}
+    <div class="shots" aria-hidden="true">
+      {#each photos as key, i}
+        <picture>
+          <source type="image/webp" srcset="/sample/{key}-220.webp 220w, /sample/{key}-330.webp 330w" sizes="150px" />
+          <img src="/sample/{key}-220.jpg" srcset="/sample/{key}-220.jpg 220w, /sample/{key}-330.jpg 330w"
+               sizes="150px" alt="" loading={i < 2 ? 'eager' : 'lazy'} decoding="async" />
+        </picture>
+      {/each}
+    </div>
+  {/if}
 </header>
 
 <section class="band">
@@ -173,15 +193,23 @@
   .btn { display: inline-block; font-weight: 700; border-radius: var(--radius-sm); padding: 10px 18px; font-size: .9rem;
     border: 1px solid transparent; cursor: pointer; text-decoration: none; }
   .nav-links .btn { padding: 7px 14px; font-size: .82rem; }
-  .primary { background: var(--accent); color: var(--accent-ink, #111); }
+  .primary { background: var(--accent-fill); color: var(--accent-ink, #111); }
   .ghost { border-color: var(--border); color: var(--text); background: transparent; }
   .ghost:hover { border-color: var(--accent); }
   .hero { max-width: 760px; margin: 0 auto; padding: 84px 24px 56px; text-align: center; }
   .eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: .74rem; letter-spacing: .16em;
     text-transform: uppercase; color: var(--text-muted); font-weight: 700; margin-bottom: 22px; }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-fill); }
   h1 { font-size: clamp(2.3rem, 5.5vw, 3.8rem); font-weight: 850; line-height: 1.06; letter-spacing: -.02em; }
   :global(.hero h1 em) { font-style: normal; color: var(--accent); }
+  /* A row on a wide screen, a 2x2 on a phone — four frames that stay square-ish either way rather
+     than a strip that shrinks to stamps. object-fit:cover because the sources are 4:5 crops and the
+     frame is not always 4:5. */
+  .shots { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin: 26px auto 0; max-width: 640px; }
+  .shots picture { flex: 0 1 140px; }
+  .shots img { width: 100%; aspect-ratio: 4 / 5; object-fit: cover; border-radius: 10px;
+    border: 1px solid var(--border); display: block; }
+  @media (max-width: 560px) { .shots picture { flex: 0 1 calc(50% - 10px); } }
   .lede { font-size: 1.12rem; color: var(--text-muted); max-width: 52ch; margin: 22px auto 30px; }
   .cta { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
   .note { margin-top: 18px; font-size: .82rem; color: var(--text-muted); }
