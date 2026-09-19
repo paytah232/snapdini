@@ -1,0 +1,34 @@
+-- Drop the guest phone number. DATA MINIMISATION, not tidiness.
+--
+-- Snapdini reaches a guest by EMAIL and by nothing else: the guest list exists so a host can send
+-- a lot of people one link, not to run an invitation process. Nothing in this product — not the
+-- invite, not the nudge, not the gallery blast, not the reminder — can act on a phone number. So
+-- the column was collecting personal data for no purpose, which is exactly what data minimisation
+-- forbids, and this deployment publishes a privacy impact assessment (docs/PIA-face-matching.md),
+-- which makes that a commitment rather than a preference.
+--
+-- WHY `notes` STAYS and phone does not. A note is rendered back to the host inside the guest row;
+-- being read by the host is the whole job it does. A phone number was read by nothing. That is the
+-- test a field has to pass to earn a column, and it is the reason not to re-add this one "for
+-- completeness" later.
+--
+-- WHAT DID NOT CHANGE: the importer still RECOGNISES a phone column. A host pasting a perfectly
+-- ordinary `Name,Email,Phone` spreadsheet gets a clean import with that column identified and
+-- resolved to "don't import" — never mistaken for a name, never a fatal. A host who wants the
+-- digits kept can map that column to `notes` by hand. See looksPhone() in csv.ts.
+--
+-- IF EXISTS because production never created this column at all: event_guests ships new in 1.5.0
+-- and production is still on 1.4.3 at migration 0038, where `SELECT to_regclass('event_guests')
+-- IS NOT NULL` returns false. There is no production data to lose here. On devel, which has
+-- applied 0047, this is a real drop.
+--
+-- IF EXISTS guards the COLUMN, not the table — and it does not need to guard the table, because
+-- 0047 (CREATE TABLE IF NOT EXISTS event_guests) always runs before this file. On the production
+-- upgrade to 1.5.0 the chain is 0039 … 0047 … 0053: 0047 creates the table with the column, and
+-- this drops it a few statements later. That is a slightly silly round trip, and it is still the
+-- right way to do it — see below.
+--
+-- Deliberately NOT done by editing 0047_guest_invites.sql: Drizzle tracks applied migrations by
+-- hash, and rewriting a file that has already run is how a migrator breaks quietly. Devel has run
+-- 0047 already, so editing it would put devel and a fresh install on different code paths.
+ALTER TABLE event_guests DROP COLUMN IF EXISTS phone;

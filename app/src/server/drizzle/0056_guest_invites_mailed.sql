@@ -1,0 +1,42 @@
+-- A recorded invite that was deliberately NOT handed to any transport.
+--
+-- WHY THERE HAS TO BE ONE AT ALL. POST /api/events/demo mints an event anonymously — no account,
+-- no payment, no identity of any kind — and returns its organizer code to whoever asked. That code
+-- is enough to reach every organizer route, and 1.5.0 adds one to that set that puts mail in other
+-- people's inboxes from a domain with our SPF, DKIM and DMARC on it. The primary fix is an identity
+-- gate in routes/guests.ts (owner or accepted co-host; an organizer code alone can no longer send),
+-- but refusing the DEMO with an error is the wrong answer for the demo specifically: it exists to
+-- show a stranger what the product does, and a red error on the headline feature is a worse outcome
+-- than the thing we are guarding against. So a demo event's send REPORTS SUCCESS AND MAILS NOBODY.
+--
+-- That leaves rows in guest_invites describing sends that never happened. They are wanted — the
+-- demo's own guest list reads them back, which is what makes the feature demonstrate itself — and
+-- they are dangerous, because email-budget.ts counts this table to tell an operator how much of
+-- Mailgun's monthly allowance has been spent. A demo's fake sends must never move that number.
+--
+-- WHY A COLUMN AND NOT A JOIN. A demo is derivable (owner_user_id IS NULL AND name = the demo
+-- name — see lib.ts isDemoEvent, routes/admin.ts, guest-delivery.ts). Deriving it here would work
+-- today and rot in two ways: every future reader of this table would have to re-derive the demo
+-- definition and one of them will not, and the fact being recorded is about the ROW — "nothing was
+-- sent for this one" — which stays true no matter what happens to the event afterwards. Any later
+-- non-sending path (a dry run, a self-hoster with no transport) gets the same honest flag without
+-- inventing a second one.
+--
+-- DEFAULT TRUE, so every row that already exists keeps meaning what it meant: a real attempt at a
+-- real inbox, including the ones that failed — a provider refusal is still an attempt, and the
+-- allowance-counting comment in email-budget.ts explains at length why failures are counted.
+--
+-- NOT NULL, because there is no third state. A row either went to a transport or it did not, and a
+-- nullable flag would invite a reader to treat "unknown" as either.
+--
+-- Nothing to backfill and nothing to deduplicate: guest_invites ships new in 1.5.0 (created by
+-- 0047). Production is at migration 0038 on 1.4.3, where `SELECT to_regclass('guest_invites')`
+-- returns NULL — re-verified read-only against a restored production dump before this file was
+-- written, where the whole file runs against a table 0047 created seconds earlier and holding
+-- nothing. No released version has ever had this table, so no operator can be carrying rows in it.
+--
+-- IF NOT EXISTS so a re-run is a no-op, matching every other migration in this tree.
+ALTER TABLE guest_invites ADD COLUMN IF NOT EXISTS mailed boolean NOT NULL DEFAULT true;
+
+COMMENT ON COLUMN guest_invites.mailed IS
+  'false = recorded but deliberately never handed to a transport (demo events). Operator-facing counts must filter on this.';

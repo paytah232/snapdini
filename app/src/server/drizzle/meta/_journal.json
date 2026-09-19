@@ -285,64 +285,190 @@
     {
       "idx": 40,
       "version": "7",
-      "when": 1789600000000,
+      "when": 1789501000000,
       "tag": "0040_photo_captions",
       "breakpoints": true
     },
     {
       "idx": 41,
       "version": "7",
-      "when": 1789700000000,
+      "when": 1789502000000,
       "tag": "0041_share_sends",
       "breakpoints": true
     },
     {
       "idx": 42,
       "version": "7",
-      "when": 1789800000000,
+      "when": 1789503000000,
       "tag": "0042_capture_orientation",
       "breakpoints": true
     },
     {
       "idx": 43,
       "version": "7",
-      "when": 1789900000000,
+      "when": 1789504000000,
       "tag": "0043_capture_shape",
       "breakpoints": true
     },
     {
       "idx": 44,
       "version": "7",
-      "when": 1790000000000,
+      "when": 1789505000000,
       "tag": "0044_reveal_at",
       "breakpoints": true
     },
     {
       "idx": 45,
       "version": "7",
-      "when": 1790100000000,
+      "when": 1789506000000,
       "tag": "0045_email_preferences",
       "breakpoints": true
     },
     {
       "idx": 46,
       "version": "7",
-      "when": 1790200000000,
+      "when": 1789507000000,
       "tag": "0046_guest_delivery",
       "breakpoints": true
     },
     {
       "idx": 47,
       "version": "7",
-      "when": 1790300000000,
+      "when": 1789508000000,
       "tag": "0047_guest_invites",
       "breakpoints": true
     },
     {
       "idx": 48,
       "version": "7",
-      "when": 1790400000000,
+      "when": 1789509000000,
       "tag": "0048_guest_unsubscribes",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1789510000000,
+      "tag": "0049_challenge_set_source",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1789511000000,
+      "tag": "0050_processed_stripe_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1789512000000,
+      "tag": "0051_survey_one_per_event",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1789513000000,
+      "tag": "0052_share_sends_one_per_address",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1789514000000,
+      "tag": "0053_guest_drop_phone",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1789515000000,
+      "tag": "0054_guest_email_required",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1789516000000,
+      "tag": "0055_guest_email_case_fold",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1789517000000,
+      "tag": "0056_guest_invites_mailed",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1789518000000,
+      "tag": "0057_photo_hearts",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1789519000000,
+      "tag": "0058_photo_hearts_by_participant",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1789520000000,
+      "tag": "0059_photo_hearts_event",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1789590000000,
+      "tag": "0060_photo_comments",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1789600000000,
+      "tag": "0061_share_reactions",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1789650000000,
+      "tag": "0062_comment_hearts",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1789657000000,
+      "tag": "0063_gallery_visitors",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1789657822901,
+      "tag": "0064_gallery_link_reactions",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1789659039011,
+      "tag": "0065_reaction_perf",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1789659606882,
+      "tag": "0066_index_hygiene",
       "breakpoints": true
     }
   ]

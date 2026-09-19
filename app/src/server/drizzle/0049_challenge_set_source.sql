@@ -1,0 +1,22 @@
+-- HOW a guest ended up with the card they are holding.
+--
+-- challenge_set (0039) records WHICH card. That was enough while the only two ways to get one were
+-- a printed QR naming it (?set=b) and the round-robin, because neither needed the guest's opinion.
+-- Trick cards now default to NO QR — most sets are printed minimal and guests join off the main
+-- event sign instead — so the round-robin is handing out cards to people who are sitting in front
+-- of a different one. The fix is to ask them; asking needs a place to record that we have not
+-- asked yet, and that the answer is now final.
+--
+--   'qr'      a printed card named it (?set=). Final, and it outranks everything: those cards are
+--             already printed and the card in the hand must win.
+--   'pending' round-robin, and nobody has confirmed it. The ONLY state that asks the guest, and
+--             only when the event has more than one card to confuse.
+--   'self'    the guest said which card they are holding. Final — a guest who could re-answer
+--             could shop around for the easier list.
+--   'auto'    round-robin, settled: either the guest said they have no card (so even coverage is
+--             the right answer for them), or the event only ever had one card.
+--
+-- NULL is every participant who joined before this existed, and reads as 'auto': settled, never
+-- asked. That is the whole protection for events running right now — they keep the card they have
+-- and are never re-prompted.
+ALTER TABLE participants ADD COLUMN IF NOT EXISTS challenge_set_source text;

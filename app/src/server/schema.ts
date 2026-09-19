@@ -106,6 +106,18 @@ export const events = pgTable('events', {
   expiresAt: ms('expires_at').notNull(),
   revealedAt: ms('revealed_at'),
   revealHidden: boolean('reveal_hidden').notNull().default(false),  // organizer "Hide photos" override — wins over mode/time
+  // Guest hearts. On by default: a heart only ADDS to a screen, so it takes nothing from anyone.
+  heartsEnabled: boolean('hearts_enabled').notNull().default(true),
+  // Guest comments. OFF by default, and the contrast with the line above is the whole rule: a
+  // comment puts one guest's WORDS on somebody else's gallery, under their name, for good. A
+  // default that alters another person's screen is not a default we get to make. See 0060.
+  commentsEnabled: boolean('comments_enabled').notNull().default(false),
+  /** The event's own `/gallery/<code>` link, which goes to a different audience than the two above:
+   *  those govern GUESTS (the people who scanned the QR), these govern anyone holding the link. A
+   *  host can have guests hearting each other's shots while the link they send round afterwards
+   *  stays read-only. See drizzle/0064_gallery_link_reactions.sql. */
+  galleryHeartsEnabled: boolean('gallery_hearts_enabled').notNull().default(true),
+  galleryCommentsEnabled: boolean('gallery_comments_enabled').notNull().default(false),
   isLocked: boolean('is_locked').notNull().default(false),
   allowDownloads: boolean('allow_downloads').notNull().default(true),
   noFlash: boolean('no_flash').notNull().default(false),    // organizer disables the back-camera LED flash for guests
@@ -184,7 +196,7 @@ export const appState = pgTable('app_state', {
   updatedAt: ms('updated_at').notNull(),
 });
 
-// Post-event feedback survey responses. One row per submission (an organizer may resubmit; we keep all).
+// Post-event feedback survey responses. ONE ROW PER EVENT — see idx_survey_event below and 0051.
 export const surveyResponses = pgTable('survey_responses', {
   id: text('id').primaryKey(),
   eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
@@ -202,7 +214,12 @@ export const surveyResponses = pgTable('survey_responses', {
   publishedAt: ms('published_at'),            // set when the operator actually publishes it
   createdAt: ms('created_at').notNull(),
 }, (t) => ({
-  eventIdx: index('idx_survey_event').on(t.eventId),
+  // UNIQUE as of 0051. routes/survey.ts used to read this index, find nothing and insert — two
+  // statements, and the survey token is an emailed link that never expires, so concurrent POSTs
+  // all passed the read, all inserted, and all fired the unhappy-score operator alert. The index
+  // the read already needed is the same index that makes the write the arbiter, so it is that one
+  // rather than a second.
+  eventIdx: uniqueIndex('idx_survey_event').on(t.eventId),
 }));
 
 export const participants = pgTable('participants', {
@@ -217,6 +234,11 @@ export const participants = pgTable('participants', {
   extraPhotos: integer('extra_photos').notNull().default(0),
   upgradeEmail: text('upgrade_email'),
   challengeSet: text('challenge_set'),                      // which mission card this guest was handed
+  // HOW they came by it: 'qr' (a printed card named it), 'self' (they told us which one they are
+  // holding), 'auto' (round-robin, settled) or 'pending' (round-robin, and we have not asked yet).
+  // NULL is everyone who joined before this existed and reads as 'auto' — settled, never asked.
+  // See 0049_challenge_set_source.sql, and readSetSource() for the one place that reading happens.
+  challengeSetSource: text('challenge_set_source'),
   amountPaidCents: integer('amount_paid_cents').notNull().default(0),
   stripePaymentIntent: text('stripe_payment_intent'),
   requestedMoreAt: ms('requested_more_at'),
@@ -234,6 +256,63 @@ export const participants = pgTable('participants', {
   // The sweep's only read of this table: the guests at one event who asked and left an address.
   wantsPhotosIdx: index('idx_participants_wants_photos').on(t.eventId)
     .where(sql`${t.wantsPhotos} AND ${t.email} IS NOT NULL`),
+}));
+
+/** One guest's heart on one photo. No counter column anywhere — see migration 0057. */
+export const photoHearts = pgTable('photo_hearts', {
+  id: text('id').primaryKey(),
+  photoId: text('photo_id').notNull().references(() => photos.id, { onDelete: 'cascade' }),
+  // A copy of the photo's event, which never changes — so the live count can read one event without
+  // joining photos. Not a counter: nothing can make this drift. See 0059.
+  eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
+  /** Exactly ONE of these is set — a database CHECK enforces it (0061). A heart or comment belongs
+   *  either to a guest who was at the event or to somebody who opened a share link, never both and
+   *  never neither. */
+  participantId: text('participant_id').references(() => participants.id, { onDelete: 'cascade' }),
+  visitorId: text('visitor_id').references(() => shareVisitors.id, { onDelete: 'cascade' }),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+}, (t) => ({
+  // The unique index IS the idempotency: a double tap, a retry or a second tab cannot double-count.
+  onePerPerson: uniqueIndex('photo_hearts_photo_participant_uq').on(t.photoId, t.participantId),
+  byPhoto: index('photo_hearts_photo_idx').on(t.photoId),
+  // The other direction: "my hearts across this event". The composite above cannot serve it —
+  // participant_id is its trailing column. See 0058.
+  byParticipant: index('photo_hearts_participant_idx').on(t.participantId),
+  byEventPhoto: index('photo_hearts_event_photo_idx').on(t.eventId, t.photoId),
+  byEventParticipant: index('photo_hearts_event_participant_idx').on(t.eventId, t.participantId),
+}));
+
+/** One guest's message on one photo. No counter column anywhere — see migration 0060.
+ *
+ *  Distinct from photos.caption: a caption is one voice ABOUT the picture (the photographer's or
+ *  the host's) and lives on the photo; a comment is a thread, and each line of it belongs to
+ *  whoever wrote it. */
+export const photoComments = pgTable('photo_comments', {
+  id: text('id').primaryKey(),
+  photoId: text('photo_id').notNull().references(() => photos.id, { onDelete: 'cascade' }),
+  // A copy of the photo's event, which never changes — so the count for a whole event reads off one
+  // index without joining photos. Not a counter: nothing can make this drift. Same reasoning as
+  // photo_hearts.event_id (0059).
+  eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
+  // CASCADE, and for a sharper reason than a heart has: a comment is SIGNED. Remove the participant
+  // and their words go too, rather than standing under a name the event no longer holds.
+  /** Exactly ONE of these is set — a database CHECK enforces it (0061). A heart or comment belongs
+   *  either to a guest who was at the event or to somebody who opened a share link, never both and
+   *  never neither. */
+  participantId: text('participant_id').references(() => participants.id, { onDelete: 'cascade' }),
+  visitorId: text('visitor_id').references(() => shareVisitors.id, { onDelete: 'cascade' }),
+  // Stored raw. Escaping is the renderer's job (Svelte's `{text}`); a column that half-sanitises is
+  // how `&amp;` ends up in somebody's message and an injection ends up in whatever reads it next.
+  body: text('body').notNull(),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+}, (t) => ({
+  // The hot read: every count for one event, keyed, with no join to photos.
+  byEventPhoto: index('photo_comments_event_photo_idx').on(t.eventId, t.photoId),
+  // The other direction — "which of this event's comments are mine". The composite above cannot
+  // serve it; photo_id is its trailing column. photo_hearts had to learn this in 0058.
+  byEventParticipant: index('photo_comments_event_participant_idx').on(t.eventId, t.participantId),
+  // One photo's thread, already in the order it was written.
+  byPhotoCreated: index('photo_comments_photo_created_idx').on(t.photoId, t.createdAt),
 }));
 
 export const photos = pgTable('photos', {
@@ -277,6 +356,50 @@ export const photos = pgTable('photos', {
 
 // Shareable links to a gallery: 'all' = the whole (visible) library, 'selected' = a hand-picked
 // subset (photoIds). Each has its own opaque token so an organizer can share a curated set.
+/** Somebody who opened a SHARE LINK and gave a name, so they can heart and comment.
+ *
+ *  Deliberately not a participant. Participants are the paid entitlement — they count against
+ *  `guest_cap`, hold a roll, get dealt a trick card and appear in the guest list. A link visitor is
+ *  none of those; reusing the row would have meant remembering to exclude them from every one of
+ *  those reads, and the one that must never be missed is the cap. See migration 0061. */
+/** Hearts on COMMENTS — see drizzle/0062_comment_hearts.sql.
+ *
+ *  The same shape as `photoHearts` after 0061, deliberately: the author is one of two, and every
+ *  rule that made that safe there applies here unchanged. Change one, check the other. */
+export const commentHearts = pgTable('comment_hearts', {
+  id: text('id').primaryKey(),
+  commentId: text('comment_id').notNull().references(() => photoComments.id, { onDelete: 'cascade' }),
+  eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
+  participantId: text('participant_id').references(() => participants.id, { onDelete: 'cascade' }),
+  visitorId: text('visitor_id').references(() => shareVisitors.id, { onDelete: 'cascade' }),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+}, (t) => ({
+  // PARTIAL, both — Postgres treats NULLs as distinct, so a plain composite over a nullable column
+  // deduplicates nothing while looking exactly like idempotency.
+  onePerGuest: uniqueIndex('comment_hearts_comment_participant_uq').on(t.commentId, t.participantId)
+    .where(sql`${t.participantId} IS NOT NULL`),
+  onePerVisitor: uniqueIndex('comment_hearts_comment_visitor_uq').on(t.commentId, t.visitorId)
+    .where(sql`${t.visitorId} IS NOT NULL`),
+  byComment: index('comment_hearts_comment_idx').on(t.commentId),
+  byEventParticipant: index('comment_hearts_event_participant_idx').on(t.eventId, t.participantId),
+  byEventVisitor: index('comment_hearts_event_visitor_idx').on(t.eventId, t.visitorId),
+}));
+
+export const shareVisitors = pgTable('share_visitors', {
+  id: text('id').primaryKey(),
+  /** One of two owners — see drizzle/0063_gallery_visitors.sql. `shareId` is somebody holding a
+   *  curated /s/ link, whose reactions are governed by that share's own switches; `eventId` is
+   *  somebody holding the event's /gallery/ link, whose reactions INHERIT the event's switches. */
+  shareId: text('share_id').references(() => shares.id, { onDelete: 'cascade' }),
+  eventId: text('event_id').references(() => events.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  /** Scoped to ONE link — the same person on another share of the same event is another visitor. */
+  sessionToken: text('session_token').notNull(),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+}, (t) => ({
+  byEvent: index('share_visitors_event_idx').on(t.eventId),
+}));
+
 export const shares = pgTable('shares', {
   id: text('id').primaryKey(),                 // opaque share token (fallback URL segment)
   eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
@@ -284,6 +407,11 @@ export const shares = pgTable('shares', {
   photoIds: text('photo_ids'),                 // JSON array of photo ids (for 'selected')
   label: text('label'),                        // human name for the share (organizer-editable)
   slug: text('slug'),                          // pretty URL segment (/s/<slug>); editable, globally unique
+  /** Reactions are per LINK, not per event: one event can have a family gallery that wants comments
+   *  and a client gallery that must not. Both default OFF — a link can be forwarded anywhere, so the
+   *  audience is not knowable and opening a gallery to reactions is a decision, not an inheritance. */
+  heartsEnabled: boolean('hearts_enabled').notNull().default(true),
+  commentsEnabled: boolean('comments_enabled').notNull().default(false),
   createdAt: ms('created_at').notNull(),
 }, (t) => ({
   slugIdx: uniqueIndex('idx_shares_slug').on(t.slug).where(sql`${t.slug} IS NOT NULL`),
@@ -303,6 +431,20 @@ export const shareSends = pgTable('share_sends', {
   sentAt: ms('sent_at').notNull(),
 }, (t) => ({
   eventIdx: index('idx_share_sends_event').on(t.eventId, t.sentAt),
+  // One row per address per link, enforced (0052). Both senders decide whether to mail someone by
+  // reading this table first, and without a constraint that read was a suggestion: two presses of
+  // Send, or the host's blast racing the automatic guest delivery, mailed the same link twice.
+  //
+  // A PAIR of partial indexes, not one over (event_id, share_id, email): share_id IS NULL is the
+  // standing gallery link — the common case — and Postgres treats NULLs as DISTINCT in a unique
+  // index, so a single three-column index would have left exactly those rows unconstrained.
+  //
+  // Keyed on lower(btrim(email)) because that is what the readers key on, and neither writer
+  // stores a normalised address (participants.email is kept as the guest typed it, on purpose).
+  galleryOnce: uniqueIndex('ux_share_sends_gallery')
+    .on(t.eventId, sql`lower(btrim(${t.email}))`).where(sql`${t.shareId} IS NULL`),
+  shareOnce: uniqueIndex('ux_share_sends_share')
+    .on(t.shareId, sql`lower(btrim(${t.email}))`).where(sql`${t.shareId} IS NOT NULL`),
 }));
 
 // Generated slideshow exports. Versioned (one row per generation) so an organizer keeps a few
@@ -420,23 +562,43 @@ export const guestFeedback = pgTable('guest_feedback', {
 // See 0044_guest_invites.sql for the full reasoning. In short: event_guests is WHO, guest_invites
 // is WHAT HAPPENED to one message, and email_suppressions is WHO MUST NEVER BE MAILED AGAIN.
 
-/** A person the host means to invite. Everything but the event is optional — a real guest list has
- *  rows with a phone and no email, and rows that are just a name. A row with no email is simply
- *  not mailable; it is still part of the list. */
+/** A person the host means to invite, and an ADDRESS TO INVITE THEM AT.
+ *
+ *  `email` is NOT NULL (migration 0054). This table's only job is to send a lot of people one link,
+ *  so a row without an address is a row nothing can ever be sent to — and a guest list that quietly
+ *  accepts them is a guest list that reports "20 invited" while some of those twenty were never
+ *  reachable. Whoever the host has no address for gets a printed card or a message from the host
+ *  directly; that is outside this product, deliberately. `name` and `notes` stay optional.
+ *
+ *  THERE IS NO PHONE COLUMN, and that is deliberate (dropped in 0053_guest_drop_phone.sql). This
+ *  product reaches a guest by email and by nothing else, so a phone number is data nothing here
+ *  can act on, and storing personal data with no purpose is what data minimisation forbids — see
+ *  the note on looksPhone() in csv.ts for the full reasoning and for why `notes` is different.
+ *  The importer still RECOGNISES a phone column in a host's spreadsheet so it can skip it. */
 export const eventGuests = pgTable('event_guests', {
   id: text('id').primaryKey(),
   eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
   name: text('name'),
-  /** Lower-cased and trimmed on write. The partial unique index below is a byte comparison, so
-   *  normalising here is what actually stops the same spreadsheet importing twice. */
-  email: text('email'),
-  phone: text('phone'),
+  /** Required, and lower-cased and trimmed on write — so the value a host reads back, the value
+   *  checked against the suppression list and the value the importer dedupes on are all the one
+   *  normalised form. With the column NOT NULL, the unique index below is the ONLY duplicate rule
+   *  the import needs (csv.ts used to carry a name+note fallback for address-less rows; there are
+   *  none). Note that the index no longer DEPENDS on this normalisation — see below. */
+  email: text('email').notNull(),
   notes: text('notes'),
   createdAt: ms('created_at').notNull(),
   updatedAt: ms('updated_at').notNull(),
 }, (t) => ({
   eventIdx: index('idx_event_guests_event').on(t.eventId, t.createdAt),
-  emailUnique: uniqueIndex('idx_event_guests_event_email').on(t.eventId, t.email).where(sql`${t.email} IS NOT NULL`),
+  // Keyed on lower(btrim(email)), not on the column (0055). The writer normalises and still should,
+  // but a unique index that only holds while every present and future writer remembers a
+  // toLowerCase() is a convention with an index next to it — bypassing that one call put
+  // MUM@Example.COM and mum@example.com on one event as two rows. Matches what 0031 already did for
+  // participants and 0052 for share_sends; the guest list was the odd one out. Costs no query plan,
+  // because nothing reads this table by email — every read is by event_id or by id.
+  //
+  // 0047's `WHERE email IS NOT NULL` predicate went with that rebuild: 0054 made it always true.
+  emailUnique: uniqueIndex('idx_event_guests_event_email').on(t.eventId, sql`lower(btrim(${t.email}))`),
 }));
 
 /** One invite email, to one address. Written at send time, then updated by the provider's webhook
@@ -458,6 +620,19 @@ export const guestInvites = pgTable('guest_invites', {
   providerMessageId: text('provider_message_id'),
   reason: text('reason'),                                  // the provider's words, shown verbatim
   severity: text('severity'),                              // 'permanent' | 'temporary', as reported
+  /** Was this row's message actually handed to a transport?
+   *
+   *  TRUE for every real send, including the ones that failed — a refusal by Mailgun is still an
+   *  attempt at somebody's inbox. FALSE means the product wrote the record and DELIBERATELY sent
+   *  nothing: today that is demo events only (see the DEMO note in routes/guests.ts), where the
+   *  visitor must see the feature work without a stranger being able to mail anyone from our
+   *  domain. Nothing an operator reads may count a false row as mail — email-budget.ts filters on
+   *  it, and it is the only global reader of this table.
+   *
+   *  A column rather than a join to events.name, because "this row was never sent" is a fact about
+   *  the ROW. Deriving it would mean every future reader re-deriving the demo definition, and the
+   *  fact would evaporate the moment a row outlived the event it belonged to. */
+  mailed: boolean('mailed').notNull().default(true),
   sentAt: ms('sent_at').notNull(),
   updatedAt: ms('updated_at').notNull(),
   /** The PROVIDER's timestamp for the event that last changed the status. Webhooks arrive out of
@@ -504,3 +679,26 @@ export const guestUnsubscribes = pgTable('guest_unsubscribes', {
   pk: primaryKey({ columns: [t.eventId, t.email] }),
   emailIdx: index('idx_guest_unsubscribes_email').on(t.email),
 }));
+/** Stripe webhook events this deployment has already acted on. See 0050_processed_stripe_events.sql.
+ *
+ *  Stripe retries any delivery it does not get a 2xx for, for up to three days, and one Stripe
+ *  event can therefore arrive many times. Most branches of the handler are naturally idempotent
+ *  (they SET a total or flip a boolean), but the `upgrade` branch ADDS: `amountPaidCents + paidNow`
+ *  is cumulative real money, and a second credit then makes the NEXT upgrade free, because the
+ *  upgrade route only charges newTotal − amountPaidCents.
+ *
+ *  Why a table and not a column, the way participants.stripePaymentIntent guards guest top-ups:
+ *   · events.stripePaymentIntent is the REFUND handle for the event's original payment (site-admin
+ *     refunds that intent). An upgrade writing its own intent there would silently repoint the
+ *     one-click refund at the $10 top-up instead of the $59 event.
+ *   · a single slot only remembers the LAST payment. Upgrades are designed to be repeatable
+ *     (extend retention today, add guests next week), and Stripe's retry window is long enough for
+ *     upgrade A's retry to arrive after upgrade B succeeded — at which point the slot holds B and
+ *     A is credited twice.
+ *  Keyed by the Stripe event id, so it is ordering-independent and covers every branch at once. */
+export const processedStripeEvents = pgTable('processed_stripe_events', {
+  id: text('id').primaryKey(),                 // Stripe's own event id (evt_…) — unique per event,
+                                               // reused by every retry of it
+  type: text('type').notNull(),                // e.g. 'checkout.session.completed', for reading later
+  processedAt: ms('processed_at').notNull(),
+});

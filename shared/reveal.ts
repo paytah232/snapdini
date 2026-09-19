@@ -109,6 +109,77 @@ export function msToZonedWallTime(ms: number, timeZone: string): { date: string;
   }
 }
 
+// ── The window an absolute reveal instant has to sit in ──────────────────────
+//
+// WHAT WENT WRONG. resolveCustomReveal() in routes/events.ts checked one bound — that the reveal is
+// not after retention deletes the photos — and nothing else. So a 24-hour `at_end` event could be
+// created with a reveal 48 hours IN THE PAST, and the API answered 200. The gallery then reads
+// `revealed: true` from the moment the event starts, to anybody, with `cache-control: public` on
+// it, while the event is still running. On the default settings (`at_end`, moderation off) that is
+// every photo public the instant it is taken, on a product whose entire pitch is that they appear
+// at the end. Reproduced twice, and confirmed against a control event which correctly read
+// `revealed: false`.
+//
+// The rule these two functions state is one sentence: AN ABSOLUTE REVEAL SITS AT OR AFTER THE END
+// OF THE EVENT AND AT OR BEFORE THE PHOTOS ARE DELETED. Everything about reveal timing in the
+// product already assumes it — `scheduledRevealAt` above returns `revealAt` in place of
+// `expiresAt + delay`, and a delay cannot be negative — but nothing enforced it.
+//
+// They live HERE, beside scheduledRevealAt and ceilToRevealTick, rather than in the route: the
+// route is where the rule was missing, and a rule that lives where it is enforced is a rule the
+// next enforcement point has to reinvent.
+
+/** Why this instant cannot be an event's reveal, in words for a host — or null if it can be.
+ *
+ *  The order of the three is the order a host would notice them in, and each says what to do. */
+export function revealInstantRefusal(
+  at: number,
+  window: { expiresAt: number; purgeAt: number },
+  now: number,
+): string | null {
+  // A reveal in the past is a gallery that is ALREADY open. There is no schedule left in it.
+  if (at <= now)
+    return 'That reveal time has already passed. Pick a date and time in the future.';
+  // THE ONE THAT LEAKED. A reveal before the end of the event unlocks the gallery while the party
+  // is still going, so every photo is public as it is taken.
+  if (at < window.expiresAt)
+    return 'That is before your event ends, so your guests would see the photos as they were taken. Pick a time at or after your event finishes.';
+  // Retention deletes the photos. A reveal booked past that unlocks an empty gallery — the one
+  // outcome worse than refusing to save.
+  if (at > window.purgeAt)
+    return 'That is after the photos are deleted at the end of retention. Pick an earlier reveal, or extend retention first.';
+  return null;
+}
+
+/** Keep a reveal the host already chose inside the window a RESCHEDULE has just moved.
+ *
+ *  0044_reveal_at.sql argues that an absolute instant must not be dragged around when an event is
+ *  nudged — "rescheduling would drag a date the host chose on purpose to a different day" — and
+ *  that is right for nudging by hours and wrong for a genuine reschedule. Moving an event two weeks
+ *  out left `reveal_at` at the original instant: two weeks BEFORE the event it belongs to, which is
+ *  the leak above arriving by a second road. Reproduced both by re-sending the same wall-clock
+ *  strings (which the real client always does — web/src/lib/eventEdit.ts) and by a name-only save
+ *  that sends no reveal keys at all.
+ *
+ *  CLAMPED UP, NOT REFUSED, and the precedent is clampGuestSendAt() in guest-delivery.ts, which has
+ *  done exactly this for the guest send since it was written. The host is not choosing this instant
+ *  — they are moving their event, and the reveal came along on its own — so throwing the whole
+ *  reschedule away over it would be refusing the edit they DID make because of one they did not.
+ *  "At the end of the event" is the only thing an earlier instant can mean. The caller reports the
+ *  clamp so the host is told rather than shown a different time back without explanation.
+ *
+ *  THE LATE SIDE IS REFUSED, not clamped, and the asymmetry is deliberate: clamping down would land
+ *  the reveal at the instant the photos are deleted, which unlocks an empty gallery — so there is
+ *  no safe value to pick on that side, and the host has to choose. Moving an event EARLIER is the
+ *  only way to get there, and the host doing it is on the settings screen with both controls. */
+export function clampRevealAt(at: number, window: { expiresAt: number; purgeAt: number }):
+  { at: number; clamped: boolean } | { error: string } {
+  if (at > window.purgeAt)
+    return { error: 'Moving the event leaves the photo reveal after the photos would be deleted. Pick a new reveal time, or extend retention first.' };
+  if (at < window.expiresAt) return { at: window.expiresAt, clamped: true };
+  return { at, clamped: false };
+}
+
 /** The reveal timing fields of an event, as both halves see them. */
 export interface RevealTiming {
   revealMode: string;
@@ -127,4 +198,82 @@ export interface RevealTiming {
 export function scheduledRevealAt(event: RevealTiming): number | null {
   if (event.revealMode !== 'at_end') return null;
   return event.revealAt ?? event.expiresAt + (event.revealDelayHours || 0) * 3_600_000;
+}
+
+
+// ── How long the EDGE may hold the public gallery answer ────────────────────────
+//
+// `GET /api/photos/:code?gallery=true` is the highest-fan-out response in the product: one host
+// shares one link with every guest, and every one of those phones polls it. It is also the only
+// photos response that is byte-identical for every viewer — the gallery branches build their rows
+// with `photoRow(p, null, …)`, so there is no `isOwn` and no `myParticipantId` in it. That, and
+// only that, is what makes it safe to cache in a shared cache at all.
+//
+// The tempting implementation is one number. It is wrong, and the reason is which STATE the number
+// lands in: the pre-reveal body contains `revealed: false`. Cache that for 60s and a guest can sit
+// on a lock wall for up to a minute AFTER the reveal fired, served a stale "not yet" by the edge
+// while their client did everything right — spending the entire reveal-latency budget (the 5s skew
+// pad plus the jitter on top of it) to save two requests a minute. So the TTL is computed per
+// state, and the interesting half is the cap that stops it ever spanning `revealAt`.
+//
+// NB this only takes effect if the CDN in front is configured to respect the origin's TTL. A
+// Cloudflare Cache Rule with a fixed "Edge Cache TTL" overrides Cache-Control outright and gives
+// every state one blanket number, which is precisely what this exists to avoid.
+
+/** Revealed. The body changes only when the host approves another photo, and the page already
+ *  promises "you don't need to refresh" — the poll behind that promise is what this is throttling.
+ *  30 rather than 60 because un-reveal is a real endpoint, and a stale revealed body is the one
+ *  direction of staleness that shows people something they were meant to stop seeing. The saving
+ *  between the two is two requests a minute across a whole guest list; it is not worth the window. */
+export const GALLERY_CACHE_REVEALED_S = 30;
+
+/** Never longer than this, whatever the state. A minute is already past the point where a longer
+ *  TTL saves a measurable number of requests: 150 guests polling at 45s is ~3.3 req/s uncached,
+ *  and ANY TTL in this range collapses that to a handful of origin fetches per minute. */
+export const GALLERY_CACHE_MAX_S = 60;
+
+/** A `manual` reveal has no scheduled instant, so there is no window that is provably safe — the
+ *  host may press the button during any of it. Short enough that the lock wall cannot outlive the
+ *  press by more than a moment, long enough to still absorb the simultaneous poll of a guest list. */
+export const GALLERY_CACHE_MANUAL_S = 5;
+
+/** How far short of `revealAt` a pre-reveal TTL must stop.
+ *
+ *  It covers the edge's own clock disagreeing with ours, and the round trip of the request that
+ *  stores the entry — an object cached at T with TTL t is served until T+t by the EDGE's reckoning,
+ *  not ours. 10s is comfortably more than either and costs nothing: the requests being saved are in
+ *  the minutes before the reveal, not the last ten seconds of them. */
+export const GALLERY_CACHE_REVEAL_MARGIN_S = 10;
+
+/** Below this, a TTL is all risk and no saving — it cannot absorb even one poll interval. Rounds
+ *  down to "do not cache" rather than shaving a second off the margin. */
+const GALLERY_CACHE_MIN_USEFUL_S = 5;
+
+/** Seconds the public gallery answer may be held by a shared cache. 0 means "do not".
+ *
+ *  The load-bearing property, which the tests pin directly: when the gallery is NOT yet revealed,
+ *  `now + seconds*1000` is always at least GALLERY_CACHE_REVEAL_MARGIN_S before `revealAt`. No
+ *  cached lock wall can outlive the reveal it is denying. */
+export function galleryCacheSeconds(s: {
+  revealed: boolean;
+  revealAt: number | null;
+  revealMode?: string | null;
+  now: number;
+}): number {
+  if (s.revealed) return GALLERY_CACHE_REVEALED_S;
+  // A host with a button can press it during any window, so no window is safe. This is checked
+  // before revealAt deliberately: a manual event that somehow carries an instant is still manual.
+  if (s.revealMode === 'manual') return GALLERY_CACHE_MANUAL_S;
+  // No moment to be far from — treat it exactly like manual rather than guessing at a long TTL.
+  if (s.revealAt === null || !Number.isFinite(s.revealAt)) return GALLERY_CACHE_MANUAL_S;
+  const until = Math.floor((s.revealAt - s.now) / 1000);
+  const ttl = Math.min(GALLERY_CACHE_MAX_S, until - GALLERY_CACHE_REVEAL_MARGIN_S);
+  return ttl >= GALLERY_CACHE_MIN_USEFUL_S ? ttl : 0;
+}
+
+/** The header itself, so no caller can assemble a different one by hand. `no-store` — not merely
+ *  `max-age=0` — because this is also what the PER-VIEWER branches send, and those must never be
+ *  held by an intermediary at all. */
+export function galleryCacheControl(seconds: number): string {
+  return seconds > 0 ? `public, max-age=${seconds}` : 'private, no-store';
 }
