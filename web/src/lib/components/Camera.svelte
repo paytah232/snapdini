@@ -8,16 +8,22 @@
   import { inAppBrowserName } from '$lib/inAppBrowser';
   import { setParticipantEmail, setPhotoOptIn } from '$lib/events';
   import { planOptIn, optInMessage } from '$lib/photoOptIn';
-  import { saveMany, isIOS, type SaveManyProgress } from '$lib/saveImage';
+  import { saveMany, isIOS, savePhotoByUrl, type SaveManyProgress } from '$lib/saveImage';
   import { savedSet, markSaved } from '$lib/saved';
+  import StarIcon from '$lib/components/StarIcon.svelte';
   import { watchTilt, glyphRotation, captureOrientation, requestTiltPermission } from '$lib/deviceTilt';
   import { goto, replaceState } from '$app/navigation';
   // Aliased: this component already has a `track` for the MediaStreamTrack.
   import { track as trackEvent } from '$lib/analytics';
   import { fade } from 'svelte/transition';
-  import { getEvent, getMe, joinEvent, getPhotosBySession, savePhotoCaption, CAPTION_MAX, clampCaption, captionLength, captionRemaining,
-           type PublicEvent, type Photo } from '$lib/events';
-  import { getSession, saveSession, clearSession } from '$lib/session';
+  import { getEvent, getMe, joinEvent, chooseCard, getPhotosBySession, savePhotoCaption, CAPTION_MAX, clampCaption, captionLength, captionRemaining,
+           type PublicEvent, type Photo, setHeart, getHearts,
+  } from '$lib/events';
+  import { getSession, saveSession, clearSession, rememberEvent, forgetEventAt } from '$lib/session';
+  // isIOS is aliased: saveImage exports one too, and the two answer different questions — that one
+  // is about download behaviour, this one about whether an install prompt can exist at all.
+  import { initInstall, canInstall, promptInstall, isStandalone, isIOS as isIOSInstall,
+           askedAlready, markAsked } from '$lib/pwa';
   import { getConfig } from '$lib/api';
   import { applyEventTheme } from '$lib/theme';
   import { showToast, hideToast } from '$lib/toast';
@@ -25,7 +31,11 @@
   import { putCapture, delCapture, listCaptures, saveProgress, getProgress } from '$lib/captureStore';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import PhotoCard from '$lib/components/PhotoCard.svelte';
+  import DownloadIcon from '$lib/components/DownloadIcon.svelte';
   import StartYourOwn from '$lib/components/StartYourOwn.svelte';
+  import ShareScope from '$lib/components/ShareScope.svelte';
+  import DownloadFormat from '$lib/components/DownloadFormat.svelte';
+  import { zipHref, downloadFilename } from '$lib/download';
   import GuestFeedback from '$lib/components/GuestFeedback.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import Confetti from './Confetti.svelte';
@@ -83,6 +93,9 @@
   let askedHost = false;
   let buying = false;
   $: outOfShots = photosRemaining <= 0 && screen === 'camera';
+  /** The "ask the host / buy more" card, when it is on screen. Where a press on the spent
+   *  shutter sends the guest. */
+  let oosPanelEl: HTMLDivElement | undefined;
   // Fires once when the roll is actually spent, which is the closest thing to "the guest finished".
   let rollReported = false;
   $: if (outOfShots && !rollReported && ownCount > 0) { rollReported = true; trackEvent('roll_completed', { shots: ownCount }, ev?.joinCode); }
@@ -90,13 +103,17 @@
   // A guest gets a brief chance to take back a shot they have just fluffed — a thumb over the lens,
   // a blink. Short on purpose: the window is what stops "delete and reshoot" becoming an unlimited
   // roll. Mirrors PHOTO_DELETE_WINDOW_SECONDS on the server; the server is the authority.
-  const undoWindowMs = 60_000;
+  // Read from the server rather than restated here. It was a hardcoded 60_000 under a comment
+  // saying "the server is the authority", which is exactly the shape of thing that goes quietly
+  // wrong the day an operator sets PHOTO_DELETE_WINDOW_SECONDS: the bin would keep offering itself
+  // for a minute on a server that stopped accepting the delete after thirty seconds.
+  let undoWindowMs = 30_000;   // matches the server default until /api/config answers
   let nowTick = Date.now();
   let undoTimer: ReturnType<typeof setInterval> | undefined;
   // Eligibility is per PHOTO, from its own takenAt — take three shots quickly and any of the three
   // can be the bad one, so a single "last shot" control would delete the wrong frame.
   // Two-step delete: the first tap arms it, the second commits. Once armed, the control STAYS
-  // even if the 60s window lapses mid-decision — the guest decided in time, and yanking the button
+  // even if the window lapses mid-decision — the guest decided in time, and yanking the button
   // out from under a half-made choice is worse than a few seconds of grace.
   let confirmingDeleteId: string | null = null;
   const canDelete = (p: Photo, now: number) => !!p.isOwn && now - Number(p.takenAt) < undoWindowMs;
@@ -110,12 +127,38 @@
 
   let settingsOpen = false;
   let showFeedback = false;
-  let screenFlash = false;       // selfie screen-flash
   let torchSupported = false;    // hardware torch (back camera, Android Chrome)
   let torchOn = false;           // what the LAMP is doing, read back from the track — not our intent
   let torchRefused = false;      // proven, on this device, not to work at all
   let torchToldOnce = false;
-  let flashArmed = false;        // when armed, the torch fires for the shot (and lights video)
+  /* ── What the flash button remembers ──────────────────────────────────────────
+     ONE preference per CAPTURE TYPE, and none at all per lens.
+
+     It used to be the other way around, as two separate flags: `flashArmed` drove the hardware
+     torch and existed only on the back camera, `screenFlash` drove a white screen fill and existed
+     only on the front one. So the setting was keyed on which way the camera pointed — arm the
+     flash, flip to the selfie camera, and it was off again; flip back and it had been reset.
+
+     Front and back are the same decision made with different hardware, so they share a flag and
+     the MECHANISM is chosen at capture time (torch where there is one, screen fill on the selfie
+     camera). Photo and video are genuinely different decisions — a pulse for a still against a
+     lamp left on for a whole clip, which is a real drain and a real thing to point at people — so
+     those get one flag each. */
+  let flashPhoto = false;
+  let flashVideo = false;
+  /** The armed state of whichever capture type is on screen. Derived — never assign to it; call
+   *  setFlash so the value lands in the flag that is actually remembered. */
+  $: flashArmed = videoMode ? flashVideo : flashPhoto;
+  /* Can the flash actually fire in the combination on screen? A lamp if this camera has one;
+     otherwise the screen itself, which lights a selfie STILL but is no use for a selfie CLIP —
+     filling the screen for the length of a take would white out the preview they are filming
+     against. Kept as a derived value because both the button and the capture path need it. */
+  $: flashUsable = !ev?.noFlash && (torchSupported || (facing === 'user' && !videoMode));
+  $: flashTitle = flashUsable
+    ? 'Flash'
+    : videoMode
+      ? 'No flash when filming on the selfie camera'
+      : 'No flash on this camera';
   let fillActive = false;
   // Every phone camera blinks the screen when the shutter fires, and without it there was almost
   // nothing to say a photo had been taken — the roll counter drops and a thumbnail appears behind a
@@ -260,6 +303,69 @@
   // the guest payload does not carry the type, and a wrong glyph is worse than a neutral one.
   let missionTick = '\u25CB';
   let confetti: { burst: (n?: number) => void } | undefined;
+
+  // ── Which card is this guest actually holding? ─────────────────────────────
+  //
+  // Several cards exist so a host can hand out different lists. A printed card's QR names its own
+  // set and settles it; most cards are printed WITHOUT one, and those guests joined off the main
+  // event sign — so the round-robin hands them a card, and the card on the table in front of them
+  // may well be a different one.
+  //
+  // So the server leaves that question open (setPending) and we ask it here, behind the trick-list
+  // pill: the moment they want the list is exactly the moment the wrong one matters. Nobody else is
+  // asked — not a guest who scanned a card, not a single-card event, and not anyone who joined
+  // before any of this existed.
+  let cardPending = false;
+  let cardChoices: import('$lib/events').CardChoice[] = [];
+  let cardsHaveQr = false;
+  let cardAsking = false;
+  /** The card they have tapped but not yet confirmed. The choice cannot be taken back, so it is
+   *  worth one deliberate second — and the warning has to be on screen WHEN they decide, not in a
+   *  line of small print above a row of buttons. */
+  let cardConfirming: import('$lib/events').CardChoice | null = null;
+  let cardSaving = false;
+
+  /** Fold the server's answer about the card in. Called everywhere the missions are. */
+  function applyCardStatus(r: import('$lib/events').GuestCardStatus) {
+    cardPending = !!r.setPending;
+    cardChoices = Array.isArray(r.setChoices) ? r.setChoices : [];
+    cardsHaveQr = !!r.cardsHaveQr;
+    // Answered — by us, on another device, or by the host moving them. Either way the question is
+    // gone and so is anything asking it.
+    if (!cardPending) { cardAsking = false; cardConfirming = null; }
+  }
+
+  async function pickCard(key: string | null) {
+    if (cardSaving || !sessionToken) return;
+    cardSaving = true;
+    try {
+      const r = await chooseCard(sessionToken, key);
+      if (Array.isArray(r.challenges)) missions = r.challenges;
+      applyServerDone(r.challengesDone);
+      applyCardStatus(r);
+      cardAsking = false; cardConfirming = null;
+      // Straight on to what they came for. The list is the point; the question was in the way.
+      missionsOpen = true;
+      trackEvent(key ? 'trick_card_chosen' : 'trick_card_none', undefined, ev?.joinCode);
+    } catch (e) {
+      // 409 means somebody already answered this — two taps on a bad connection is the ordinary
+      // way to get here. Their card is settled either way, so take the question away rather than
+      // telling them off.
+      cardPending = false; cardAsking = false; cardConfirming = null;
+      missionsOpen = true;
+      void refreshMissions();
+      const msg = (e as { message?: string })?.message;
+      if (msg && !/already/i.test(msg)) showToast(msg, true);
+    } finally { cardSaving = false; }
+  }
+
+  /** The trick-list pill. One question stands between some guests and their list. */
+  function openTrickList() {
+    if (cardPending && cardChoices.length > 1) { cardAsking = true; cardConfirming = null; return; }
+    missionsOpen = true;
+    void refreshMissions();
+    trackEvent('mission_list_opened', undefined, ev?.joinCode);
+  }
   $: missionsLeft = missions.filter((m) => !missionsDone.includes(m.id));
   $: armedText = missions.find((m) => m.id === armed)?.text ?? '';
   const isDone = (id: string) => missionsDone.includes(id);
@@ -281,7 +387,7 @@
   let emailNoteDismissed = false;
   // The warning only matters once there is something to LOSE. Before the first shot, switching
   // browsers costs nothing, and a notice about it is noise on a screen they have just arrived at.
-  $: switchRisk = !!inAppName && !emailNoteDismissed && (serverRemaining < (ev?.maxPhotos ?? 0) || galleryPhotos.length > 0);
+  $: switchRisk = !!inAppName && !emailNoteDismissed && (serverRemaining < (ev?.maxPhotos ?? 0) || ownCount > 0);
   async function attachEmail() {
     if (!sessionToken || emailBusy) return;
     const v = emailDraft.trim();
@@ -361,8 +467,22 @@
   // This screen is the guest's OWN roll and nothing else. Browsing everyone's photos is what the
   // shared gallery is for, and having both was two half-galleries instead of one of each.
   // othersCount survives because it answers "is there anything over there worth linking to".
-  $: ownCount = galleryPhotos.filter((p) => p.isOwn).length;
-  $: othersCount = galleryPhotos.length - ownCount;
+  //
+  // Both counts now come from the SERVER, and have to: the roll asks for `own=true`, so the array
+  // it holds is this guest's shots and nothing else. Deriving "how many of everyone else's are
+  // there" by subtraction from an own-only array gives 0 every time — which would have quietly
+  // removed the link to the shared gallery for every guest. Same reasoning for ownCount: it is an
+  // answer about the event, not about the page's current array (which ?highlightsOnly can shrink).
+  let ownCount = 0;
+  let othersCount = 0;
+  /** Take the counts off a photos response, falling back to counting the rows for an older API. */
+  function applyCounts(r: { ownCount?: number; othersCount?: number; photos?: Photo[] }) {
+    ownCount = r.ownCount ?? (r.photos ?? []).filter((p) => p.isOwn).length;
+    othersCount = r.othersCount ?? 0;
+  }
+  // Still filtered here, and deliberately: the server sending only this guest's shots is an
+  // optimisation, and the rule that this screen is their own roll is not something to leave resting
+  // on a query parameter.
   $: shownPhotos = galleryPhotos.filter((p) => p.isOwn);
   let revealMsg = '';
   let lbOpen = false;
@@ -395,7 +515,21 @@
   $: showShapes = (allowedAspects || []).some((a) => a !== '1:1');
   $: hasEventInfo = showShapes || videoMaxSecs > 0;
 
+  /** Named, so onDestroy can actually remove it. Inline it was unremovable: Camera is destroyed
+   *  and recreated on every route move, so listeners accumulated and ALL of them fired on a
+   *  bfcache restore, each racing restoreIfSessionExists(). That is precisely the "second
+   *  participant, fresh roll, top-up stranded on the old row" failure the comment below says this
+   *  listener exists to prevent — the guard was creating the bug it was written to stop. */
+  const onPageShow = (e: Event) => {
+    if ((e as PageTransitionEvent).persisted) void restoreIfSessionExists();
+  };
+
   onMount(async () => {
+    // Before anything else: Chrome fires beforeinstallprompt once, early, and a listener attached
+    // after it has fired never hears it — the offer would then be impossible for that visit.
+    initInstall();
+    installedAlready = isStandalone();
+    iosInstall = isIOSInstall();
     try {
       orientMq = window.matchMedia('(orientation: landscape)');
       orientMq.addEventListener('change', () => { readOrientation(); readTilt(); });
@@ -404,7 +538,14 @@
     } catch { /* no matchMedia: the notice simply never shows */ }
     try {
       ev = await getEvent(identifier);
+      // The way back for the installed app, refreshed every time the event opens — not only on the
+      // join that created the session, or a guest who joined last week would never be remembered.
+      if (typeof location !== 'undefined') rememberEvent(ev.joinCode, location.pathname);
     } catch {
+      // An event that is over and purged must not become a trap: the launcher would keep opening
+      // this same dead page, and the app would look permanently broken with no way to type a new
+      // code. Drop the pointer so the next launch offers the way in instead.
+      if (typeof location !== 'undefined') forgetEventAt(location.pathname);
       fatal = 'Event not found';
       return;
     }
@@ -412,7 +553,11 @@
     // billing is off — the server resolves which to send).
     videoMaxSecs = ev.videoSeconds ?? 0;
     // The server ceiling, not the event tier — see the upload handler for why they differ.
-    try { videoHardMaxSecs = (await getConfig()).videoHardMaxSeconds ?? 600; } catch { /* keep the default */ }
+    try {
+      const cfg = await getConfig();
+      videoHardMaxSecs = cfg.videoHardMaxSeconds ?? 600;
+      if (cfg.photoDeleteWindowSeconds) undoWindowMs = cfg.photoDeleteWindowSeconds * 1000;
+    } catch { /* keep the defaults */ }
     // Apply the event's theme straight away so the JOIN screen (button, colours) is themed too —
     // applyEventTheme is contrast-guarded and falls back to the warm default for no-theme events.
     applyEventTheme(ev.theme);
@@ -475,6 +620,7 @@
         myEmail = me.participant?.email ?? null;
         missions = Array.isArray(me.challenges) ? me.challenges : [];
         applyServerDone(me.challengesDone);
+        applyCardStatus(me);
         if (me.challengeTick) missionTick = me.challengeTick;
         await enterCamera();
         return;
@@ -491,7 +637,7 @@
     // so a guest who had been on the join screen sees the name form again and can join a SECOND
     // time — a new participant, a fresh roll, and any top-up they bought stranded on the old row.
     // pageshow is the only event that fires in that case.
-    window.addEventListener('pageshow', (e) => { if ((e as PageTransitionEvent).persisted) void restoreIfSessionExists(); });
+    window.addEventListener('pageshow', onPageShow);
     // Refresh the camera list if one is plugged in/out mid-session (hot-plug).
     navigator.mediaDevices?.addEventListener?.('devicechange', refreshCameras);
   });
@@ -558,6 +704,21 @@
   // safe area). Measured clearance was 4px instead of the 12 the rule asks for, and on a notched
   // phone that offset grows while the rail's top does not — which closes the gap and puts the
   // banner back on top of the icons. That is the bug we just fixed, latent again.
+  // The brightness pill sits directly under the icon row, with the same gap above it that the row
+  // itself has — so it is anchored to the topbar's BOTTOM EDGE rather than a hard-coded offset.
+  // .topbar is `padding: 16px 20px`, so its height already is icons + one padding above + one
+  // below; landing the pill's top edge on it spends that lower padding as the gap. Measured because
+  // the row's height is not ours to predict: the counter, the mission chip and the demo nav all
+  // change it, and a guessed 70px was both wrong and silently wrong.
+  let topbarEl: HTMLElement | undefined;
+  let topbarH = 0;
+  let topbarRO: ResizeObserver | null = null;
+  function measureTopbar() { if (topbarEl) topbarH = topbarEl.offsetHeight; }
+  $: if (topbarEl && !topbarRO && typeof ResizeObserver !== 'undefined') {
+    topbarRO = new ResizeObserver(measureTopbar);
+    topbarRO.observe(topbarEl);
+  }
+
   let noteEl: HTMLElement | undefined;
   let noteBottom = 0;
   let noteRO: ResizeObserver | null = null;
@@ -593,26 +754,151 @@
   let bulkSaving = false;
   let bulkProgress = '';
   let bulkDone = '';
-  async function saveWholeRoll() {
-    const mine = galleryPhotos.filter((p) => p.isOwn);
-    if (!mine.length || bulkSaving) return;
-    bulkSaving = true; bulkProgress = `0/${mine.length}`;
+  // ── Downloading your own roll ───────────────────────────────────────────────
+  // The same two questions the event gallery asks, in the same order, through the same components:
+  // WHAT (all of them / only the ones this device has not got / hand-picked), then HOW (separate
+  // files or one zip).
+  //
+  // This was a single "Save all" that answered both questions silently — always everything, always
+  // files. So a guest who had already saved half their roll had no way to ask for just the rest,
+  // and the zip existed on every screen except the one most guests actually see.
+  // ── Hearts on your own roll ─────────────────────────────────────────────────
+  // The same control the event gallery draws, from the same component. The point here is the other
+  // direction: this is where you find out that the shot YOU took picked up eleven hearts.
+  let heartCounts: Record<string, number> = {};
+  let heartMine = new Set<string>();
+
+  async function loadHearts() {
+    if (!ev?.heartsEnabled || !ev?.joinCode) return;
     try {
-      const items = mine.map((p) => ({
-        id: p.id,
-        url: p.url,
-        filename: `snapdini-${new Date(p.takenAt).toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${p.mediaType === 'video' ? 'mp4' : 'jpg'}`,
-      }));
+      const r = await getHearts(ev.joinCode, sessionToken ?? undefined);
+      heartCounts = r.hearts;
+      heartMine = new Set(r.mine);
+    } catch { /* counts are decoration; never break the roll over them */ }
+  }
+
+  async function toggleHeart(p: Photo, want: boolean) {
+    if (!sessionToken) return;
+    // Only the DELTA is optimistic. The server's own total replaces it on reply — guessing the
+    // total is what drifts when two people press at once.
+    const before = heartCounts[p.id] ?? 0;
+    heartCounts = { ...heartCounts, [p.id]: Math.max(0, before + (want ? 1 : -1)) };
+    const mine = new Set(heartMine);
+    want ? mine.add(p.id) : mine.delete(p.id);
+    heartMine = mine;
+    try {
+      const r = await setHeart(p.id, sessionToken, want);
+      heartCounts = { ...heartCounts, [p.id]: r.hearts };
+    } catch {
+      heartCounts = { ...heartCounts, [p.id]: before };
+      const undo = new Set(heartMine);
+      want ? undo.delete(p.id) : undo.add(p.id);
+      heartMine = undo;
+      showToast('Could not save that', true);
+    }
+  }
+
+  let selecting = false;
+  let selectedIds = new Set<string>();
+  let dlScopeOpen = false;
+  let choosing: { list: Photo[]; ids?: string[] } | null = null;
+
+  $: mineAll = galleryPhotos.filter((p) => p.isOwn);
+  $: mineNew = mineAll.filter((p) => !saved.has(p.id));
+
+  function toggleSelecting() { selecting = !selecting; selectedIds = new Set(); }
+
+  function onRollTap(p: Photo, i: number) {
+    if (!selecting) { lbIndex = i; lbOpen = true; return; }
+    const next = new Set(selectedIds);
+    next.has(p.id) ? next.delete(p.id) : next.add(p.id);
+    selectedIds = next;
+  }
+
+  function beginDownload() {
+    if (!allowDownloads) { showToast('Downloads are off for this event', true); return; }
+    if (selecting) {
+      const list = mineAll.filter((p) => selectedIds.has(p.id));
+      if (!list.length) { showToast('Tap the shots you want first'); return; }
+      offerDownload(list, list.map((q) => q.id));
+      return;
+    }
+    // Ask WHAT whenever there is more than one shot. An earlier version skipped the sheet when
+    // "all" and "only the new ones" named the same photos — but "pick them myself" is always a
+    // different answer, so with a fully-saved roll the download just started with no way to narrow
+    // it. One photo is the only case with nothing to decide.
+    if (mineAll.length <= 1) { offerDownload(mineAll); return; }
+    dlScopeOpen = true;
+  }
+
+  function pickDownloadScope(scope: 'all' | 'favourites' | 'select' | 'new') {
+    dlScopeOpen = false;
+    if (scope === 'select') {
+      if (!selecting) toggleSelecting();
+      showToast('Tap the shots you want, then Download');
+      return;
+    }
+    // A subset has to travel as explicit ids, or the server hands back the whole event and quietly
+    // undoes the choice. 'favourites' is the host's axis and is not offered here.
+    if (scope === 'new') { offerDownload(mineNew, mineNew.map((q) => q.id)); return; }
+    offerDownload(mineAll);
+  }
+
+  function offerDownload(list: Photo[], ids?: string[]) {
+    if (!list.length) return;
+    choosing = { list, ids };
+  }
+
+  function startZip(ids?: string[]) {
+    choosing = null;
+    if (!ev) return;
+    if (selecting) toggleSelecting();
+    showToast('Preparing your download…');
+    // The token is what makes an own-roll zip possible before the reveal; after it the server does
+    // not need it, and passing it anyway keeps one code path instead of two.
+    location.href = zipHref(ev.joinCode, ids, sessionToken ?? undefined);
+  }
+  function chooseZip() { startZip(choosing?.ids); }
+  function chooseFiles() {
+    const list = choosing?.list ?? [];
+    choosing = null;
+    void saveAsFiles(list);
+  }
+
+  // One photo, from its own card — the same control the event gallery puts there, from the same
+  // component. One at a time on purpose: this is a per-card control, and two in flight would leave
+  // the second's outcome landing on a card the guest has already scrolled past.
+  let savingOne: string | null = null;
+  async function saveOne(p: Photo) {
+    if (savingOne) return;
+    savingOne = p.id;
+    try {
+      const out = await savePhotoByUrl(p.url, downloadFilename(p));
+      // Only an outcome that actually reached the device marks the card. A cancelled share is the
+      // guest's decision and says nothing; a failure must not claim they have it.
+      if ((out === 'shared' || out === 'downloaded') && ev) saved = markSaved(ev.joinCode, [p.id]);
+      else if (out === 'failed') showToast('Could not save that one', true);
+    } finally { savingOne = null; }
+  }
+
+  async function saveAsFiles(list: Photo[]) {
+    if (!list.length || bulkSaving) return;
+    bulkSaving = true; bulkProgress = `0/${list.length}`;
+    try {
+      const items = list.map((q) => ({ id: q.id, url: q.url, filename: downloadFilename(q) }));
       const r = await saveMany(items, (pr: SaveManyProgress) => (bulkProgress = `${pr.done}/${pr.total}`));
       if (r.savedIds.length && ev) saved = markSaved(ev.joinCode, r.savedIds);
-      if (r.cancelled) { showToast(r.saved ? `Stopped — ${r.saved} saved` : 'Stopped'); bulkDone = ''; }
+      if (r.cancelled) { showToast(r.saved ? `Stopped — ${r.saved} downloaded` : 'Stopped'); bulkDone = ''; }
       else {
-        showToast(`${r.saved} photo${r.saved === 1 ? '' : 's'} saved`);
-        // Saving a roll is slow and batched, and a toast has gone by the time the last batch lands.
-        // The button says so itself for a few seconds, so "did that finish?" has an answer on screen.
-        bulkDone = `✓ Saved ${r.saved}`;
+        showToast(`${r.saved} photo${r.saved === 1 ? '' : 's'} downloaded`);
+        // Saving is slow and batched, and a toast has gone by the time the last batch lands. The
+        // button says so itself for a few seconds, so "did that finish?" has an answer on screen.
+        bulkDone = `✓ Downloaded ${r.saved}`;
         setTimeout(() => (bulkDone = ''), 4000);
       }
+      // The selection has been spent — leaving it on invites a second, accidental download of the
+      // same photos.
+      if (selecting) toggleSelecting();
     } catch { showToast('Could not save those', true); }
     finally { bulkSaving = false; bulkProgress = ''; }
   }
@@ -625,6 +911,7 @@
       // Merged, not assigned — see missionsDoneLocal. `missions` is set first, because the merge
       // uses it to decide which local ticks are still on offer.
       applyServerDone(me.challengesDone);
+      applyCardStatus(me);
       if (me.challengeTick) missionTick = me.challengeTick;
     } catch { /* keep what we have */ }
   }
@@ -675,19 +962,33 @@
     // Leave the rest of the app's toasts where they belong.
     if (typeof document !== 'undefined') document.documentElement.style.removeProperty('--toast-bottom');
     clearInterval(undoTimer);
+    clearTimeout(lensHintTimer);
     try { orientMq?.removeEventListener('change', readOrientation); } catch { /* ignore */ }
     stopTilt?.();
     noteRO?.disconnect();
+    topbarRO?.disconnect();
     // onDestroy also runs during SSR, where `document` is undefined — guard it.
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
     if (typeof navigator !== 'undefined') navigator.mediaDevices?.removeEventListener?.('devicechange', refreshCameras);
-    if (typeof window !== 'undefined') { window.removeEventListener('online', autoRetry); window.removeEventListener('pagehide', stopCamera); }
+    if (typeof window !== 'undefined') { window.removeEventListener('online', autoRetry); window.removeEventListener('pagehide', stopCamera); window.removeEventListener('pageshow', onPageShow); }
     if (retryTimer) clearInterval(retryTimer);
+    nativeWake?.();   // a pending 'they came back' listener outlives the component otherwise
     stopCamera();
   });
 
   async function doJoin() {
     if (!joinName.trim()) { showToast('Enter your name', true); return; }
+    // Asking to be emailed the photos and leaving no address is a promise we cannot keep: the
+    // switch went on, the join succeeded, and nothing was ever sent. The address is still optional
+    // for everybody else — this is required only because THEY asked for it.
+    // `!myEmail` matters: a returning guest whose address we already hold must not be made to type
+    // it again just because the box is ticked and the field is blank. We only need SOMEWHERE to
+    // send them — not this particular field filled in.
+    if (joinWantsPhotos && !joinEmail.trim() && !myEmail) {
+      showToast('Add your email so we know where to send your photos', true);
+      document.getElementById('join-email')?.focus();
+      return;
+    }
     if (joinEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(joinEmail)) { showToast("That email doesn't look right", true); return; }
     // Asked HERE, and nowhere else, because iOS only grants it from inside a user gesture — and
     // this tap is already the one that leads to the camera prompt, so the two land together as one
@@ -709,7 +1010,17 @@
         }
         return;
       }
-      const r = await joinEvent(identifier, joinName.trim(), joinEmail.trim() || undefined);
+      // The set named by a printed card's QR (`?set=b`), straight off the address bar. The server
+      // has always honoured it and the QR endpoint has always printed it; nothing in between ever
+      // carried it, so every guest who scanned a card was quietly handed whatever the round-robin
+      // said next. Read here rather than from $page so the /app route's join works the same way.
+      // The server validates it against the event's own sets, so a stale or edited link cannot put
+      // a guest on a card that does not exist.
+      const printedSet = (() => {
+        try { return new URLSearchParams(window.location.search).get('set') || undefined; }
+        catch { return undefined; }
+      })();
+      const r = await joinEvent(identifier, joinName.trim(), joinEmail.trim() || undefined, printedSet);
       sessionToken = r.sessionToken;
       serverRemaining = r.photosRemaining;
       canBuyShots = !!r.canBuyShots;
@@ -719,6 +1030,7 @@
       wantsPhotos = !!r.wantsPhotos;
       missions = Array.isArray(r.challenges) ? r.challenges : [];
       applyServerDone(r.challengesDone);
+      applyCardStatus(r);
       if (r.challengeTick) missionTick = r.challengeTick;
       saveSession(r.joinCode, r.sessionToken);
       trackEvent('joined', undefined, r.joinCode);
@@ -772,8 +1084,41 @@
   $: if (ev && typeof localStorage !== 'undefined') { try { localStorage.setItem('savedev_' + ev.joinCode, saveToDevice ? '1' : '0'); } catch { /* ignore */ } }
 
   // Attach a stream for the given constraints and wire up the preview/track.
+  /**
+   * Take stereo when the microphone actually has it, rather than assuming either way.
+   *
+   * `channelCount: { ideal: 2 }` in the original request is a preference the browser is free to
+   * ignore, and Chrome on Android answers it with mono on every device tried — even ones whose own
+   * camera app records stereo, because that app uses the platform's camera audio path and this is
+   * the WebRTC one. But "the browser did not volunteer it" is not the same claim as "the device
+   * cannot do it", and the track itself can be asked: getCapabilities reports the real range.
+   *
+   * So if the hardware says it has two channels and we were handed one, ask again explicitly. A
+   * refusal costs nothing — applyConstraints rejects, the track keeps the mono it already had, and
+   * the clip records exactly as it would have. Which is why this is worth attempting and why
+   * `exact: 2` must never go in the ORIGINAL request: there, a refusal fails the whole
+   * getUserMedia call and the clip records with no sound at all.
+   *
+   * MEASURED, so nobody has to go round this again: on a current Android phone whose own camera app
+   * records 256k STEREO, getCapabilities() on the getUserMedia track reports no second channel at
+   * all — not stereo refused, stereo absent. The upgrade below never even fires there, which is the
+   * correct outcome and the reason it is written as a capability check rather than a forced retry.
+   * There is no constraint that produces stereo on that path; the way to a stereo clip is the
+   * phone's own camera app, which the video-quality setting already offers.
+   */
+  async function preferStereo() {
+    const t = stream?.getAudioTracks?.()[0];
+    if (!t?.getCapabilities || !t.applyConstraints) return;
+    try {
+      const max = (t.getCapabilities() as MediaTrackCapabilities).channelCount?.max ?? 1;
+      if (max < 2 || (t.getSettings?.().channelCount ?? 1) >= 2) return;
+      await t.applyConstraints({ channelCount: { exact: 2 } });
+    } catch { /* mono it is — the track is untouched and still recording */ }
+  }
+
   async function attachCamera(constraints: MediaStreamConstraints) {
     stream = await navigator.mediaDevices.getUserMedia(constraints);
+    if (constraints.audio) await preferStereo();
     if (videoEl) { videoEl.srcObject = stream; await videoEl.play().catch(() => {}); }
     track = stream.getVideoTracks()[0] || null;
     // Pin the exact camera we landed on. Without this, re-acquiring for a quality/mode change
@@ -791,6 +1136,35 @@
     else if (track?.label) {
       if (/front|user|selfie|face/i.test(track.label)) facing = 'user';
       else if (/back|rear|environment|world/i.test(track.label)) facing = 'environment';
+    }
+    // WHICH LENS IS THE "NORMAL" ONE — the 1x wide, not the ultra-wide and not the telephoto.
+    //
+    // Nothing names a lens's role: getCapabilities() reports zoom and resolution, never focal
+    // length, and on Android the label is usually "camera2 0, facing back", which says nothing at
+    // all (see $lib/lensName for why we do not guess from names). But there is an answer that needs
+    // no heuristic and works everywhere: a getUserMedia call that asks for facingMode and does NOT
+    // name a device is answered with the PLATFORM'S OWN DEFAULT for that side, and that default is
+    // the main lens. So we do not infer which one is normal — we ask, once, and remember what came
+    // back. Only recorded when we did not name a device, or we would just be recording our own
+    // previous choice.
+    const askedForDevice = !!(constraints.video as MediaTrackConstraints | undefined)?.deviceId;
+    if (!askedForDevice && liveId && (facing === 'user' || facing === 'environment')
+        && normalLens[facing] !== liveId) {
+      normalLens = { ...normalLens, [facing]: liveId };
+      try { localStorage.setItem(NORMAL_LENS, JSON.stringify(normalLens)); } catch { /* private mode */ }
+    }
+    // Knowing which lens is standard is only half of it — flip still has to LAND there. Without a
+    // favourite, flip names no device and the browser is free to answer with whichever lens it
+    // likes, which is how a phone with three rear cameras gives you a different one each time.
+    // So the standard lens becomes the favourite the first time we identify it.
+    //
+    // ONLY when the side has no answer recorded at all. Un-starring writes '' rather than deleting
+    // the key precisely so that it reads as "this guest chose none" and not "not asked yet" — a
+    // preference we re-applied over the top of their choice would be worse than never having one.
+    if (liveId && (facing === 'user' || facing === 'environment')
+        && lensFavs[facing] === undefined && normalLens[facing] === liveId) {
+      lensFavs = { ...lensFavs, [facing]: liveId };
+      try { localStorage.setItem(LENS_FAVS, JSON.stringify(lensFavs)); } catch { /* private mode */ }
     }
     // Tap-to-focus only works where the device exposes focus controls (some Android
     // Chrome); iOS Safari never does. Detect it so we don't show a fake focus ring.
@@ -841,6 +1215,32 @@
   // collapses), so we request a sane ceiling per the chosen quality. 'Standard' (1080p30) is the
   // reliable default; bump to High or drop to Smooth from the camera settings.
   const RES_PHOTO = { width: { ideal: 7680 }, height: { ideal: 4320 } };
+
+  /* What the microphone is asked for — and, more to the point, what it is asked NOT to do.
+   *
+   * `audio: true` does not mean "record the sound in the room". It opts into the browser's VOICE
+   * CALL chain: echo cancellation, noise suppression and automatic gain, three filters written to
+   * make one person talking into a handset intelligible to someone on the other end of a phone
+   * line. Every assumption behind them is wrong here. Music is not noise to be removed, but noise
+   * suppression cannot tell the difference and takes it out in swirling chunks; echo cancellation
+   * hunts for anything resembling playback, which at a party is the speakers; and auto gain rides
+   * the level up in the quiet bits and slams it down on every cheer, so the room appears to breathe.
+   * The result is thin, watery, pumping sound on top of a perfectly good picture.
+   *
+   * Turning all three off is what "record what it actually sounds like" means. The trade is real
+   * and deliberate: with no gain riding, a quiet voice stays quiet and a loud room stays loud. That
+   * is the right trade for a camera at an event — the sound people want back is the room.
+   *
+   * Stereo and 48k are ideals, not demands, so a phone that only offers mono simply gives mono
+   * rather than failing the whole request — which is what happens in practice; see preferStereo for
+   * what was measured and why there is nothing further to try here. */
+  const AUDIO_HQ: MediaTrackConstraints = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    channelCount: { ideal: 2 },
+    sampleRate: { ideal: 48000 },
+  };
   // 'phone' is not a resolution — it means "don't record in the browser at all, hand me to the
   // phone's own camera app". Persisted like the others, so choosing it once makes it the mode.
   type VidQuality = 'high' | 'standard' | 'smooth' | 'phone';
@@ -863,7 +1263,18 @@
   // than discovering it halfway through a clip they cannot re-shoot.
   let benchRunning = false;
   let benchStep: VidQuality | null = null;
-  let benchResult: { results: Record<string, number>; best: VidQuality } | null = null;
+  let benchResult: { results: Record<string, number>; best: VidQuality;
+                     mic: { channels: number; max: number } | null } | null = null;
+
+  /** What the live microphone track reports — measured, not assumed. Null when there is no mic. */
+  function micReport(): { channels: number; max: number } | null {
+    const t = stream?.getAudioTracks?.()[0];
+    if (!t) return null;
+    let max = 0;
+    try { max = (t.getCapabilities?.() as MediaTrackCapabilities | undefined)?.channelCount?.max ?? 0; }
+    catch { /* not every browser implements it */ }
+    return { channels: t.getSettings?.().channelCount ?? 0, max };
+  }
   let benchPrompt = false;
   let benchStored = false;
   // Measured PER EVENT, not per device. localStorage is already per device, so a new phone gets a
@@ -909,11 +1320,41 @@
     recBitrate = Math.min(40_000_000, Math.max(2_000_000, Math.round(w * h * fps * 0.1)));
   }
 
+  /* The last frame that was on screen, held there while the stream is swapped.
+
+     Releasing a camera blanks the <video> instantly, and acquiring the next one takes long enough
+     to read as a fault rather than a transition — the picture drops to black, a spinner appears
+     over nothing, and on a flip or a quality change it happens for no reason the guest can see.
+     Holding the frame they were already looking at turns that into a still: the subject stays put,
+     dimmed, and the spinner reads as "working on it" instead of "something went wrong". */
+  let freezeEl: HTMLCanvasElement | undefined;
+  let frozen = false;
+  let frozenMirrored = false;
+
+  function freezePreview() {
+    const v = videoEl;
+    // readyState < HAVE_CURRENT_DATA means there is no frame to take — first open, or a camera that
+    // never came up. Nothing to hold, so don't pretend: fall through to the existing black.
+    if (!v || !freezeEl || v.readyState < 2 || !v.videoWidth) { frozen = false; return; }
+    try {
+      freezeEl.width = v.videoWidth;
+      freezeEl.height = v.videoHeight;
+      freezeEl.getContext('2d')?.drawImage(v, 0, 0);
+      // The mirror is captured WITH the frame, not read live: a flip changes `facing` before the new
+      // stream arrives, and a held selfie frame re-mirrored mid-swap flips the picture sideways
+      // while it is standing still — the one moment it is most obvious.
+      frozenMirrored = facing === 'user';
+      frozen = true;
+    } catch { frozen = false; }
+  }
+
   async function startCamera() {
+    if (recFlush) await recFlush;   // never yank the tracks out from under a recorder still flushing
+    freezePreview();                // take the frame BEFORE the tracks go and the <video> blanks
     stopCamera();
     cameraStarting = true;   // show a spinner while the camera (re)acquires — the brief black flash now reads as "working"
     // Only grab the mic in video mode (avoids an unnecessary mic prompt while taking photos).
-    const audio = videoMaxSecs !== 0 && videoMode;
+    const audio = videoMaxSecs !== 0 && videoMode ? AUDIO_HQ : false;
     // 'phone' never records in-browser, so it never asks for a resolution.
     const q = VQ_RES[videoQuality === 'phone' ? 'standard' : videoQuality];
     const res = videoMode
@@ -1019,6 +1460,11 @@
         reportClientError(`camera: ${judged instanceof Error ? judged.name + ' ' + judged.message : 'failed'}`,
           denied ? 'camera-denied' : 'camera', ev?.joinCode);
         if (denied && !permissionReported) { permissionReported = true; trackEvent('camera_permission_denied', undefined, ev?.joinCode); }
+        // The camera did not come back, so the last known torch answer is no longer about anything.
+        // stopCamera() deliberately leaves it alone (see the note there) precisely so a re-acquire
+        // does not flicker the flash button — which means THIS is the path that has to clear it, or
+        // a failed start leaves a flash control that looks live and does nothing.
+        torchSupported = false;
         return;
       }
     }
@@ -1063,17 +1509,64 @@
     }
   }
 
-  function stopCamera() {
-    // Tear down any in-progress recording first so flipping/leaving can't strand the recorder.
-    if (recording) { try { mediaRecorder?.stop(); } catch { /* ignore */ } recording = false; clearInterval(recTimer); }
+  /** Everything except the recorder. Split out so a stop that is still flushing can defer it.
+   *  `only` releases a stream we have ALREADY moved on from: if the camera has since re-acquired,
+   *  stop just those old tracks and leave the live one alone — a deferred release must never reach
+   *  forward and kill the stream that replaced it. */
+  function releaseStream(only?: MediaStream) {
+    if (only && only !== stream) { only.getTracks().forEach((t) => t.stop()); return; }
     if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
     // Detach the stream from the <video> too — some browsers keep the "camera in use" indicator
     // lit while a stream is still bound to a live element, even after its tracks are stopped.
     if (videoEl) { try { videoEl.pause(); } catch { /* */ } videoEl.srcObject = null; }
     track = null;
     focusSupported = false;
-    torchSupported = false;   // (the hardware torch turns off with the track; flashArmed stays as the user's choice)
+    /* torchSupported is deliberately NOT cleared here. Stopping the track does not change whether
+       this camera HAS a lamp — only attachCamera can answer that, and it answers definitively the
+       moment the new stream arrives. Clearing it meant every mode switch ran
+       supported -> false -> supported, and the flash button visibly flicked to its struck-through
+       "no flash here" state and back for the length of a getUserMedia call. With flash on for both
+       photo and video there is now no transition to see at all, which is the honest rendering: the
+       answer never actually changed. The error paths below clear it, so a camera that fails to come
+       back cannot leave a live-looking button behind. */
     torchOn = false;          // stopping the track kills the lamp, so our record of it must follow
+  }
+
+  // Settles once the recorder has finished flushing; null when nothing is in flight. This exists
+  // because `recording` CANNOT answer "is it safe to stop the tracks yet" — see stopRecorder.
+  let recFlush: Promise<void> | null = null;
+
+  /** Stop the recorder and hand back a promise that settles once it has actually flushed. */
+  function stopRecorder(): Promise<void> {
+    const mr = mediaRecorder;
+    if (!mr || mr.state === 'inactive') return recFlush ?? Promise.resolve();
+    recFlush = new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => { if (done) return; done = true; recFlush = null; resolve(); };
+      mr.addEventListener('stop', finish, { once: true });
+      setTimeout(finish, 2000);   // the camera light must not stay on if that event never arrives
+      try { mr.stop(); } catch { finish(); }
+    });
+    return recFlush;
+  }
+
+  function stopCamera() {
+    // MediaRecorder.stop() is ASYNCHRONOUS. It flushes whatever the encoders still hold and only
+    // THEN fires dataavailable and stop. This used to stop the recorder and kill the tracks in the
+    // very next statement, which cut that flush off mid-way — and because an audio encoder buffers
+    // in larger chunks than a video one, the part that went missing was the AUDIO tail.
+    //
+    // That is exactly the shape the bug had in the wild: video complete, audio short, both streams
+    // starting at 0.000. Measured on real uploads, audio came up 165ms, 248ms and once 1410ms
+    // shorter than its own video. Intermittent because it depends on how much the encoders happened
+    // to be holding when the tracks died.
+    // NOTE the guard is the flush promise, NOT `recording`. MediaRecorder.stop() sets state to
+    // inactive SYNCHRONOUSLY and flushes afterwards, and toggleRecord clears `recording` on the
+    // line after it stops — so both of those read "not recording" while the tail is still in the
+    // encoder. Gating on either one is what let the tracks die mid-flush.
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') { recording = false; clearInterval(recTimer); stopRecorder(); }
+    if (recFlush) { const old = stream ?? undefined; recFlush.then(() => releaseStream(old)); return; }
+    releaseStream();
   }
 
   // Quick front/back toggle. Clears any specific device pick so it follows facing again.
@@ -1107,11 +1600,21 @@
   // the camera for everybody to teach a gesture most guests will never want; a single line at the
   // moment it is true costs nothing and is ignorable.
   const LENS_HINT = 'snap_lenshint';
-  $: if (screen === 'camera' && cameras.length > 1 && typeof localStorage !== 'undefined') {
+  let lensHintTimer: ReturnType<typeof setTimeout> | undefined;
+  $: if (screen === 'camera' && cameras.length > 1 && !lensHintTimer && typeof localStorage !== 'undefined') {
     try {
       if (!localStorage.getItem(LENS_HINT)) {
-        localStorage.setItem(LENS_HINT, '1');
-        showToast('Tip: hold the flip button to pick a lens');
+        // Deliberately delayed, and the "said it" flag is NOT written until it actually shows.
+        // showToast is a single slot with no queue (lib/toast.ts), so a tip fired the instant the
+        // camera appears is simply replaced by whatever the join flow says next — while the old
+        // code had already recorded the tip as delivered. It was therefore spent, once per device,
+        // on a toast nobody ever saw. 3.5s clears the 2.6s a toast lives for, and costs nothing:
+        // the flip button carries a permanent dot (.round.has-more) for anyone looking sooner.
+        lensHintTimer = setTimeout(() => {
+          if (screen !== 'camera') return;
+          showToast('Tip: hold the flip button to pick a lens');
+          try { localStorage.setItem(LENS_HINT, '1'); } catch { /* ignore */ }
+        }, 3500);
       }
     } catch { /* ignore */ }
   }
@@ -1120,6 +1623,15 @@
   // browser feels like; someone who prefers the ultra-wide for the look of it had to open the
   // picker every single time. One favourite per side, so flip stays a single tap and lands where
   // they want it. Kept on the device — it is about this phone's lenses, not about any event.
+  // The lens the platform hands back when we ask for a side and name no device — i.e. the normal
+  // one. Kept per side, per device, because it is a fact about this phone's hardware.
+  const NORMAL_LENS = 'snap_lensnormal';
+  let normalLens: { user?: string; environment?: string } = {};
+  try { normalLens = JSON.parse(localStorage.getItem(NORMAL_LENS) || '{}') || {}; } catch { normalLens = {}; }
+  /** True for the lens this phone treats as standard on that side. */
+  const isNormalLens = (c: { id: string; facing: string }) =>
+    !!c.facing && normalLens[c.facing as 'user' | 'environment'] === c.id;
+
   const LENS_FAVS = 'snap_lensfav';
   let lensFavs: { user?: string; environment?: string } = {};
   try { lensFavs = JSON.parse(localStorage.getItem(LENS_FAVS) || '{}') || {}; } catch { lensFavs = {}; }
@@ -1133,7 +1645,10 @@
     !!c.facing && lensFavs[c.facing] === c.id;
   function toggleFav(c: { id: string; facing: 'user' | 'environment' | '' }) {
     if (!c.facing) return;
-    lensFavs = { ...lensFavs, [c.facing]: isFav(c) ? undefined : c.id };
+    // '' is "this guest wants no favourite on this side", which is a different answer from the key
+    // being absent ("we have not worked one out yet"). Both are falsy, so flip treats them the same
+    // and falls back to facingMode; only the auto-pick in attachCamera tells them apart.
+    lensFavs = { ...lensFavs, [c.facing]: isFav(c) ? '' : c.id };
     try { localStorage.setItem(LENS_FAVS, JSON.stringify(lensFavs)); } catch { /* ignore */ }
   }
 
@@ -1153,12 +1668,12 @@
     } catch { return null; }
   }
 
-  // Said once, and only after the lamp has actually failed to light. Withdraws the button too —
-  // a control that provably does nothing is worse than no control.
+  // Said once, and only after the lamp has actually failed to light. Greys the button out too (via
+  // torchSupported → flashUsable): a control that provably does nothing should not look live.
   function noteTorchRefused() {
     torchRefused = true;
     torchSupported = false;
-    flashArmed = false;
+    setFlash(false);
     if (torchToldOnce) return;
     torchToldOnce = true;
     showToast('This browser won’t let us use the flash.');
@@ -1172,9 +1687,17 @@
    *  was driven once at the start of the clip and once at the end, and the button in between was a
    *  control with no wire behind it. applyConstraints works on a live track and the recorder reads
    *  the same track regardless, so there is no reason it cannot follow along. */
+  /** Remember the flash choice against the capture type in front of the guest. */
+  function setFlash(on: boolean) {
+    if (videoMode) flashVideo = on; else flashPhoto = on;
+  }
+
   function toggleFlash() {
-    flashArmed = !flashArmed;
-    if (recording && torchSupported && !ev?.noFlash) void setTorch(flashArmed);
+    // Read the new value from a local, not from flashArmed: that is a reactive derivation and does
+    // not update until Svelte flushes, so driving the lamp off it here would use the OLD state.
+    const on = !flashArmed;
+    setFlash(on);
+    if (recording && torchSupported && !ev?.noFlash) void setTorch(on);
   }
 
   // Drive the hardware torch on/off. Used as a flash pulse for photos and a continuous light for
@@ -1326,13 +1849,18 @@
     // not control. Note what this deliberately does NOT do: launch that app. Choosing an option in
     // a settings menu set the camera going immediately, which is a setting behaving like a button.
     // The two buttons that mean "start now" — the record button, and "Use phone camera" on the
-    // capability prompt — call nativeVideoInput themselves.
-    if (q === 'phone') return;
+    // capability prompt — call openNativeVideo themselves.
+    // Nothing of ours to re-acquire for 'phone' — but if the preview is already dead (they just
+    // backed out of the camera app) then leaving it that way makes a settings change look broken.
+    if (q === 'phone') { resumeIfDead(); return; }
     if (videoMode) await startCamera();   // re-acquire at the new resolution
   }
 
   // Brightness is a CSS filter on the preview (and baked into photo capture).
   $: if (videoEl) videoEl.style.filter = brightness === 1 ? '' : `brightness(${brightness})`;
+  // A camera that failed has no "playing" event coming, so the held frame would sit there for good,
+  // looking like a live preview behind an error nobody can dismiss.
+  $: if (cameraError) frozen = false;
 
   // Tap-to-focus: best-effort. Where the device exposes focus/exposure points of
   // interest we apply them; everywhere we show a focus ring for feedback.
@@ -1652,17 +2180,50 @@
     await applyRecordShape();
   }
 
+  /** The shutter, pressed with nothing left on the roll.
+   *
+   *  It is `aria-disabled`, not `disabled`, so this is reached — and that is the point. A disabled
+   *  button consumes NOTHING: the tap falls through to the viewfinder behind it, and on a phone the
+   *  browser reads that as the start of a text selection and throws its own Copy/Search menu over
+   *  the app. On the most-pressed control in the product, the answer to "why did nothing happen"
+   *  was a system context menu.
+   *
+   *  So it answers, and answers with the way out rather than with a complaint: where there is an
+   *  "ask the host / buy more" panel on screen, focus goes to it — the person is taken to what is
+   *  blocking them, which is the rule in docs/DEVELOPMENT.md. Where there is not, they are at least
+   *  told, which is strictly more than a dead tap. */
+  function announceNoShots() {
+    const cta = oosPanelEl?.querySelector('button') as HTMLButtonElement | null;
+    if (cta) {
+      showToast("That's your roll — here's how to get more.");
+      oosPanelEl?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      cta.focus();
+    } else {
+      showToast("That's your roll — no shots left.", true);
+    }
+  }
+
   async function capturePhoto() {
-    // Guard: one capture at a time, never below 0 remaining, and ONLY when the camera is truly
-    // live (a real frame is decoded). Without the readiness check a failed camera (e.g. incognito)
-    // could still "take" a blank shot and burn a snap — discard instead.
-    if (capturing || photosRemaining <= 0 || cameraError || !stream || !videoEl || !videoEl.videoWidth) return;
+    // Guard: one capture at a time, and ONLY when the camera is truly live (a real frame is
+    // decoded). Without the readiness check a failed camera (e.g. incognito) could still "take" a
+    // blank shot and burn a snap — discard instead.
+    //
+    // The two states the BUTTON advertises are answered out loud; the rest stay silent, because
+    // they are either transient (a double tap mid-capture) or already on screen (cameraError is
+    // rendered as a panel).
+    if (photosRemaining <= 0) { announceNoShots(); return; }
+    if (capturing || cameraError || !stream || !videoEl || !videoEl.videoWidth) return;
     capturing = true;
     // Hardware flash: pulse the torch on and give auto-exposure a moment to settle before the shot.
-    const useFlash = flashArmed && torchSupported && !ev?.noFlash;
+    // The preference is one thing; how to light the shot is another. A lamp if this camera has
+    // one, otherwise the screen itself on the selfie camera — which is the only light a front
+    // camera has ever had.
+    const wantFlash = flashArmed && !ev?.noFlash;
+    const useTorch = wantFlash && torchSupported;
+    const useFill = wantFlash && !torchSupported && facing === 'user';
     try {
-      if (useFlash) { await setTorch(true); await new Promise((r) => setTimeout(r, 260)); }
-      if (screenFlash) { fillActive = true; await new Promise((r) => setTimeout(r, 320)); }
+      if (useTorch) { await setTorch(true); await new Promise((r) => setTimeout(r, 260)); }
+      if (useFill) { fillActive = true; await new Promise((r) => setTimeout(r, 320)); }
       const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
       const { sx, sy, sw, sh } = cropRect(vw, vh, aspectValue(aspect));
       const canvas = document.createElement('canvas');
@@ -1685,15 +2246,37 @@
     }
   }
 
-  function toggleRecord() {
+  // One deferred start at most. Without it, an impatient double-press while the previous clip is
+  // still flushing would queue two starts and the second would fight the first.
+  let startPending = false;
+
+  async function toggleRecord() {
+    // aria-disabled on the button, so this is reached while the camera is broken. Say so rather
+    // than swallowing the press — the error panel may be scrolled out of view.
+    if (cameraError) { showToast(cameraError, true); return; }
     // "Use my own camera" has to mean it everywhere, not just on the switch into video mode.
     // setMode() honoured it; this did not — so the setting persisted, the settings sheet said
     // "my own camera", and pressing record quietly recorded in the browser anyway. Which is the
     // one thing the guest had just chosen not to do, and they chose it because in-browser
     // recording was stuttering on their phone.
-    if (!recording && videoQuality === 'phone') { nativeVideoInput?.click(); return; }
+    if (!recording && videoQuality === 'phone') { openNativeVideo(); return; }
     if (!stream) return;
     if (!recording) {
+      // A NEW RECORDER MUST NOT BE BUILT WHILE THE PREVIOUS ONE IS STILL FLUSHING. Both would sit
+      // on the same audio track, and starting a second encoder on it makes the first one's buffered
+      // tail unreachable — it is simply dropped. The video survives because it has already been
+      // handed over frame by frame, so what lands is a complete picture with the last second of
+      // sound missing, and no gap anywhere to show where it went.
+      //
+      // This is why the clips that lost audio were the ones stopped and restarted quickly: the
+      // faster the restart, the more of the tail was still in the encoder when it got taken away.
+      // Waiting costs a few tens of milliseconds and only ever after a just-finished clip.
+      if (recFlush) {
+        if (startPending) return;
+        startPending = true;
+        try { await recFlush; } finally { startPending = false; }
+        if (recording || !stream) return;   // the world may have moved while we waited
+      }
       // Codec order matters more than any quality setting here, and it was backwards. VP8 was
       // preferred first, which is the one format phones cannot decode in hardware — a 4K VP8 clip
       // is decoded on the CPU and stutters on playback even though the recording is perfect (it
@@ -1716,7 +2299,10 @@
       const mime = types.find((m) => m === '' || MediaRecorder.isTypeSupported(m));
       chunks = [];
       // Bitrate matched to the live stream (matchRecBitrate); crisp without overwhelming the encoder.
-      const recOpts: MediaRecorderOptions = { videoBitsPerSecond: recBitrate, audioBitsPerSecond: 128_000 };
+      // 192k AAC, up from 128k. The picture is given a bitrate matched to what the sensor is actually
+    // producing (matchRecBitrate, up to 40Mbit); spending another 64kbit on the sound is nothing
+    // beside that, and 128k is where stereo music starts to audibly smear.
+    const recOpts: MediaRecorderOptions = { videoBitsPerSecond: recBitrate, audioBitsPerSecond: 192_000 };
       if (mime) recOpts.mimeType = mime;
       mediaRecorder = new MediaRecorder(stream, recOpts);
       mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
@@ -1735,11 +2321,27 @@
         if (videoMaxSecs > 0 && recSecs >= videoMaxSecs) toggleRecord();
       }, 1000);
     } else {
-      mediaRecorder?.stop();
+      stopRecorder();   // tracked, so the quality re-acquire below waits for the flush
       if (torchOn) setTorch(false);
       stopFpsMonitor();
       recording = false; clearInterval(recTimer);
-      // If the clip stuttered, apply the queued quality downgrade now (re-acquires the stream).
+      // A FRESH STREAM PER CLIP WAS TRIED HERE AND MADE IT WORSE. Do not put it back.
+      //
+      // Clips record with their sound ahead of their picture, and the audio track ends short by
+      // exactly the amount it is out. The obvious reading is that the camera is the slow one, so
+      // this re-acquired the stream after every clip to hand the next one fresh tracks. Six clips
+      // recorded that way came out -0.026, -0.175, -0.820, -0.853, -0.918 and -0.997 — five of six
+      // bad, against two of five before the change.
+      //
+      // It is the MICROPHONE that is slow, not the camera. The mic takes up to a second to deliver
+      // its first sample, the muxer rebases the audio track to zero regardless, and everything it
+      // recorded lands that far early. So a just-acquired stream is the WORST thing to record on,
+      // not the best, and the clips that used to come out clean were the ones where the stream had
+      // been alive long enough for the mic to warm up. Re-acquiring guaranteed a cold one every
+      // time. The lead is bounded — it clusters at ~1s, which is the wake-up, not drift.
+      //
+      // The correction lives at ingest instead (audioLeadFrom in app/src/server/images.ts), where
+      // it costs the guest nothing. Leave the stream alone.
       if (pendingQuality) { const q = pendingQuality; pendingQuality = null; setVideoQuality(q); }
       processQueue();   // recording is over — let the queue move again
     }
@@ -1790,6 +2392,51 @@
   // event's limit, so it is held to it strictly; a clip picked from the camera roll was shot outside
   // the app (often deliberately, for 4K the browser cannot manage) and cannot be re-trimmed, so the
   // server keeps it even when it runs over. Defaults to 'capture' — the strict side.
+  /* ── Offering the home-screen install ──────────────────────────────────────
+     Offered the MOMENT Chrome hands us a prompt to fire, not after some number of shots.
+     Installing is only worth anything for the event still to come, so every shot taken before the
+     offer is benefit the guest never gets — and a counter cannot know when the offer is even
+     possible. Chrome decides that, by firing beforeinstallprompt once the install criteria and its
+     own engagement heuristic are met; until then there is nothing to show, and after it there is no
+     reason to wait. So the trigger is that event, and the only question left is whether the guest
+     is in a position to see it.
+
+     Chrome's own banner is suppressed by initInstall(), so this is the only prompt they get.
+     Tracked per event (see pwa.ts) — a different event is a fair second ask, the same one is not. */
+  let installOffer = false;
+  let installHelp = false;     // iOS: the Share-menu instructions, since there is no button to press
+  // Read once on mount rather than reactively: neither answer changes while the camera is open, and
+  // both touch APIs that do not exist during SSR.
+  let installedAlready = false;
+  let iosInstall = false;
+
+  function maybeOfferInstall() {
+    if (installOffer || isStandalone()) return;
+    if (!$canInstall) return;          // iOS, or Chrome has not handed us a prompt to defer yet
+    // Only when it can actually be READ. Showing it marks the event asked, and the offer is final
+    // for that event — so a strip that appears behind the settings sheet, under the spinner, or
+    // mid-clip is not a missed impression, it is the guest's one chance spent without them ever
+    // seeing it.
+    if (screen !== 'camera' || cameraStarting || recording || settingsOpen) return;
+    const code = ev?.joinCode;
+    if (!code || askedAlready(code)) return;
+    markAsked(code);
+    installOffer = true;
+  }
+
+  // Re-evaluated whenever any of these change, so a prompt that arrives while the guest is in the
+  // gallery, mid-recording or under the settings sheet is held and offered the moment they are back
+  // on the camera, rather than being dropped because it turned up at an awkward time.
+  $: if ($canInstall && ev && screen === 'camera' && !cameraStarting && !recording && !settingsOpen) {
+    maybeOfferInstall();
+  }
+
+  async function doInstall() {
+    installOffer = false;
+    const r = await promptInstall();
+    if (r === 'accepted') showToast('Snapdini added to your home screen');
+  }
+
   function enqueue(blob: Blob, mediaType: 'photo' | 'video', ext: string, source: 'capture' | 'upload' = 'capture', extra?: { durationSecs?: number; w?: number; h?: number }) {
     // Read at the moment of the shot and carried on the item, never read again at upload time: a
     // queued capture can sit in IndexedDB across a reload and go up hours later, by which point the
@@ -1850,6 +2497,57 @@
   }
 
   let nativeVideoInput: HTMLInputElement;
+
+  /** Open the phone's own camera app — after giving it back the hardware.
+   *
+   *  Android Chrome refuses the capture intent with "you can't use the camera while you're in a
+   *  call" when the page still holds camera and mic. There is no call: the objection is to OUR
+   *  getUserMedia, and the phone cannot tell the difference. So hand the devices back first.
+   *
+   *  Releasing is safe because the way back is already covered from both directions —
+   *  nativeVideoPicked fires resumeIfDead whether or not they filmed anything, and
+   *  visibilitychange catches the browsers that suspend us during the handoff.
+   *
+   *  stopCamera() is used rather than releaseStream() so an in-flight recording still gets to
+   *  flush its audio tail; in that case it releases on the flush, a moment after the picker is
+   *  already up, which is still well before they start filming. */
+  /** Disarms the pending "they came back" listeners; null when none are armed. */
+  let nativeWake: (() => void) | null = null;
+
+  /** Bring the viewfinder back when they return from the phone's camera app.
+   *
+   *  `change` fires ONLY when they actually filmed something. Back out of the camera app and the
+   *  input says nothing whatsoever — so, now that we hand the hardware over on the way in, a
+   *  cancelled capture left the guest holding a black viewfinder with nothing to say it needed a
+   *  nudge. The only way back was to go and change a setting.
+   *
+   *  Three signals, because no one of them fires everywhere: `cancel` is the modern, exact one;
+   *  `visibilitychange` (wired in onMount) catches the phones that suspend us during the handoff;
+   *  window focus catches whatever does neither. resumeIfDead is idempotent and acts only when the
+   *  stream is genuinely gone, so arriving here three times costs nothing. */
+  function armNativeRecovery() {
+    nativeWake?.();   // never leave a previous arming attached
+    const wake = () => {
+      nativeWake = null;
+      window.removeEventListener('focus', wake);
+      nativeVideoInput?.removeEventListener('cancel', wake);
+      // A beat first: the camera app has to actually let go of the devices before we ask for them.
+      setTimeout(resumeIfDead, 300);
+    };
+    nativeWake = () => {
+      nativeWake = null;
+      window.removeEventListener('focus', wake);
+      nativeVideoInput?.removeEventListener('cancel', wake);
+    };
+    window.addEventListener('focus', wake);
+    nativeVideoInput?.addEventListener('cancel', wake);
+  }
+
+  function openNativeVideo() {
+    stopCamera();
+    armNativeRecovery();
+    nativeVideoInput?.click();   // must stay in the same synchronous gesture or the click is ignored
+  }
 
   // Read a video file's duration (seconds) via a throwaway <video> element. 0 if unreadable.
   function readVideoDuration(file: File): Promise<number> {
@@ -2083,7 +2781,7 @@
 
       const best = (['high', 'standard', 'smooth'] as VidQuality[]).find((q) => results[q] >= SMOOTH_FPS) || 'smooth';
 
-      benchResult = { results, best };
+      benchResult = { results, best, mic: micReport() };
 
       videoQuality = best;
 
@@ -2299,10 +2997,12 @@
   async function refreshGalleryIfOpen() {
     if (screen !== 'gallery' || !sessionToken) return;
     try {
-      const r = await getPhotosBySession(identifier, sessionToken);
+      const r = await getPhotosBySession(identifier, sessionToken, false, true);
       galleryRevealed = r.revealed;
       allowDownloads = r.allowDownloads ?? true;
       galleryPhotos = r.photos || [];
+      void loadHearts();   // counts are live and per-viewer; the roll payload cannot carry them
+      applyCounts(r);
       ensureDeleteTicker();
     } catch { /* a failed refresh must never disturb a gallery that is already rendered */ }
   }
@@ -2352,11 +3052,15 @@
     stopCamera();   // free the camera while browsing the gallery — saves battery, drops the "in use" indicator
     applyEventTheme(ev?.theme);
     try {
-      const r = await getPhotosBySession(identifier, sessionToken!);
+      // own=true: this screen shows the guest their own shots, so ask for exactly those. It used
+      // to fetch the whole revealed event and discard about three quarters of it client-side.
+      const r = await getPhotosBySession(identifier, sessionToken!, false, true);
       galleryRevealed = r.revealed;
       allowDownloads = r.allowDownloads ?? true;
       // Own photos come back even before reveal; everyone else's stay hidden.
       galleryPhotos = r.photos || [];
+      void loadHearts();   // counts are live and per-viewer; the roll payload cannot carry them
+      applyCounts(r);
       ensureDeleteTicker();
       if (!r.revealed) {
         revealMsg = r.revealMode === 'manual' ? 'The host will reveal everyone’s photos soon.'
@@ -2407,7 +3111,7 @@
               <div class="ei-row"><span class="ei-k">Reveal</span><span>{ev.revealMode === 'at_end' ? 'When the event ends' : 'Live as you shoot'}</span></div>
               <!-- How many, never which. The tricks are the surprise, and this screen is public. -->
               {#if (ev.challengeCount ?? 0) > 0}
-                <div class="ei-row"><span class="ei-k">Trick list</span><span class="chip trick">🎩 {ev.challengeCount} to pull off</span></div>
+                <div class="ei-row"><span class="ei-k">Trick list</span><span class="chip trick">🃏 {ev.challengeCount} to pull off</span></div>
               {/if}
             </div>
           </details>
@@ -2415,17 +3119,20 @@
       {/if}
       <label for="join-name">Your name</label>
       <input id="join-name" bind:value={joinName} maxlength="40" placeholder="e.g. Alex" autocomplete="name" />
-      <label for="join-email">Email <span class="muted">(optional)</span></label>
+      <!-- The word changes with the switch below. A field labelled "optional" that then refuses the
+           form is the kind of small dishonesty people remember. -->
+      <label for="join-email">Email {#if joinWantsPhotos && !myEmail}<span class="req">(needed for your photos)</span>{:else}<span class="muted">(optional)</span>{/if}</label>
       <input id="join-email" bind:value={joinEmail} type="email" inputmode="email" autocomplete="email" placeholder="you@example.com" />
       <p class="join-hint">Add your email to get your photos afterwards and pick up where you left off.</p>
       <!-- Beside the address rather than after the button, because it is a statement ABOUT the
-           address. Nothing here is required and nothing blocks the join: the hint under it says so
-           in words, since a checkbox next to an empty optional field reads as a trap otherwise. -->
+           address. Switching it ON is the one thing that makes the address required — and the label
+           above changes to say so, rather than letting somebody submit an opt-in we could never
+           honour. Everything else here is still optional and still does not block the join. -->
       <div class="join-optin">
         <label for="join-wants">Email me the photos when the event ends</label>
         <Toggle id="join-wants" bind:checked={joinWantsPhotos} />
       </div>
-      <p class="join-hint">{joinWantsPhotos && !joinEmail.trim()
+      <p class="join-hint" class:needs={joinWantsPhotos && !joinEmail.trim() && !myEmail}>{joinWantsPhotos && !joinEmail.trim() && !myEmail
         ? 'Pop your email in above so we know where to send them.'
         : 'You can opt in later — there’s a button with your photos.'}</p>
       <button class="btn primary" on:click={doJoin} disabled={joining}>{joining ? 'Joining…' : 'Join & open camera'}</button>
@@ -2442,46 +3149,80 @@
   <!-- The counter-rotation is published as a variable rather than applied here: rotating this
        element would rotate the viewfinder and the layout with it, which is the thing we are
        specifically not doing. Individual glyphs opt in. -->
-  <div id="cam-root" class="cam" style="--glyph-rot: {glyphRot}deg; --note-bottom: {noteVar}">
+  <div id="cam-root" class="cam" style="--glyph-rot: {glyphRot}deg; --note-bottom: {noteVar}; --topbar-h: {topbarH ? `${topbarH}px` : `72px`}">
     <div class="viewfinder">
       <!-- svelte-ignore a11y-media-has-caption -->
       <!-- Mirrored on the front camera, because that is what a phone does and what people expect
            when they look at themselves. It was not mirrored at all, while CAPTURE mirrors for
            'user' facing — so the preview and the photo you got back disagreed, which is the
            "it's flipped again" feeling. Now what you see is what is saved. -->
-      <video bind:this={videoEl} class:mirrored={facing === 'user'} autoplay playsinline muted></video>
+      <video bind:this={videoEl} class:mirrored={facing === 'user'} autoplay playsinline muted
+             on:playing={() => (frozen = false)}></video>
+      <!-- Under the spinner, over the blanked <video>. aria-hidden: it is the same picture the
+           guest was already looking at, so announcing it would be narrating a pause.
+
+           ALWAYS RENDERED, shown with a class. Behind {#if frozen} the canvas does not exist until
+           after the frame has been taken — and the frame is taken by drawing INTO it, so it could
+           never be shown at all. The element has to be there first. -->
+      <canvas class="freeze" class:on={frozen} class:mirrored={frozenMirrored}
+              bind:this={freezeEl} aria-hidden="true"></canvas>
       <!-- svelte-ignore a11y-no-static-element-interactions -->
-      <div class="gesture-layer"
+      <div class="gesture-layer" class:tilted={glyphRot !== 0}
         on:pointerdown={onGesturePointerDown}
         on:pointermove={onGesturePointerMove}
         on:pointerup={onGesturePointerUp}
         on:pointercancel={onGesturePointerUp}></div>
       {#if focusRing}<div class="focus-ring" style="left:{focusRing.x}px;top:{focusRing.y}px"></div>{/if}
       {#if brightnessHud}
-        <div class="bright-hud" transition:fade={{ duration: 150 }}>
-          <span aria-hidden="true">☀</span>
+        <div class="bright-hud" class:tilted={glyphRot !== 0}
+             class:cw={glyphRot === 90} class:ccw={glyphRot === -90}
+             transition:fade={{ duration: 150 }}>
+          <span aria-hidden="true">☀️</span>
           <div class="bright-bar"><div class="bright-fill" style="width:{((brightness - BRIGHT_MIN) / (BRIGHT_MAX - BRIGHT_MIN)) * 100}%"></div></div>
           <span class="bright-val">{Math.round(brightness * 100)}%</span>
           <button class="ctrl tiny" on:click={resetBrightness} disabled={brightness === 1} title="Reset brightness" aria-label="Reset brightness">↺</button>
         </div>
       {/if}
+      <!-- The home-screen offer. A strip at the bottom, not a modal: a guest is holding a camera
+           and the one thing this must never do is stand between them and the next shot. Dismissing
+           it is final for this event (markAsked ran when it appeared), so it cannot come back and
+           nag mid-party. -->
+      {#if installOffer}
+        <div class="install-offer" role="status">
+          <span class="io-txt">Add Snapdini to your home screen? It opens like an app — same camera, no address bar.</span>
+          <button class="io-yes" on:click={doInstall}>Add</button>
+          <button class="io-no" on:click={() => (installOffer = false)} aria-label="No thanks">✕</button>
+        </div>
+      {/if}
       {#if fillActive}<div class="fill"></div>{/if}
       {#if blinking}{#key blinkSeq}<div class="blink" aria-hidden="true"></div>{/key}{/if}
       <Confetti bind:this={confetti} colors={ev?.theme?.accent ? [ev.theme.accent, '#f4e4c1', '#e8825a', '#7fb3a3'] : undefined} />
-      <div class="topbar">
+      <div class="topbar" bind:this={topbarEl}>
         {#if ev?.isDemo}
           <div class="demo-nav">
             <!-- Order is the tour, not the escape: a visitor should see what the host and the
                  gallery look like before they are offered the way out. "Home" was ambiguous — it
                  read as "my dashboard" as easily as "leave" — so the exit says what it does. -->
-            {#if demoHostHref}<a class="home-btn" href={demoHostHref} aria-label="See the host's view of this demo">🎛 Host view</a>{/if}
-            <!-- "Gallery" alone collided with the guest's OWN roll button at the bottom left, which
-                 is also a 🖼. Name this one for whose photos it holds. -->
-            <a class="home-btn" href={demoGalleryHref} aria-label="See the whole event's gallery, everyone's photos">🖼 Event gallery</a>
+            {#if demoHostHref}<a class="home-btn" href={demoHostHref} aria-label="See the host's view of this demo">🎛️ Host view</a>{/if}
+            <!-- Event gallery USED to be a third button here, and three of them crowded the trick
+                 list and the shot counter that share this row — a bar sized for one control on
+                 every other event. It has moved to the guest's roll, where "see everyone's photos"
+                 already lives and where somebody looking at their own shots is actually thinking
+                 about the rest of them. See `.full-gallery` below. -->
             <a class="home-btn quiet" href="/" aria-label="Leave the demo and go back to the Snapdini home page">✕ Exit demo</a>
           </div>
         {:else}
           <div class="evname"><Logo word={false} color={ev?.theme?.accent ?? ''} /> {ev?.name}</div>
+          <!-- Only for the account that actually owns or co-hosts THIS event (youManage, checked
+               server-side against the event's owner). A host walking their own party is still a
+               guest here — their shots belong to whoever they joined as — but they should not have
+               to find their way back to their own dashboard through the address bar.
+               No organizer code in the link: the admin page authorises a signed-in host off the
+               session cookie, so there is no credential to put in a URL. -->
+          {#if ev?.youManage && ev?.joinCode}
+            <a class="home-btn host-btn" href="/admin/{ev.joinCode}"
+               aria-label="Open your host dashboard for this event">🎛️ Host view</a>
+          {/if}
         {/if}
         <!-- The trick list and the counter are ONE group, pinned to the right together.
              As three separate children of a space-between row they were spread across the full
@@ -2499,7 +3240,7 @@
                notice about something that is not on screen is just noise. -->
           <div class="mwrap">
             <button class="mbadge" class:alldone={!missionsLeft.length}
-                    on:click={() => { missionsOpen = true; void refreshMissions(); trackEvent('mission_list_opened', undefined, ev?.joinCode); }}
+                    on:click={openTrickList}
                     aria-label="Trick list, {missionsDone.length} of {missions.length} pulled off">
               {missionsDone.length}/{missions.length}
             </button>
@@ -2543,8 +3284,8 @@
             {#if myEmail}
               <p class="sw-h">Opening in your browser? Use <b>{myEmail}</b></p>
               <p class="sw-s">{inAppName}’s browser keeps asking for the camera. Your real browser
-                asks once — just enter the same email there and your {galleryPhotos.length || 'existing'}
-                shot{galleryPhotos.length === 1 ? '' : 's'} come with you.</p>
+                asks once — just enter the same email there and your {ownCount || 'existing'}
+                shot{ownCount === 1 ? '' : 's'} come with you.</p>
             {:else}
               <p class="sw-h">Add your email before you switch browsers</p>
               <p class="sw-s">You joined without one, so opening this link anywhere else would start
@@ -2624,8 +3365,16 @@
         </div>
       {/if}
       <div class="rail">
-        {#if facing === 'user'}<button class="ctrl" on:click={() => (screenFlash = !screenFlash)} class:active={screenFlash} title="Flash" aria-label="Flash">⚡</button>{/if}
-        {#if torchSupported && !ev?.noFlash}<button class="ctrl" on:click={toggleFlash} class:active={flashArmed} title="Flash" aria-label="Flash">⚡</button>{/if}
+        <!-- Present whenever the event allows a flash at all, and greyed out with a slash through
+             it where nothing can light (a selfie clip; a camera with no lamp). It used to be
+             withdrawn instead, which meant the whole rail shuffled up every time the guest flipped
+             the camera — and a control that moves is harder to hit than one that is merely off.
+             The preference survives either way: flip back and the flash is still armed. -->
+        {#if !ev?.noFlash}
+          <button class="ctrl" on:click={toggleFlash} class:active={flashArmed && flashUsable}
+                  class:noflash={!flashUsable} disabled={!flashUsable}
+                  title={flashTitle} aria-label={flashTitle}>⚡</button>
+        {/if}
         <!-- Offered in BOTH modes now that a clip really is cropped to it: the camera delivers the
              shape (applyRecordShape) instead of the recorder being handed a wide frame. It is put
              away only on a camera that has actually refused — there a shape is a photo setting
@@ -2651,6 +3400,67 @@
       <!-- !videoMode as well as the flag: setMode already closes the sheet on the way in, but the
            list must not be reachable from video by any route, and a guard on the render is the
            one place that covers all of them. -->
+      <!-- "Which card are you?" — asked once, behind the trick-list pill, and only of a guest the
+           server left the question open for. Never in video mode, for the same reason the list is
+           not: a trick is a photo prompt, and the guard belongs on the render so no route can slip
+           past it. -->
+      {#if cardAsking && !videoMode}
+        <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
+        <div class="settings-back" on:click|self={() => (cardAsking = false)} role="dialog" aria-modal="true" aria-label="Which trick card have you got?">
+          <div class="settings-modal">
+            <div class="sm-head">
+              <span>Which card have you got?</span>
+              <button class="ctrl tiny" on:click={() => (cardAsking = false)} aria-label="Close">✕</button>
+            </div>
+
+            {#if cardConfirming}
+              <p class="m-lede">
+                <b>{cardConfirming.label}</b>{' '}— is that the one in front of you?
+              </p>
+              <p class="cc-warn">You can’t change it afterwards, so have a quick look first.</p>
+              <ul class="cc-preview">
+                {#each cardConfirming.preview as t}<li>{t}</li>{/each}
+                {#if cardConfirming.count > cardConfirming.preview.length}
+                  <li class="cc-more">+{cardConfirming.count - cardConfirming.preview.length} more</li>
+                {/if}
+              </ul>
+              <div class="cc-actions">
+                <button class="cc-back" on:click={() => (cardConfirming = null)} disabled={cardSaving}>Back</button>
+                <button class="cc-yes" on:click={() => pickCard(cardConfirming?.key ?? null)} disabled={cardSaving}>
+                  {cardSaving ? 'One moment…' : 'Yes, that’s mine'}
+                </button>
+              </div>
+            {:else}
+              <p class="m-lede">
+                Your tricks depend on which card you’re sitting at. Tap the one in front of you.
+              </p>
+              {#if cardsHaveQr}
+                <!-- Better advice than a guess, and only ever shown when the host's cards actually
+                     print a code of their own. -->
+                <p class="cc-qr">📷️ Your card has its own code — scanning that one always gets it right.</p>
+              {/if}
+              <ul class="m-list">
+                {#each cardChoices as c (c.key)}
+                  <li class="m-item">
+                    <button class="m-btn cc-btn" on:click={() => (cardConfirming = c)}>
+                      <span class="cc-lab">{c.label}</span>
+                      <span class="cc-hint">
+                        {c.preview.join(' · ')}{#if c.count > c.preview.length}{' '}· +{c.count - c.preview.length} more{/if}
+                      </span>
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+              <!-- The option that keeps the cards evenly spread. Without it everyone who joined off
+                   the main sign taps the first button, and the even coverage several cards exist
+                   for is gone — so a guess is not asked of someone who never had a card. -->
+              <button class="cc-none" on:click={() => pickCard(null)} disabled={cardSaving}>
+                I haven’t got a card — pick one for me
+              </button>
+            {/if}
+          </div>
+        </div>
+      {/if}
       {#if missionsOpen && !videoMode}
         <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
         <div class="settings-back" on:click|self={() => (missionsOpen = false)} role="dialog" aria-modal="true" aria-label="Trick list">
@@ -2756,11 +3566,38 @@
                   <span class="sm-label">Trouble recording here?</span>
                   <span class="sm-desc">Shoot with your phone’s own camera app instead, then upload it. Counts as one shot; keep it under {videoMaxSecs}s.</span>
                 </span>
-                <button class="sm-select" type="button" on:click={() => nativeVideoInput?.click()}>🎥 Record with phone camera</button>
+                <button class="sm-select" type="button" on:click={openNativeVideo}>🎥 Record with phone camera</button>
               </div>
             {/if}
 
             {#if saveNote}<div class="sm-note">Now also saving a copy of each shot to your device.</div>{/if}
+
+            <!-- The quiet route in. Somebody who opens Settings is exactly the person who might want
+                 this, and offering it here costs nobody else a thing — unlike a banner. Shown even
+                 when we have no prompt to fire, because on iOS there never is one and the Share-menu
+                 instructions are the only way. Hidden once it is already installed. -->
+            {#if !installedAlready}
+              <!-- Title, description, control — the same shape as every other row in this sheet, and
+                   all inside ONE `.col` row. Every .sm-row draws a divider along its bottom edge, so
+                   anything placed after the row lands on the far side of that line and reads as
+                   belonging to whatever comes next — which is how this description ended up under
+                   "Report a problem". One row, one divider, the whole entry above it. -->
+              <div class="sm-row col">
+                <span class="sm-labelwrap">
+                  <span class="sm-label">Snapdini app</span>
+                  <span class="sm-desc">Opens like an app, with no address bar. It still works if your signal drops, and it keeps nothing from your phone — it is the same camera, in its own window.</span>
+                </span>
+                <button class="sm-select" type="button"
+                        on:click={() => (iosInstall ? (installHelp = !installHelp) : void doInstall())}>
+                  📲 Add to home screen
+                </button>
+                {#if installHelp}
+                  <div class="sm-note tight">
+                    On iPhone: tap <b>Share</b> at the bottom of Safari, then <b>Add to Home Screen</b>.
+                  </div>
+                {/if}
+              </div>
+            {/if}
 
             <div class="sm-row">
               <button class="sm-select" type="button" on:click={() => { settingsOpen = false; showFeedback = true; }}>💬 Report a problem / feedback</button>
@@ -2775,7 +3612,7 @@
           <span></span><span></span><span></span><span></span>
         </div>
       {/if}
-      {#if recording}<div class="rec">● {Math.floor(recSecs / 60)}:{String(recSecs % 60).padStart(2, '0')}{#if videoMaxSecs > 0} / {Math.floor(videoMaxSecs / 60)}:{String(videoMaxSecs % 60).padStart(2, '0')}{/if}</div>{/if}
+      {#if recording}<div class="rec">● {Math.floor(recSecs / 60)}:{String(recSecs % 60).padStart(2, '0')}{#if videoMaxSecs > 0}{' '}/ {Math.floor(videoMaxSecs / 60)}:{String(videoMaxSecs % 60).padStart(2, '0')}{/if}</div>{/if}
       {#if cameraStarting && !cameraError}
         <div class="cam-loading" transition:fade={{ duration: 120 }}>
           <div class="cam-spinner" aria-label="Starting camera"></div>
@@ -2841,11 +3678,19 @@
     {/if}
 
     <div class="bottombar">
-      <button class="round" on:click={openGallery} title="Gallery" aria-label="Gallery{pendingCount ? ` (${pendingCount} uploading)` : ''}">🖼{#if pendingCount}<span class="badge" class:error={hasUploadError}>{pendingCount}</span>{/if}</button>
+      <button class="round" on:click={openGallery} title="Gallery" aria-label="Gallery{pendingCount ? ` (${pendingCount} uploading)` : ''}">🖼️{#if pendingCount}<span class="badge" class:error={hasUploadError}>{pendingCount}</span>{/if}</button>
       {#if videoMode}
-        <button class="shutter video" class:recording on:click={toggleRecord} disabled={!!cameraError} aria-label={recording ? 'Stop recording' : 'Record'}><span class="core"></span></button>
+        <button class="shutter video" class:recording on:click={toggleRecord}
+                aria-disabled={!!cameraError || undefined}
+                aria-label={recording ? 'Stop recording' : 'Record'}><span class="core"></span></button>
       {:else}
-        <button class="shutter photo" on:click={capturePhoto} disabled={photosRemaining <= 0 || !!cameraError} aria-label="Take photo"><span class="core"></span></button>
+        <!-- aria-disabled, NOT disabled. See announceNoShots(): a disabled button absorbs the
+             tap and the phone raises its own Copy/Search menu over the app, on the control people
+             press more than any other. Same muted look, same announcement to a screen reader, and
+             the press is answered. -->
+        <button class="shutter photo" on:click={capturePhoto}
+                aria-disabled={photosRemaining <= 0 || !!cameraError || undefined}
+                aria-label="Take photo"><span class="core"></span></button>
       {/if}
       <!-- Hidden, not just disabled, while recording: the stream cannot be swapped mid-clip, so a
            greyed-out button is only there to be tried and to look broken. -->
@@ -2892,7 +3737,16 @@
             <div class="lens-row">
               <button class="lens-opt" class:on={c.id === deviceId} on:click={() => chooseLens(c.id)}>
                 <span class="lens-name">{c.label}</span>
-                {#if c.id === deviceId}<span class="lens-now" aria-label="Currently in use">●</span>{/if}
+                <!-- Named for the guest who wandered onto the ultra-wide and wants back. Not a guess
+                     from the label: it is the lens this phone hands back when we ask for the side
+                     and name no device at all. -->
+                {#if isNormalLens(c)}<span class="lens-std">standard</span>{/if}
+                <!-- Always present, only sometimes visible. Rendered conditionally, its arrival and
+                     departure moved the `standard` pill sideways as the live lens changed — so a
+                     label that describes the HARDWARE appeared to jump about in response to a
+                     choice. visibility:hidden keeps the slot and keeps it out of the a11y tree. -->
+                <span class="lens-now" class:shown={c.id === deviceId}
+                      aria-label={c.id === deviceId ? 'Currently in use' : undefined}>●</span>
               </button>
               {#if canFavourite(c)}
                 <button class="lens-fav" class:on={isFav(c)}
@@ -2900,7 +3754,7 @@
                         aria-pressed={isFav(c)}
                         title={isFav(c) ? 'Flip lands here for this side' : 'Make this the lens flip goes to'}
                         aria-label={isFav(c) ? `${c.label} is where flip lands` : `Make ${c.label} where flip lands`}>
-                  {isFav(c) ? '★' : '☆'}
+                  <StarIcon filled={isFav(c)} size={16} />
                 </button>
               {/if}
             </div>
@@ -2920,6 +3774,14 @@
             <li><b>4K</b><span>{benchResult.results.high} fps · {fpsLabel(benchResult.results.high)}</span></li>
             <li><b>1080p</b><span>{benchResult.results.standard} fps · {fpsLabel(benchResult.results.standard)}</span></li>
             <li><b>720p</b><span>{benchResult.results.smooth} fps · {fpsLabel(benchResult.results.smooth)}</span></li>
+            {#if benchResult.mic}
+              <!-- Phrased as what it MEANS, not as a spec: "Mono" on its own is a fact a guest can
+                   do nothing with, and it reads as a fault. Browsers record mono on nearly every
+                   phone; the camera app is the way to stereo, and that button is already here. -->
+              <li><b>Sound</b><span>
+                {benchResult.mic.channels >= 2 ? 'Stereo' : 'Mono — your camera app records stereo'}
+              </span></li>
+            {/if}
           </ul>
           <div class="bench-sub">
             We've set you to <b>{benchResult.best === 'high' ? '4K' : benchResult.best === 'standard' ? '1080p' : '720p'}</b>.
@@ -2938,7 +3800,7 @@
               {#if videoMaxSecs > 0}
                 <span class="bench-note">Keep it to about {videoMaxSecs}s — that's this event's limit.</span>
               {/if}
-              <button class="btn ghost sm" on:click={() => { benchResult = null; benchPrompt = false; void setVideoQuality('phone'); nativeVideoInput?.click(); }}>
+              <button class="btn ghost sm" on:click={() => { benchResult = null; benchPrompt = false; void setVideoQuality('phone'); openNativeVideo(); }}>
                 🎥 Shoot with my own camera
               </button>
             </div>
@@ -2959,11 +3821,14 @@
         <span>Choppy? Your phone's own camera will do better.</span>
       {#if !showShapes}<span class="bench-note">This event is square — try to frame it that way.</span>{/if}
       {#if videoMaxSecs > 0}<span class="bench-note">Keep it to about {videoMaxSecs}s.</span>{/if}
-        <button class="btn primary sm" on:click={() => { void setVideoQuality('phone'); nativeVideoInput?.click(); }}>🎥 Use phone camera</button>
+        <button class="btn primary sm" on:click={() => { void setVideoQuality('phone'); openNativeVideo(); }}>🎥 Use phone camera</button>
       </div>
     {/if}
     {#if outOfShots && (canAskHost || canBuyShots)}
-      <div class="oos-panel">
+      <!-- Bound so a press on the spent shutter can take the guest here — see announceNoShots().
+           Focus goes to the first BUTTON inside rather than to the panel, because the panel is a
+           div and the thing worth reaching is the way forward, not the heading above it. -->
+      <div class="oos-panel" bind:this={oosPanelEl}>
         <div class="oos-title">That's your roll</div>
         <div class="oos-actions">
           {#if canAskHost}
@@ -3005,18 +3870,26 @@
              only when the host has allowed downloads, and only when there is more than one to save
              (for a single shot the button on the photo itself is the shorter path). -->
         {#if allowDownloads && myShotCount > 1}
-          <button class="btn ghost sm" on:click={saveWholeRoll} disabled={bulkSaving}
-                  aria-label="Save all {myShotCount} of your photos to this device">
-            {bulkSaving ? `Saving ${bulkProgress}…` : bulkDone || `⤓ Save all ${myShotCount}`}
+          {#if selecting}
+            <button class="btn ghost sm" on:click={toggleSelecting}>Cancel</button>
+          {/if}
+          <button class="btn ghost sm" on:click={beginDownload} disabled={bulkSaving}
+                  aria-label={selecting
+                    ? `Download the ${selectedIds.size} shot${selectedIds.size === 1 ? '' : 's'} you picked`
+                    : 'Download your photos'}>
+            {#if bulkSaving}Saving {bulkProgress}…
+            {:else if bulkDone}{bulkDone}
+            {:else if selecting}<DownloadIcon /> Download {selectedIds.size || ''}
+            {:else}<DownloadIcon /> Download{/if}
           </button>
         {/if}
-        <button class="btn ghost sm" on:click={backToCamera}>← Camera</button>
+        <button class="btn ghost sm" on:click={backToCamera}>📷 Camera</button>
       </div>
     </header>
     {#if !galleryRevealed}
       <div class="notice">
         <span aria-hidden="true">🔒</span>
-        <span>{revealMsg}{#if galleryPhotos.length} Only you can see your own shots until then.{/if}</span>
+        <span>{revealMsg}{#if galleryPhotos.length}{' '}Only you can see your own shots until then.{/if}</span>
       </div>
     {/if}
     {#if shownPhotos.length}
@@ -3034,7 +3907,16 @@
           <PhotoCard photo={p} shotNumber={shownPhotos.length - i} saved={saved.has(p.id)}
                      tileAr={tileAspect(allowedAspects)}
                      captionMode={p.isOwn ? 'edit' : 'static'}
-                     on:open={() => { lbIndex = i; lbOpen = true; }}
+                     selectable={selecting} selected={selectedIds.has(p.id)}
+                     canDownload={allowDownloads && !selecting}
+                     saving={savingOne === p.id}
+                     hearts={ev?.heartsEnabled ? (heartCounts[p.id] ?? 0) : undefined}
+                     showHeartCount={false}
+                     hearted={heartMine.has(p.id)}
+                     canHeart={!!sessionToken && !selecting}
+                     on:heart={(e) => toggleHeart(p, e.detail)}
+                     on:open={() => onRollTap(p, i)}
+                     on:download={() => saveOne(p)}
                      on:caption={() => openCaption(p)}>
             <svelte:fragment slot="tile">
               {#if canDelete(p, nowTick) || confirmingDeleteId === p.id}
@@ -3045,7 +3927,7 @@
                   {#if confirmingDeleteId === p.id}
                     Sure?
                   {:else}
-                    🗑<span class="bin-secs">{secsLeft(p, nowTick)}</span>
+                    🗑️<span class="bin-secs">{secsLeft(p, nowTick)}</span>
                   {/if}
                 </button>
               {/if}
@@ -3058,6 +3940,21 @@
         <span class="big">{galleryRevealed ? '📷' : '🔒'}</span>
         <p class="muted">You haven’t taken any photos yet.</p>
       </div>
+    {/if}
+    <!-- Below the roll on purpose: this is the "what next", read after a guest has looked at their
+         own shots. Gated on the gallery actually being OPEN — instant reveal, or a host who
+         revealed early — and on somebody else having shot something, because a link to a gallery
+         holding only your own photos is a round trip to nowhere. Once an event ENDS revealed the
+         load-time redirect gets there first, so this is the during-the-event route. -->
+    <!-- `othersCount > 0` is the rule for a real event: a link to a gallery holding only your own
+         photos is a round trip to nowhere. A DEMO is the exception, and deliberately — it is seeded
+         with photos and the whole point is the tour, so a visitor who has shot nothing yet still
+         needs somewhere to see what a gallery looks like. This is where the demo's third top-bar
+         button went. -->
+    {#if ev?.joinCode && galleryRevealed && (othersCount > 0 || ev?.isDemo)}
+      <a class="full-gallery" href={ev?.isDemo ? demoGalleryHref : `/gallery/${ev.joinCode}`}>
+        🖼️ See everyone's photos{#if faceMatching}{' '}— and find the ones you're in{/if} →
+      </a>
     {/if}
     <!-- The real entry point, and deliberately not on the camera screen: nothing new goes near the
          shutter. Here a guest is already looking at their own shots, which is the moment they think
@@ -3088,16 +3985,6 @@
           </button>
         {/if}
       </div>
-    {/if}
-    <!-- Below the roll on purpose: this is the "what next", read after a guest has looked at their
-         own shots. Gated on the gallery actually being OPEN — instant reveal, or a host who
-         revealed early — and on somebody else having shot something, because a link to a gallery
-         holding only your own photos is a round trip to nowhere. Once an event ENDS revealed the
-         load-time redirect gets there first, so this is the during-the-event route. -->
-    {#if galleryRevealed && othersCount > 0 && ev?.joinCode}
-      <a class="full-gallery" href="/gallery/{ev.joinCode}">
-        🖼 See everyone's photos{#if faceMatching}{' '}— and find the ones you're in{/if} →
-      </a>
     {/if}
     <!-- The same offer, in the gallery: this is where a guest lands after a failed upload, and
          telling them they are out of shots without showing the way forward is a dead end. -->
@@ -3134,6 +4021,17 @@
   </div>
   <!-- After the reveal this roll can show OTHER people's photos too (Mine / All / Others), so
        saving follows the host's download setting rather than "it is in my gallery". -->
+  {#if dlScopeOpen}
+    <ShareScope action="download" voice="guest" subject="roll" canFavourite={false} canSelect={true}
+                approvedCount={mineAll.length} newCount={mineNew.length}
+                videoCount={mineAll.filter((q) => q.mediaType === 'video').length}
+                on:pick={(e) => pickDownloadScope(e.detail)} on:close={() => (dlScopeOpen = false)} />
+  {/if}
+  {#if choosing}
+    <DownloadFormat count={choosing.list.length}
+                    on:pick={(e) => (e.detail === 'zip' ? chooseZip() : chooseFiles())}
+                    on:close={() => (choosing = null)} />
+  {/if}
   {#if lbOpen}<Lightbox photos={shownPhotos} index={lbIndex} captionMode="own"
               on:saved={(e) => { if (ev) saved = markSaved(ev.joinCode, [e.detail]); }}
                         allowSave={allowDownloads}
@@ -3151,7 +4049,7 @@
         {#if captionFor.challenge}
           <!-- The trick stays visible while they type: a caption sits ALONGSIDE the mission, and
                seeing it here is what stops someone retyping the trick as their caption. -->
-          <div class="capm-mission">🎩 {captionFor.challenge}</div>
+          <div class="capm-mission">🃏 {captionFor.challenge}</div>
         {/if}
         <!-- svelte-ignore a11y-autofocus -->
         <textarea class="capm-text" rows="2" bind:value={captionDraft} autofocus
@@ -3178,7 +4076,7 @@
     <div class="drawer-head"><span>Upload queue</span><button class="btn ghost sm" on:click={() => { queue = queue.filter((q) => q.status !== 'done'); drawerOpen = false; }}>Done</button></div>
     {#each queue as item}
       <div class="qitem">
-        <span class="qthumb">{item.mediaType === 'video' ? '🎥' : '🖼'}</span>
+        <span class="qthumb">{item.mediaType === 'video' ? '🎥' : '🖼️'}</span>
         <span class="qcol">
           <span class="qname">{item.mediaType === 'video' ? 'Video' : 'Photo'}</span>
           {#if qmeta(item)}<span class="qmeta">{qmeta(item)}</span>{/if}
@@ -3198,7 +4096,7 @@
   .spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .btn { display: inline-block; font-weight: 700; border-radius: var(--radius-sm); padding: 12px 18px; border: 1px solid transparent; cursor: pointer; text-decoration: none; font-size: 0.95rem; }
-  .btn.primary { background: var(--accent); color: var(--accent-ink, #111); width: 100%; }
+  .btn.primary { background: var(--accent-fill); color: var(--accent-ink, #111); width: 100%; }
   .btn.ghost { border-color: var(--border); color: var(--text); background: transparent; }
   /* Between ghost and primary. A ghost button on the out-of-shots card reads as a line of text
      rather than as something to press — and that card is a DARK overlay in both themes, so in the
@@ -3209,12 +4107,25 @@
     background: color-mix(in srgb, var(--accent) 12%, transparent); }
   .btn.sm { padding: 7px 12px; font-size: 0.82rem; }
 
-  /* Event poster image as the sign-in backdrop, with the join form in a readable card. */
-  .join-bg { position: absolute; inset: 0; z-index: 0; overflow: hidden; }
-  /* Keep the image's aspect ratio (contain) over a blurred, darkened fill — no oversized crop on wide screens. */
+  /* Event image as the sign-in backdrop, with the join form in a readable card.
+     FIXED, not absolute. `.center` scrolls (overflow-y:auto), and an absolutely positioned backdrop
+     scrolls with it — so the moment the card grew taller than the screen (a blurb, a long name, the
+     event-info block) the image slid up and off, and the bottom of the join form sat on bare --bg.
+     Measured on a 390x640 screen: after scrolling to the button, the bottom 95px had no backdrop at
+     all. Fixed to the viewport it cannot go anywhere, however long the card gets. */
+  .join-bg { position: fixed; inset: 0; z-index: 0; overflow: hidden; }
   .join-bg-blur { position: absolute; inset: -24px; background-size: cover; background-position: center; filter: blur(26px) brightness(0.5); }
-  .join-bg-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-  .center.hasbg::after { content: ''; position: absolute; inset: 0; background: rgba(0,0,0,0.5); z-index: 1; }
+  /* COVER on a portrait screen, which is every phone, and every phone is how a guest arrives — they
+     scanned a QR code. The host frames the image in a 3:4 cropper that promises "how guests see the
+     join screen", and `contain` broke that promise: a 3:4 crop letterboxed into a ~9:19.5 phone is a
+     shallow band of photo across the middle with darkened blur above and below, which is what "it
+     doesn't align well" looks like.
+     Wide screens keep `contain`, which is what it was for — a portrait crop cropped AGAIN to fill a
+     landscape monitor loses the top and bottom of the host's framing, and there the blurred fill
+     beside it reads as deliberate rather than as a gap. */
+  .join-bg-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  @media (min-aspect-ratio: 1/1) { .join-bg-img { object-fit: contain; } }
+  .center.hasbg::after { content: ''; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1; }
   .join { width: 100%; max-width: 340px; text-align: center; position: relative; z-index: 2; }
   .join.card { background: rgba(20,16,10,0.62); backdrop-filter: blur(6px); border: 1px solid rgba(255,255,255,0.12);
     border-radius: var(--radius); padding: 26px 22px; }
@@ -3242,16 +4153,38 @@
   .join label { display: block; text-align: left; font-size: 0.8rem; color: var(--text-muted); margin: 14px 0 5px; }
   .join input { width: 100%; padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); -webkit-text-fill-color: var(--text); font-size: 1rem; }
   .join-hint { text-align: left; font-size: 0.74rem; color: var(--text-muted); margin: 7px 2px 4px; line-height: 1.4; }
+  /* Not red, and not an error: nothing has gone wrong yet. It is the one line on the form that has
+     become an instruction, so it stops being grey and nothing more. */
+  .join-hint.needs { color: var(--text); font-weight: 600; }
+  .req { color: var(--accent); font-weight: 600; }
   .join .btn { margin-top: 20px; }
   .manage-link { display: inline-block; margin-top: 16px; font-size: 0.78rem; color: var(--text-muted); text-decoration: none; }
   .manage-link:hover { color: var(--accent); text-decoration: underline; }
 
-  .cam { position: fixed; inset: 0; background: #000; overflow: hidden; z-index: 10; }
+  .cam { --round-size: 52px; position: fixed; inset: 0; background: #000; overflow: hidden; z-index: 10;
+    /* Where the Photo/Video pill sits, and how tall it is. Anything stacked ABOVE the pill measures
+       from these rather than carrying its own copy of the number — the install strip was written
+       with a separate 132px, the pill's top edge is at 139px, and it spent the whole time sitting
+       7px into it. The height is the pill's own rules added up: 2x3px container padding, 2x5px
+       button padding, and one 0.78rem line — which is why .modes button pins its line-height
+       instead of inheriting, so a phone's font scaling moves this with it rather than past it. */
+    --modes-bottom: 108px;
+    --modes-h: calc(16px + 0.78rem * 1.2);
+    /* The first clear line above the pill. Everything that stacks there uses THIS, so two things
+       cannot end up with different ideas of where the pill stops — which is the bug this whole
+       group of variables exists to stop happening again. */
+    --above-modes: calc(var(--modes-bottom) + var(--modes-h) + 12px); }
   /* The viewfinder fills the whole screen; controls overlay it (native-camera style), so
      'full' aspect is truly edge-to-edge and fixed ratios sit behind the floating controls. */
   .viewfinder { position: absolute; inset: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; }
   video { width: 100%; height: 100%; object-fit: cover; display: block; }
   .mirrored { transform: scaleX(-1); }
+  /* Same box and same fit as the <video> it stands in for, so the frame does not jump as it takes
+     over. Dimmed, because a still that looks live is worse than a black screen — the guest waits
+     for a picture that is already there. */
+  .freeze { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: none;
+    z-index: 1; filter: brightness(0.55); }
+  .freeze.on { display: block; }
   .fill { position: absolute; inset: 0; background: #fff; z-index: 5; }
   /* The shutter blink: black in, quick fade out, never in the way of a tap. Kept under the control
      rail's z-index so the shutter button itself stays visible through it — the blink is about the
@@ -3288,13 +4221,50 @@
   /* Full-stage gesture layer: drag left/right to set brightness, tap to focus. Sits above the
      video but below the controls (z 6). touch-action:none stops the browser hijacking the swipe. */
   .gesture-layer { position: absolute; inset: 0; z-index: 2; background: transparent; touch-action: pan-y; -webkit-tap-highlight-color: transparent; }
+  /* THE REASON THE BRIGHTNESS SWEEP DID NOTHING WHEN THE PHONE WAS TURNED WITH ROTATION LOCKED.
+     `touch-action` decides who gets a gesture before any JS runs. `pan-y` hands VERTICAL dragging
+     to the browser for scrolling and lets horizontal ones through — right while the page and the
+     person agree on which way is sideways. Turn the phone inside a locked layout and the person's
+     sideways becomes the page's VERTICAL, so the sweep the brightness control wants is exactly the
+     one the browser was taking. The axis arithmetic in onGesturePointerMove was already correct and
+     never got the chance to run, because the pointer events stopped arriving.
+     Swapped, not removed: the browser still needs an axis to scroll on, and with the phone turned
+     that axis is the page's horizontal. */
+  .gesture-layer.tilted { touch-action: pan-x; }
   /* Centred, but never wide enough to reach the control rail on the right.
      At its natural ~262px it clears the rail on a 390px phone by 10px and OVERLAPS it by 5px on a
      360px one, which is a very common Android width — so the collision depended on the handset.
      Reserving the rail's column (14px offset + 40px button, plus room to breathe) makes it a
      property of the layout instead of a coincidence of screen size. The bar below shrinks to suit,
      which costs nothing: it is a relative level, not a measurement anybody reads off in pixels. */
-  .bright-hud { position: absolute; top: 70px; left: 50%; transform: translateX(-50%); z-index: 5;
+  /* Counter-rotated like the glyphs, and for the same reason: with rotation LOCKED the page never
+     turns, so a pill that runs left-to-right on the page runs top-to-bottom for the person holding
+     the phone sideways — a brightness bar that reads as a vertical column, with a horizontal sweep
+     driving it. Everything else in this overlay already turns (see .rot/.counter/.mwrap); the HUD
+     was simply missed.
+     Turned, it goes to the page edge that is the PERSON's top — after rotate(90deg) the pill's own
+     up points along the page's +x, so the page's RIGHT edge is up there, and the mirror for -90.
+     That puts it where portrait puts it from the only point of view that matters: the top of what
+     you are looking at, centred.
+
+     The inset off that edge is the icon row's own height, not a token 14px. At 14px the pill landed
+     in the icons; the row is the thing it has to clear, so the row's height is the measurement that
+     actually answers the question, and it follows the row if that ever changes.
+
+     Placed by its CENTRE, because rotation happens about the centre: anchoring the upright box's
+     edge would leave the turned pill about half its own WIDTH (~100px, and it changes with the
+     label) from where it was asked to be. translate(50%) puts the centre on the page edge, the
+     inset brings it in, and the final translateY — applied in the already-rotated frame — backs it
+     off by half the pill's HEIGHT, which is what sticks out sideways once it is turned. Never needs
+     either dimension as a number. */
+  .bright-hud.tilted { top: 50%; bottom: auto; }
+  .bright-hud.tilted.cw  { left: auto; right: 0;
+    transform: translate(calc(50% - var(--hud-top)), -50%) rotate(90deg) translateY(50%); }
+  .bright-hud.tilted.ccw { right: auto; left: 0;
+    transform: translate(calc(-50% + var(--hud-top)), -50%) rotate(-90deg) translateY(50%); }
+  .bright-hud { --hud-top: var(--topbar-h, 72px);
+    position: absolute; top: var(--hud-top); left: 50%; transform: translateX(-50%); z-index: 5;
+    transition: transform 0.2s ease;
     max-width: calc(100% - 140px);
     display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 999px;
     background: rgba(0,0,0,0.6); color: #fff; backdrop-filter: blur(4px); }
@@ -3302,7 +4272,7 @@
   /* Shrinkable, so the cap above takes it out of the bar rather than out of the readout or the
      reset button — a number cut in half is unreadable, a shorter bar is just a shorter bar. */
   .bright-bar { width: 120px; min-width: 44px; flex: 0 1 120px; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.25); overflow: hidden; }
-  .bright-fill { height: 100%; background: var(--accent); }
+  .bright-fill { height: 100%; background: var(--accent-fill); }
   .bright-val { font-family: var(--font-mono); font-size: 0.72rem; min-width: 38px; text-align: right; flex: none; }
   .focus-ring { position: absolute; z-index: 4; width: 76px; height: 76px; margin: -38px 0 0 -38px; border: 2px solid #fff;
     border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,.3); pointer-events: none; animation: focuspulse 0.85s ease-out forwards; }
@@ -3312,9 +4282,15 @@
      not move with them. Clearing a cutout would mean moving the rail too, and the rail's position
      is load-bearing for the landscape layout — a lot of moving parts to dodge a hole whose position
      the browser will not tell us anyway (see the note below on what the insets actually give you). */
-  .topbar { position: absolute; top: 0; left: 0; right: 0; z-index: 6; padding: 16px 20px; display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; background: linear-gradient(to bottom, rgba(0,0,0,0.6), transparent); pointer-events: none; }
-  .evname { display: inline-flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: 0.85rem; color: #fff; }
+  /* center, not flex-start. The row holds things of different heights — a one-line event name, a
+     trick pill, and a counter with a caption stacked under it — and aligning them to their TOPS
+     left the short ones riding high above the tall one instead of reading as one row. */
+  .topbar { position: absolute; top: 0; left: 0; right: 0; z-index: 6; padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; gap: 14px; background: linear-gradient(to bottom, rgba(0,0,0,0.6), transparent); pointer-events: none; }
+  .evname { unicode-bidi: plaintext; display: inline-flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: 0.85rem; color: #fff; }
   .demo-nav { display: flex; gap: 6px; flex-wrap: wrap; }
+  /* Beside the event name rather than in place of it: a host still needs to see which event they
+     are standing in. */
+  .host-btn { flex: none; margin-left: 8px; }
   /* Demo-only escape hatch back to the marketing site. pointer-events:auto re-enables
      clicks inside the otherwise click-through topbar.
      This and .mbadge are two writings of ONE idea — a tappable pill on the dark viewfinder overlay
@@ -3338,7 +4314,12 @@
     min-width: 52px;
   }
   .bin-secs { font-variant-numeric: tabular-nums; opacity: .75; }
-  .topright { display: flex; align-items: flex-start; gap: 14px; }
+  /* align-SELF, not just align-items: this pins the group to the top of the bar so its position
+     never depends on how tall the thing beside it is. The demo nav carries two pills, and below
+     ~380px they wrap to a second row — which doubled the bar's height and, under the row's
+     align-items:center, pushed the trick list and the shot counter 16px down the screen. The
+     counter is a fixed point a guest glances at; it does not move because the demo grew a button. */
+  .topright { display: flex; align-items: flex-start; align-self: flex-start; gap: 14px; }
   /* Centred, not right-aligned. The word sits under a number that changes width as the roll runs
      down — 24, then 9, then 3 — and aligning their right edges left it visibly off-centre under
      every count but the widest one. */
@@ -3374,6 +4355,18 @@
   .ctrl.active { border-color: var(--accent); background: rgba(245,197,24,0.25); }
   .ctrl.tiny { width: 34px; height: 34px; font-size: 0.85rem; flex: none; }
   .ctrl:disabled { opacity: 0.35; cursor: default; }
+  /* Struck through rather than removed — see the flash button in the rail. The line is drawn
+     rather than swapped in as a different glyph so it lands identically whatever the emoji font
+     does with ⚡, and it counter-rotates with the glyph so it stays across the icon when the phone
+     is turned sideways. It leans top-left to bottom-right: the other way round runs PARALLEL to the
+     bolt and reads as a second bolt rather than a strike, and it would lean against the disabled
+     camera glyph sitting directly under it in the same rail. */
+  .ctrl.noflash { position: relative; }
+  .ctrl.noflash::after {
+    content: ''; position: absolute; left: 50%; top: 50%; width: 26px; height: 2px;
+    background: currentColor; border-radius: 1px; box-shadow: 0 0 2px rgba(0,0,0,.8);
+    transform: translate(-50%, -50%) rotate(45deg); pointer-events: none;
+  }
 
   /* Settings as a centred modal (covers the whole camera stage). */
   .settings-back { position: absolute; inset: 0; z-index: 20; background: rgba(0,0,0,0.55);
@@ -3392,9 +4385,34 @@
   .sm-label { font-size: 0.85rem; }
   .sm-desc { font-size: 0.7rem; color: rgba(255,255,255,0.55); line-height: 1.3; }
   .sm-row.col .sm-labelwrap { flex: none; }
+  /* Above the shutter, clear of it: the bottom of this screen is the one place a thumb is
+     guaranteed to be, and a bar under the thumb is a bar that gets dismissed by accident. */
+  .install-offer {
+    position: absolute; left: 12px; right: 12px; z-index: 7;
+    bottom: var(--above-modes);
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: 14px;
+    background: rgba(0,0,0,0.78); color: #fff; backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,0.22); font-size: 0.8rem; line-height: 1.35;
+  }
+  .io-txt { flex: 1; min-width: 0; }
+  .install-offer button { font: inherit; font-weight: 700; cursor: pointer; border-radius: 999px; flex: none; }
+  .io-yes { padding: 7px 14px; border: 0; background: var(--accent-fill, #f5c518); color: var(--accent-ink, #111); }
+  .io-no { padding: 7px 8px; border: 0; background: none; color: rgba(255,255,255,.7); }
   .sm-select { width: 100%; background: rgba(0,0,0,0.5); color: #fff; border: 1px solid rgba(255,255,255,0.3);
-    border-radius: 8px; padding: 9px 10px; font: inherit; font-size: 0.85rem; }
+    border-radius: 8px; padding: 9px 10px; font: inherit; font-size: 0.85rem;
+    transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease; }
+  /* app.css turns the OS tap highlight off for the whole site, which leaves a press with NO
+     feedback at all unless something replaces it — on a dark sheet, a tap that does nothing visible
+     reads as a tap that missed. Brighter fill and border, plus the same slight squash .pcell-bin
+     uses, so the two press the same way. */
+  .sm-select:active { background: rgba(255,255,255,0.16); border-color: rgba(255,255,255,0.55); transform: scale(0.985); }
+  .ctrl:active { background: rgba(255,255,255,0.22); border-color: rgba(255,255,255,0.5); }
+  @media (prefers-reduced-motion: reduce) { .sm-select { transition: none; } .sm-select:active { transform: none; } }
   .sm-note { font-size: 0.74rem; color: rgba(255,255,255,0.75); padding-top: 12px; }
+  /* Inside a `.col` row the 8px gap already separates it from the control above, so the note's own
+     12px top padding would double the space and break the pairing it is there to make. */
+  .sm-note.tight { padding-top: 0; }
   /* Full width and vertically centred — the same box the video gets from the flex viewfinder, so
      the two stay in register at every shape. */
   .grid { position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%); pointer-events: none; } .grid span { position: absolute; background: rgba(255,255,255,0.2); }
@@ -3402,15 +4420,19 @@
   .grid span:nth-child(3) { top: 33.3%; left: 0; right: 0; height: 1px; } .grid span:nth-child(4) { top: 66.6%; left: 0; right: 0; height: 1px; }
   /* Clear of the topbar — at top:16px a long event name sat straight over the timer. */
   .rec { position: absolute; top: 64px; left: 50%; transform: translateX(-50%); z-index: 7; color: #fff; background: rgba(0,0,0,0.5); padding: 4px 12px; border-radius: 999px; font-family: var(--font-mono); }
-  /* Keeps the shutter row from reflowing when the flip button is hidden mid-recording. */
-  .round-spacer { display: inline-block; width: 44px; height: 44px; }
+  /* Keeps the shutter row from reflowing when the flip button is hidden mid-recording. It has to be
+     EXACTLY the size of .round or it does the opposite of its job: at 44px against a 52px button it
+     was 8px short, so starting a clip nudged the shutter sideways — the one control you are aiming
+     at, moving at the moment you press it. Both read the same variable now so they cannot drift
+     apart again. */
+  .round-spacer { display: inline-block; width: var(--round-size); height: var(--round-size); }
   /* Deliberately does NOT turn or move with the phone. It is the widest control on the screen and
      sits directly above the shutter, so turning it in place would stand it on end through the
      shutter, and moving it aside is worse still — the thing you reach for stops being where you
      left it. A native camera leaves its mode strip exactly where it is for the same reason; only
      the round glyphs turn. */
-  .modes { position: absolute; bottom: 108px; left: 50%; transform: translateX(-50%); display: flex; background: rgba(0,0,0,0.5); border-radius: 999px; padding: 3px; z-index: 10; }
-  .modes button { padding: 5px 14px; border-radius: 999px; border: none; background: transparent; color: rgba(255,255,255,0.6); font-size: 0.78rem; font-weight: 600; cursor: pointer; -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; user-select: none; outline: none; }
+  .modes { position: absolute; bottom: var(--modes-bottom); left: 50%; transform: translateX(-50%); display: flex; background: rgba(0,0,0,0.5); border-radius: 999px; padding: 3px; z-index: 10; }
+  .modes button { padding: 5px 14px; line-height: 1.2; border-radius: 999px; border: none; background: transparent; color: rgba(255,255,255,0.6); font-size: 0.78rem; font-weight: 600; cursor: pointer; -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; user-select: none; outline: none; }
   .modes button.on { background: #fff; color: #111; }
   .bottombar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 8; padding: 20px;
     background: linear-gradient(transparent, rgba(0,0,0,0.65)); display: flex; align-items: center; justify-content: space-between; }
@@ -3468,12 +4490,28 @@
        a gap instead of as bar height. Taking 10 off `bottom` puts it back: 98 - 76 - 10 = 12px.
        (And note the earlier attempt at 84px went the wrong way entirely: a smaller `bottom` is
        LOWER, which is what put the pills on top of the shutter.) */
-    .modes { bottom: 98px; }
+    .cam { --modes-bottom: 98px; }
+    /* The spent-roll card grows UPWARDS from a fixed bottom, and sideways there is nothing above it
+       to grow into: 390px of screen, the bottom bar owns the last ~96, and a card starting 190px up
+       has 200px left for a title, two buttons, and a feedback form that can open underneath them.
+       It ran off the top of the screen — not clipped at an edge where it would look wrong, but
+       scrolled out of a viewport that does not scroll, so the way forward was simply gone.
+       Dropping it to the first clear line above the mode pills gives back ~50px, the extra width
+       buys back a wrapped line or two, and the cap means the feedback form can only ever make it
+       scroll. Note it does NOT go lower than that: the pills are still live on a spent roll, and a
+       card laid across them would trade a card you cannot reach for controls you cannot press. */
+    .oos-panel {
+      bottom: var(--above-modes);    /* clear of the pill, not across it */
+      width: min(420px, 78vw);
+      max-height: calc(100dvh - var(--above-modes) - var(--note-bottom, 52px) - 16px);
+      overflow-y: auto;
+    }
     /* Sideways the rail runs ACROSS the top right, straight through where this sits, so the width
        cap cannot save it — there is nothing to the side any more. It goes below the rail instead,
        off the same measured banner edge, where the gap between the rail and the mode pills is wide
        open. */
-    .bright-hud { top: calc(var(--note-bottom, 52px) + 64px); max-width: calc(100% - 32px); }
+    .bright-hud { --hud-top: max(var(--topbar-h, 72px), calc(var(--note-bottom, 52px) + 8px));
+      max-width: calc(100% - 32px); }
   }
 
   /* The WHOLE control turns, not the character inside it.
@@ -3482,10 +4520,10 @@
      different ways. A circular button can turn as a unit — its outline is identical at any angle —
      and then the glyph and everything positioned against it keep their arrangement and turn
      together, which is the point. */
-  .round { width: 52px; height: 52px; border-radius: 50%; border: none; background: rgba(255,255,255,0.15); color: #fff; font-size: 1.3rem; cursor: pointer; position: relative;
+  .round { width: var(--round-size); height: var(--round-size); border-radius: 50%; border: none; background: rgba(255,255,255,0.15); color: #fff; font-size: 1.3rem; cursor: pointer; position: relative;
     transform: rotate(var(--glyph-rot, 0deg)); transition: transform 0.2s ease; }
   @media (prefers-reduced-motion: reduce) { .round { transition: none; } }
-  .badge { position: absolute; top: -4px; right: -4px; background: var(--accent); color: var(--accent-ink, #111); border-radius: 999px; min-width: 18px; height: 18px; font-size: 0.65rem; font-weight: bold; display: flex; align-items: center; justify-content: center; padding: 0 4px; }
+  .badge { position: absolute; top: -4px; right: -4px; background: var(--accent-fill); color: var(--accent-ink, #111); border-radius: 999px; min-width: 18px; height: 18px; font-size: 0.65rem; font-weight: bold; display: flex; align-items: center; justify-content: center; padding: 0 4px; }
   .badge.error { background: #c0392b; color: #fff; }
   /* A hold-for-more marker, the same idea as the dot iOS puts on a control that has a long press.
      Only drawn when there IS more than one lens: advertising a gesture that does nothing is worse
@@ -3495,12 +4533,23 @@
        more behind this", and it is the only thing that fits: the rail is 52px buttons on a 320px
        phone, so "tap or hold" either shrinks to unreadable or pushes the rail off the screen. The
        one-time tip spells the gesture out in words once; this is the reminder afterwards. */
-    content: '\2026'; position: absolute; right: 6px; bottom: 1px;
+    /* In its own little disc, sitting on the button's corner like a badge. Bare, the ellipsis was
+       three pale dots floating over whatever the camera happened to be pointing at, and it read as
+       a rendering artefact as easily as a control. A filled circle is unambiguously a THING, and it
+       carries its own contrast instead of relying on a text shadow to survive a bright viewfinder. */
+    content: '\22EE'; position: absolute; right: -2px; bottom: -2px;
     /* No rotation of its own: it is positioned against a button that now turns as a unit, so it is
        carried round already. Turning it again would spin it on the spot inside a control that had
        itself moved — the two rotations cancelling into the wrong place. */
-    font-size: .8rem; line-height: 1; color: rgba(255,255,255,.9);
-    text-shadow: 0 1px 3px rgba(0,0,0,.8); pointer-events: none;
+    width: 18px; height: 18px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    /* Lighter than it was, still clearly darker than the flip button's own disc
+       (rgba(255,255,255,.15)) — it is a marker ON that control, so reading as the same weight would
+       make it look like a second button rather than a badge. Vertical dots, because a horizontal
+       ellipsis says "truncated text" and a vertical one says "more options" — the convention every
+       phone already uses. */
+    background: rgba(0,0,0,.42); border: 1px solid rgba(255,255,255,.55);
+    font-size: .76rem; line-height: 1; color: rgba(255,255,255,.92); pointer-events: none;
   }
   .lens-back { position: absolute; inset: 0; z-index: 12; display: flex; align-items: flex-end;
     justify-content: center; padding: 0 12px 96px; pointer-events: auto; background: rgba(0,0,0,.34); }
@@ -3510,14 +4559,23 @@
   .lens-head { font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; opacity: .72; padding: 2px 6px 6px; }
   .lens-row { display: flex; align-items: stretch; gap: 6px; }
   .lens-row .lens-opt { flex: 1; min-width: 0; }
-  .lens-fav { flex: none; width: 44px; border-radius: 11px; border: 1px solid rgba(255,255,255,.16);
+  /* Flex-centred, because what is in it is no longer TEXT. A button centres its inline content for
+     free, which is why a ★ character sat dead centre here with no rule at all; StarIcon is a block
+     SVG, and a block child ignores that centring and parks at the top left. Every other icon button
+     in the product (.ic in SlideshowPanel, .fav-corner in review) already says this outright. */
+  .lens-fav { flex: none; width: 44px; display: flex; align-items: center; justify-content: center;
+    border-radius: 11px; border: 1px solid rgba(255,255,255,.16);
     background: rgba(255,255,255,.06); color: rgba(255,255,255,.55); font-size: 1rem; cursor: pointer; }
   .lens-fav.on { color: #f0b429; border-color: rgba(240,180,41,.6); background: rgba(240,180,41,.12); }
   .lens-opt { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
     padding: 12px 14px; border-radius: 11px; border: 1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.06);
     color: #fff; font: inherit; font-size: .92rem; cursor: pointer; text-align: left; }
   .lens-opt.on { border-color: rgba(240,180,41,.75); background: rgba(240,180,41,.14); }
-  .lens-now { color: #f0b429; font-size: .7rem; }
+  .lens-now { flex: none; width: 12px; text-align: center; color: #f0b429; font-size: .7rem;
+    visibility: hidden; }
+  .lens-now.shown { visibility: visible; }
+  .lens-std { flex: none; font-size: .62rem; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--text-muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; }
   .lens-sub { opacity: .55; font-size: .82em; }
   .lens-cancel { margin-top: 4px; padding: 11px 14px; border-radius: 11px; border: 1px solid rgba(255,255,255,.16);
     background: transparent; color: #fff; font: inherit; font-size: .9rem; cursor: pointer; }
@@ -3550,18 +4608,32 @@
   }
   /* Ordinary page content in the roll, never an overlay — see .oos-panel.oos-inline for what
      happens when a card in here inherits the gallery's own min-height. */
-  .optin {
-    max-width: 720px; margin: 0 auto 14px; padding: 12px 14px;
+  /* max-width alone does nothing below 720px, so on every phone these ran edge-to-edge while the
+     photo cards beside them sat 10px in (.pgrid's padding) — the panels read as full-bleed bands
+     rather than cards. `min(720px, 100% - 20px)` keeps the centred 720px cap where there is room
+     and gives the same 10px gutter where there is not, with no media query. 20px because these are
+     SIBLINGS of .pgrid, so half its padding each side puts their edges on the cards' edges. */
+  /* ONE card shape for the two "what next" panels under the roll. They are the same object — a
+     full-width panel holding one line of offer — and each drew itself separately, which is how the
+     opt-in ended up with an accent-bordered button sitting inside an already-bordered card. */
+  .optin, .full-gallery {
+    max-width: min(720px, 100% - 20px); margin: 0 auto 14px; padding: 12px 16px;
     border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
-    display: flex; flex-direction: column; gap: 8px;
+    color: var(--text); text-decoration: none; font-size: .88rem; font-weight: 600;
   }
+  .optin { display: flex; flex-direction: column; gap: 8px; }
+  /* Only while it is actually a button. Once the guest has answered, the card is a statement and
+     lighting it up on hover would promise a press that does nothing. */
+  .optin:has(.optin-cta):hover, .full-gallery:hover { border-color: var(--accent); }
   .optin-h { margin: 0; font-size: .88rem; font-weight: 600; color: var(--text); line-height: 1.4; }
   .optin-note { margin: 0; font-size: .78rem; color: var(--text-muted); line-height: 1.45; }
   /* 44px everywhere: this is read one-handed, in the dark, at a party. */
+  /* The CARD is the control. No border and no background of its own: the panel around it already
+     draws both, and a second one inside the first is the "border button" look. */
   .optin-cta {
-    min-height: 44px; padding: 10px 14px; width: 100%; cursor: pointer;
-    border: 1px solid var(--accent); border-radius: 10px; background: transparent;
-    color: var(--text); font-size: .88rem; font-weight: 600; text-align: center;
+    min-height: 44px; padding: 0; width: 100%; cursor: pointer;
+    border: 0; background: transparent;
+    color: var(--text); font: inherit; font-size: .88rem; font-weight: 600; text-align: center;
   }
   .optin-cta:disabled { opacity: .6; }
   /* Wraps rather than shrinks: at 360px a side-by-side field and button leave the field too narrow
@@ -3588,12 +4660,12 @@
   /* The label carries the tap target now — a switch is small, and this is the one thing on the join
      screen a guest is being asked to decide. */
   .join .join-optin label { cursor: pointer; margin: 0; }
-  .full-gallery {
-    display: block; max-width: 720px; margin: 0 auto 14px; padding: 12px 16px; text-align: center;
-    border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
-    color: var(--text); text-decoration: none; font-size: .88rem; font-weight: 600;
-  }
-  .full-gallery:hover { border-color: var(--accent); }
+  /* max-width alone does nothing below 720px, so on every phone these ran edge-to-edge while the
+     photo cards beside them sat 10px in (.pgrid's padding) — the panels read as full-bleed bands
+     rather than cards. `min(720px, 100% - 20px)` keeps the centred 720px cap where there is room
+     and gives the same 10px gutter where there is not, with no media query. 20px because these are
+     SIBLINGS of .pgrid, so half its padding each side puts their edges on the cards' edges. */
+  .full-gallery { display: block; text-align: center; }
   .oos-fb { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border, #3a3630); }
   .sm-link {
     background: none; border: none; cursor: pointer; padding: 6px 0 0; text-align: left;
@@ -3629,11 +4701,13 @@
   .oos-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
   .shutter { width: 76px; height: 76px; border-radius: 50%; border: 4px solid #fff; background: transparent;
     cursor: pointer; padding: 0; display: flex; align-items: center; justify-content: center; -webkit-tap-highlight-color: transparent; }
-  .shutter:disabled { opacity: 0.4; }
+  /* `[aria-disabled]`, not `:disabled` — the shutter still takes its press and answers it (see
+     announceNoShots), so the styling that says "not now" has to key off the ARIA state instead. */
+  .shutter[aria-disabled='true'] { opacity: 0.4; }
   .shutter .core { transition: width 0.18s ease, height 0.18s ease, border-radius 0.18s ease, background 0.18s ease; }
   /* Photo: solid white circle. */
   .shutter.photo .core { width: 60px; height: 60px; border-radius: 50%; background: #fff; }
-  .shutter.photo:active:not(:disabled) .core { width: 54px; height: 54px; }
+  .shutter.photo:active:not([aria-disabled='true']) .core { width: 54px; height: 54px; }
   /* Video idle: white ring with a red dot. Recording: morphs to a white rounded square
      (the red ring around it signals "recording" and stays visually distinct from idle). */
   .shutter.video .core { width: 30px; height: 30px; border-radius: 50%; background: var(--danger); }
@@ -3650,9 +4724,16 @@
   .gallery { min-height: 100dvh; background: var(--bg); }
   .gallery header { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
   .gallery h2 { flex: 1; font-size: 1rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .gallery-actions { display: flex; align-items: center; gap: 8px; }
+  /* stretch + a shared min-height, because these three buttons hold different things — a text
+     label, an SVG icon, a badge — and each was sizing to its own content, so three controls that
+     do the same kind of job came out three different heights. */
+  .gallery-actions { display: flex; align-items: stretch; gap: 8px; }
+  .gallery-actions .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    min-height: 36px; line-height: 1;
+  }
   .queue-btn { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-  .qbadge { background: var(--accent); color: var(--accent-ink, #111); font-size: 0.68rem; font-weight: 800; min-width: 17px; height: 17px; border-radius: 9px; padding: 0 4px; display: inline-flex; align-items: center; justify-content: center; }
+  .qbadge { background: var(--accent-fill); color: var(--accent-ink, #111); font-size: 0.68rem; font-weight: 800; min-width: 17px; height: 17px; border-radius: 9px; padding: 0 4px; display: inline-flex; align-items: center; justify-content: center; }
   .qbadge.error { background: var(--danger); color: #fff; }
   .qempty { color: var(--text-muted); font-size: 0.85rem; padding: 14px 4px; }
   .notice { display: flex; align-items: center; gap: 10px; margin: 12px; padding: 12px 14px;
@@ -3746,6 +4827,33 @@
     padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, .3);
     background: rgba(255, 255, 255, .1); color: #fff; }
   .m-item.armed .m-go { color: #0f1a16; background: #7fb3a3; border-color: #7fb3a3; font-weight: 700; }
+
+  /* The card chooser. It borrows .m-list/.m-btn because it IS the same list of tappable rows one
+     screen earlier — two different row styles for the same gesture would read as two features. */
+  .cc-btn { flex-direction: column; align-items: flex-start; gap: 3px; }
+  .cc-lab { font-weight: 700; }
+  .cc-hint { font-size: .78rem; line-height: 1.4; opacity: .75; }
+  .cc-qr { margin: 0 0 12px; padding: 9px 11px; border-radius: 10px; font-size: .8rem; line-height: 1.45;
+    border: 1px solid rgba(245, 197, 24, .45); background: rgba(245, 197, 24, .12); }
+  .cc-warn { margin: 0 0 10px; font-size: .8rem; line-height: 1.45;
+    padding: 9px 11px; border-radius: 10px;
+    border: 1px solid rgba(245, 197, 24, .45); background: rgba(245, 197, 24, .12); }
+  .cc-preview { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+  .cc-preview li { font-size: .76rem; padding: 4px 9px; border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, .18); background: rgba(255, 255, 255, .06); }
+  .cc-preview .cc-more { opacity: .7; }
+  .cc-actions { display: flex; gap: 8px; }
+  /* `font: inherit` AFTER the size would wipe it — it comes first, deliberately. */
+  .cc-back, .cc-yes, .cc-none {
+    font: inherit; cursor: pointer; border-radius: 11px; padding: 11px 14px; font-size: .9rem;
+  }
+  .cc-back { flex: none; border: 1px solid rgba(255, 255, 255, .22); background: transparent; color: inherit; }
+  .cc-yes { flex: 1; border: 1px solid #7fb3a3; background: #7fb3a3; color: #0f1a16; font-weight: 700; }
+  .cc-yes:disabled, .cc-back:disabled, .cc-none:disabled { opacity: .6; cursor: default; }
+  /* Quieter than the cards themselves: it is the honest answer for some guests, not the easy way
+     out of the question. */
+  .cc-none { width: 100%; margin-top: 10px; border: 1px dashed rgba(255, 255, 255, .24);
+    background: transparent; color: inherit; opacity: .85; font-size: .84rem; }
 
   @media (prefers-reduced-motion: reduce) {
     .m-prog-fill { transition: none; }

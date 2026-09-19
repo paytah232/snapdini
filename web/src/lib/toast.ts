@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 
-export type ToastKind = 'info' | 'error' | 'success';
+export type ToastKind = 'info' | 'error' | 'success' | 'hint';
 export const toast = writable<{ msg: string; kind: ToastKind } | null>(null);
 
 let timer: ReturnType<typeof setTimeout> | undefined;
@@ -18,6 +18,16 @@ export function showToast(msg: string, error = false): void {
 
 export function showSuccess(msg: string): void {
   show(msg, 'success');
+}
+
+/** A message the reader has to ACT on, rather than one reporting what already happened.
+ *
+ *  Worth its own kind because of where it lands: a hint fires in response to a touch, so it appears
+ *  under the hand that caused it, next to whatever that hand is still holding. An info toast is
+ *  quiet on purpose — it is telling you something is done — and quiet is exactly wrong for an
+ *  instruction competing with the thing beneath your own finger. */
+export function showHint(msg: string): void {
+  show(msg, 'hint');
 }
 
 /** Take a toast down NOW, without waiting out its timer.

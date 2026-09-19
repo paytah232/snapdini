@@ -1,7 +1,7 @@
 {
   "name": "Snapdini",
   "short_name": "Snapdini",
-  "start_url": "/",
+  "start_url": "/open",
   "display": "standalone",
   "background_color": "#0f0f0f",
   "theme_color": "#0f0f0f",
