@@ -17,6 +17,7 @@
   import { modalFocus } from '$lib/ui';
   import { presetsForEventType, presetForEventType, type PosterPreset } from '$lib/posterPresets';
   import { drawPoster, DEFAULT_POSTER_LAYOUT, PAGE_W, PAGE_H, type PosterInk } from '$lib/posterRender';
+  import { shouldDismissBackdrop } from '$lib/posterFlow';
 
   export let eventName: string;
   export let blurb = '';
@@ -110,13 +111,20 @@
   // scroll, and by the time you reach "Start from scratch" the close button is nearly 2000px above
   // the viewport. ui.ts's own note says to pair modalFocus with Escape-to-close; this never did.
   function onKey(e: KeyboardEvent) { if (e.key === 'Escape') dispatch('close'); }
+
+  // The same rule the designer's backdrop runs on, for the same reason: `|self` alone passes for a
+  // gesture that merely ENDED out here. Drag a tile and release past the grid — or drag-select the
+  // blurb text under one — and the click's target is the backdrop, so the gallery closed on a
+  // gesture that never asked it to.
+  let downOnBack = false;
 </script>
 
 <svelte:window on:keydown={onKey} />
 
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
 <div class="back" role="dialog" aria-modal="true" aria-label="Choose a poster design" use:modalFocus
-     on:click|self={() => dispatch('close')}>
+     on:pointerdown={(e) => (downOnBack = e.target === e.currentTarget)}
+     on:click={(e) => { if (shouldDismissBackdrop({ downOnBackdrop: downOnBack, clickOnBackdrop: e.target === e.currentTarget })) dispatch('close'); }}>
   <div class="sheet">
     <div class="head sticky">
       <div>
@@ -180,7 +188,13 @@
     margin: -18px -18px 14px; padding: 18px;
     background: var(--surface); border-bottom: 1px solid var(--border);
   }
-  .head h2 { margin: 0; font-size: 1.1rem; }
+  /* Accent, not body text. This heading sits directly above a wall of poster thumbnails, each a
+     full-bleed design of its own, and in plain ink it simply lost — the eye went to the posters and
+     the one line telling you what to do with them never got read. --accent and not --accent-fill
+     because this is TEXT: the fill is the brand yellow for sitting behind something, while --accent
+     is the same yellow pulled down far enough to stay legible as strokes on a light surface. It
+     follows the event's theme too, so the heading is the host's own colour. */
+  .head h2 { margin: 0; font-size: 1.1rem; color: var(--accent); }
   .sub { margin: 4px 0 0; color: var(--text-muted); font-size: 0.82rem; line-height: 1.45; max-width: 56ch; }
   /* 44px, the HIG minimum. It was 25x28 — a close control is the one button that must never be
      fiddly, because it is what someone reaches for when they are already lost. */
@@ -218,7 +232,7 @@
   .tile.suggested { border-color: var(--accent); }
   .t-sugg {
     margin-left: 6px; padding: 1px 6px; border-radius: 999px; vertical-align: middle;
-    background: var(--accent); color: var(--accent-ink, #111);
+    background: var(--accent-fill); color: var(--accent-ink, #111);
     font-size: 0.6rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
   }
 </style>

@@ -15,13 +15,21 @@
 
 /** x/y are the element CENTRE as a fraction of its space (0–1); `size` is px in the 1080-wide
  *  canvas space (font size for text; the QR square's width for `qr`). */
-import { drawDecor, drawDecorAt, DECOR_KINDS, type DecorKind, type DecorPos, type DecorPlacement } from './cardDecor';
+import { drawDecor, drawDecorAt, decorReach, DECOR_KINDS, type DecorKind, type DecorPos, type DecorPlacement } from './cardDecor';
 import {
   applyFace, castFor, clearTracking, ensurePosterFonts, titleFaceOf, typeSet,
   type Face, type TitleFace, type TypeSetKey,
 } from './posterFonts';
 
-export type Box = { x: number; y: number; size: number };
+/** `rot` turns the element about its own anchor, in RADIANS, and it is OPTIONAL: absent means
+ *  upright, which is what every design saved before it existed carries — and absent has to stay
+ *  absent rather than becoming `rot: 0`, because the cfg blob is what undo compares and what is
+ *  saved (the same rule readTextItem() keeps for a line's colour).
+ *
+ *  Radians, not degrees, and `rot`, not `angle`: the placed decorations have stored exactly this
+ *  since they were added (cardDecor's DecorPlacement), and one vocabulary for "how far round is it"
+ *  beats two. The degrees a host sees are a presentation of this, made at the control. */
+export type Box = { x: number; y: number; size: number; rot?: number };
 // The coordinate space a Box's x/y fractions are measured against. The poster is the whole page;
 // a card is a rect inside the sheet — same helpers, same drag code, two spaces.
 export type Space = { w: number; h: number; ox: number; oy: number };
@@ -39,7 +47,26 @@ export type PosterLayout = Record<PosterElKey, Box>;
  *  Lives here rather than in the editor because it is part of what a poster IS, not of how one is
  *  edited — the preset gallery has to lay a poster out without opening the editor at all. */
 export const DEFAULT_POSTER_LAYOUT: PosterLayout = {
-  brand:   { x: 0.5, y: 0.07,  size: 34 },   // the 🎩 Snapdini mark — slides left/right along the top only
+  // The 🎩 Snapdini mark sits at the FOOT, on the footer line, and slides left/right along it.
+  //
+  // It used to run across the top centre, which is the one band a poster cannot spare: a `top`
+  // decoration draws at the page centre too, and a border's top edge runs through the same strip.
+  // Rather than let the two collide, drawPoster used to hand positional motifs a rect that started
+  // BELOW the mark — so switching our wordmark on visibly pushed the host's own decoration down the
+  // page and away from the edge it was drawn to touch. We were charging the host's design for our
+  // credit line.
+  //
+  // At the foot it reads as an imprint, which is what it is, and it is out of the way of everything
+  // that wants the top: `top` motifs, the frame, and the wavy border all reach the paper's edge
+  // again. Set at the footer URL's own size and on its line, so the two read as one printed
+  // footer rather than as a heading that slid down. x is left of centre so a centred join URL sits
+  // beside it rather than under it.
+  //
+  // Changing this default does NOT move any poster already saved: a stored design carries its own
+  // `layout.brand`, and restore() spreads the saved layout OVER these defaults. See the corridor in
+  // drawPoster, which keys off where the mark actually is rather than off this constant, so a design
+  // saved with the mark still at the top keeps the clearance it was laid out with.
+  brand:   { x: 0.185, y: 0.94, size: 26 },
   // Low enough that adding the small caps line above it does not push that line into a `top`
   // decoration — the headline block is centred on this point and grows in BOTH directions.
   title:   { x: 0.5, y: 0.225, size: 72 },
@@ -61,9 +88,61 @@ export const clonePosterLayout = (l: PosterLayout): PosterLayout =>
   ({ brand: { ...l.brand }, title: { ...l.title }, message: { ...l.message },
      steps: { ...l.steps }, qr: { ...l.qr }, footer: { ...l.footer }, names: { ...l.names } });
 
+/** ONE box, out of a stored blob, clamped to something drawable.
+ *
+ *  This is the clamp readCardSets() has always had, lifted to where the Box type lives so the
+ *  poster's layout, the cards' layout and the per-card overrides are all validated by the SAME
+ *  code. The poster's own layout was the one reader that spread the blob raw, and a poster design
+ *  is stored server-side and restored on every open, so a bad value is permanent for that event:
+ *    · `{"footer":{"size":1e9}}` reaches fitted(), which walks `size -= 2` from a billion with a
+ *      measureText on every step — the tab stops responding. Infinity never terminates at all.
+ *    · `{"qr":null}` reaches `layout.qr.size` inside a reactive block, which throws outside any
+ *      catch, so the designer fails on mount and the host cannot open their own poster again.
+ *  Both are organizer-scoped, and neither has a way back out without a database edit.
+ *
+ *  A BAD FIELD FALLS BACK TO THE DEFAULT rather than dropping the element, matching the readers
+ *  next to it: losing where the title sits beats refusing to open the design.
+ *
+ *  `rot` is carried through and ABSENT STAYS ABSENT — upright is what every design saved before
+ *  rotation existed carries, and the cfg blob is what undo compares and what is saved, so writing
+ *  `rot: 0` onto an untouched element would make an open-and-close look like an edit. Clamped to
+ *  one turn either way, the range the placed-decoration reader already uses. */
+const clampNum = (v: unknown, lo: number, hi: number, dflt: number): number =>
+  typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : dflt;
+/** px, in the 1080-wide page space. 1 rather than 0 so nothing divides by it; 2000 is wider than
+ *  the page, so it bounds the work without bounding what a host can actually want. */
+export const BOX_SIZE_MIN = 1, BOX_SIZE_MAX = 2000;
+export function readBox(v: unknown, d: Box): Box {
+  const b = (v && typeof v === 'object' ? v : {}) as Partial<Box>;
+  const out: Box = {
+    x: clampNum(b.x, 0, 1, d.x),
+    y: clampNum(b.y, 0, 1, d.y),
+    size: clampNum(b.size, BOX_SIZE_MIN, BOX_SIZE_MAX, d.size),
+  };
+  const rot = typeof b.rot === 'number' && Number.isFinite(b.rot)
+    ? clampNum(b.rot, -Math.PI, Math.PI, 0)
+    : d.rot;
+  if (rot !== undefined) out.rot = rot;
+  return out;
+}
+
+/** A stored poster layout, element by element. Every key is present on the way out, whatever the
+ *  blob held — which is what lets `layout.qr.size` be read without a guard. */
+export function readPosterLayout(raw: unknown): PosterLayout {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const out = {} as PosterLayout;
+  for (const k of Object.keys(DEFAULT_POSTER_LAYOUT) as PosterElKey[]) out[k] = readBox(o[k], DEFAULT_POSTER_LAYOUT[k]);
+  return out;
+}
+
 /** One host-added line. `x`/`y` are the CENTRE as a fraction of the page, matching every other
- *  element; `size` is px in the 1080-wide space. */
-export type PosterTextItem = { text: string; x: number; y: number; size: number };
+ *  element; `size` is px in the 1080-wide space.
+ *
+ *  `colour` follows the same shape the placed decorations already use (`it.colour || …`): optional,
+ *  per item, falling back to the group's colour — here the message ink. It is per LINE rather than
+ *  per group because a single swatch for all of them is a control for a thing that does not exist
+ *  yet when it is offered, and behaves like one choice while looking like several. */
+export type PosterTextItem = { text: string; x: number; y: number; size: number; colour?: string; rot?: number };
 
 export type PosterCodeDisplay = 'url' | 'code' | 'none';
 
@@ -72,6 +151,54 @@ export type PosterCodeDisplay = 'url' | 'code' | 'none';
  *  Exported because the designer needs the same rectangle for its drag outline, and it used to
  *  carry its own copy of these numbers. Two copies of a geometry is one geometry and one bug
  *  waiting for someone to change the padding in the place they happened to be looking at. */
+/** The wordmark, in one place. It is measured in three (the renderer, the designer's drag outline,
+ *  and the footer's width) and three copies of a string is two chances to measure one thing and
+ *  draw another. */
+export const BRAND_TEXT = '🎩 Snapdini';
+
+/** Set the wordmark's font on `ctx` and report how wide the mark comes out.
+ *
+ *  It was measured in three places — here, the footer's width calculation, and the designer's drag
+ *  outline — each with its own copy of the shorthand. Three copies of a font is two chances to
+ *  measure one thing and draw another. */
+export function brandFont(ctx: CanvasRenderingContext2D, sizePx: number): number {
+  ctx.font = `600 ${sizePx}px "Helvetica Neue", Arial, sans-serif`;
+  return ctx.measureText(BRAND_TEXT).width;
+}
+
+/** The footer join URL's full width, when it has the line to itself. */
+export const FOOTER_MAX_W = PAGE_W - 120;
+
+/** How much width the footer URL may actually occupy.
+ *
+ *  The mark defaults to the SAME line at the foot now, so a long join address centred across the
+ *  whole page runs straight through it — seen, not predicted: a custom domain rendered the two on
+ *  top of each other. The mark's width is measured rather than assumed, and the URL is given the
+ *  paper that is left; drawUrl already knows how to shrink, and to split domain from path, when what
+ *  it is given is not enough.
+ *
+ *  Narrowed ONLY when the two really are on one line. A host who has dragged either of them
+ *  elsewhere gets the whole width back, and so does every design saved before the mark moved — its
+ *  mark is still up at y=0.07, a page away from the footer. */
+export function footerMaxW(ctx: CanvasRenderingContext2D, layout: PosterLayout, showBrand?: boolean): number {
+  if (showBrand === false) return FOOTER_MAX_W;
+  const b = layout.brand, f = layout.footer;
+  // Their ink bands overlapping is what "on the same line" means; a gap bigger than the two type
+  // sizes together is two different places on the page.
+  if (Math.abs(b.y * PAGE_H - f.y * PAGE_H) > (b.size + f.size) * 0.7) return FOOTER_MAX_W;
+  ctx.save();
+  const bw = brandFont(ctx, b.size);
+  ctx.restore();
+  const bx = b.x * PAGE_W, fx = f.x * PAGE_W;
+  const GAP = 20;
+  // The mark's nearest edge plus a gap. The URL is centred on fx, so it may reach that far in
+  // EACH direction — hence the doubling.
+  const edge = bx < fx ? bx + bw / 2 + GAP : bx - bw / 2 - GAP;
+  // A floor, because a URL squeezed below this is unreadable either way and the honest failure is
+  // for the two to be tight rather than for the address to become a smudge.
+  return Math.max(260, Math.min(FOOTER_MAX_W, Math.abs(fx - edge) * 2));
+}
+
 export function qrPanelRect(box: Box, codeDisplay: PosterCodeDisplay): { x: number; y: number; w: number; h: number } {
   const w = box.size + 90;
   // The code and the URL both print below the QR and both need the taller panel. It is the thing
@@ -80,9 +207,132 @@ export function qrPanelRect(box: Box, codeDisplay: PosterCodeDisplay): { x: numb
   const h = box.size + (codeDisplay !== 'none' ? 195 : 90);
   return { x: box.x * PAGE_W - w / 2, y: box.y * PAGE_H - h / 2, w, h };
 }
+
+/** The QR IMAGE's own square inside the panel — the picture, not the paper it is mounted on.
+ *
+ *  THE keep-out rect for anything drawn over the panel, and the reason it is this and not
+ *  qrPanelRect: the server generates the code with `{ margin: 4, errorCorrectionLevel: 'H' }`
+ *  (app/src/server/routes/events.ts), so the four-module quiet zone ISO 18004 asks for is baked
+ *  INTO the PNG and travels with the image. Everything qrPanelRect adds on top of this — 45px above,
+ *  45px each side, and the strip under the code where the join code or the URL prints — is
+ *  ADDITIONAL margin, not quiet zone. Claiming the whole panel as untouchable would be refusing the
+ *  host most of a decoration for a reason that is already paid for.
+ *
+ *  Exported so drawPoster clips to exactly the rect drawQrPanel draws the image into, rather than a
+ *  second copy of the same arithmetic drifting away from it. */
+export function qrImageRect(box: Box, codeDisplay: PosterCodeDisplay): { x: number; y: number; w: number; h: number } {
+  const p = qrPanelRect(box, codeDisplay);
+  return { x: p.x + (p.w - box.size) / 2, y: p.y + 45, w: box.size, h: box.size };
+}
+
+/** The same square, rounded OUTWARD to whole pixels — what a clip has to use.
+ *
+ *  The QR's rect lands on fractional coordinates (its centre is a fraction of the page and its size
+ *  is a dragged number), and a clip edge falling mid-pixel is ANTIALIASED: the excluded region only
+ *  covers part of that pixel, so ink still reaches the rest of it. Measured in headless Chromium
+ *  before this existed — a motif straddling the code's corner put nine pixels of green on the
+ *  bottom row of the symbol. A keep-out that keeps out 99% of a pixel is not a keep-out.
+ *
+ *  Outward rather than nearest: at most one pixel of extra margin is given away, and the thing
+ *  being protected is the only part of the poster nobody can fix after it is printed. */
+export function qrKeepOut(box: Box, codeDisplay: PosterCodeDisplay): { x: number; y: number; w: number; h: number } {
+  const r = qrImageRect(box, codeDisplay);
+  const x = Math.floor(r.x), y = Math.floor(r.y);
+  return { x, y, w: Math.ceil(r.x + r.w) - x, h: Math.ceil(r.y + r.h) - y };
+}
+// ── Readable ink ─────────────────────────────────────────────────────────────
+// Lives here, with the poster's other colour arithmetic, because BOTH renderers need exactly this
+// rule and a second copy of it is a second answer. It used to sit in PosterModal.svelte, which is
+// why the card renderer could not be lifted out without either duplicating it or dragging the
+// component along.
+// ONE rule, used by both outputs. The poster and the card both let a host pick a background and
+// pick text colours, and nothing stopped the two colliding: white text on a white background is
+// an empty poster, and the near-black join code vanished on a dark card. Rather than overriding
+// the host's choice with flat black or white, a colour that would disappear is walked along its
+// OWN lightness until it clears a readable contrast — a gold title on white becomes a darker
+// gold, not black, so the design still looks like the one they chose.
+export const rgbOf = (hex: string): [number, number, number] => {
+  const m = /^#?([0-9a-f]{6})$/i.exec((hex || '').trim());
+  const n = m ? parseInt(m[1], 16) : 0;
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+// WCAG relative luminance (0–1) — the gamma-corrected one, not the flat 0.299/0.587/0.114
+// weighting the designer sorts a palette by, because this is what the contrast ratio is defined
+// against.
+export const relLum = (hex: string): number => {
+  const [r, g, b] = rgbOf(hex).map((v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+export const contrast = (a: string, b: string): number => {
+  const x = relLum(a), y = relLum(b);
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+};
+const toHex = (r: number, g: number, b: number): string =>
+  '#' + [r, g, b].map((v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0')).join('');
+/** Blend a colour toward black or white by `t` (0–1) — keeps the hue, moves the lightness. */
+const shade = (hex: string, t: number, toWhite: boolean): string => {
+  const [r, g, b] = rgbOf(hex), e = toWhite ? 255 : 0;
+  return toHex(r + (e - r) * t, g + (e - g) * t, b + (e - b) * t);
+};
+/**
+ * `hex` made readable on `bg`. Returns the colour untouched when it already reads; otherwise the
+ * nearest version of itself that clears `min` contrast, darkening on a light background and
+ * lightening on a dark one.
+ *
+ * `min` is per role, not one number: 3.0 is WCAG's bar for large display type (a poster headline,
+ * a card title) and 4.5 the bar for body text — and a trick list read in the hand at 21px is body
+ * text, so holding it to the headline's bar would leave it printing pale grey.
+ */
+export const INK_LARGE = 3.0, INK_BODY = 4.5;
+export function readableOn(hex: string, bg: string, min = INK_LARGE): string {
+  if (!/^#?[0-9a-f]{6}$/i.test((hex || '').trim())) return hex;
+  if (contrast(hex, bg) >= min) return hex;
+  const toWhite = relLum(bg) < 0.22;              // dark ground → lighten the ink, and vice versa
+  // A grey — or a cream, or an off-black — has no hue worth preserving, so "the nearest version of
+  // itself" is not worth having: white text on a white card would land on the palest grey that
+  // scrapes past the bar. Go to ink. A properly coloured choice (gold, coral, teal) is far above
+  // this threshold and keeps its hue.
+  const [r, g, b] = rgbOf(hex);
+  if (Math.max(r, g, b) - Math.min(r, g, b) < 40) return toWhite ? '#f5f5f5' : '#1a1a1a';
+  for (let t = 0.08; t <= 1.0001; t += 0.08) {
+    const c = shade(hex, t, toWhite);
+    if (contrast(c, bg) >= min) return c;
+  }
+  return toWhite ? '#ffffff' : '#111111';         // fully blended and still short: go all the way
+}
+// What a text colour is actually sitting on. An image background is painted then darkened by 55%
+// black, so whatever the photo is, the ink lands on something dark — matching what the eye sees
+// and what the old cardDark flag assumed.
+export const IMAGE_INK_BG = '#2b2b2b';
+
 /** The colours the poster is DRAWN with — already made readable against the ground they land on.
  *  The renderer never second-guesses these; picking them is the designer's job (readableOn). */
-export type PosterInk = { headline: string; message: string; steps: string; footer: string; code: string };
+/** The poster's colours.
+ *
+ *  The five required ones are the poster's palette. The three optional ones are exceptions to it:
+ *  the small lines bracketing the title and the name lockup are drawn in the TITLE's colour, which
+ *  is the right default — they are parts of one piece of typography — but it had been welded, so a
+ *  host who wanted the names in a second colour had no way to say so at all.
+ *
+ *  Absent means "the title's", which is what every design saved before this reads as and why none
+ *  of them change. Nothing here is a migration; see inkOf(), the one place the fallback happens. */
+export type PosterInk = {
+  headline: string; message: string; steps: string; footer: string; code: string;
+  /** The small caps line above the title. Absent = the title's own colour. */
+  headlineTop?: string;
+  /** ...and the one below it. */
+  headlineBottom?: string;
+  /** The name lockup, hairlines and all. Absent = the title's own colour. */
+  names?: string;
+};
+
+/** The colour an optional ink resolves to.
+ *
+ *  ONE function rather than three `??` at three call sites, because the rule it states — "same as
+ *  the title unless somebody said otherwise" — is the whole compatibility guarantee, and a fourth
+ *  optional ink added later has to inherit it rather than re-derive it. */
+export const inkOf = (ink: PosterInk, key: 'headlineTop' | 'headlineBottom' | 'names'): string =>
+  ink[key] ?? ink.headline;
 
 export type PosterRenderOpts = {
   // ── Text ──
@@ -97,6 +347,13 @@ export type PosterRenderOpts = {
    *  Blank = not drawn, which is the default. See drawNames for how a separator in the middle turns
    *  one typed line into the stacked three-row lockup. */
   names?: string;
+  /** Does a separator in `names` build the stacked lockup, or is the line set verbatim?
+   *
+   *  Undefined = true, which is what every design saved before this has and how the lockup has
+   *  always behaved. The opt-out exists because "One & Two" is sometimes exactly what the host
+   *  wants ON one line — a host who typed a line and got a three-row monogram had no way to say
+   *  "no, like that". */
+  stackNames?: boolean;
   message: string;                 // blank = not drawn at all
   stepsText: string;               // blank = not drawn at all
   cleanUrl: string;                // the join URL with the scheme stripped
@@ -186,12 +443,74 @@ export function drawCover(ctx: CanvasRenderingContext2D, img: HTMLImageElement, 
   ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
 }
 
-// Draw a single line, shrinking the font until it fits maxW — keeps long join URLs from
-// spilling past the QR panel / page edge (no clean place to wrap a URL).
-export function fitText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxW: number, weight: number, sizePx: number, family: string): void {
+// ── Turning things ───────────────────────────────────────────────────────────
+// The placed decorations have rotated since they were added: `rot`, in radians, applied by
+// drawDecorAt as translate → rotate → draw. These two extend that ONE vocabulary to the text, which
+// is all the poster's other elements are. There is deliberately no second scheme and no degrees.
+
+/** Paint with the canvas turned by `rot` about (cx, cy).
+ *
+ *  translate → rotate → translate back, so everything inside still draws in PAGE coordinates and no
+ *  draw site has to be rewritten to work relative to its own anchor — which is what keeps the
+ *  measuring path and the drawing path the same code as before.
+ *
+ *  `rot` absent or 0 costs one branch and paints exactly what it painted before. That is not an
+ *  optimisation: an upright design must come out byte-identical, and the surest way to guarantee
+ *  that is for it to run the same instructions. */
+export function rotated(ctx: CanvasRenderingContext2D, cx: number, cy: number, rot: number | undefined, paint: () => void): void {
+  if (!rot) { paint(); return; }
+  ctx.save();
+  ctx.translate(cx, cy); ctx.rotate(rot); ctx.translate(-cx, -cy);
+  paint();
+  ctx.restore();
+}
+
+/** The axis-aligned box a rect occupies once it is turned by `rot` about (ax, ay).
+ *
+ *  THE renderer's answer to "and where is it now". Exported for exactly the reason
+ *  measureTitleBlock() and measureFooterUrl() are: the designer's hit-test and its selection
+ *  outline must not keep a second guess at geometry the renderer owns. That class of bug has been
+ *  found four times in PosterModal.svelte — the last one left an outline 221px narrower than its
+ *  own text — and a rotation derived in the component would be the fifth.
+ *
+ *  An axis-aligned hull rather than the turned quad, deliberately: the drag code speaks in rects
+ *  (its snapping lines, its print-margin clamp, the element's own `left/top/width/height` box), a
+ *  hull is honest about what it is — the rect the element is inside — and the alternative is a
+ *  second geometry for every one of those to learn. */
+export function rotatedRect(
+  r: { x: number; y: number; w: number; h: number },
+  rot: number | undefined,
+  ax: number, ay: number,
+): { x: number; y: number; w: number; h: number } {
+  if (!rot) return r;
+  const c = Math.cos(rot), s = Math.sin(rot);
+  const xs: number[] = [], ys: number[] = [];
+  for (const [px, py] of [[r.x, r.y], [r.x + r.w, r.y], [r.x, r.y + r.h], [r.x + r.w, r.y + r.h]]) {
+    const dx = px - ax, dy = py - ay;
+    xs.push(ax + dx * c - dy * s);
+    ys.push(ay + dx * s + dy * c);
+  }
+  const x0 = Math.min(...xs), y0 = Math.min(...ys);
+  return { x: x0, y: y0, w: Math.max(...xs) - x0, h: Math.max(...ys) - y0 };
+}
+
+/** Shrink the font until `text` fits `maxW`, and report what that came to: the width the glyphs
+ *  really occupy and the size they ended up set at. Leaves that font applied.
+ *
+ *  Split out of fitText so an outline can ask the same question the ink answers. Anything that
+ *  re-derived "and how wide did that end up" would be a second guess at glyph geometry, and this
+ *  file has been bitten by one of those already — see measureUrlBlock. */
+function fitted(ctx: CanvasRenderingContext2D, text: string, maxW: number, weight: number, sizePx: number, family: string): { w: number; px: number } {
   let size = sizePx;
   ctx.font = `${weight} ${size}px ${family}`;
   while (size > 14 && ctx.measureText(text).width > maxW) { size -= 2; ctx.font = `${weight} ${size}px ${family}`; }
+  return { w: ctx.measureText(text).width, px: size };
+}
+
+// Draw a single line, shrinking the font until it fits maxW — keeps long join URLs from
+// spilling past the QR panel / page edge (no clean place to wrap a URL).
+export function fitText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxW: number, weight: number, sizePx: number, family: string): void {
+  fitted(ctx, text, maxW, weight, sizePx, family);
   ctx.fillText(text, x, y);
 }
 
@@ -205,6 +524,38 @@ export function drawUrl(ctx: CanvasRenderingContext2D, url: string, x: number, y
   const path = i === -1 ? '' : url.slice(i);
   fitText(ctx, domain, x, y, maxW, weight, sizePx, family);
   if (path) fitText(ctx, path, x, y + lineH, maxW, weight, Math.round(sizePx * 0.82), family);
+}
+
+/** How the footer join URL is set. One place, because drawPoster draws it and the designer's drag
+ *  outline has to measure the same thing. */
+export const FOOTER_FONT = { weight: 400, family: 'ui-monospace, Menlo, Consolas, monospace', lineHeight: 1.25 } as const;
+
+/** The footer URL's footprint, exactly as drawPoster sets it — including the width the mark leaves
+ *  it when the two share the footer line. */
+export function measureFooterUrl(ctx: CanvasRenderingContext2D, url: string, layout: PosterLayout, showBrand?: boolean): { w: number; h: number } {
+  const size = layout.footer.size;
+  return measureUrlBlock(ctx, url, footerMaxW(ctx, layout, showBrand), FOOTER_FONT.weight, size, FOOTER_FONT.family, size * FOOTER_FONT.lineHeight);
+}
+
+/** The footprint of a URL drawn by drawUrl: one line, or a domain over its path, each already
+ *  shrunk to whatever the loop above settled on. `h` is measured from the TOP of the first line,
+ *  which is where the caller anchors its rect — the URL is drawn on a middle baseline, so the
+ *  first line reaches half a size above it and the last reaches half its own size below.
+ *
+ *  The designer kept its own copy of this and got three details wrong: it measured the path line at
+ *  the full size the path is NOT drawn at, it clamped the width to maxW rather than to what the
+ *  shrink loop produced, and its height stopped short of the second line's descenders. */
+export function measureUrlBlock(ctx: CanvasRenderingContext2D, url: string, maxW: number, weight: number, sizePx: number, family: string, lineH: number): { w: number; h: number } {
+  ctx.font = `${weight} ${sizePx}px ${family}`;
+  const full = ctx.measureText(url).width;
+  if (full <= maxW) return { w: full, h: sizePx };
+  const i = url.indexOf('/');
+  const domain = i === -1 ? url : url.slice(0, i);
+  const path = i === -1 ? '' : url.slice(i);
+  const d = fitted(ctx, domain, maxW, weight, sizePx, family);
+  if (!path) return { w: d.w, h: sizePx };
+  const p = fitted(ctx, path, maxW, weight, Math.round(sizePx * 0.82), family);
+  return { w: Math.max(d.w, p.w), h: sizePx / 2 + lineH + p.px / 2 };
 }
 
 // The Snapdini brand mark punched into the centre of the QR: a white safety ring (so the QR stays
@@ -248,17 +599,60 @@ function facedLines(ctx: CanvasRenderingContext2D, face: Face, sizePx: number, t
   return wrapToLines(ctx, castFor(face, text), maxW);
 }
 
-/** A centred wrapped block in one face. Returns the total height drawn, so a caller stacking
- *  several blocks can lay them out without measuring twice. */
-function drawFaced(ctx: CanvasRenderingContext2D, text: string, face: Face, colour: string, box: Box, maxW: number, sizePx = box.size): number {
+/** One faced block, wrapped and measured: the rows, the size they are actually set at, the line
+ *  height that follows from it, and the footprint the whole block occupies.
+ *
+ *  THE one place that turns a string, a face and a wrap width into geometry. drawFaced paints from
+ *  it and measureFaced reports it, so the ink and the drag outline cannot disagree about where the
+ *  glyphs are — which they did, for every set except `plain`, while the designer kept its own
+ *  Helvetica-shaped guess. Leaves the face applied and its tracking set; callers clear it. */
+function facedBlock(ctx: CanvasRenderingContext2D, text: string, face: Face, sizePx: number, maxW: number): { lines: string[]; px: number; lh: number; w: number; h: number } {
   const lines = facedLines(ctx, face, sizePx, text, maxW);
   const px = applyFace(ctx, face, sizePx);
   const lh = px * face.lineHeight;
+  let w = 0;
+  for (const ln of lines) w = Math.max(w, ctx.measureText(ln).width);
+  return { lines, px, lh, w, h: lines.length * lh };
+}
+
+/** A centred wrapped block in one face. Returns the total height drawn, so a caller stacking
+ *  several blocks can lay them out without measuring twice. */
+function drawFaced(ctx: CanvasRenderingContext2D, text: string, face: Face, colour: string, box: Box, maxW: number, sizePx = box.size): number {
+  const { lines, lh, h } = facedBlock(ctx, text, face, sizePx, maxW);
   ctx.fillStyle = colour; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   let y = box.y * PAGE_H - ((lines.length - 1) * lh) / 2;
   for (const ln of lines) { ctx.fillText(ln, box.x * PAGE_W, y); y += lh; }
   clearTracking(ctx);
-  return lines.length * lh;
+  return h;
+}
+
+/** What drawFaced would occupy, without painting it. */
+function measureFaced(ctx: CanvasRenderingContext2D, text: string, face: Face, sizePx: number, maxW: number): { w: number; h: number } {
+  const { w, h } = facedBlock(ctx, text, face, sizePx, maxW);
+  // Tracking is sticky canvas state. A measure call that left 0.14em behind would silently space
+  // out whatever was measured or drawn next.
+  clearTracking(ctx);
+  return { w, h };
+}
+
+/** How much paper each of the poster's wrapped body blocks gets — the message is inset further
+ *  than the how-to line. Here rather than at the call sites because the outline has to wrap to the
+ *  SAME width the ink does: two copies of a wrap width is two sets of line breaks. */
+export const BODY_MAX_W = { message: PAGE_W - 200, steps: PAGE_W - 120 } as const;
+export type BodyBlockKey = keyof typeof BODY_MAX_W;
+
+/** A host-added line gets the same paper the how-to line does. */
+export const TEXT_ITEM_MAX_W = PAGE_W - 120;
+
+/** The footprint of the message or the how-to block, exactly as drawPoster sets it.
+ *
+ *  The designer used to measure these two itself, in Helvetica at the requested size with no
+ *  tracking and no casing, while the renderer set them in the host's chosen body face — which is
+ *  tracked, often upper-cased, and scaled. Measured on the bundled faces, the how-to outline came
+ *  out 221px narrower than the text it was meant to contain in Editorial, and the message outline
+ *  a whole line and a half too short. Hence: ask the renderer. */
+export function measureBodyBlock(ctx: CanvasRenderingContext2D, o: { typeSet?: TypeSetKey }, which: BodyBlockKey, text: string, box: Box): { w: number; h: number } {
+  return measureFaced(ctx, text, typeSet(o.typeSet).body, box.size, BODY_MAX_W[which]);
 }
 
 /** The headline, as up to three stacked parts in two faces, centred on the title box as one block.
@@ -270,7 +664,8 @@ function drawFaced(ctx: CanvasRenderingContext2D, text: string, face: Face, colo
  *  designer's drag-handle maths — a handle sized from a different measurement than the one that
  *  drew the text is a handle that does not sit on the text. */
 export type TitleSpec = Pick<PosterRenderOpts, 'headline' | 'headlineTop' | 'headlineBottom' | 'typeSet' | 'titleFace'>;
-type TitleRow = { text: string; face: Face; px: number; lh: number; w: number };
+type TitlePart = 'top' | 'main' | 'bottom';
+type TitleRow = { text: string; face: Face; px: number; lh: number; w: number; part: TitlePart };
 
 function titleRows(ctx: CanvasRenderingContext2D, o: TitleSpec, box: Box): TitleRow[] {
   const set = typeSet(o.typeSet);
@@ -279,17 +674,17 @@ function titleRows(ctx: CanvasRenderingContext2D, o: TitleSpec, box: Box): Title
   const maxW = PAGE_W - 140;
   const capPx = Math.round(box.size * 0.30);
   const rows: TitleRow[] = [];
-  const push = (text: string, face: Face, px: number) => {
+  const push = (text: string, face: Face, px: number, part: TitlePart) => {
     for (const ln of facedLines(ctx, face, px, text, maxW)) {
       const drawn = applyFace(ctx, face, px);
-      rows.push({ text: ln, face, px, lh: drawn * face.lineHeight, w: ctx.measureText(ln).width });
+      rows.push({ text: ln, face, px, lh: drawn * face.lineHeight, w: ctx.measureText(ln).width, part });
     }
   };
   const top = (o.headlineTop ?? '').trim();
   const bottom = (o.headlineBottom ?? '').trim();
-  if (top) push(top, cap, capPx);
-  push(o.headline || 'Our Event', main, box.size);
-  if (bottom) push(bottom, cap, capPx);
+  if (top) push(top, cap, capPx, 'top');
+  push(o.headline || 'Our Event', main, box.size, 'main');
+  if (bottom) push(bottom, cap, capPx, 'bottom');
   clearTracking(ctx);
   return rows;
 }
@@ -308,9 +703,14 @@ export function measureTitleBlock(ctx: CanvasRenderingContext2D, o: TitleSpec, b
 function drawTitleBlock(ctx: CanvasRenderingContext2D, o: PosterRenderOpts, box: Box) {
   const rows = titleRows(ctx, o, box);
   const total = rows.reduce((a, r) => a + r.lh, 0);
-  ctx.fillStyle = o.ink.headline; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   let y = box.y * PAGE_H - total / 2;
   for (const r of rows) {
+    // Per row, not per block. The three rows are still ONE draggable thing — pulling a headline
+    // into fragments is not on offer — but they no longer have to share a colour, and with no
+    // override set they all resolve to the same one they always did.
+    ctx.fillStyle = r.part === 'main' ? o.ink.headline
+      : inkOf(o.ink, r.part === 'top' ? 'headlineTop' : 'headlineBottom');
     applyFace(ctx, r.face, r.px);
     ctx.fillText(r.text, box.x * PAGE_W, y + r.lh / 2);
     y += r.lh;
@@ -344,7 +744,9 @@ export function splitNames(raw: string): { left: string; joiner: string; right: 
 
 type NameRow = { text: string; face: Face; px: number; lh: number; w: number; rule: boolean };
 
-function nameRows(ctx: CanvasRenderingContext2D, o: TitleSpec & { names?: string }, box: Box): NameRow[] {
+type NameSpec = TitleSpec & { names?: string; stackNames?: boolean };
+
+function nameRows(ctx: CanvasRenderingContext2D, o: NameSpec, box: Box): NameRow[] {
   const raw = (o.names ?? '').trim();
   if (!raw) return [];
   const set = typeSet(o.typeSet);
@@ -362,7 +764,9 @@ function nameRows(ctx: CanvasRenderingContext2D, o: TitleSpec & { names?: string
     return { ...r, w: Math.min(ctx.measureText(r.text).width, maxW) };
   };
 
-  const parts = splitNames(raw);
+  // Off means the line is set exactly as it was typed — "One & Two", one row, no joiner, no
+  // hairlines. splitNames is not even asked, so nothing about the typed text can change the answer.
+  const parts = o.stackNames === false ? null : splitNames(raw);
   const rows = parts
     ? [row(parts.left, name, box.size, false),
        row(parts.joiner, join, Math.round(box.size * 0.62), true),
@@ -375,16 +779,10 @@ function nameRows(ctx: CanvasRenderingContext2D, o: TitleSpec & { names?: string
 
 /** A host-added line's footprint, so it can be dragged and resized like anything else. */
 export function measureTextItem(ctx: CanvasRenderingContext2D, o: { typeSet?: TypeSetKey }, t: PosterTextItem): { w: number; h: number } {
-  const face = typeSet(o.typeSet).body;
-  const lines = facedLines(ctx, face, t.size, t.text || ' ', PAGE_W - 120);
-  const px = applyFace(ctx, face, t.size);
-  let w = 0;
-  for (const ln of lines) w = Math.max(w, ctx.measureText(ln).width);
-  clearTracking(ctx);
-  return { w, h: lines.length * px * face.lineHeight };
+  return measureFaced(ctx, t.text || ' ', typeSet(o.typeSet).body, t.size, TEXT_ITEM_MAX_W);
 }
 
-export function measureNames(ctx: CanvasRenderingContext2D, o: TitleSpec & { names?: string }, box: Box): { w: number; h: number } {
+export function measureNames(ctx: CanvasRenderingContext2D, o: NameSpec, box: Box): { w: number; h: number } {
   const rows = nameRows(ctx, o, box);
   if (!rows.length) return { w: 0, h: 0 };
   // The hairlines stick out past the joiner, so the block is at least as wide as the widest name
@@ -403,7 +801,8 @@ function drawNames(ctx: CanvasRenderingContext2D, o: PosterRenderOpts, box: Box)
   if (!rows.length) return;
   const total = rows.reduce((a, r) => a + r.lh, 0);
   const cx = box.x * PAGE_W;
-  ctx.fillStyle = o.ink.headline; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const colour = inkOf(o.ink, 'names');
+  ctx.fillStyle = colour; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   let y = box.y * PAGE_H - total / 2;
   for (const r of rows) {
     const mid = y + r.lh / 2;
@@ -414,7 +813,7 @@ function drawNames(ctx: CanvasRenderingContext2D, o: PosterRenderOpts, box: Box)
       // against the heavy names. It scales with the joiner so it never out-weighs the script.
       const half = r.w / 2 + ruleGap(r.px);
       ctx.save();
-      ctx.strokeStyle = o.ink.headline; ctx.lineWidth = Math.max(1, r.px * 0.035); ctx.lineCap = 'round';
+      ctx.strokeStyle = colour; ctx.lineWidth = Math.max(1, r.px * 0.035); ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.moveTo(cx - half - ruleLen(r.px), mid); ctx.lineTo(cx - half, mid);
       ctx.moveTo(cx + half, mid); ctx.lineTo(cx + half + ruleLen(r.px), mid);
@@ -514,21 +913,35 @@ function transparentQr(img: HTMLImageElement): HTMLCanvasElement | null {
  *  What is still absolute: never INVERT it. An iPhone will read a light-on-dark code, Android's ML
  *  Kit will not — so an inverted code works for whoever tests it and fails for half the guests. */
 function drawQrPanel(ctx: CanvasRenderingContext2D, box: Box, qr: HTMLImageElement, o: PosterRenderOpts) {
-  const qSize = box.size;
   const { x: px, y: py, w: panelW, h: panelH } = qrPanelRect(box, o.codeDisplay);
   if (o.qrPanel !== false) { ctx.fillStyle = '#ffffff'; roundRect(ctx, px, py, panelW, panelH, 36); ctx.fill(); }
-  const qx = px + (panelW - qSize) / 2, qy = py + 45, ccx = px + panelW / 2;
+  const q = qrImageRect(box, o.codeDisplay);
   ctx.imageSmoothingEnabled = false;
   const art = o.qrPanel === false ? transparentQr(qr) : null;
-  ctx.drawImage(art ?? qr, qx, qy, qSize, qSize);
+  ctx.drawImage(art ?? qr, q.x, q.y, q.w, q.h);
   ctx.imageSmoothingEnabled = true;
-  drawBrandChip(ctx, qx + qSize / 2, qy + qSize / 2, qSize * 0.20);
+  drawBrandChip(ctx, q.x + q.w / 2, q.y + q.h / 2, q.w * 0.20);
+}
+
+/** What prints UNDER the code, in the panel's lower strip.
+ *
+ *  Split out of drawQrPanel so a host-placed motif can be drawn BETWEEN the two. The panel is paper
+ *  and the code is a picture, but the join code and the URL are words a guest has to read off a
+ *  wall — and this poster's standing rule, stated where the slot decoration is drawn, is that the
+ *  words sit on top of the line art rather than fight it. That strip is not quiet zone, so a motif
+ *  is allowed to reach it; it is simply not allowed to be on top when it does.
+ *
+ *  Nothing inside moved: the baselines are still measured from the bottom of the QR image. */
+function drawQrCaption(ctx: CanvasRenderingContext2D, box: Box, o: PosterRenderOpts) {
+  const { x: px, w: panelW } = qrPanelRect(box, o.codeDisplay);
+  const q = qrImageRect(box, o.codeDisplay);
+  const ccx = px + panelW / 2, qBottom = q.y + q.h;
   ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
   if (o.codeDisplay === 'code') {
-    ctx.fillStyle = '#555'; ctx.font = '400 26px "Helvetica Neue", Arial, sans-serif'; ctx.fillText('Join code', ccx, qy + qSize + 52);
-    ctx.fillStyle = o.ink.code; ctx.font = '800 58px ui-monospace, Menlo, Consolas, monospace'; ctx.fillText(o.joinCode, ccx, qy + qSize + 116);
+    ctx.fillStyle = '#555'; ctx.font = '400 26px "Helvetica Neue", Arial, sans-serif'; ctx.fillText('Join code', ccx, qBottom + 52);
+    ctx.fillStyle = o.ink.code; ctx.font = '800 58px ui-monospace, Menlo, Consolas, monospace'; ctx.fillText(o.joinCode, ccx, qBottom + 116);
   } else if (o.codeDisplay === 'url') {
-    ctx.fillStyle = o.ink.code; drawUrl(ctx, o.cleanUrl, ccx, qy + qSize + 86, panelW - 70, 700, 36, '"Helvetica Neue", Arial, sans-serif', 44);
+    ctx.fillStyle = o.ink.code; drawUrl(ctx, o.cleanUrl, ccx, qBottom + 86, panelW - 70, 700, 36, '"Helvetica Neue", Arial, sans-serif', 44);
   }
 }
 
@@ -562,8 +975,8 @@ export async function drawPoster(ctx: CanvasRenderingContext2D, opts: PosterRend
   const brandOn = opts.showBrand !== false;
   if (brandOn) {
     ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-    ctx.fillStyle = ink.headline; ctx.font = `600 ${layout.brand.size}px "Helvetica Neue", Arial, sans-serif`;
-    ctx.fillText('🎩 Snapdini', layout.brand.x * W, layout.brand.y * H + layout.brand.size * 0.34);
+    ctx.fillStyle = ink.headline; brandFont(ctx, layout.brand.size);
+    ctx.fillText(BRAND_TEXT, layout.brand.x * W, layout.brand.y * H + layout.brand.size * 0.34);
   }
 
   // Line art BEFORE the text and the QR panel, for the same reason the card renderer draws it
@@ -576,10 +989,34 @@ export async function drawPoster(ctx: CanvasRenderingContext2D, opts: PosterRend
   const qrBox = layout.qr;
   const qrPx = { x: qrBox.x * W - qrBox.size / 2, y: qrBox.y * H - qrBox.size / 2, w: qrBox.size, h: qrBox.size };
   const placed = opts.decorItems ?? [];
+
+  /** A host's own image, placed like a motif.
+   *
+   *  Drawn here rather than in cardDecor because that file is pure vector geometry shared with the
+   *  card renderer, and an image needs a loader and an await. Same placement maths as a motif so
+   *  the two cannot drift: centre at (x, y) of the page, rotation about that centre, and a size
+   *  taken from the shorter page edge so the mark keeps its physical size whether this is an A6
+   *  card or an A2 sheet.
+   *
+   *  Transparency is the point — a crest on a coloured poster is nothing in a white box — which is
+   *  why the upload is re-encoded to PNG rather than the JPEG every other theme image becomes. */
+  const drawLogos = async () => {
+    for (const it of placed) {
+      if (it.kind !== 'logo' || !it.url) continue;
+      let img: HTMLImageElement;
+      try { img = await load(it.url); } catch { continue; }   // a missing file leaves a gap, not a crash
+      const ar = it.ar && Number.isFinite(it.ar) && it.ar > 0 ? it.ar : (img.width / img.height || 1);
+      const scale = Math.max(0.4, Math.min(2.2, it.scale || 1));
+      const w = Math.min(W, H) * 0.22 * scale;
+      const h = w / ar;
+      ctx.save();
+      ctx.translate(it.x * W, it.y * H);
+      if (it.rot) ctx.rotate(it.rot);
+      ctx.drawImage(img, -w / 2, -h / 2, w, h);
+      ctx.restore();
+    }
+  };
   const page = { x: 0, y: 0, w: W, h: H };
-  for (const it of placed) {
-    drawDecorAt(ctx, { ...it, colour: it.colour || opts.decorColour || ink.headline, unit: 2, card: page });
-  }
   // The design's own decoration draws WHATEVER is placed by hand. The two are additive.
   //
   // This used to suppress the slot motif as soon as anything was placed, on the theory that a host
@@ -612,7 +1049,17 @@ export async function drawPoster(ctx: CanvasRenderingContext2D, opts: PosterRend
     // motif in that gap instead of crowding the headline.
     // With the mark switched off there is no ink to stay clear of, so the corridor is the whole
     // page — otherwise a `top` motif would hang below an empty band, visibly avoiding nothing.
-    const brandBottom = brandOn ? layout.brand.y * H + layout.brand.size * 0.5 : 0;
+    // ...and only when the mark is actually IN that band. The mark now defaults to the foot (see
+    // DEFAULT_POSTER_LAYOUT.brand), where it is nowhere near a `top` motif, so insetting the whole
+    // page for it would cost every new poster the top edge to avoid a collision that cannot happen.
+    //
+    // Keyed off the mark's POSITION, not off `showBrand`, because both states have to be right: a
+    // design saved before this change still has the mark at 0.07 and still needs the corridor, and
+    // a host who drags it back up there needs it too. The threshold is the top fifth of the page —
+    // a `top` motif reaches about y=240 at its largest, and the title's own default centre is
+    // 0.225, so anything below this is not in the motif's way.
+    const brandInTopBand = brandOn && layout.brand.y < 0.20;
+    const brandBottom = brandInTopBand ? layout.brand.y * H + layout.brand.size * 0.5 : 0;
     const card = positional
       ? { x: 0, y: brandBottom, w: W, h: H - brandBottom }
       : { x: 0, y: 0, w: W, h: H };
@@ -631,19 +1078,83 @@ export async function drawPoster(ctx: CanvasRenderingContext2D, opts: PosterRend
   // Everything else is drawn at its free layout position (the organizer drags/resizes these).
   const qr = await load(opts.qrSrc);
   drawQrPanel(ctx, layout.qr, qr, opts);
-  drawTitleBlock(ctx, opts, layout.title);
-  if (opts.message.trim()) drawFaced(ctx, opts.message, set.body, ink.message, layout.message, W - 200);
-  if (opts.stepsText.trim()) drawFaced(ctx, opts.stepsText, set.body, ink.steps, layout.steps, W - 120);
-  drawNames(ctx, opts, layout.names);
+
+  // ── Motifs the host placed by hand, OVER the panel ──────────────────────────
+  //
+  // These used to be drawn before the panel, which is why a motif dragged anywhere near the code
+  // simply vanished: the white rect painted straight over it, and nothing on screen said so. It was
+  // never a placement restriction — the host could put a motif there, it just could not be seen —
+  // which is the worst version of the bug, because the control worked and the paper did not.
+  //
+  // What it costs, and what it does not: the code keeps every module and every bit of the quiet
+  // zone it was generated with, because the clip below cuts the QR IMAGE's square out of the region
+  // these are allowed to paint in. See qrImageRect for why that square, and not the panel, is the
+  // honest keep-out — the quiet zone is inside the PNG.
+  //
+  // Even-odd on two rects: the page, then the code's square. Applied whether or not the panel is
+  // shown, because with the panel off the light modules are knocked out to transparent and the
+  // PAPER is the quiet zone — a motif drawn across it would be printing on the code itself.
+  //
+  // They now also sit ABOVE the slot decoration rather than below it. Same reasoning the host's own
+  // text lines are drawn last with: a thing the host put in a particular place by hand outranks a
+  // thing the design dropped into a slot.
+  if (placed.length) {
+    const keepOut = qrKeepOut(layout.qr, opts.codeDisplay);
+    // ...and only when one of them could actually REACH the code.
+    //
+    // A clip is not free of consequence even where it excludes nothing: it puts the strokes through
+    // a different rasterisation, and measured in Chromium that moved 872 antialiased pixels of a
+    // motif at the top of the page by up to 6/255 — invisible, and still a change to a design
+    // nobody edited. decorReach() is cardDecor's own answer to how far a motif's ink goes, so this
+    // is not a second guess at its size.
+    const reaches = placed.some((it) => {
+      const r = decorReach({ scale: it.scale, unit: 2, card: page });
+      const cx = it.x * W, cy = it.y * H;
+      return cx + r > keepOut.x && cx - r < keepOut.x + keepOut.w
+          && cy + r > keepOut.y && cy - r < keepOut.y + keepOut.h;
+    });
+    ctx.save();
+    if (reaches) {
+      ctx.beginPath();
+      ctx.rect(0, 0, W, H);
+      ctx.rect(keepOut.x, keepOut.y, keepOut.w, keepOut.h);
+      ctx.clip('evenodd');
+    }
+    for (const it of placed) {
+      drawDecorAt(ctx, { ...it, colour: it.colour || opts.decorColour || ink.headline, unit: 2, card: page });
+    }
+    ctx.restore();
+  }
+  // ...and the words under the code go on top of them, like every other word on the poster.
+  drawQrCaption(ctx, layout.qr, opts);
+
+  // Each of these is turned about its own anchor when the host has turned it, and draws exactly as
+  // it always did when they have not — see rotated(). The QR is NOT in this list and neither is the
+  // mark; canRotate() in $lib/posterFlow says why.
+  rotated(ctx, layout.title.x * W, layout.title.y * H, layout.title.rot, () => drawTitleBlock(ctx, opts, layout.title));
+  if (opts.message.trim()) rotated(ctx, layout.message.x * W, layout.message.y * H, layout.message.rot,
+    () => drawFaced(ctx, opts.message, set.body, ink.message, layout.message, BODY_MAX_W.message));
+  if (opts.stepsText.trim()) rotated(ctx, layout.steps.x * W, layout.steps.y * H, layout.steps.rot,
+    () => drawFaced(ctx, opts.stepsText, set.body, ink.steps, layout.steps, BODY_MAX_W.steps));
+  rotated(ctx, layout.names.x * W, layout.names.y * H, layout.names.rot, () => drawNames(ctx, opts, layout.names));
   // Last, so a host-added line sits on top of everything else — they added it deliberately and it
   // should not end up behind a motif they chose earlier.
   for (const t of opts.textItems ?? []) {
     if (!t.text.trim()) continue;
-    drawFaced(ctx, t.text, set.body, ink.message, { x: t.x, y: t.y, size: t.size }, W - 120, t.size);
+    // `t.colour || ink.message` — the same fallback chain the placed decorations use. A line saved
+    // before this existed has no colour and still draws in the message ink.
+    rotated(ctx, t.x * W, t.y * H, t.rot,
+      () => drawFaced(ctx, t.text, set.body, t.colour || ink.message, { x: t.x, y: t.y, size: t.size }, TEXT_ITEM_MAX_W, t.size));
   }
   if (opts.showFooterUrl) {
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = ink.footer;
-    drawUrl(ctx, cleanUrl, layout.footer.x * W, layout.footer.y * H, W - 120, 400, layout.footer.size, 'ui-monospace, Menlo, Consolas, monospace', layout.footer.size * 1.25);
+    rotated(ctx, layout.footer.x * W, layout.footer.y * H, layout.footer.rot, () => {
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = ink.footer;
+      drawUrl(ctx, cleanUrl, layout.footer.x * W, layout.footer.y * H, footerMaxW(ctx, layout, opts.showBrand), FOOTER_FONT.weight, layout.footer.size, FOOTER_FONT.family, layout.footer.size * FOOTER_FONT.lineHeight);
+    });
   }
+  // A host's own image goes on last and OUTSIDE the QR keep-out that the motifs draw inside.
+  // The keep-out exists to stop a decoration we placed for them wandering over the code; a logo is
+  // put exactly where they put it, and is theirs to move if it lands somewhere it should not.
+  await drawLogos();
   return { backgroundImage };
 }

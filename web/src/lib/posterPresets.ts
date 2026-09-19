@@ -237,6 +237,7 @@ const PRESET_FOR_TYPE: Record<string, string> = {
   hens: 'sweetheart',
   birthday: 'celebration',
   graduation: 'celebration',
+  travel: 'minimal',
   christmas: 'deco',
   corporate: 'letterpress',
   general: 'minimal',
@@ -244,6 +245,51 @@ const PRESET_FOR_TYPE: Record<string, string> = {
 
 export const presetForEventType = (type: string | null | undefined): PosterPreset | undefined =>
   presetByKey(PRESET_FOR_TYPE[type ?? ''] ?? '');
+
+// ── The small-caps pair that brackets the headline ──────────────────────────
+// A printed sign reads as designed rather than as typed when its title is set as PARTS: a small
+// tracked line, the big word, a small tracked line. The designer offers both, and the example in
+// the placeholder is the only thing that tells a host what to put there.
+//
+// The two examples used to be "CAPTURE THE" above and "THE LOVE" below, which is what a host sees
+// bracketing their own title:
+//
+//        CAPTURE THE
+//       Ana and Ben
+//         THE LOVE
+//
+// — not a sentence, and not a shape anyone would copy. The pair has to read as ONE phrase wrapping
+// the title, which is what every real sign does. So: a verb above, the phrase that completes it
+// below, and the host's own title as the object. "Capture Ana and Ben in love."
+//
+// Keyed on the mission-pack keys (EVENT_TYPES in challenges.ts) — the same vocabulary PRESET_FOR_TYPE,
+// decorFor() and tickFor() use, not a second one invented here. "Capture … in love" is a wedding
+// line and would be strange on a conference sign, which is the whole reason this varies.
+export type TitleBracket = { top: string; bottom: string };
+
+/** Nothing was asked, or the type is one we do not know. Skipping the event-type question is a
+ *  supported answer, not a missing one, so this has to be a real pair rather than a blank. */
+const NEUTRAL_BRACKET: TitleBracket = { top: 'CAPTURE', bottom: 'AS IT HAPPENS' };
+
+const BRACKET_FOR_TYPE: Record<string, TitleBracket> = {
+  wedding:       { top: 'CAPTURE', bottom: 'IN LOVE' },
+  engagement:    { top: 'CAPTURE', bottom: 'SAYING YES' },
+  'baby-shower': { top: 'CAPTURE', bottom: 'BEFORE BABY ARRIVES' },
+  hens:          { top: 'CAPTURE', bottom: 'LETTING LOOSE' },
+  birthday:      { top: 'CAPTURE', bottom: 'CELEBRATING' },
+  graduation:    { top: 'CAPTURE', bottom: 'THROWING THE CAP' },
+  travel:        { top: 'CAPTURE', bottom: 'THE WHOLE TRIP' },
+  christmas:     { top: 'CAPTURE', bottom: 'MERRY AND BRIGHT' },
+  corporate:     { top: 'CAPTURE', bottom: 'AT ITS BEST' },
+  general:       NEUTRAL_BRACKET,
+};
+
+/** The example bracket to SUGGEST for this kind of event.
+ *
+ *  A placeholder, never a value: blank still means "do not draw this line", and nothing starts
+ *  printing on the poster because an example exists. */
+export const titleBracketFor = (type: string | null | undefined): TitleBracket =>
+  BRACKET_FOR_TYPE[type ?? ''] ?? NEUTRAL_BRACKET;
 
 /** The gallery's order for this event: the suggested design first, everything else as declared.
  *

@@ -12,6 +12,7 @@
            offeredChallenges, isCustomId, ALL_BY_ID,
            CHALLENGE_MAX_LEN, DEFAULT_COUNT, MAX_COUNT, MAX_SETS, tickFor, cleanTick,
            TICKS_OUTLINE, TICKS_EMOJI,
+           missionsSavedMessage,
            type Challenge, type Mood, type MissionSet } from '$lib/challenges';
   import { showToast } from '$lib/toast';
   import { track } from '$lib/analytics';
@@ -149,7 +150,18 @@
   }
   function addCard() {
     if (!pack || drafts.length >= MAX_SETS) return;
-    const key = String.fromCharCode(97 + drafts.length);
+    // The FIRST UNUSED letter, not one derived from the count. `97 + drafts.length` is only right
+    // while the keys are a contiguous prefix — remove any card but the last and it collides with a
+    // card that still exists. Cards [a,b] → remove A → length 1 → proposes "b", which is taken.
+    // The server then re-derived the same colliding key and dropped the set, so the host lost a
+    // card they had just written and still got success:true back.
+    const used = new Set(drafts.map((d) => d.key));
+    let key = '';
+    for (let i = 0; i < MAX_SETS; i++) {
+      const c = String.fromCharCode(97 + i);
+      if (!used.has(c)) { key = c; break; }
+    }
+    if (!key) return;
     // Varied against the cards that already exist, not a fresh copy of the curated order — which
     // would hand the host an exact duplicate of card A and leave them to rebuild it by hand. It
     // keeps whatever the existing cards already share, so the essentials stay on every table, and
@@ -226,7 +238,9 @@
         // only honest thing to put on the admin card.
         onSaved(d.sets ?? []);
         track('missions_saved', { cards: (d.sets ?? []).length, per, type }, joinCode);
-        showToast(d.sets?.length ? `Saved — ${d.sets.length} card${d.sets.length === 1 ? '' : 's'} ready to print` : 'Trick list cleared');
+        // `reseated` comes back on the same reply and is the only place a host is told that
+        // deleting a card just moved guests off it — see missionsSavedMessage().
+        showToast(missionsSavedMessage({ sets: (d.sets ?? []).length, reseated: Number(d.reseated) || 0 }));
       } catch (e) {
         showToast(`${e instanceof Error ? e.message : 'Could not save'} — your trick list is back open, nothing was lost`, true);
         onSaveFailed(sets);
@@ -396,7 +410,7 @@
   .tabs { display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0 6px; }
   .tab { position: relative; padding: 7px 11px; border: 1px solid var(--border); border-radius: 8px;
     background: transparent; color: var(--text); font: inherit; font-size: .8rem; cursor: pointer; }
-  .tab.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); font-weight: 700; }
+  .tab.on { background: var(--accent-fill); color: var(--accent-ink, #111); border-color: var(--accent); font-weight: 700; }
   /* Same corner-bubble treatment as .preset-check on the admin page, so the count reads as a badge
      on the card rather than a second word in its name. The ring in --surface keeps it legible
      wherever it lands, including over the accent fill of the selected tab. */
@@ -404,7 +418,7 @@
     position: absolute; top: -7px; right: -7px;
     min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
     display: flex; align-items: center; justify-content: center;
-    background: var(--accent); color: var(--accent-ink, #111);
+    background: var(--accent-fill); color: var(--accent-ink, #111);
     font-size: .64rem; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums;
     box-shadow: 0 0 0 2px var(--surface);
   }
@@ -436,7 +450,7 @@
   .chip { padding: 7px 11px; border: 1px solid var(--border); border-radius: 8px; background: transparent;
     color: var(--text); cursor: pointer; font: inherit; font-size: .8rem; }
   .chip:hover { border-color: var(--accent); }
-  .chip.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); font-weight: 700; }
+  .chip.on { background: var(--accent-fill); color: var(--accent-ink, #111); border-color: var(--accent); font-weight: 700; }
 
   /* Wraps rather than squashing: at 360px "Every trick Hens / bachelorette offers" and the hint
      cannot share a line. */
@@ -463,12 +477,12 @@
   .btn { font-weight: 700; border-radius: var(--radius-sm); padding: 10px 14px; font-size: 0.86rem;
     border: 1px solid transparent; cursor: pointer; text-decoration: none; text-align: center; }
   .btn.sm { padding: 7px 12px; font-size: 0.8rem; }
-  .btn.primary { background: var(--accent); color: var(--accent-ink, #111); }
+  .btn.primary { background: var(--accent-fill); color: var(--accent-ink, #111); }
   .btn.ghost { background: transparent; color: var(--text); border-color: var(--border); }
   .btn:disabled { opacity: 0.6; cursor: default; }
   .ticks { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; margin-bottom: 6px; }
   .tk { width: 34px; height: 34px; border-radius: 8px; cursor: pointer; font-size: 1rem; line-height: 1;
     border: 1px solid var(--border); background: transparent; color: var(--text); }
-  .tk.on { background: var(--accent); border-color: var(--accent); }
+  .tk.on { background: var(--accent-fill); border-color: var(--accent); }
   .tkown { width: 46px; flex: none; text-align: center; }
 </style>

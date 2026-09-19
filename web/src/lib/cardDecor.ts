@@ -36,7 +36,13 @@
 // printed, often on a home inkjet, and a filled shape is both uglier and dearer than an outline.
 
 export type DecorKind = 'none' | 'frame' | 'bows' | 'birds' | 'glasses' | 'confetti' | 'stars' | 'camera'
-  | 'botanical' | 'deco' | 'rings' | 'cameraline' | 'wave' | 'hearts' | 'heartlens';
+  | 'botanical' | 'deco' | 'rings' | 'cameraline' | 'wave' | 'hearts' | 'heartlens'
+  /** A host's own image — a crest, a monogram, a wordmark. Deliberately NOT in DECOR_KINDS: it is
+   *  not a motif this file can draw, and drawDecorAt declines anything that is not listed there, so
+   *  it passes through the vector renderer untouched and the poster renderer paints it. Keeping it
+   *  in this union is what lets it share every other thing a placement has — position, scale,
+   *  rotation, the drag surface, the control cluster and the bin. */
+  | 'logo';
 /** Where a motif sits. Only the scattered/repeatable kinds use it — a border is already everywhere
  *  and the camera is pinned to the QR. */
 export type DecorPos = 'top' | 'corners' | 'both';
@@ -111,6 +117,12 @@ export const decorFor = (eventType: string | null | undefined): DecorKind =>
 /** A motif the host has placed themselves. */
 export type DecorPlacement = {
   kind: DecorKind;
+  /** For `logo` only: the same-origin uploads path of the image, and its width ÷ height.
+   *  The aspect is stored rather than measured because the placement's hit box has to exist before
+   *  the image has loaded — otherwise a wordmark is grabbable only as a square for the first frame
+   *  after every open. */
+  url?: string;
+  ar?: number;
   /** Centre, as a fraction of the rect (0–1). */
   x: number;
   y: number;
@@ -846,13 +858,30 @@ function paintMotif(ctx: CanvasRenderingContext2D, p: Pen, kind: DecorKind, cx: 
  *
  *  Only positional kinds place: `frame`, `wave` and `camera` are defined by the edges
  *  of the paper or by the code, and "drag the border somewhere else" is not a thing anyone means. */
+/** The motif half-size drawDecorAt paints at — paper-scaled, then capped against the rect so a
+ *  short or narrow one can never be handed a motif wider than it is. */
+function placedSize(o: { scale: number; unit: number; card: Rect }): number {
+  const scale = Math.max(0.4, Math.min(2.2, o.scale || 1));
+  return Math.min(24 * o.unit * scale, Math.min(o.card.w, o.card.h) * 0.17);
+}
+
+/** How far a placed motif's ink can reach from its anchor, in the rect's own pixels.
+ *
+ *  Exported so a caller asking "could this motif reach the QR" is not keeping a second copy of the
+ *  sizing above — the same rule the poster renderer keeps about glyph geometry. A radius rather
+ *  than a box, because a placed motif rotates about its anchor and a circle is the one bound that
+ *  does not have to be turned with it.
+ *
+ *  3× the half-size: the widest any motif draws from its own centre is confetti's band at 2.2s,
+ *  with birds just under it at ~2.2s, so this clears the lot with room for a pen width. */
+export const decorReach = (o: { scale: number; unit: number; card: Rect }): number => placedSize(o) * 3;
+
 export function drawDecorAt(ctx: CanvasRenderingContext2D, o: DecorAtOpts): void {
   const kind = o.kind;
   if (kind === 'none') return;
   if (!(DECOR_KINDS.find((d) => d.key === kind)?.positional ?? false)) return;
   const scale = Math.max(0.4, Math.min(2.2, o.scale || 1));
-  const span = Math.min(o.card.w, o.card.h);
-  const s = Math.min(24 * o.unit * scale, span * 0.17);
+  const s = placedSize(o);
   ctx.save();
   ctx.strokeStyle = o.colour;
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
