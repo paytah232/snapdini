@@ -80,7 +80,7 @@
     transition: transform 0.15s, background 0.15s;
   }
   .toggle input:checked + .toggle-track {
-    background: var(--accent);
+    background: var(--accent-fill);
     border-color: var(--accent);
   }
   .toggle input:checked + .toggle-track::before {

@@ -36,7 +36,7 @@ export const GUEST_DELIVERY_OPTIONS: readonly GuestDeliveryOption[] = [
   { value: 'all_on_reveal', label: 'Everything, as soon as photos are revealed',
     desc: 'Every guest who asked for the photos gets the whole gallery the moment it opens. Nothing for you to do.' },
   { value: 'favourites_manual', label: "Just my favourites, when I've picked them",
-    desc: 'Nothing goes out until you say so. Star the ones you love, then send the link from your event page.' },
+    desc: 'Nothing goes out until you say so. Favourite the ones you love, then send the link from your event page.' },
   { value: 'scheduled', label: 'At a time I choose',
     desc: 'Pick the date and time below. It goes out then, whether or not you are near your phone.' },
   { value: 'manual', label: "I'll send it myself",

@@ -17,6 +17,21 @@ import type { BillingConfig, AppOptions } from '$lib/types';
 // The panel re-quotes on every change; the prices it shows are the server's business and are
 // asserted where they are computed. Here it only has to not reach the network.
 vi.mock('$lib/api', () => ({ postJson: vi.fn(async () => ({})) }));
+import { postJson } from '$lib/api';
+
+/** A server quote, for the tests that are about how one is PRESENTED.
+ *
+ *  Most tests here only drive the selects and are happy with the default empty reply — the prices
+ *  are the server's business and are asserted where they are computed. These three are the
+ *  exception: they are about the breakdown's own arithmetic, which needs numbers to show. */
+const quoteOf = (over: Record<string, unknown> = {}) => ({
+  tier: 'paid', amountCents: 1500, baseCents: 1500, maxGuests: 10, coveredCents: 0,
+  maxPhotos: 24, videoSeconds: 0, durationHours: 24, retentionDays: 7,
+  framePack: false, shotsCents: 0, frameCents: 0, videoCents: 0, durationCents: 0, retentionCents: 0,
+  ...over,
+});
+/** Let the panel's quote promise settle — `tick()` alone only flushes Svelte, not the fetch. */
+const settled = async () => { for (let i = 0; i < 4; i++) { await Promise.resolve(); await tick(); } };
 
 const billing = {
   billingEnabled: true, currency: 'aud', freeAllGuests: 10,
@@ -72,6 +87,24 @@ describe('the upgrade panel’s keep-photos control', () => {
     expect(pick(container, 'Keep photos').value).toBe('365');
   });
 
+  // The reported bug, in the shape it was reported in: an event already holding more retention than
+  // its tier includes, so the "untouched" rule below resolves to the event's OWN number. The panel
+  // carried two listeners on one change event — `bind:value` and an `on:change` that set the
+  // touched flag — and the flush could run the rule while the flag was still false, which hands
+  // back the tier's number and throws the host's pick away. The second pick then stuck, because by
+  // then the flag was set. One handler now sets both, in order.
+  //
+  // NOTE: this passes against the two-listener version too — jsdom's fireEvent runs both listeners
+  // before the flush, which is exactly why the bug reached a browser. It is here to pin the rule,
+  // not to stand in for the browser check.
+  it('takes the host’s FIRST pick on an event that already has more than its tier includes', async () => {
+    const { container } = render(UpgradePanel, { props: { ...freeEvent, guestCap: 60, retentionDays: 31, amountPaidCents: 800 } });
+    const keep = pick(container, 'Keep photos');
+    expect(keep.value).toBe('31');
+    await set(keep, '365');
+    expect(pick(container, 'Keep photos').value, 'the first pick must stick').toBe('365');
+  });
+
   it('never offers less than the event already has — the server refuses downgrades', async () => {
     // A year already paid for leaves nothing to sell, so the control goes away rather than
     // listing "1 week": /api/billing/upgrade clamps every field UP, so a shorter keep would be
@@ -107,6 +140,21 @@ describe('the upgrade breakdown tells a host what they already have', () => {
     const chk = [...container.querySelectorAll('label.chk')]
       .find((l) => /Unlock all frame sizes/.test(l.textContent || ''));
     expect(chk, 'an unticked "unlock" box beside a charge for the same thing').toBeUndefined();
+  });
+
+  // The note earns its place by explaining a CHARGE, and the charge only exists past the free
+  // tier — that is the whole mechanism this group was written for. Below ten guests there is no
+  // charged line to account for, so the note would be a bare "you already have this" on a panel
+  // whose entire job is offering things you do not.
+  it('says nothing about the pack while the event is still inside the free tier', async () => {
+    const { container } = render(UpgradePanel, { props: giftedEvent });
+    await tick();
+    expect(container.textContent).not.toContain('Frame sizes are already on your event');
+  });
+
+  it('explains the pack the moment growing past the free tier starts charging for it', async () => {
+    const { container } = render(UpgradePanel, { props: giftedEvent });
+    await set(pick(container as HTMLElement, 'Guests'), '25');
     expect(container.textContent).toContain('Frame sizes are already on your event');
   });
 
@@ -117,6 +165,116 @@ describe('the upgrade breakdown tells a host what they already have', () => {
       .find((l) => /Unlock all frame sizes/.test(l.textContent || ''));
     expect(chk, 'a host without the pack must still be able to buy it').toBeDefined();
     expect(container.textContent).not.toContain('Frame sizes are already on your event');
+  });
+
+  // The event pass was the one line that could never say "already yours", so the biggest number in
+  // the breakdown always read as a fresh charge — even for a host who had not touched the guest tier.
+  it('says the event pass is already yours when the guest tier is untouched', async () => {
+    vi.mocked(postJson).mockResolvedValue(quoteOf());
+    const { container } = render(UpgradePanel, { props: giftedEvent });
+    // Buy something ELSE, so the breakdown is up and the guest tier is still untouched — which is
+    // the case this test is about. (The breakdown only renders once a change costs money.)
+    await set(pick(container as HTMLElement, 'Video'), '10');
+    await settled();
+    const pass = [...container.querySelectorAll('.quote-lines li')]
+      .find((l) => /Event pass/.test(l.textContent || ''));
+    expect(pass, 'the breakdown should itemise the event pass').toBeDefined();
+    expect(pass?.textContent).toContain('already yours');
+  });
+
+  // The list prices the WHOLE event, so on a paid event its lines sum to more than is owed. Without
+  // the subtraction shown, a priced "already yours" line reads as being charged a second time.
+  it('shows what has been paid and what is left, so the line prices add up to something', async () => {
+    // coveredCents, not amountPaidCents: the subtraction is now "what your event already has, at
+    // today's prices", which is the same sum the upgrade route bills.
+    vi.mocked(postJson).mockResolvedValue(quoteOf({ coveredCents: 500 }));
+    const { container } = render(UpgradePanel, { props: { ...giftedEvent, amountPaidCents: 500 } });
+    await set(pick(container as HTMLElement, 'Video'), '10');
+    await settled();
+    const sum = container.querySelector('.quote-lines.sum');
+    expect(sum, 'a paid event needs the subtraction spelled out').not.toBeNull();
+    expect(sum?.textContent).toContain('Already on your event');
+    expect(sum?.textContent).toContain('You pay now');
+    // The headline stops calling itself "total" once it is no longer the amount due.
+    expect(container.querySelector('.quote-price')?.textContent).toContain('new total');
+  });
+
+  it('does not spell out a subtraction when nothing has been paid', async () => {
+    vi.mocked(postJson).mockResolvedValue(quoteOf());
+    const { container } = render(UpgradePanel, { props: giftedEvent });
+    // With the breakdown up — otherwise this passes for the wrong reason, there being no
+    // breakdown at all to look in.
+    await set(pick(container as HTMLElement, 'Video'), '10');
+    await settled();
+    expect(container.querySelector('.quote'), 'the breakdown should be showing').not.toBeNull();
+    expect(container.querySelector('.quote-lines.sum'), 'minus $0 is noise').toBeNull();
+    expect(container.querySelector('.quote-price')?.textContent).not.toContain('new total');
+  });
+
+  // Six items at one weight and one colour, and the host has to hunt for which one the upgrade is
+  // even about. `class:owned` was already being set and nothing styled it.
+  it('tells the changing line apart from the ones you already have', async () => {
+    vi.mocked(postJson).mockResolvedValue(quoteOf({ maxGuests: 25 }));
+    const { container } = render(UpgradePanel, { props: giftedEvent });
+    await set(pick(container as HTMLElement, 'Guests'), '25');
+    await settled();
+
+    const line = (needle: RegExp) => [...container.querySelectorAll('.quote-lines li')]
+      .find((l) => needle.test(l.textContent || ''));
+
+    const pass = line(/Event pass/);
+    expect(pass, 'the event pass should be itemised').toBeDefined();
+    expect(pass?.classList.contains('owned'), 'a raised guest tier is NOT already yours').toBe(false);
+    expect(pass?.querySelector('.prev')?.textContent, 'it should say what it was').toContain('10');
+
+    // …and something untouched keeps the quieter treatment.
+    const shots = line(/Extra shots/);
+    if (shots) {
+      expect(shots.classList.contains('owned'), 'untouched shots are already yours').toBe(true);
+      expect(shots.querySelector('.prev'), 'an unchanged line has no "was"').toBeNull();
+    }
+  });
+
+  // The breakdown answers "why that number", so it has no business on screen before there is a
+  // number. Rendered at rest it was a priced list of everything the host already owns, sitting
+  // under a heading that offers to sell them more — which is the reading that made an "already
+  // yours" line look like a second charge in the first place.
+  it('keeps the breakdown off the card until the host changes something', async () => {
+    vi.mocked(postJson).mockResolvedValue(quoteOf());
+    const { container } = render(UpgradePanel, { props: giftedEvent });
+    await settled();
+    expect(container.querySelector('.quote'), 'nothing has changed — there is nothing to explain').toBeNull();
+    // What the card says at rest is the one line at the top, and it still says it.
+    expect(container.querySelector('.cur')?.textContent).toContain('10');
+  });
+
+  it('brings it out as soon as a selection costs something', async () => {
+    vi.mocked(postJson).mockResolvedValue(quoteOf({ videoSeconds: 10, videoCents: 500 }));
+    const { container } = render(UpgradePanel, { props: giftedEvent });
+    await set(pick(container as HTMLElement, 'Video'), '10');
+    await settled();
+    expect(container.querySelector('.quote'), 'a charge needs itemising').not.toBeNull();
+  });
+
+  // A change the event has already paid for charges nothing, and the button says so on its own.
+  // An itemised list of a $0 bill is the noise this whole change is removing.
+  it('stays away for a change that is already covered', async () => {
+    vi.mocked(postJson).mockResolvedValue(quoteOf({ coveredCents: 1500 }));
+    const { container } = render(UpgradePanel, { props: { ...giftedEvent, amountPaidCents: 1500 } });
+    await set(pick(container as HTMLElement, 'Video'), '10');
+    await settled();
+    expect(container.querySelector('.quote'), 'nothing to pay, nothing to itemise').toBeNull();
+    expect(container.textContent).toContain('already covered');
+  });
+
+  // Three places used to state one number: the "Now:" line, the subtraction, and a footnote. The
+  // footnote is gone; the "Now:" line carries it whether the breakdown is up or not.
+  it('states what has been paid exactly once, at the top', async () => {
+    vi.mocked(postJson).mockResolvedValue(quoteOf());
+    const { container } = render(UpgradePanel, { props: { ...giftedEvent, amountPaidCents: 500 } });
+    await settled();
+    expect(container.querySelector('.cur')?.textContent).toContain('$5.00');
+    expect(container.textContent).not.toContain('Already paid');
   });
 
   it('changes nothing about what is charged', async () => {

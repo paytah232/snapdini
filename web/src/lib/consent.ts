@@ -26,11 +26,36 @@ export function isValidGtagId(id: string | null | undefined): boolean {
   return !!id && VALID_ID.test(id.trim());
 }
 
+// The JS expression the tag uses as `page_location`, instead of letting it read document.location.
+//
+// Built from three pieces on purpose:
+//
+//   location.origin  from the BROWSER, never from a server-side ORIGIN guess — getting the host
+//                    wrong here would misreport every page rather than protect anything.
+//   the path         already reduced to its route pattern by the caller (redactPath), so a token
+//                    sitting in a path segment never leaves the machine.
+//   location.search  kept, deliberately. utm_* and gclid live in the query and GA4's campaign
+//                    attribution reads them from page_location; dropping it would trade a privacy
+//                    fix for broken ad reporting.
+//
+// What is absent is the point: location.hash is NOT included. The organizer code travels in the
+// fragment on every /admin/<joinCode>#<organizerCode> page, document.location.href includes the
+// fragment, and the default page_location IS document.location.href — so the host's own
+// credential was being handed to Google on every admin page view. It no longer is.
+//
+// `<` is escaped so a pathname can never close the inline <script> it is interpolated into.
+const pageLocation = (path: string): string =>
+  `location.origin+${JSON.stringify(path).replace(/</g, '\\u003c')}+location.search`;
+
 // The <head> markup: Consent Mode v2 defaults + gtag loader. Order matters — the consent `default`
 // commands and the gtag() shim MUST precede the async library load, and there are TWO defaults: an
 // explicit granted baseline for the rest of the world, then a denied override for CONSENT_REGIONS.
 // Also honours the Global Privacy Control browser signal (auto-deny) and replays a stored choice.
-export function analyticsHead(id: string): string {
+//
+// `path` is the visited pathname ALREADY reduced to a route pattern (shared/token-paths
+// redactPath). It is a required argument rather than an option so a future caller cannot forget it
+// and quietly go back to sending Google the raw URL.
+export function analyticsHead(id: string, path: string): string {
   const regions = JSON.stringify(CONSENT_REGIONS);
   return (
     `<script>` +
@@ -42,7 +67,7 @@ export function analyticsHead(id: string): string {
     // Replay a previously stored choice before the tag fires.
     `try{var c=localStorage.getItem('snapdini-consent');if(c==='granted')gtag('consent','update',{ad_storage:'granted',ad_user_data:'granted',ad_personalization:'granted',analytics_storage:'granted'});else if(c==='denied')gtag('consent','update',{ad_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',analytics_storage:'denied'});}catch(e){}` +
     `gtag('set','ads_data_redaction',true);gtag('set','url_passthrough',true);` +
-    `gtag('js',new Date());gtag('config','${id}');` +
+    `gtag('js',new Date());gtag('config','${id}',{page_location:${pageLocation(path)}});` +
     `</script>` +
     // The library is ~154KB and, even async, competes with the hero for bandwidth and main-thread
     // time during the initial paint. It is loaded on idle instead, or on the first interaction,

@@ -18,7 +18,10 @@ export interface AppOptions {
   defaults: { durationHours: number; maxPhotos: number; revealMode: string; aspectRatios: string[] };
 }
 
-export interface BillingTier { maxGuests: number; amountCents: number; }
+/** videoMul: how much a clip costs on an event of this size, as a multiple of the listed add-on
+ *  price. Video is the only add-on whose cost is guests x seconds rather than seconds alone — see
+ *  PAID_TIERS on the server. Optional so a config from before this still reads (and prices at 1x). */
+export interface BillingTier { maxGuests: number; amountCents: number; videoMul?: number; }
 export interface VideoAddon { seconds: number; amountCents: number; }
 export interface ShotsTier { maxShots: number; amountCents: number; }
 export interface DurationTier { maxHours: number; amountCents: number; }
@@ -41,6 +44,10 @@ export interface BillingConfig {
 }
 
 export interface BillingQuote {
+  /** What the event ALREADY has, priced at today's prices. The upgrade charges the difference
+   *  between this and `amountCents` — not against money paid in the past, which made every price
+   *  change retroactive for events already sold at the old one. */
+  coveredCents?: number;
   maxGuests: number;
   maxPhotos: number;
   aspectRatios: string[];
@@ -65,6 +72,10 @@ export interface AppConfig {
   version: string;
   videoMaxSeconds: number;
   videoHardMaxSeconds?: number;
+  /** How long a guest has to bin a shot they just took. The client MUST read this rather than keep
+   *  its own copy: an operator can change it, and a bin that outlives the server's acceptance is a
+   *  button that fails. */
+  photoDeleteWindowSeconds?: number;
   faceMatchingAvailable?: boolean;
   emailEnabled: boolean;
   supportEmail: string | null;

@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { getSlideshow, startSlideshowJob, uploadSlideshowAudio, favouriteSlideshow, deleteSlideshowVersion, slideshowDownloadUrl, buyBrandingRemoval, type SlideshowStatus, type SlideshowOrder } from '$lib/events';
+  import StarIcon from '$lib/components/StarIcon.svelte';
   import { showToast } from '$lib/toast';
   import Toggle from '$lib/components/Toggle.svelte';
+  import DownloadIcon from '$lib/components/DownloadIcon.svelte';
   const money = (c: number) => `$${(c / 100).toFixed(2)}`;
 
   async function toggleFav(id: string) {
@@ -245,7 +247,7 @@
 
     <div class="fld"><span>Order</span>
       <div class="seg">
-        <button class="seg-btn" class:on={order === 'chronological'} on:click={() => (order = 'chronological')}>Start → end</button>
+        <button class="seg-btn" class:on={order === 'chronological'} on:click={() => (order = 'chronological')}>Start → End</button>
         <button class="seg-btn" class:on={order === 'shuffled'} on:click={() => (order = 'shuffled')}>🔀 Shuffled</button>
       </div>
     </div>
@@ -292,7 +294,7 @@
     {/if}
 
     {#if includeCount > 0}
-      <p class="estimate">≈ <b>{fmtDur(estSeconds)}</b> long · {includeCount - videoN} photo{includeCount - videoN === 1 ? '' : 's'}{#if videoN} + {videoN} clip{videoN === 1 ? '' : 's'}{/if} · ~<b>{estMB < 10 ? estMB.toFixed(1) : Math.round(estMB)} MB</b>
+      <p class="estimate">≈ <b>{fmtDur(estSeconds)}</b> long · {includeCount - videoN} photo{includeCount - videoN === 1 ? '' : 's'}{#if videoN}{' '}+ {videoN} clip{videoN === 1 ? '' : 's'}{/if} · ~<b>{estMB < 10 ? estMB.toFixed(1) : Math.round(estMB)} MB</b>
         {#if selectedTracks.length}· 🎵 {loopMusic ? 'looped to fit' : (musicWarn ? 'ends early' : 'plays once')}{/if}</p>
       <p class="how-long">All <b>{includeCount}</b> of them go in — nothing is left out. Building it takes
         <b>{roughTime(estRenderSecs)}</b>, and it runs on our server, so you only have to start it.
@@ -355,7 +357,7 @@
            aria-valuenow={st?.phase === 'encoding' ? (st?.progress ?? 0) : undefined}>
         <div class="bar" style="width:{st?.phase === 'encoding' ? (st?.progress ?? 0) : 0}%"></div>
       </div>
-      <p class="hint">{st?.phase === 'encoding' ? `Encoding… ${st?.progress ?? 0}%` : 'Collecting photos…'}{#if st?.label} · {st.label}{/if}</p>
+      <p class="hint">{st?.phase === 'encoding' ? `Encoding… ${st?.progress ?? 0}%` : 'Collecting photos…'}{#if st?.label}{' '}· {st.label}{/if}</p>
       <p class="bg-note">This keeps rendering on our server. Close the tab, lock your phone, change the
         settings above and queue another — it carries on regardless, and every finished slideshow is
         waiting in the list below whenever you come back.</p>
@@ -403,14 +405,14 @@
             <!-- svelte-ignore a11y-media-has-caption -->
             <video class="rthumb" src={s.playUrl ?? s.url} muted preload="metadata" playsinline></video>
             <div class="rinfo">
-              <div class="rlabel">{s.label}{#if s.resolution} · {s.resolution === '4k' ? '4K' : s.resolution}{/if}</div>
-              <div class="rwhen">{fmtAgo(s.createdAt)}{#if s.favourite} · ★ kept{/if}</div>
+              <div class="rlabel">{s.label}{#if s.resolution}{' '}· {s.resolution === '4k' ? '4K' : s.resolution}{/if}</div>
+              <div class="rwhen">{fmtAgo(s.createdAt)}{#if s.favourite}{' '}· ★ kept{/if}</div>
             </div>
             <div class="racts">
-              <button class="ic" class:on={s.favourite} on:click={() => toggleFav(s.id)} title={s.favourite ? 'Unfavourite' : 'Keep (favourite)'} aria-label="Favourite">{s.favourite ? '★' : '☆'}</button>
-              <a class="ic" href={slideshowDownloadUrl(code, s.id)} title="Download {s.resolution === '4k' ? '4K' : '1080p'}" aria-label="Download">⬇</a>
+              <button class="ic" class:on={s.favourite} on:click={() => toggleFav(s.id)} title={s.favourite ? 'Unfavourite' : 'Keep (favourite)'} aria-label="Favourite"><StarIcon filled={s.favourite} size={15} /></button>
+              <a class="ic" href={slideshowDownloadUrl(code, s.id)} title="Download {s.resolution === '4k' ? '4K' : '1080p'}" aria-label="Download"><DownloadIcon /></a>
               {#if s.resolution === '4k'}<a class="ic txt" href={slideshowDownloadUrl(code, s.id, '1080p')} title="Download a smaller 1080p version" aria-label="Download 1080p">1080p</a>{/if}
-              <button class="ic" on:click={() => removeVersion(s.id)} title="Delete" aria-label="Delete">🗑</button>
+              <button class="ic" on:click={() => removeVersion(s.id)} title="Delete" aria-label="Delete">🗑️</button>
             </div>
           </div>
         {/each}
@@ -439,8 +441,9 @@
   .fld { display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 12px; }
   .fld > span { display: block; margin-bottom: 4px; }
   .fld select { width: 100%; padding: 9px 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font: inherit; font-size: 0.88rem; }
-  .btn { display: inline-block; min-height: 44px; font-weight: 700; border-radius: var(--radius-sm); padding: 11px 18px; font-size: 0.9rem; border: 1px solid var(--border); cursor: pointer; font: inherit; text-align: center; background: transparent; color: var(--text); text-decoration: none; }
-  .btn.primary { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); }
+  .btn { display: inline-block; min-height: 44px; font-weight: 700; border-radius: var(--radius-sm); padding: 11px 18px; font-size: 0.9rem; border: 1px solid var(--border); cursor: pointer; font-family: inherit; text-align: center; background: transparent; color: var(--text); text-decoration: none; }
+  .btn.primary { background: var(--accent-fill); color: var(--accent-ink, #111); border-color: var(--accent); }
+  .btn.sm { padding: 7px 14px; font-size: 0.82rem; border-radius: var(--radius-sm); }
   .full { width: 100%; }
   .recent { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
   .recent-head { font-weight: 800; font-size: 0.85rem; margin-bottom: 4px; }
@@ -462,7 +465,7 @@
   .credit { font-size: 0.68rem; color: var(--text-muted); margin: 10px 0 0; }
   .seg { display: flex; gap: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; margin-bottom: 8px; }
   .seg-btn { flex: 1; min-height: 44px; background: transparent; color: var(--text-muted); border: none; padding: 9px; font: inherit; font-size: 0.84rem; font-weight: 700; cursor: pointer; }
-  .seg-btn.on { background: var(--accent); color: var(--accent-ink, #111); }
+  .seg-btn.on { background: var(--accent-fill); color: var(--accent-ink, #111); }
   .seg-btn small { font-weight: 600; opacity: 0.8; }
   .estimate { font-size: 0.8rem; color: var(--text); margin: 0 0 12px; }
   .tracks { display: flex; flex-direction: column; gap: 5px; max-height: 220px; overflow-y: auto; }
@@ -494,7 +497,7 @@
   .vol input[type="range"] { flex: 1; accent-color: var(--accent); }
   .vol-pct { min-width: 34px; text-align: right; }
   .progress { position: relative; height: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; overflow: hidden; margin: 4px 0 0; }
-  .progress .bar { height: 100%; background: var(--accent); transition: width 0.4s ease; }
+  .progress .bar { height: 100%; background: var(--accent-fill); transition: width 0.4s ease; }
   /* A percentage that hasn't moved in a minute and a render that has died look exactly alike, and
      ffmpeg really does sit on one number while it works through a long still or a clip — for the
      whole collecting phase there is no number at all and the bar is 0px wide. The sweep claims

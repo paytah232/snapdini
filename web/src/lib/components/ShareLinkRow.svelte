@@ -74,10 +74,19 @@
     <div class="who">
       <span class="title">{title}</span>
       {#if subtitle}<span class="sub">{subtitle}</span>{/if}
+      <!-- Under the name rather than in the actions row: this says what the link IS, not something
+           you can do to it. Styled by the caller, which is the only one that knows what it means. -->
+      <slot name="pills" />
     </div>
     <div class="acts">
       <slot name="tag" />
       <button class="btn ghost sm" on:click={() => dispatch('copy', { url })}>🔗 Copy</button>
+      <!-- A real anchor, not a button that calls window.open: the host gets middle-click, long-press
+           and "open in background" for free, and a popup blocker has no opinion about it. Checking
+           a link used to mean copying it and pasting it into a new tab by hand — three steps to
+           answer "what does this actually look like". -->
+      <a class="btn ghost sm open" href={url} target="_blank" rel="noopener noreferrer"
+         title="Open this link in a new tab">↗ Open</a>
       {#if canShare}
         <button class="btn ghost sm" on:click={nativeShare}>📤 Share</button>
       {/if}
@@ -162,7 +171,7 @@
   /* Rides on the Email button: the number of people this link has already gone to. */
   .count {
     margin-left: 5px; font-size: 0.68rem; font-weight: 700;
-    color: var(--accent-ink, #111); background: var(--accent);
+    color: var(--accent-ink, #111); background: var(--accent-fill);
     border-radius: 999px; padding: 0 5px;
   }
   .bad { color: var(--danger); }
@@ -187,4 +196,30 @@
   .addr { overflow-wrap: anywhere; min-width: 0; }
   .at { color: var(--text-muted); white-space: nowrap; }
   .sent li.bad .at { color: var(--danger); }
+  /* The FULL button rule set, local on purpose. app.css explains why a global one cannot work:
+     Svelte emits a component's own `.btn` as `.btn.svelte-xxx.svelte-xxx.svelte-xxx`, specificity
+     (0,4,0), so a global rule loses in every component that defines one and wins in the ones that
+     do not — half-applied, which is worse than absent.
+     This component used to carry ONLY the `.ghost` colour patch. That fixed the cold-grey UA
+     ButtonFace it was written for, and left everything else: no padding, no radius, no weight, no
+     `sm` sizing, and `primary` with no gold at all — so `btn primary sm` painted as a raw browser
+     button. Colours without the shape is why these still did not read as Snapdini buttons. */
+  /* inline-FLEX with an explicit line-height, so a link and a button of the same class come out the
+     same height. A <button> gets `line-height: normal` from the UA while an <a> inherits the page's
+     1.5, so "Open"/"View" sat visibly taller than the buttons beside it — the row read as one odd
+     control among several. Setting both here means the element an action happens to be written as
+     stops being something the layout can feel. */
+  .btn { display: inline-flex; align-items: center; justify-content: center; line-height: 1.2;
+    font-weight: 700; border-radius: var(--radius-sm); padding: 10px 18px;
+    font-size: 0.9rem; border: 1px solid transparent; cursor: pointer; text-decoration: none;
+    font-family: inherit; text-align: center; min-height: 40px; }
+  /* A floor, because an emoji is taller than a letter. "🔗 Copy" and "Edit" are the same font at
+     the same padding, but the emoji glyph raises the line box by most of a pixel, so the row came
+     out a mix of 31.8px and 31px controls — small enough to look like a rendering accident rather
+     than a decision, which is exactly what makes it read as sloppy. The floor is the emoji height,
+     so the plain ones come up to meet it instead of the row being ragged. */
+  .btn.sm { padding: 7px 14px; font-size: 0.82rem; border-radius: var(--radius-sm); min-height: 32px; }
+  .btn.ghost { background: transparent; color: var(--text); border-color: var(--border); }
+  .btn.ghost:hover { border-color: var(--accent); }
+  .btn:disabled { opacity: 0.6; cursor: default; }
 </style>

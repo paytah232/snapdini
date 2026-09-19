@@ -10,7 +10,14 @@ button,
 summary,
 [role='button'],
 .tab,
-.seg {
+.seg,
+/* Toggle.svelte is a <label> wrapping a visually-hidden checkbox — the label IS the hit area, and
+   it was the one control shape this list missed. So tapping a switch on a phone flashed the grey
+   rectangle AND began selecting its own label text, which reads as the app glitching under your
+   thumb. Matched by class, not by the bare `label` element: a label beside a text field is next to
+   copyable content (a host copying their join link), and the note above is deliberate that only
+   CONTROLS give up selection. */
+.toggle {
   -webkit-tap-highlight-color: transparent;
   -webkit-user-select: none;
   user-select: none;
@@ -72,8 +79,22 @@ textarea {
   --border:      #2e2e2e;
   --text:        #f0ece6;
   --text-muted:  #8f897c;
+  /* The site header's height, in one place. Three pages had drawn their own header at three
+     different heights, and anything that sticks BELOW one (see the admin section bar) has to know
+     how far down to sit — which is not something to re-type per page. */
+  --nav-h:       62px;
   --accent:      #f5c518;
   --accent-dark: #c9a00e;
+  /* The accent SPLIT in two, because one value cannot serve both jobs on a light ground.
+     As a FILL with dark ink on top, brighter is strictly better (#f5c518 gives 11.6:1).
+     As TEXT on a near-white card, brighter is strictly worse (#f5c518 gives 1.59:1 — a gold
+     eyebrow would all but vanish). Dark mode never had to choose: on a near-black ground the
+     bright gold is both the best fill and the best text, which is why it reads as the "right"
+     yellow and light mode looked dull beside it.
+     So: --accent-fill is the brand yellow everywhere it sits BEHIND something, and --accent stays
+     the readable gold for text, borders and focus rings. In dark mode the two are the same value,
+     so nothing about dark mode changes. */
+  --accent-fill: #f5c518;
   --accent-ink:  #111;   /* legible text/icon colour on top of --accent */
   --danger:      #e84444;
   --success:     #4cbb6a;
@@ -85,16 +106,32 @@ textarea {
 
 :root[data-theme='light'] {
   color-scheme: light;
-  --bg:          #f7f7f4;
-  --surface:     #ffffff;
-  --surface-2:   #efeee9;
-  --border:      #e2e1db;
+  /* Warm, slightly-off neutrals rather than paper white. A pure #fff card on a near-white ground
+     glares on a phone held at arm's length, and the two surfaces were only 1.07:1 apart — the
+     cards barely read as cards. Dropping the ground and warming the card widens that to 1.12:1
+     and lets the gold sit in a family instead of on top of one. All text pairs stay above AA:
+     --text 16.8:1 on a card, --text-muted 5.15:1; on the page ground 14.98:1 and 4.59:1. */
+  --bg:          #f1efe8;
+  --surface:     #fdfcf9;
+  --surface-2:   #e9e6dd;
+  --border:      #ddd9ce;
   --text:        #1b1b1a;
   --text-muted:  #6c6c66;
-  /* Lighter, warmer gold in light mode — small accent text is also bolded for legibility
-     (see .kicker / .eyebrow). Still works as a button fill with dark --accent-ink. */
-  --accent:      #cc9a06;
-  --accent-dark: #a87f04;
+  /* The SAME yellow as --accent-fill, one shade down — not a different colour.
+     #b08b08 is hue 47deg / saturation 92%, byte-for-byte the brand yellow's own hue and
+     saturation, with only the lightness reduced. That is the whole trick: on a near-white ground
+     a yellow light enough to be the brand is too light to be text (#f5c518 reads 1.59:1 — a price
+     you cannot see), and a yellow dark enough to read is no longer the brand. Dark mode never has
+     to choose, which is why one token worked there and looked wrong here.
+     3.13:1 on a card clears AA for the large/bold type this is used on — and is an improvement on
+     the #cc9a06 it replaces, which was 2.50:1 and passed nothing. Used for text, borders, focus
+     rings and ticks; --accent-fill is used anywhere the colour sits BEHIND something. */
+  --accent:      #b08b08;
+  --accent-dark: #8a6d06;
+  /* The one that was making light mode look duller than dark: buttons now carry the same brand
+     yellow as dark mode (dark ink on it reads at 11.6:1, better than the 7.4:1 it had). Accent
+     TEXT deliberately stays on --accent above — see the note in the dark block. */
+  --accent-fill: #f5c518;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -173,3 +210,20 @@ label.t-label {
      thing to aim at. The admin page and the feature cards already said so; the wizard did not. */
   cursor: pointer;
 }
+
+/* ── A secondary button must not fall back to the browser's own grey ────────────────────────────
+ *
+ * `class="btn ghost"` appears in 21 components. Four of them — the create wizard, the guest list,
+ * the share-link row and siteadmin — carried the class with no rule behind it, because Svelte
+ * scopes a component's <style> to that component's markup and the copy written in Camera.svelte
+ * has never applied anywhere else. Those four buttons painted in the UA's ButtonFace, which
+ * `color-scheme: dark` renders dark enough to pass for deliberate; in light mode it is #efefef,
+ * a flat cold grey against warm surfaces, which is how it was finally noticed.
+ *
+ * The fix is a local `.ghost` in each of the four, NOT a global rule here — and that is worth
+ * writing down, because a global one looks obviously better and cannot work. Svelte emits a
+ * component's `.btn` as `.btn.svelte-ox4xyi.svelte-ox4xyi.svelte-ox4xyi`, repeating the scoping
+ * class to force specificity to (0,4,0). Nothing reasonable written in this sheet outranks that,
+ * so a global `.btn.ghost` silently loses the properties the component's own `.btn` happens to
+ * set — here `border: 1px solid transparent` — while appearing to work for the ones it does not.
+ * Half-applied is worse than absent. */

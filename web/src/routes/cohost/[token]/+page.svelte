@@ -79,7 +79,7 @@
   .state .big { font-size: 40px; display: block; margin-bottom: 10px; }
   .btn { display: inline-block; font-weight: 700; border-radius: var(--radius-sm); padding: 12px 18px; font-size: 0.95rem; cursor: pointer; border: 1px solid transparent; text-decoration: none; text-align: center; }
   .btn.block { display: block; width: 100%; margin-top: 10px; box-sizing: border-box; }
-  .btn.primary { background: var(--accent); color: var(--accent-ink, #111); }
+  .btn.primary { background: var(--accent-fill); color: var(--accent-ink, #111); }
   .btn.ghost { background: transparent; color: var(--text); border-color: var(--border); }
   .btn:disabled { opacity: 0.6; cursor: default; }
   .msg { margin-top: 8px; padding: 12px 14px; border-radius: var(--radius-sm); font-size: 0.85rem; background: color-mix(in srgb, var(--accent) 16%, var(--surface)); }

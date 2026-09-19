@@ -95,8 +95,8 @@
     border-radius: var(--radius-sm); color: var(--text); font-size: 0.95rem; font-family: var(--font); resize: vertical; }
   input:focus, textarea:focus { outline: 2px solid var(--accent); border-color: transparent; }
   .btn { display: inline-block; width: 100%; margin-top: 20px; padding: 12px; border: 1px solid transparent;
-    border-radius: var(--radius-sm); font-weight: 700; font-size: 0.95rem; cursor: pointer; font: inherit; text-align: center; text-decoration: none; }
-  .btn.primary { background: var(--accent); color: var(--accent-ink, #111); }
+    border-radius: var(--radius-sm); font-weight: 700; font-size: 0.95rem; cursor: pointer; font-family: inherit; text-align: center; text-decoration: none; }
+  .btn.primary { background: var(--accent-fill); color: var(--accent-ink, #111); }
   .btn.ghost { background: transparent; color: var(--text); border-color: var(--border); }
   .btn.block { display: block; }
   .btn:disabled { opacity: 0.6; cursor: default; }

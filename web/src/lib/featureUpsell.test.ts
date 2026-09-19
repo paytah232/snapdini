@@ -97,6 +97,39 @@ describe('the table these rules are tested against', () => {
     expect(climbs(durations.map((t) => t.maxHours)) && climbs(durations.map((t) => t.amountCents))).toBe(true);
     expect(climbs(retentions.map((t) => t.maxDays)) && climbs(retentions.map((t) => t.amountCents))).toBe(true);
   });
+
+  // Climbing is not enough. The shots ladder used to climb while SAGGING in the middle: the blocks
+  // cost $3, then $2, then $3, so a dozen shots were cheapest in the middle of the range and there
+  // was no reason anyone could state for it. Shots are the one thing with a genuine per-unit cost to
+  // us — each is a file stored, thumbnailed and served for the whole retention window — so the price
+  // of the next dozen must never be lower than the price of the last.
+  it('never makes a later dozen shots cheaper than an earlier one', () => {
+    const blocks = shots.slice(1).map((t, i) => {
+      const prev = shots[i];
+      return { to: t.maxShots, perShot: (t.amountCents - prev.amountCents) / (t.maxShots - prev.maxShots) };
+    });
+    for (let i = 1; i < blocks.length; i++) {
+      expect(blocks[i].perShot, `the block ending at ${blocks[i].to} undercuts the one before it`)
+        .toBeGreaterThanOrEqual(blocks[i - 1].perShot);
+    }
+  });
+
+  // The counterpart, and deliberately the opposite direction: a bigger event is nearly free for us
+  // to carry — the same event row, the same gallery — so guests get a volume discount.
+  //
+  // Asserted on the MARGINAL rate (what the next block of guests costs), not the average per head.
+  // The average is a sawtooth in any tiered table — someone with 26 guests pays the 60-guest price —
+  // so it is not a rule the ladder can be held to.
+  it('keeps guests going the other way — each block cheaper per head than the last', () => {
+    const blocks = paid.slice(1).map((t, i) => {
+      const prev = paid[i];
+      return { to: t.maxGuests, perGuest: (t.amountCents - prev.amountCents) / (t.maxGuests - prev.maxGuests) };
+    });
+    for (let i = 1; i < blocks.length; i++) {
+      expect(blocks[i].perGuest, `the block ending at ${blocks[i].to} costs more per head than the one before`)
+        .toBeLessThan(blocks[i - 1].perGuest);
+    }
+  });
 });
 
 describe('who the features are free for', () => {
@@ -353,5 +386,59 @@ describe('retention when the guest count moves between tiers', () => {
         expect(retentionFor(once, PAID, touched)).toBe(once);
       }
     }
+  });
+});
+
+// ── Video is the one add-on priced by guests x seconds ───────────────────────────────────────
+//
+// The wizard quotes a clip before the server does. If the two ever round differently the host is
+// shown one number and charged another, so this pins the client half against the same arithmetic
+// videoCentsFor() uses on the server — multiplier by tier, then to the nearest dollar.
+describe('what a clip costs on an event of this size', () => {
+  const billing = {
+    billingEnabled: true, currency: 'aud', freeAllGuests: 10,
+    paidTiers: [
+      { maxGuests: 25, amountCents: 500, videoMul: 1 },
+      { maxGuests: 60, amountCents: 1500, videoMul: 1.25 },
+      { maxGuests: 150, amountCents: 2900, videoMul: 1.75 },
+      { maxGuests: 400, amountCents: 5900, videoMul: 2.25 },
+    ],
+    videoAddons: [
+      { seconds: 10, amountCents: 200 }, { seconds: 30, amountCents: 600 },
+      { seconds: 60, amountCents: 1400 }, { seconds: 90, amountCents: 2400 },
+    ],
+    shotsFree: 12, shotsTiers: [], framePackCents: 500,
+    durationFreeHours: 48, durationTiers: [], retentionFreeDays: 7, retentionPaidDays: 31, retentionTiers: [],
+  } as unknown as BillingConfig;
+
+  it('charges the listed price on the smallest paid tier', () => {
+    expect(videoAddonCents(billing, 60, 25)).toBe(1400);
+    expect(videoAddonCents(billing, 90, 25)).toBe(2400);
+  });
+
+  it('scales it up with the guest tier, to the dollar', () => {
+    expect(videoAddonCents(billing, 60, 60)).toBe(1800);    // 14 x 1.25 = 17.50 → $18
+    expect(videoAddonCents(billing, 60, 150)).toBe(2500);   // 14 x 1.75 = 24.50 → $25 (half up)
+    expect(videoAddonCents(billing, 90, 400)).toBe(5400);   // 24 x 2.25 = $54
+  });
+
+  it('never returns a part-dollar, whatever the multiplier does', () => {
+    for (const g of [25, 60, 150, 400]) {
+      for (const sec of [10, 30, 60, 90]) {
+        expect(videoAddonCents(billing, sec, g) % 100, `${sec}s at ${g} guests`).toBe(0);
+      }
+    }
+  });
+
+  it('falls back to the list price when nobody has said how many guests', () => {
+    expect(videoAddonCents(billing, 60)).toBe(1400);
+  });
+
+  it('is still free on an event small enough to be free', () => {
+    expect(videoPrice(billing, 90, 10).kind).toBe('gift');
+  });
+
+  it('treats an unknown clip length as no charge rather than guessing', () => {
+    expect(videoAddonCents(billing, 45, 150)).toBe(0);
   });
 });

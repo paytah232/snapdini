@@ -1,8 +1,10 @@
 <script lang="ts">
+  import SiteNav from '$lib/components/SiteNav.svelte';
   import { onMount } from 'svelte';
   import { api, postJson, getMe } from '$lib/api';
   import Loading from '$lib/components/Loading.svelte';
   import { showToast } from '$lib/toast';
+  import { dep } from '$lib/reactive';
   import type { User } from '$lib/types';
 
   let loading = true;
@@ -133,8 +135,8 @@
     && (evKind === 'demo' || evShowInactive || eventActive(e)));
   $: msgFiltered = contactMsgs.filter((m) => match([m.name, m.email, m.message], msgQuery) && (msgShowDone || !m.handled));
   // Reset to page 1 whenever a query or filter changes (and clamp if a page goes out of range).
-  $: { void evQuery; void evShowInactive; evPage = 1; }
-  $: { void msgQuery; void msgShowDone; msgPage = 1; }
+  $: { dep(evQuery, evShowInactive); evPage = 1; }
+  $: { dep(msgQuery, msgShowDone); msgPage = 1; }
   $: evPaged = paginate(evFiltered, Math.min(evPage, pageCount(evFiltered.length)));
   $: msgPaged = paginate(msgFiltered, Math.min(msgPage, pageCount(msgFiltered.length)));
   $: activeEventCount = events.filter(eventActive).length;
@@ -149,7 +151,7 @@
   let errShowDone = false;
   let errQuery = '', errPage = 1;
   $: errFiltered = clientErrors.filter((e) => match([e.message, e.context, e.event_code], errQuery) && (errShowDone || !e.handled));
-  $: { void errQuery; void errShowDone; errPage = 1; }
+  $: { dep(errQuery, errShowDone); errPage = 1; }
   $: errPaged = paginate(errFiltered, Math.min(errPage, pageCount(errFiltered.length)));
 
   async function loadClientErrors() {
@@ -244,11 +246,76 @@
     p.percentOff != null ? `${p.percentOff}% off` : `$${(p.amountOff / 100).toFixed(2)} off`;
 
   const fmtDate = (ms: number | null) => (ms ? new Date(ms).toLocaleString() : '—');
-  const relExpiry = (ms: number) => {
-    const d = ms - Date.now();
-    if (d <= 0) return 'ended';
-    const h = Math.round(d / 3.6e6);
-    return h < 48 ? `${h}h left` : `${Math.round(h / 24)}d left`;
+  /* What an event was SET UP to be, not just how it is doing.
+     The row answers who owns it, how many guests and how much was paid; the one thing it could not
+     answer is what the host actually built — which is the question behind most support mail. Every
+     field is already on the row from the list query, so opening this costs no request and no wait:
+     it is a disclosure, not a fetch. */
+  let openEvent: string | null = null;
+  const yn = (v: unknown) => (v ? '✓' : '✗');
+  /** The roll, the gallery, and the paperwork. Grouped because that is how a host meets them. */
+  const evSetup = (e: any) => [
+    { title: 'The roll', items: [
+      ['Shots each', e.max_photos ?? '—'],
+      ['Video', e.video_seconds ? `${e.video_seconds}s` : 'off'],
+      ['Shapes', e.aspect_ratios || 'any'],
+      ['Flash', e.no_flash ? 'blocked' : 'allowed'],
+      ['Trick list', yn(e.has_challenges)],
+      ['Type', e.event_type || '—'],
+    ] },
+    { title: 'The gallery', items: [
+      ['Reveal', `${e.reveal_mode || '—'}${e.reveal_delay_hours ? ` +${e.reveal_delay_hours}h` : ''}`],
+      ['Downloads', yn(e.allow_downloads)],
+      ['Hearts', `${yn(e.hearts_enabled)} camera / ${yn(e.gallery_hearts_enabled)} gallery`],
+      ['Comments', `${yn(e.comments_enabled)} camera / ${yn(e.gallery_comments_enabled)} gallery`],
+      ['Moderation', yn(e.moderation_enabled)],
+      ['Face matching', yn(e.face_matching_enabled)],
+      ['Rating', e.rating_mode || '—'],
+    ] },
+    { title: 'Set up', items: [
+      ['Theme', yn(e.has_theme)],
+      ['Poster', yn(e.has_poster)],
+      ['Blurb', yn(e.has_blurb)],
+      ['Frames removed', yn(e.branding_removal_paid)],
+      ['Keeps for', e.retention_days ? `${e.retention_days}d` : '—'],
+      ['Timezone', e.timezone || '—'],
+      ['Guests may buy', [e.guest_may_buy_shots && 'shots', e.guest_may_buy_video && 'video',
+                          e.guest_may_buy_frames && 'frames'].filter(Boolean).join(', ') || 'nothing'],
+      ['Guests may ask', yn(e.guest_may_request)],
+    ] },
+  ];
+
+  /** A span of time, in the coarsest unit that still says something useful. */
+  const rel = (ms: number) => {
+    const h = Math.round(ms / 3.6e6);
+    if (h < 1) return '<1h';
+    return h < 48 ? `${h}h` : `${Math.round(h / 24)}d`;
+  };
+  /* What the event is DOING, not just when it stops.
+     "3d left" answered how long until expiry and left the question actually being asked
+     unanswered: is this running, about to run, or over? Three rows reading "3d left", "2d left",
+     "5d left" look like three live events, and any of them may not have started yet — the status
+     column was the one place that could say so and did not. */
+  type EvState = 'upcoming' | 'live' | 'done' | 'purged';
+  const evState = (e: any): EvState => {
+    if (e.purged_at) return 'purged';
+    const now = Date.now();
+    const starts = Number(e.starts_at) || 0;
+    const ends = Number(e.expires_at) || 0;
+    if (starts && now < starts) return 'upcoming';
+    if (ends && now >= ends) return 'done';
+    return 'live';
+  };
+  const evStatus = (e: any): string => {
+    const now = Date.now();
+    switch (evState(e)) {
+      case 'purged':   return '🗑️ purged';
+      case 'upcoming': return `starts in ${rel(Number(e.starts_at) - now)}`;
+      case 'done':     return `ended ${rel(now - Number(e.expires_at))} ago`;
+      // An event with no expiry is running with nothing to count down to, which is worth saying
+      // plainly rather than as "ends in NaN".
+      default:         return e.expires_at ? `ends in ${rel(Number(e.expires_at) - now)}` : 'running';
+    }
   };
   // When all of an event's data is (or was) purged.
   const purgeInfo = (e: any): string => {
@@ -296,6 +363,8 @@
 </script>
 
 <svelte:head><title>Site admin · Snapdini</title></svelte:head>
+
+<SiteNav admin />
 
 <main class="wrap">
   {#if loading}
@@ -345,7 +414,7 @@
               <tbody>
                 {#each revenue.users as u (rowKey(u))}
                   <tr>
-                    <td>{u.email}{#if u.displayName} <span class="muted">({u.displayName})</span>{/if}</td>
+                    <td>{u.email}{#if u.displayName}{' '}<span class="muted">({u.displayName})</span>{/if}</td>
                     <td>{u.events.length}</td>
                     <td>{money(u.totalCents)}</td>
                     <td><button class="linklike" on:click={() => (openUser = openUser === rowKey(u) ? null : rowKey(u))}>{openUser === rowKey(u) ? 'Hide' : 'Details'}</button></td>
@@ -356,7 +425,7 @@
                         <thead><tr><th>Event</th><th>Created</th><th>Paid</th></tr></thead>
                         <tbody>
                           {#each u.events as ev}
-                            <tr><td>{ev.name}{#if ev.branding} <span class="muted">· no-frames add-on</span>{/if}</td><td>{fmtDate(ev.createdAt)}</td><td>{money(ev.cents)}</td></tr>
+                            <tr><td>{ev.name}{#if ev.branding}{' '}<span class="muted">· no-frames add-on</span>{/if}</td><td>{fmtDate(ev.createdAt)}</td><td>{money(ev.cents)}</td></tr>
                           {/each}
                         </tbody>
                       </table>
@@ -399,17 +468,20 @@
                 <td class="stacked muted">
                   <div>👤 {e.owner || 'anon'}</div>
                   <div>👥 {e.participants}/{e.guest_cap} guests</div>
-                  <div>🖼 {e.photos} photos</div>
+                  <div>🖼️ {e.photos} photos</div>
                 </td>
                 <!-- `paid` is true for demos too (they bypass billing), so a tick here read as a
                      sale. Show the amount actually taken, and label demos as what they are. -->
                 <td>{!e.owner ? 'Demo' : e.amount_paid_cents > 0 ? `$${(e.amount_paid_cents / 100).toFixed(2)}${e.refunded_at ? ' (refunded)' : ''}` : '—'}</td>
                 <td class="stacked">
-                  <div class="ev-status">{e.purged_at ? '🗑 purged' : relExpiry(e.expires_at)}</div>
+                  <div class="ev-status {evState(e)}">{evStatus(e)}</div>
                   <div class="purge-line">{purgeInfo(e)}</div>
                 </td>
                 <td class="muted nowrap">{fmtDate(e.created_at)}</td>
                 <td class="nowrap">
+                  <button class="linklike" aria-expanded={openEvent === e.id}
+                          on:click={() => (openEvent = openEvent === e.id ? null : e.id)}
+                          title="What this event was set up to be">{openEvent === e.id ? 'Hide' : 'Setup'}</button>
                   {#if e.organizer_code}<a class="manage" href={`/admin/${e.join_code}#${encodeURIComponent(e.organizer_code)}`} title="Open the full manager for this event (support override)">Manage →</a>{/if}
                   <!-- `paid` is true for demos and free-tier events (both amount 0), so gating on it
                        offered a Refund button beside 25 events with nothing to refund. Gate on money
@@ -418,6 +490,22 @@
                   {:else if e.refunded_at}<span class="refunded-tag" title="Refunded">↩ refunded</span>{/if}
                 </td>
               </tr>
+              {#if openEvent === e.id}
+                <!-- Same `.drill` row the revenue table uses for its own expansion, so the page has
+                     one way of opening something rather than two that look slightly different. -->
+                <tr class="drill"><td colspan="6">
+                  <div class="setup">
+                    {#each evSetup(e) as group}
+                      <div class="setup-g">
+                        <div class="setup-h">{group.title}</div>
+                        {#each group.items as [k, v]}
+                          <div class="setup-r"><span>{k}</span><b>{v}</b></div>
+                        {/each}
+                      </div>
+                    {/each}
+                  </div>
+                </td></tr>
+              {/if}
             {/each}
             {#if !evFiltered.length}<tr><td colspan="6" class="muted">{events.length ? (evKind === 'demo' || evShowInactive ? 'No matches.' : 'No active events — switch to “All”.') : (evKind === 'demo' ? 'No demo rolls.' : 'No events yet.')}</td></tr>{/if}
           </tbody>
@@ -438,7 +526,7 @@
       <!-- What guests said about USING it — a different respondent from the host survey. -->
       {#if guestFeedbackRows.length}
         <h2>Guest feedback{guestFeedbackAvg ? ` · ${guestFeedbackAvg.toFixed(1)}★ avg` : ''}</h2>
-        <div class="tablewrap">
+        <div class="table-scroll">
           <table>
             <thead><tr><th>Rating</th><th>Guest</th><th>Event</th><th>Comment</th></tr></thead>
             <tbody>
@@ -460,7 +548,7 @@
            failures — Australian Consumer Law does not allow contracting out of that. -->
       {#if guestPayments.length}
         <h2>Guest top-ups</h2>
-        <div class="tablewrap">
+        <div class="table-scroll">
           <table>
             <thead><tr><th>Guest</th><th>Event</th><th>Shots</th><th>Paid</th><th></th></tr></thead>
             <tbody>
@@ -826,7 +914,24 @@
   .ev-name { font-weight: 700; white-space: normal; max-width: 220px; overflow-wrap: anywhere; }
   .ev-code { display: inline-block; margin-top: 3px; font-size: 0.72rem; background: var(--border, #f0f0f0); padding: 1px 6px; border-radius: 5px; }
   .stacked { font-size: 0.78rem; line-height: 1.6; }
+  /* Colour carries the state as well as the words, so a long list can be scanned rather than read.
+     The words still say it on their own — this is a second channel, not the only one. */
+  /* Three columns that collapse to one — the admin gets opened on a phone as often as not, and a
+     fixed three-across turns each value into a two-character column. */
+  .setup { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px 22px; padding: 4px 2px 8px; }
+  .setup-g { min-width: 0; }
+  .setup-h { font-weight: 800; font-size: .74rem; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted, #8a8578); margin-bottom: 6px; }
+  .setup-r { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0;
+    border-bottom: 1px solid var(--border, #3a3630); font-size: .82rem; }
+  .setup-r:last-child { border-bottom: none; }
+  .setup-r span { color: var(--muted, #8a8578); }
+  .setup-r b { font-weight: 700; text-align: right; overflow-wrap: anywhere; }
+
   .ev-status { font-weight: 700; }
+  .ev-status.live { color: var(--success, #2e9e5b); }
+  .ev-status.upcoming { color: var(--accent, #b08b08); }
+  .ev-status.done, .ev-status.purged { color: var(--muted, #8a8578); }
   .purge-line { font-size: 0.7rem; color: var(--text-muted); }
   .nowrap { white-space: nowrap; }
   thead th { background: var(--surface-2, #fafafa); border-bottom: 1px solid var(--border, #e5e5e5); font-size: 0.74rem; text-transform: uppercase; letter-spacing: .03em; color: var(--text-muted); }
@@ -840,7 +945,7 @@
   .refunded-tag { margin-left: 8px; font-size: .72rem; color: var(--text-muted); }
   .score { text-align: center; font-variant-numeric: tabular-nums; font-weight: 700; }
   .cmt-line { margin: 2px 0; }
-  .btn { display: inline-block; margin-top: 10px; padding: 8px 14px; border-radius: 10px; background: var(--accent, #333); color: #fff; text-decoration: none; border: none; cursor: pointer; }
+  .btn { display: inline-block; margin-top: 10px; padding: 8px 14px; border-radius: 10px; background: var(--accent-fill); color: var(--accent-ink, #111); text-decoration: none; border: none; cursor: pointer; font: inherit; font-weight: 700; }
   .promo-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
   /* `.search` already set these; `.in` did not, so the promo-code inputs fell back to the
      browser default (white) and ignored dark mode. */
@@ -854,14 +959,14 @@
   .search { flex: 1; min-width: 200px; max-width: 360px; margin: 0; padding: 8px 11px; border: 1px solid var(--border, #ddd); border-radius: 9px; font-size: 0.88rem; background: var(--bg); color: var(--text); }
   .seg { display: inline-flex; border: 1px solid var(--border, #ddd); border-radius: 9px; overflow: hidden; }
   .seg-btn { background: transparent; border: none; padding: 8px 14px; font: inherit; font-size: 0.82rem; font-weight: 700; color: var(--text-muted); cursor: pointer; }
-  .seg-btn.on { background: var(--accent); color: var(--accent-ink, #111); }
+  .seg-btn.on { background: var(--accent-fill); color: var(--accent-ink, #111); }
   .seg-btn small { font-weight: 600; opacity: 0.8; }
   .an-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 20px; margin-top: 6px; }
   .an-funnel h3, .an-cols h3 { font-size: .9rem; margin: 0 0 8px; }
   .an-step { display: grid; grid-template-columns: 1fr 90px 46px 52px; align-items: center; gap: 8px; padding: 3px 0; font-size: .84rem; }
   .an-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .an-bar { background: var(--border); border-radius: 999px; height: 8px; overflow: hidden; }
-  .an-fill { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+  .an-fill { display: block; height: 100%; background: var(--accent-fill); border-radius: 999px; }
   .an-n { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
   .an-drop { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-muted); font-size: .78rem; }
   .an-note { font-size: .84rem; }
@@ -872,6 +977,7 @@
     padding: 8px 10px; border-radius: 9px; font: inherit;
     background: var(--surface); color: var(--text); border: 1px solid var(--border);
   }
+  .btn.ghost { background: transparent; color: var(--text); border-color: var(--border); }
   .pager { display: flex; align-items: center; gap: 14px; justify-content: center; margin-top: 12px; font-size: 0.82rem; color: var(--text-muted); }
   .pg { background: none; border: 1px solid var(--border, #ddd); color: var(--text); border-radius: 9px; padding: 6px 12px; font-size: 0.82rem; cursor: pointer; }
   .pg:hover:not(:disabled) { border-color: var(--accent); }

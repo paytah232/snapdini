@@ -1,18 +1,19 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { page } from '$app/stores';
   import { goto, replaceState } from '$app/navigation';
   import { track } from '$lib/analytics';
+  import { dep } from '$lib/reactive';
   import { getConfig, getMe, api, ApiError } from '$lib/api';
   import { firePurchase, fireLead, purchaseTracked, leadTracked } from '$lib/adtracking';
   import {
-    getAdmin, saveSettings, setReveal, toggleLock, deleteEvent,
+    getAdmin, getEvent, saveSettings, setReveal, toggleLock, deleteEvent,
     setHighlights, saveTheme, emailLink, linkSends, setAllowDownloads,
     getPhotosByOrganizer, listCohosts, inviteCohost, removeCohost,
     listShares, deleteShare, deleteParticipant,
     type AdminEvent, type Photo, type EventTheme, type CohostList, type ShareLink, type LinkSend,
-    setParticipantCard, sendGuestPhotos, REVEAL_CUSTOM, REVEAL_TICK_MS,
-    ceilToRevealTick, zonedWallTimeToMs, msToZonedWallTime, revealMomentLabel,
+    setParticipantCard, sendGuestPhotos, saveGalleryLink, REVEAL_CUSTOM, REVEAL_TICK_MS,
+    ceilToRevealTick, zonedWallTimeToMs, msToZonedWallTime, revealMomentLabel, revealInstantRefusal,
     listGuests, addGuest, updateGuest, removeGuest, previewGuestImport, commitGuestImport, sendInvites,
     type GuestListPayload, type ImportPreview, type GuestField } from '$lib/events';
   import { GUEST_DELIVERY_DEFAULT, GUEST_DELIVERY_OPTIONS, guestReleaseAt, releaseDateKnown,
@@ -20,6 +21,8 @@
            type GuestDelivery, type GuestSendScope } from '$lib/guestDelivery';
   import type { AppOptions, BillingConfig } from '$lib/types';
   import UpgradePanel from '$lib/components/UpgradePanel.svelte';
+  import SiteNav from '$lib/components/SiteNav.svelte';
+  import { readView, writeView } from '$lib/rememberedView';
   import HelpTip from '$lib/components/HelpTip.svelte';
   import Toggle from '$lib/components/Toggle.svelte';
   import TimeField from '$lib/components/TimeField.svelte';
@@ -27,17 +30,22 @@
   import ShareLinkRow from '$lib/components/ShareLinkRow.svelte';
   import GuestList from '$lib/components/GuestList.svelte';
   import Logo from '$lib/components/Logo.svelte';
-  import { applyEventTheme, THEME_PRESETS } from '$lib/theme';
+  import { applyEventTheme, isLightBg, THEME_PRESETS, THEME_PRESET_LABELS } from '$lib/theme';
   import { getAdminCode, saveAdminCode } from '$lib/session';
   import { showToast, showSuccess } from '$lib/toast';
   import { imgFallback } from '$lib/ui';
+  import { reviewEmptyState } from '$lib/reviewEmpty';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import PosterModal from '$lib/components/PosterModal.svelte';
+  import DownloadIcon from '$lib/components/DownloadIcon.svelte';
   import PosterWizard from '$lib/components/PosterWizard.svelte';
   import Loading from '$lib/components/Loading.svelte';
   import { modalFocus } from '$lib/ui';
   import MissionsModal from '$lib/components/MissionsModal.svelte';
+  import { seedAfterMissions } from '$lib/posterFlow';
   import EventImageEditor from '$lib/components/EventImageEditor.svelte';
+  import PaletteModal from '$lib/components/PaletteModal.svelte';
+  import { normalizeStoredColor, type CustomPalette } from '$lib/palette';
   import FeedbackModal from '$lib/components/FeedbackModal.svelte';
   import Turnstile from '$lib/components/Turnstile.svelte';
 
@@ -83,6 +91,9 @@
   let welcome: { title: string; sub: string } | null = null;  // post-create / post-payment celebration modal
   let showFeedback = false;
   let viewerLoggedIn = false;   // for the top return bar
+  /** The public view of this event, used ONLY by the organizer-code wall to give advice that fits.
+   *  Carries no secret — the join flow already makes an event's name and existence public. */
+  let wallEvent: Awaited<ReturnType<typeof getEvent>> | null = null;
   let viewerIsAdmin = false;    // site admin drilled in via support-override → offer "back to site admin"
 
   let ev: AdminEvent | null = null;
@@ -99,6 +110,63 @@
 
   let allPhotos: Photo[] = [];   // approved photos — gates the Review & Curate link card
   let pendingPhotos: Photo[] = []; // status === 'pending'
+  // ── Which part of the admin page you are in ────────────────────────────────
+  // This page had grown to ten cards in one column: every host scrolled past nine things to reach
+  // the one they came for, and the length itself made it read as complicated. So the cards are
+  // grouped and the page opens on a menu of them — the same shape the setup wizard uses, for the
+  // same reason.
+  //
+  // null is the menu. Kept in memory rather than the URL on purpose: the hash here already carries
+  // the ORGANIZER CODE (see the review link), so putting a section there would either fight it or
+  // put a section name next to a secret in the address bar.
+  type Section = 'controls' | 'share' | 'guests' | 'settings' | 'theme' | 'tricks' | 'photos' | 'upgrade';
+  /** The palette row, split the way the palettes themselves already split.
+   *
+   *  Sixteen swatches in one wrapping row was a wall: the light ones were only findable by being
+   *  paler than their neighbours, and which half a swatch belonged to was something the host had to
+   *  work out from its colour. Two labelled columns say it instead.
+   *
+   *  Which column a palette lands in is asked of `isLightBg` — the SAME function applyEventTheme
+   *  uses to decide whether the event wears light or dark chrome. Not a hand-kept list: a list
+   *  would be a second place to update, and the day the two disagreed the card would file a palette
+   *  under "Dark" and then render the event light. Add a palette to THEME_PRESETS and it sorts
+   *  itself. */
+  const PRESET_COLUMNS = [
+    { label: 'Dark', keys: Object.keys(THEME_PRESETS).filter((k) => !isLightBg(THEME_PRESETS[k].bg)) },
+    { label: 'Light', keys: Object.keys(THEME_PRESETS).filter((k) => isLightBg(THEME_PRESETS[k].bg)) },
+  ];
+
+  const SECTIONS = ['controls', 'share', 'guests', 'settings', 'theme', 'tricks', 'photos'] as const;
+  // Kept across a refresh, per tab and per event — see lib/rememberedView. A host who reloads while
+  // fiddling with the theme should land back on the theme, not at the top of the menu having lost
+  // their place. Read at init rather than in onMount so the first paint is already the right
+  // section and the menu does not flash past on the way to it.
+  let section: Section | null = readView<Section>(`admin:${$page.params.code ?? ''}`, SECTIONS);
+  $: writeView(`admin:${$page.params.code ?? ''}`, section);
+  // Named here rather than in the markup so the tile and the bar you land on cannot disagree about
+  // what the place you just opened is called — and, since the tiles are recognised by their icon at
+  // least as much as by their name, the ICON is here for the same reason. A host taps a picture and
+  // lands on a bar that only carries words, and has to re-read to be sure they arrived where they
+  // meant to. Two fields, one entry, so the picture comes with them.
+  //
+  // U+FE0F on 🎛️ and ⚙️ is load-bearing — both default to TEXT presentation and render as a
+  // monochrome glyph (or tofu) on desktop without it. See emojiPresentation.test.ts.
+  const SECTION_META: Record<Section, { icon: string; title: string }> = {
+    controls: { icon: '🎛️', title: 'Controls' },
+    share: { icon: '🔗', title: 'Share & invite' },
+    guests: { icon: '👥', title: 'Guests' },
+    settings: { icon: '⚙️', title: 'Event settings' },
+    theme: { icon: '🎨', title: 'Theme' },
+    tricks: { icon: '🎯', title: 'Trick list' },
+    photos: { icon: '⭐', title: 'Photos' },
+    // U+FE0F on ⬆️ for the same reason as the two above: it defaults to TEXT presentation.
+    upgrade: { icon: '⬆️', title: 'Upgrade this event' },
+  };
+
+  /** Bound out of UpgradePanel: does it actually have anything to offer? It renders nothing at all
+   *  when the event is already at the top of every ladder, and only the panel can answer that. */
+  let upgradeOffers = false;
+
   let posterOpen = false;
   // The picker, and what it chose. `posterSeed` is handed to the designer as its initialConfig, so a
   // preset travels through the SAME restore path a saved design does — there is no second way for a
@@ -152,6 +220,53 @@
     if (ev?.posterConfig) { posterOpen = true; return; }
     wizardOpen = true;
   }
+  /** "Start again from a design…" — raised by the designer itself, behind its own two-step confirm,
+   *  so by the time it reaches here the host has pressed twice and meant it. The designer closes and
+   *  the gallery opens in its place: one screen at a time, and no half-dead editor behind the picker
+   *  holding a design that is about to be replaced.
+   *
+   *  `loadEvent()` on the way through for the same reason `on:close` does it — the designer
+   *  auto-saves, so the event we hold is a version behind, and `hasDesign` below is read off it. */
+  /** Raised by the poster designer's empty trick-cards tab — an OFFER it makes, and nothing more.
+   *  The trick list is opt-in because it changes what guests see on their own phones, so the
+   *  designer can open this editor and can never switch anything on by itself.
+   *
+   *  The designer CLOSES rather than sitting behind it: MissionsModal paints at z-index 80 and the
+   *  designer's backdrop at 300, so stacked it would open faithfully and be invisible. The design
+   *  auto-saves, so nothing is lost, and it reopens on the way back with the new list loaded —
+   *  which is what loadEvent() in between is for.
+   */
+  let posterAfterMissions = false;
+  /** Whether the design the designer closed on had been written to the event. See
+   *  seedAfterMissions() — an untouched gallery preset is saved nowhere but `posterSeed`. */
+  let posterMissionsPersisted = false;
+  function editMissionsFromPoster(e: CustomEvent<{ persisted: boolean }>) {
+    posterOpen = false;
+    posterAfterMissions = true;
+    posterMissionsPersisted = !!e.detail?.persisted;
+    missionsOpen = true;
+  }
+  async function closeMissions() {
+    missionsOpen = false;
+    if (!posterAfterMissions) return;
+    posterAfterMissions = false;
+    const seed = posterSeed;
+    await loadEvent();
+    // NOT unconditionally null. `loadEvent()` is what brings the new trick list back, and on an
+    // edited design it also brings the design itself — but nothing persists an untouched gallery
+    // preset, so dropping the seed there reopened the designer on the OLD design and the host's
+    // pick was gone. seedAfterMissions() carries the reasoning.
+    posterSeed = seedAfterMissions({ seed, persisted: posterMissionsPersisted });
+    posterOpen = true;
+  }
+
+  function restylePoster() {
+    track('poster_restyle', undefined, code);
+    posterOpen = false;
+    posterSeed = null;
+    wizardOpen = true;
+    void loadEvent();
+  }
   async function pickPreset(p: { key: string; cfg: Record<string, unknown>; theme: EventTheme; themePreset?: string }) {
     track('poster_preset_picked', { preset: p.key }, code);
     wizardOpen = false;
@@ -195,7 +310,7 @@
   $: partFiltered = partQuery.trim()
     ? partAll.filter((p) => `${p.name ?? ''} ${p.email ?? ''}`.toLowerCase().includes(partQuery.trim().toLowerCase()))
     : partAll;
-  $: { void partQuery; partLimit = PART_PAGE; }   // a new search starts from the top
+  $: { dep(partQuery); partLimit = PART_PAGE; }   // a new search starts from the top
   $: partShown = partFiltered.slice(0, partLimit);
 
   // settings form
@@ -241,6 +356,19 @@
     const start = sDate ? (zonedWallTimeToMs(sDate, sTime || '00:00', sTimezone || 'UTC') ?? ev.startsAt) : ev.startsAt;
     return start + (ev.expiresAt - ev.startsAt);
   })();
+  // The server's own refusal, run as the host edits — the twin of the wizard's `revealIssue`. This
+  // form had NO lower bound at all: no `min` on the date, nothing on the time, and a reveal in the
+  // past opens the gallery while the event is still running. `sEndsAt` is the end read in the
+  // EVENT's zone (see above), which is the only version worth comparing against.
+  //
+  // No upper bound here, deliberately: `AdminEvent` carries no retention instant, and inventing one
+  // would refuse a reveal the server would have accepted. The server checks that bound on every
+  // save regardless; this is the half that catches the host BEFORE they save, and the two bounds it
+  // can check — already passed, and before the event ends — are the two that leak photographs.
+  $: sRevealIssue = (sWantsCustomReveal && sActualRevealAt !== null && ev)
+    ? revealInstantRefusal(sActualRevealAt,
+        { expiresAt: sEndsAt, purgeAt: Number.MAX_SAFE_INTEGER }, Date.now())
+    : null;
   $: sGuestRevealAt = revealInstant({
     revealMode: sReveal, endsAt: sEndsAt,
     customAt: sWantsCustomReveal ? sActualRevealAt : null,
@@ -322,6 +450,8 @@
   }
   let sModeration = false;
   let sNoFlash = false;
+  let sHearts = true;                      // guest hearts; on unless the host turns them off
+  let sComments = false;                   // guest comments; OFF unless the host opts in
   let sTimezone = '';
   let sSlug = '';
   let sAspects = new Set<string>();
@@ -338,7 +468,7 @@
   // Unsaved settings edits. The Upgrade panel quotes off the SAVED event (e.g. its frame sizes), so
   // an unticked-but-unsaved shape would under-quote — we block upgrading until settings are saved.
   $: settingsDirty = baselineSig !== '' &&
-    baselineSig !== JSON.stringify([sName, sBlurb, sDate, sTime, sReveal, sDelay, sRevealDate, sRevealTime, sModeration, sNoFlash, sTimezone, sSlug, [...sAspects].sort(),
+    baselineSig !== JSON.stringify([sName, sBlurb, sDate, sTime, sReveal, sDelay, sRevealDate, sRevealTime, sModeration, sNoFlash, sHearts, sComments, sTimezone, sSlug, [...sAspects].sort(),
        sGuestDelivery, sGuestSendScope, sGuestSendDate, sGuestSendTime, sGuestMailThanks, sGuestMailReminder, sGuestMailLive]);
 
   // theme editor
@@ -353,7 +483,20 @@
   let headerImageUrl: string | null = null;
   let pendingHeaderBlob: Blob | null = null;
   let headerPreview: string | null = null;
-  let editorFile: File | null = null;     // image being cropped/positioned in the editor
+  let editorFile: File | null = null;     // a newly picked image being cropped
+  /** Reopening the editor on the image the event ALREADY has — the whole point of keeping the
+   *  original. `editorFile` and `editorSrc` are mutually exclusive: one is a fresh pick, the other
+   *  is a reframe of what is already there. */
+  let editorSrc = '';
+  let pendingOriginal: File | null = null;   // the untouched upload, sent alongside the crop
+  let imageOriginalUrl: string | null = null;
+  let imageCrop = '';
+  $: editorOpen = !!editorFile || !!editorSrc;
+  /** Can this event be reframed in place? Only once it has an original to reframe FROM — an event
+   *  whose image was uploaded before this existed has a crop and nothing to re-cut, and offering
+   *  the button there would open an editor on a picture that is already cropped and quietly crop it
+   *  again. Those hosts get "Change image…", which is what they have always had. */
+  $: canReposition = !!headerPreview && !!imageOriginalUrl;
   let savingTheme = false;
 
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
@@ -363,15 +506,11 @@
   const pad = (n: number) => String(n).padStart(2, '0');
   const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-  function normalizeHex(val?: string): string {
-    if (!val) return '#000000';
-    if (val.startsWith('#')) return val.length === 4
-      ? '#' + [...val.slice(1)].map((c) => c + c).join('')
-      : val;
-    const m = val.match(/(\d+),\s*(\d+),\s*(\d+)/);
-    if (!m) return '#000000';
-    return '#' + [m[1], m[2], m[3]].map((n) => parseInt(n).toString(16).padStart(2, '0')).join('');
-  }
+  // One parser, in $lib/palette, because the colour picker needs the same one and two copies of
+  // "what counts as a colour" is two sets of edge cases. Same answers as the hand-rolled version
+  // this replaces, including passing an exotic-but-valid stored value (an 8-digit hex set through
+  // the API) straight through rather than flattening it to black.
+  const normalizeHex = (val?: string): string => normalizeStoredColor(val);
 
   // Resolve organizer code: URL hash → ?code= → localStorage.
   function resolveOrgCode(): string {
@@ -414,8 +553,13 @@
     // which is an unbounded await on the one path that reaches it — so the single case this page
     // most needed a watchdog for was the one case the watchdog had not started yet.
     bootWatchdog = setTimeout(() => { if (booting) bootStalled = true; }, 12_000);
+    // Outside the try, because it is read in the finally — and everything below is scoped to the
+    // try block, so reading `sp` down there is a ReferenceError that lands as an unhandled
+    // rejection nobody sees.
+    let wantUpgrade = false;
     try {
     const sp = new URLSearchParams(location.search);
+    wantUpgrade = sp.get('upgrade') === '1';
     // Celebrate a fresh create / successful payment / upgrade with a modal (QR + share link).
     const paidReturn = sp.get('paid') === '1';
     const upgradedReturn = sp.get('upgraded') === '1';
@@ -461,14 +605,22 @@
     if (!timezones.length) timezones = ['UTC'];
 
     orgCode = resolveOrgCode();
-    if (orgCode) {
-      authInput = orgCode;
+    if (orgCode) authInput = orgCode;
+    // The PUBLIC event, fetched regardless of whether we hold a code: it is what lets the wall name
+    // the event and tell "log in as the owner" apart from "there is no account on this one". Never
+    // blocks boot — a wall with generic wording is a smaller failure than a page that will not load.
+    void getEvent(code).then((ev0) => { wallEvent = ev0; }).catch(() => { /* generic wording it is */ });
+    // Ask even with NO code. requireOrganizer has always authorised an owner or accepted co-host by
+    // IDENTITY off the session cookie — but this page only ever asked when it already held a code,
+    // so a signed-in host opening their own event's manage URL was shown the organizer-code wall
+    // for an event the server would have let them straight into.
+    {
       // Keep trying, on our own. The watchdog used to do nothing but put a "Try again" button on
       // screen and wait to be clicked — which is the page asking the host to perform a retry it
       // could have performed itself, while their event sat there working perfectly.
       for (;;) {
         bootAttempt++;
-        const r = await tryLoad();
+        const r = await tryLoad(!orgCode);
         if (r !== 'unreachable' || gone) break;
         bootStalled = true;                              // say so, but keep going
         await sleep(Math.min(1_000 * 2 ** (bootAttempt - 1), 15_000));
@@ -488,6 +640,21 @@
       // one the host cannot tell apart from slow.
       booting = false;
       clearTimeout(bootWatchdog);
+      // Coming back from a read-only page of the setup walkthrough, which is where a host is sent
+      // when they want the part of their event that is bought rather than set.
+      //
+      // In the finally, AFTER booting is cleared, because until then the whole page is the word
+      // "Loading…" — the target does not exist to be scrolled to, and getElementById quietly
+      // answers null. Sitting above this, it did nothing at all.
+      // `?upgrade=1` from the setup walkthrough now OPENS the section rather than hunting for an
+      // anchor down the page — the panel is not on the page at all until it does. (It stays a query
+      // parameter rather than a #hash because this page reads its organizer code out of the hash;
+      // any other hash would be read as a credential and hand the host the code wall.)
+      if (wantUpgrade) {
+        section = 'upgrade';
+        await tick();
+        window.scrollTo({ top: 0, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+      }
     }
     refreshTimer = setInterval(refresh, 30_000);
   });
@@ -545,11 +712,15 @@
    *  toasted "Access denied", so a network blip on a perfectly good code dumped the host at the
    *  login wall being told they had no access. The code was fine; the wifi wasn't. */
   type LoadResult = 'ok' | 'denied' | 'unreachable';
-  async function tryLoad(): Promise<LoadResult> {
+  /** `quiet` suppresses the denial toast for the speculative attempt made with no code at all — a
+   *  visitor who simply opened this URL is not being told off, they are being shown the wall. */
+  async function tryLoad(quiet = false): Promise<LoadResult> {
     try {
       await withTimeout(loadEvent(), 10_000, 'Your event');
       authed = true;
-      saveAdminCode(code, orgCode);
+      // Never cache an empty string: resolveOrgCode reads this back, and '' would look like a
+      // stored answer while being none.
+      if (orgCode) saveAdminCode(code, orgCode);
       void loadCohosts();
       void loadShares();
       void loadSends();
@@ -560,14 +731,14 @@
       if (worthRetrying(e)) return 'unreachable';     // keep the code; the caller decides when to stop
       authed = false;
       orgCode = '';
-      showToast(e instanceof Error ? e.message : 'Access denied', true);
+      if (!quiet) showToast(e instanceof Error ? e.message : 'Access denied', true);
       return 'denied';
     }
   }
 
   async function authenticate() {
     const input = authInput.trim();
-    if (!input) { showToast('Enter your organizer code', true); return; }
+    if (!input) { showToast('Enter your organiser code', true); return; }
     authBusy = true;
     orgCode = input;
     await tryLoad();
@@ -637,11 +808,15 @@
     sGuestMailLive = e.guestMailLive !== false;
     sModeration = !!e.moderationEnabled;
     sNoFlash = !!e.noFlash;
+    sHearts = e.heartsEnabled !== false;
+    sComments = e.commentsEnabled === true;
     sTimezone = e.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     sSlug = e.slug || '';
     sAspects = new Set(e.aspectRatios && e.aspectRatios.length ? e.aspectRatios : ['1:1']);
+    galleryHearts = ev?.galleryHeartsEnabled !== false;
+    galleryComments = ev?.galleryCommentsEnabled === true;
     // Snapshot the saved settings so we can detect unsaved edits (gates the Upgrade panel).
-    baselineSig = JSON.stringify([sName, sBlurb, sDate, sTime, sReveal, sDelay, sRevealDate, sRevealTime, sModeration, sNoFlash, sTimezone, sSlug, [...sAspects].sort(),
+    baselineSig = JSON.stringify([sName, sBlurb, sDate, sTime, sReveal, sDelay, sRevealDate, sRevealTime, sModeration, sNoFlash, sHearts, sComments, sTimezone, sSlug, [...sAspects].sort(),
        sGuestDelivery, sGuestSendScope, sGuestSendDate, sGuestSendTime, sGuestMailThanks, sGuestMailReminder, sGuestMailLive]);
 
     // theme editor
@@ -650,6 +825,8 @@
     selectedPreset = theme.preset || '';
     tCustomCss = theme.customCss || '';
     headerImageUrl = theme.headerImage || null;
+    imageOriginalUrl = theme.imageOriginal || null;
+    imageCrop = theme.imageCrop || '';
     if (headerPreview && headerPreview.startsWith('blob:')) URL.revokeObjectURL(headerPreview); // avoid leaking on auto-refresh
     headerPreview = headerImageUrl;
     pendingHeaderBlob = null;
@@ -883,7 +1060,15 @@
       // nowhere at all, which is the worst possible moment to swallow a message.
       fd.append('cf-turnstile-response', refundToken);
       const r = await fetch('/api/contact', { method: 'POST', body: fd, credentials: 'same-origin' });
-      if (!r.ok) { refundTurnstile?.reset(); throw new Error('Could not send your request'); }
+      if (!r.ok) {
+        refundTurnstile?.reset();
+        // Use the server's own words. Ours said only "Could not send your request", which on the
+        // one form where the words are a paying host asking for their money back is the same dead
+        // end twice over: the bot check's refusal names the address to unblock, and this threw it
+        // away. Fall back to ours only when there is nothing there to use.
+        const d = (await r.json().catch(() => ({}))) as { error?: string };
+        throw new Error(d.error || 'Could not send your request');
+      }
       refundDone = true;
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'Failed — please email support@snapdini.com', true);
@@ -896,7 +1081,7 @@
       // Say why. Silently ignoring the click is what made this feel broken: the box appeared to
       // tick, the save succeeded, and the shape was gone on reload with nothing explaining it.
       shapeNotice = billingKnown
-        ? 'Extra frame shapes need the frame pack — add it in Upgrade below, then pick your shapes.'
+        ? 'Extra frame shapes need the frame pack — add it in the Upgrade card, then pick your shapes.'
         : 'Just checking what this event includes…';
       return;
     }
@@ -923,6 +1108,7 @@
       showToast('Pick the date and time for the reveal', true);
       return;
     }
+    if (sRevealIssue) { showToast(sRevealIssue, true); return; }
     if (sGuestSendIssue === 'missing') {
       showToast('Pick the date and time to send your guests the photos', true);
       return;
@@ -962,6 +1148,8 @@
         guestMailReminder: sGuestReminderOffered && sGuestMailReminder,
         guestMailLive: sGuestMailLive,
         noFlash: sNoFlash,
+        heartsEnabled: sHearts,
+        commentsEnabled: sComments,
         ratingMode: 'favourite',
         timezone: sTimezone,
         slug: sSlug.trim(),
@@ -972,6 +1160,14 @@
       if (saved?.aspectsRefused) {
         shapeNotice = 'Saved — but the extra frame shapes need the frame pack, so they were not applied.';
         showToast('Settings saved, except the frame shapes', true);
+      } else if (saved?.revealAtClamped || saved?.guestSendAtClamped) {
+        // A time the host typed that the server had to move — it cannot fall outside the event.
+        // Said out loud, because the alternative is the form quietly showing a different time from
+        // the one they entered, which is how a host learns to distrust the whole page.
+        shapeNotice = saved.revealAtClamped
+          ? 'Saved — your reveal time was outside the event, so it was moved to when the event ends.'
+          : 'Saved — your send time was outside the event, so it was moved to when the event ends.';
+        showToast('Saved, with one time adjusted', true);
       } else {
         shapeNotice = '';
         showSuccess('Settings saved');
@@ -990,6 +1186,16 @@
   // looking for one guest, not changing how the page works from then on.
   let partsOpen = false;
   let cohostOpen = false;
+  // Collapsed by default, and deliberately not remembered: revealing a long-lived secret should be
+  // a decision each time, not a state the page keeps for you.
+  let adminCodeOpen = false;
+  /** Revealed only on request, and re-hidden whenever the panel is closed — so the code is never
+   *  still on screen from a previous visit to this card. */
+  let codeShown = false;
+  $: if (!adminCodeOpen) codeShown = false;
+  /** A fixed run of dots, NOT derived from the real code: deriving the length from the secret would
+   *  leak its length into the DOM, which is a small thing to give away for nothing. */
+  const CODE_MASK = '•'.repeat(32);
   let cohostEmail = '';
   let cohostBusy = false;
   async function loadCohosts() {
@@ -1040,10 +1246,10 @@
     } finally { guestBusy = false; }
   }
 
-  const onGuestAdd = (e: CustomEvent<{ name: string; email: string; phone: string; notes: string }>) =>
+  const onGuestAdd = (e: CustomEvent<{ name: string; email: string; notes: string }>) =>
     guestAction(() => addGuest(code, orgCode, e.detail), () => showSuccess('Added to the guest list'));
 
-  const onGuestUpdate = (e: CustomEvent<{ id: string; name: string; email: string; phone: string; notes: string }>) =>
+  const onGuestUpdate = (e: CustomEvent<{ id: string; name: string; email: string; notes: string }>) =>
     guestAction(() => updateGuest(code, orgCode, e.detail.id, e.detail), () => showSuccess('Guest updated'));
 
   function onGuestRemove(e: CustomEvent<{ id: string }>) {
@@ -1087,10 +1293,19 @@
         // The skipped list is reported FIRST and as a warning, not folded into a success count.
         // "Sent 19" when 20 were asked for reads as success; the one that did not go is the whole
         // reason this feature records anything at all.
-        if (r.skipped.length)
+        // What was not even ATTEMPTED comes first, because it is the only one of these the host has
+        // to act on: press Send again. A "send to everyone" press mails only people who have never
+        // had an invite, so the next press reaches exactly these and no one twice.
+        if (r.notSent)
+          showToast(`Sent ${r.sent} — ${r.notSent} still to go (${r.perSend} per send). Press Send invites again.`, true);
+        else if (r.skipped.length)
           showToast(`Sent ${r.sent} — ${r.skipped.length} blocked (bounced or reported as spam before)`, true);
         else if (r.failed)
           showToast(`Sent ${r.sent}, ${r.failed} failed to send`, true);
+        // Nothing sent and nothing left: everyone on the list already has one. Said plainly, because
+        // "Invites sent to 0 guests" reads as a failure when it is the finished state.
+        else if (!r.sent)
+          showToast('Everyone on your list has already been invited');
         else
           showSuccess(`Invite${r.sent === 1 ? '' : 's'} sent to ${r.sent} guest${r.sent === 1 ? '' : 's'}`);
       },
@@ -1100,10 +1315,34 @@
   // ── Shared links ─────────────────────────────────────────────────────────────
   let sharesList: ShareLink[] = [];
   let editShare: ShareLink | null = null;   // opens the share modal to rename / change the URL
+  /** The gallery link's own two switches. Kept beside the other link settings rather than in Event
+   *  settings, because that is where a host goes to decide what a LINK does. */
+  let galleryLinkEdit = false;
+  let galleryHearts = true;
+  let galleryComments = false;
+  let galleryLinkBusy = false;
+  async function applyGalleryLink() {
+    galleryLinkBusy = true;
+    try {
+      await saveGalleryLink(code, orgCode, { galleryHeartsEnabled: galleryHearts, galleryCommentsEnabled: galleryComments });
+      if (ev) { ev.galleryHeartsEnabled = galleryHearts; ev.galleryCommentsEnabled = galleryComments; }
+      galleryLinkEdit = false;
+      showSuccess('Saved');
+    } catch (e) { showToast(e instanceof Error ? e.message : 'Could not save', true); }
+    finally { galleryLinkBusy = false; }
+  }
   async function loadShares() { try { sharesList = (await listShares(code, orgCode)).shares; } catch { /* leave */ } }
   async function copyShare(url: string) { try { await navigator.clipboard.writeText(url); showToast('Link copied'); } catch { showToast(url, false); } }
-  async function dropShare(id: string) {
-    try { await deleteShare(code, orgCode, id); await loadShares(); showSuccess('Share link deleted'); }
+  async function dropShare(sh: ShareLink) {
+    // Asked, because it cannot be undone and it takes more with it than the URL. A link that was
+    // open to reactions owns the people who reacted through it — their name lives on the link, not
+    // on the event — so deleting the link deletes their hearts and words too. Better said here than
+    // discovered afterwards.
+    const extra = (sh.heartsEnabled || sh.commentsEnabled)
+      ? '\n\nThis link let people react, so any hearts and comments left through it go with it. Your guests\u2019 own hearts and comments are not affected.'
+      : '';
+    if (!confirm(`Delete \u201c${sh.label}\u201d? Anyone holding it gets a "not found" page.${extra}`)) return;
+    try { await deleteShare(code, orgCode, sh.id); await loadShares(); showSuccess('Share link deleted'); }
     catch (e) { showToast(e instanceof Error ? e.message : 'Could not delete', true); }
   }
   const shareKindText = (k: string, n: number | null) => k === 'favourites' ? 'Favourites' : k === 'selected' ? `${n ?? ''} selected` : 'Whole gallery';
@@ -1196,6 +1435,10 @@
       // report full success, because the old toast counted the addresses submitted.
       if (r.errors && !r.sent) showToast(`Could not send to ${r.errors} address${r.errors !== 1 ? 'es' : ''}`, true);
       else if (r.errors) showToast(`Sent to ${r.sent} — ${r.errors} failed`, true);
+      // Never attempted, because the list was longer than one press. Said out loud: the old toast
+      // reported `Sent to 200 addresses!` for 250 pasted addresses and the fifty vanished. Sending
+      // again is safe — the ledger stops anyone being mailed the same link twice.
+      else if (r.notSent) showToast(`Sent to ${r.sent} — ${r.notSent} still to go (${r.perSend} per send). Send again to finish.`, true);
       else showToast(`Sent to ${r.sent} address${r.sent !== 1 ? 'es' : ''}!`);
       await loadSends();
     } catch (e) {
@@ -1206,6 +1449,26 @@
   }
 
   // ── Theme editor ─── changes apply live to the page AND auto-save; no preview/save buttons.
+  let paletteOpen = false;
+
+  /** The picker handed back eight colours. Treated exactly like a preset, minus the preset NAME:
+   *  an empty `selectedPreset` is what has always meant "these colours are the host's own", so the
+   *  custom swatch lights up and none of the named ones do, with no new state to keep in step. */
+  async function onPaletteApply(e: CustomEvent<CustomPalette>) {
+    theme = { ...theme, ...e.detail };
+    selectedPreset = '';
+    syncColorInputs();
+    paletteOpen = false;
+    await persistTheme();
+    showSuccess('Your colours are live');
+  }
+
+  /** Are the event's colours the host's OWN? An empty `selectedPreset` has always meant "not one of
+   *  the named palettes", but on an event that has no theme at all it means "nothing chosen yet" —
+   *  and the custom swatch was showing a tick for it, claiming a choice nobody had made. A palette
+   *  is custom only when there are colours AND no preset names them. */
+  $: hasCustomPalette = !selectedPreset && !!theme.bg;
+
   async function applyPreset(key: string) {
     const preset = THEME_PRESETS[key];
     theme = { ...theme, ...preset };
@@ -1233,45 +1496,79 @@
     const file = e.dataTransfer?.files?.[0];
     if (file && file.type.startsWith('image/')) editorFile = file;   // drag-drop opens the same editor
   }
-  async function onImageConfirm(e: CustomEvent<Blob>) {
-    pendingHeaderBlob = e.detail;
+  async function onImageConfirm(e: CustomEvent<{ blob: Blob; crop: string }>) {
+    pendingHeaderBlob = e.detail.blob;
+    imageCrop = e.detail.crop;
+    // A fresh pick carries its original up with it; a reframe already has one stored and must not
+    // replace it — re-uploading the same picture on every nudge would leave a trail of dead files.
+    pendingOriginal = editorFile;
     if (headerPreview && headerPreview.startsWith('blob:')) URL.revokeObjectURL(headerPreview);
-    headerPreview = URL.createObjectURL(e.detail);
+    headerPreview = URL.createObjectURL(e.detail.blob);
     editorFile = null;
+    editorSrc = '';
     await persistTheme();      // upload + save the new image immediately
+  }
+
+  /** Open the editor on the ORIGINAL, parked where the last crop was taken. */
+  function repositionImage() {
+    if (!imageOriginalUrl) return;
+    editorFile = null;
+    editorSrc = imageOriginalUrl;
   }
 
   async function clearHeaderImage() {
     pendingHeaderBlob = null;
+    pendingOriginal = null;
     headerImageUrl = null;
+    imageOriginalUrl = null;
+    imageCrop = '';
     headerPreview = null;
     await persistTheme();      // persist the removal immediately
+  }
+
+  /** One POST, used for both files the event image now needs. `kind` only tells the server which
+   *  encoder to use; the auth, the size cap and the metadata scrub are the same either way. */
+  async function uploadThemeImage(body: Blob, kind: 'original' | 'crop'): Promise<string> {
+    const form = new FormData();
+    form.append('headerImage', body, kind === 'original' ? 'original.jpg' : 'event-image.jpg');
+    const res = await fetch(`/api/events/${code}/theme-image?kind=${kind}`, {
+      method: 'POST', body: form, headers: { 'X-Organizer-Code': orgCode }
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    return data.url as string;
   }
 
   // Uploads any pending image, then saves the current palette. Called on every change.
   async function persistTheme() {
     savingTheme = true;
     try {
+      // The original goes up FIRST and only when there is a new one: if this throws, the event is
+      // left with the image it already had rather than a crop whose original never arrived.
+      if (pendingOriginal) {
+        imageOriginalUrl = await uploadThemeImage(pendingOriginal, 'original');
+        pendingOriginal = null;
+      }
       if (pendingHeaderBlob) {
-        const form = new FormData();
-        form.append('headerImage', pendingHeaderBlob, 'event-image.jpg');
-        const res = await fetch(`/api/events/${code}/theme-image`, {
-          method: 'POST',
-          body: form,
-          headers: { 'X-Organizer-Code': orgCode }
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Upload failed');
-        headerImageUrl = data.url;
+        headerImageUrl = await uploadThemeImage(pendingHeaderBlob, 'crop');
         pendingHeaderBlob = null;
       }
       const next: EventTheme = {
         bg: cBg, surface: cSurface, accent: cAccent,
         text: cText, surface2: cSurface2, border: cBorder,
+        // Carried through rather than dropped. These two have no colour input of their own, so they
+        // were never read back into the c* variables and every save quietly discarded them — a
+        // palette's muted text and darker accent came from THEME_PRESETS, survived until the next
+        // theme change, and then fell back to the app chrome's grey. Undefined stays undefined, so
+        // an event that never had them still saves none.
+        textMuted: theme.textMuted, accentDark: theme.accentDark,
         // No explicit mode — appearance is derived from the palette's background (see applyEventTheme).
         preset: selectedPreset || undefined,
         customCss: tCustomCss || undefined,
-        headerImage: headerImageUrl || undefined
+        headerImage: headerImageUrl || undefined,
+        // Only meaningful together with the image, and cleared with it.
+        imageOriginal: headerImageUrl ? imageOriginalUrl || undefined : undefined,
+        imageCrop: headerImageUrl ? imageCrop || undefined : undefined
       };
       await saveTheme(code, orgCode, next);
       theme = next;
@@ -1287,15 +1584,13 @@
 <svelte:head><title>Admin — Snapdini</title></svelte:head>
 
 <!-- Single fixed-height nav bar (consistent across pages): brand left, context links right. -->
-<header class="topnav">
-  <!-- Home, not the dashboard: "← My events" is already in this same bar, so sending the logo there
-       too spends both routes out of here on the same destination and leaves no way back to the site. -->
-  <a class="brand" href="/"><Logo /> <small>ADMIN</small></a>
-  <nav class="topnav-right">
-    {#if viewerIsAdmin}<a class="nav-link site-admin" href="/siteadmin" title="Back to the platform console" aria-label="Site admin">🎩<span class="nav-label"> Site admin</span></a>{/if}
-    {#if viewerLoggedIn}<a class="nav-link" href="/dashboard">← My events</a>{/if}
-  </nav>
-</header>
+<!-- The mark goes HOME, not to the dashboard: "← My events" is already in this same bar, so
+     sending the logo there too spends both routes out of here on the same destination and leaves no
+     way back to the site. -->
+<SiteNav admin>
+  {#if viewerIsAdmin}<a class="nav-link site-admin" href="/siteadmin" title="Back to the platform console" aria-label="Site admin">🎩<span class="nav-label"> Site admin</span></a>{/if}
+  {#if viewerLoggedIn}<a class="nav-link" href="/dashboard">← My events</a>{/if}
+</SiteNav>
 
 {#if booting}
   {#if bootStalled}
@@ -1312,20 +1607,52 @@
     <Loading />
   {/if}
 {:else if !authed}
-  <!-- ── Auth wall ── -->
+  <!-- ── Auth wall ──
+       It used to be a bare box saying "Paste your organizer code" — for a code that is never
+       emailed and appears in exactly two places: the link you land on after creating the event,
+       and your dashboard. Somebody who did not have it was given no way to get one, which is the
+       dead end DEVELOPMENT.md forbids: say what is blocking AND take them to it.
+       So the route out is chosen from what we can actually know about THIS event. -->
   <div class="auth">
     <div class="card">
-      <h2>Organizer Login</h2>
+      <h2>{wallEvent?.name ? `Manage “${wallEvent.name}”` : 'Manage this event'}</h2>
+
+      {#if wallEvent?.hasOwner && !viewerLoggedIn}
+        <!-- The common case, and the one with a real answer. -->
+        <p class="auth-lead">This event was made with an account. Log in as its owner and you are
+          straight in — no code needed. If it is not your account, the owner can send you an
+          organiser code or a manage link from <b>Share &amp; invite → Co-hosts → Organiser code</b>.</p>
+        <a class="btn primary full" href={`/login?next=${encodeURIComponent(`/admin/${code}`)}`}>Log in</a>
+        <p class="auth-alt">Not your account? You can still use the organiser code below.</p>
+      {:else if wallEvent?.hasOwner && viewerLoggedIn}
+        <p class="auth-lead">You are signed in, but this event belongs to a different account.
+          Best: ask the owner to add you as a <b>co-host</b> — you would then manage it with this
+          login and never need a code. Otherwise they can send you an organiser code from
+          <b>Share &amp; invite → Co-hosts → Organiser code</b>.</p>
+        <a class="btn ghost full" href={`/login?next=${encodeURIComponent(`/admin/${code}`)}`}>Log in as someone else</a>
+      {:else if wallEvent && !wallEvent.hasOwner}
+        <!-- No account on the event at all: the code is genuinely the only key. Say so, rather than
+             implying a recovery that does not exist. -->
+        <!-- Only demo events reach this: real ones are always made by a signed-in account. -->
+        <p class="auth-lead">This event has no account behind it, so the <b>organiser code</b> is the
+          only key. It is remembered in the browser it was created in — try opening the manage link
+          on that device.</p>
+      {:else}
+        <p class="auth-lead">The <b>organiser code</b> is this event's private key — it lets you
+          manage it without logging in. The owner can find theirs under
+          <b>Share &amp; invite → Co-hosts → Organiser code</b>.</p>
+      {/if}
+
       <div class="field">
-        <label for="org-code">Organizer Code</label>
+        <label for="org-code">Organiser code</label>
         <input id="org-code" class="mono" type="text" bind:value={authInput}
-          placeholder="Paste your organizer code"
+          placeholder="Paste your organiser code"
           on:keydown={(e) => e.key === 'Enter' && authenticate()} />
       </div>
-      <button class="btn primary full" on:click={authenticate} disabled={authBusy}>
-        {authBusy ? 'Checking…' : 'Access Admin Panel'}
+      <button class="btn {wallEvent?.hasOwner && !viewerLoggedIn ? 'ghost' : 'primary'} full"
+              on:click={authenticate} disabled={authBusy}>
+        {authBusy ? 'Checking…' : 'Use the code'}
       </button>
-      <p class="auth-alt">Made this event with an account? <a href="/login">Log in</a> to manage it from your dashboard.</p>
     </div>
   </div>
 {:else if ev}
@@ -1356,8 +1683,79 @@
       <div class="stat"><b>{ev.maxPhotos}</b><span>Max per Person</span></div>
     </div>
 
+    {#if section === null}
+      <!-- One tap per destination, and every tile says what is inside it rather than only naming
+           itself: "Controls" alone does not tell a host where the reveal switch lives. -->
+      <div class="hub">
+        <button class="hub-tile" on:click={() => (section = 'controls')}>
+          <span class="hub-i" aria-hidden="true">{SECTION_META.controls.icon}</span>
+          <span class="hub-t">Controls</span>
+          <span class="hub-d">Reveal photos, lock the event, downloads</span>
+        </button>
+        <button class="hub-tile" on:click={() => (section = 'share')}>
+          <span class="hub-i" aria-hidden="true">{SECTION_META.share.icon}</span>
+          <span class="hub-t">Share &amp; invite</span>
+          <span class="hub-d">QR code, join link, co-hosts</span>
+        </button>
+        <button class="hub-tile" on:click={openPoster} disabled={!qrCode}>
+          <span class="hub-i" aria-hidden="true">🎩</span>
+          <span class="hub-t">Poster</span>
+          <span class="hub-d">{ev?.posterConfig ? 'Open your saved design' : 'Design the poster guests scan'}</span>
+        </button>
+        <button class="hub-tile" on:click={() => (section = 'photos')}>
+          <span class="hub-i" aria-hidden="true">{SECTION_META.photos.icon}</span>
+          <span class="hub-t">Photos</span>
+          <span class="hub-d">Review, favourite, and share what you pick</span>
+          {#if sModeration && pendingPhotos.length}
+            <span class="hub-badge">{pendingPhotos.length} pending</span>
+          {/if}
+        </button>
+        <button class="hub-tile" on:click={() => (section = 'guests')}>
+          <span class="hub-i" aria-hidden="true">{SECTION_META.guests.icon}</span>
+          <span class="hub-t">Guests</span>
+          <span class="hub-d">Invite by email, see who has joined</span>
+        </button>
+        <button class="hub-tile" on:click={() => (section = 'settings')}>
+          <span class="hub-i" aria-hidden="true">{SECTION_META.settings.icon}</span>
+          <span class="hub-t">Event settings</span>
+          <span class="hub-d">Name, dates, shots per guest</span>
+        </button>
+        <button class="hub-tile" on:click={() => (section = 'theme')}>
+          <span class="hub-i" aria-hidden="true">{SECTION_META.theme.icon}</span>
+          <span class="hub-t">Theme</span>
+          <span class="hub-d">Palette and the look guests see</span>
+        </button>
+        <button class="hub-tile" on:click={() => (section = 'tricks')}>
+          <span class="hub-i" aria-hidden="true">{SECTION_META.tricks.icon}</span>
+          <span class="hub-t">Trick list</span>
+          <span class="hub-d">Optional photo challenges for guests</span>
+        </button>
+        {#if billing?.billingEnabled}
+          <!-- Last, and double width, because it is the one tile that is not part of running the
+               event. It used to sit open at the bottom of every visit whether or not the host had
+               come to buy anything — a permanent shop front under the controls. Now it is a door
+               like the rest, and the host decides when to walk through it. -->
+          <button class="hub-tile wide" on:click={() => (section = 'upgrade')}>
+            <span class="hub-i" aria-hidden="true">{SECTION_META.upgrade.icon}</span>
+            <span class="hub-t">{SECTION_META.upgrade.title}</span>
+            <span class="hub-d">More guests, more shots, longer video, keep the photos for longer</span>
+          </button>
+        {/if}
+      </div>
+    {:else}
+      <!-- STICKY, not fixed. The feedback button a few hundred lines down carries the lesson: a
+           fixed control on a phone sits on top of whatever full-width button you have just
+           scrolled to, and the thing you reached for is the thing you cannot press. Sticky keeps
+           its own row in the flow, so it is always in reach and never covers anything. -->
+      <div class="sec-bar">
+        <button class="sec-back" on:click={() => (section = null)}>← All settings</button>
+        <span class="sec-i" aria-hidden="true">{SECTION_META[section].icon}</span>
+        <span class="sec-now">{SECTION_META[section].title}</span>
+      </div>
+    {/if}
+
     <!-- Invite -->
-    <div class="card">
+    <div class="card" class:sec-hide={section !== 'share'}>
       <div class="card-title">Share &amp; invite</div>
       <div class="qr-block">
         {#if qrCode}
@@ -1369,7 +1767,7 @@
                there is no hover and a control that only appears on one would simply not exist. -->
           <div class="qr-wrap">
             <img class="qr" src={qrCode} alt="QR code" />
-            <button class="qr-dl" on:click={downloadQr} title="Save this QR as a PNG" aria-label="Save QR code as an image">⬇</button>
+            <button class="qr-dl" on:click={downloadQr} title="Save this QR as a PNG" aria-label="Save QR code as an image"><DownloadIcon /></button>
           </div>
         {/if}
         <div class="cb-group">
@@ -1394,15 +1792,11 @@
       <button class="btn primary sm full" on:click={openPoster} disabled={!qrCode}>
         {ev?.posterConfig ? '🎩 Manage poster' : '🎩 Create poster'}
       </button>
-      {#if ev?.posterConfig}
-        <!-- Only once a design exists. Before that the button above already opens the gallery, so
-             this would be a second route to the same screen; after that the button goes straight
-             back to their work — which is right, "Manage poster" must not throw the work away to
-             show a menu — and this is how the gallery stays reachable. -->
-        <button class="btn ghost sm full" on:click={() => { wizardOpen = true; track('poster_restyle', undefined, code); }} disabled={!qrCode}>
-          Start again from a design…
-        </button>
-      {/if}
+      <!-- "Start again from a design…" used to sit here as a second button. It now lives INSIDE the
+           designer, behind a two-step confirm — see PosterModal's on:restyle. Starting again throws
+           away the host's design work, and a one-tap control for that has no business sitting on the
+           page you land on: it belongs next to the thing it destroys, where you can see what you are
+           about to lose. -->
       </div>
       <!-- The gallery-only link and "email the gallery link" used to sit here, under the join QR.
            They are the opposite of an invite: you send them afterwards, to people who only want to
@@ -1414,7 +1808,7 @@
          this is for the ones you are not. It is also the only place in the product that can answer
          "did that actually arrive?" — which is the part a host cannot do from their own inbox. -->
     {#if guestData}
-      <div class="card">
+      <div class="card" class:sec-hide={section !== 'guests'}>
         <div class="card-title">Guest list</div>
         <GuestList
           data={guestData}
@@ -1432,7 +1826,7 @@
     {/if}
 
     <!-- Controls -->
-    <div class="card">
+    <div class="card" class:sec-hide={section !== 'controls'}>
       <div class="card-title">Controls</div>
 
       <div class="toggle-row">
@@ -1588,8 +1982,25 @@
     </div>
 
     <!-- Event settings -->
-    <div class="card">
+    <div class="card" class:sec-hide={section !== 'settings'}>
       <div class="card-title">Event settings</div>
+      <!-- The same settings, asked the way they were asked when the event was made.
+           This card is correct and dense and explains nothing: it is a list of controls for
+           somebody who already knows what each one does. The wizard on /app is the only place the
+           product ever says what moderation is FOR, or what the guest email actually contains, and
+           until now that explanation was reachable exactly once, before the event existed.
+           The sub-line has to be honest about the limit, because the first thing a host will try it
+           for is a bigger guest list. -->
+      <!-- The code is NOT in the href. It used to be, and that put a long-lived secret into the page
+           markup — readable in devtools, in a saved page, by an extension, and over a shoulder on a
+           screen-share — for no gain: the wizard resolves it from localStorage, which this browser
+           already has (saveAdminCode). Handed over on the click instead, in the fragment, where it
+           never touches the server or an access log. -->
+      <button class="btn ghost sm rerun" on:click={() => goto(`/app?edit=${code}#${encodeURIComponent(orgCode)}`)}>
+        ↺ Walk me through the setup again
+      </button>
+      <p class="hint rerun-why">The same questions with their explanations, your answers already
+        filled in. Guest numbers and event length change in the Upgrade card, not there.</p>
       <div class="field">
         <label for="s-name">Event name</label>
         <input id="s-name" type="text" maxlength="80" bind:value={sName} />
@@ -1622,7 +2033,7 @@
       </div>
       <div class="field">
         <!-- svelte-ignore a11y-label-has-associated-control -->
-        <label>Photo shapes{#if !canAllShapes}<HelpTip text="Extra shapes need the frame pack — add it in the Upgrade section below. Square (1:1) is always free." />{/if}</label>
+        <label>Photo shapes{#if !canAllShapes}<HelpTip text="Extra shapes need the frame pack — add it in the Upgrade card. Square (1:1) is always free." />{/if}</label>
         <div class="aspect-options">
           {#each options?.aspectRatios ?? [] as a}
             <label class="aspect-opt" class:locked={a.value !== '1:1' && !canAllShapes}>
@@ -1672,6 +2083,8 @@
           <p class="hint reveal-note">
             {#if sActualRevealAt === null}
               Pick the date and time — it's read in the event's timezone{sTimezone ? ` (${sTimezone})` : ''}.
+            {:else if sRevealIssue}
+              <span class="bad">{sRevealIssue}</span>
             {:else}
               Photos appear from <b>{revealMomentLabel(sActualRevealAt, sTimezone)}</b>.
               {#if sRevealMoved}
@@ -1681,21 +2094,47 @@
           </p>
         {/if}
       {/if}
-      {#if sReveal !== 'instant'}
-        <div class="toggle-row">
-          <div>
-            <label class="t-label" for="s-moderation">Moderate photos</label>
-            <div class="t-sub">Approve each photo before it appears in the gallery</div>
+      <!-- Offered whatever the reveal mode is. It used to be hidden under 'instant', which is
+           backwards: instant reveal is precisely when a gate is most wanted, because without one
+           every shot goes straight to the gallery the moment it is taken. Moderation IS the window
+           an instant event otherwise has none of. -->
+      <div class="toggle-row">
+        <div>
+          <label class="t-label" for="s-moderation">Moderate photos</label>
+          <div class="t-sub">
+            Approve each photo before it appears in the gallery{sReveal === 'instant'
+              ? ' — with instant reveal this is the only thing standing between a shot and the gallery.'
+              : ''}
           </div>
-          <Toggle id="s-moderation" bind:checked={sModeration} />
         </div>
-      {/if}
+        <Toggle id="s-moderation" bind:checked={sModeration} />
+      </div>
       <div class="toggle-row">
         <div>
           <label class="t-label" for="s-no-flash">No flash</label>
           <div class="t-sub">Disable the camera flash for guests (handy in dark venues to avoid harsh shots)</div>
         </div>
         <Toggle id="s-no-flash" bind:checked={sNoFlash} />
+      </div>
+      <div class="toggle-row">
+        <div>
+          <label class="t-label" for="s-hearts">Guest hearts</label>
+          <!-- Says what turning it OFF does to what already exists, because that is the question a
+               host actually has. Nothing is deleted: the rows stay and the counts come back. -->
+          <div class="t-sub">Let guests heart each other's photos, and see how many hearts each one has.
+            Turning this off hides them — no hearts are deleted, and they reappear if you turn it back on.</div>
+        </div>
+        <Toggle id="s-hearts" bind:checked={sHearts} />
+      </div>
+      <div class="toggle-row">
+        <div>
+          <label class="t-label" for="s-comments">Guest comments</label>
+          <!-- OFF by default, and the copy says who can remove one, because that is the question a
+               host weighs before switching this on: it puts other people's words on their gallery. -->
+          <div class="t-sub">Let guests leave a short message on each other's photos. Off by default.
+            You can delete any comment; a guest can delete their own.</div>
+        </div>
+        <Toggle id="s-comments" bind:checked={sComments} />
       </div>
       <div class="divider gd-div"></div>
 
@@ -1831,44 +2270,65 @@
     </div>
 
     <!-- Theme -->
-    <div class="card">
+    <div class="card" class:sec-hide={section !== 'theme'}>
       <div class="card-title">Theme</div>
       <div class="field">
         <div class="label-mono">PALETTE</div>
-        <p class="hint" style="margin:0 0 8px">The palette sets the colours <em>and</em> light/dark look — no separate appearance switch.</p>
-        <div class="presets">
-          {#each Object.keys(THEME_PRESETS) as key}
-            <!-- A "Custom" chip sits at the end of this row (below) for the case where the palette
-                 is deliberately not one of these — an empty row otherwise reads as broken. -->
-            <button class="preset" class:selected={selectedPreset === key} title={key} on:click={() => applyPreset(key)}
-              style="background:{THEME_PRESETS[key].bg};border-color:{selectedPreset === key ? 'var(--accent)' : THEME_PRESETS[key].accent}">
-              <span style="color:{THEME_PRESETS[key].text}">{key}</span>
-              {#if selectedPreset === key}<span class="preset-check">✓</span>{/if}
-            </button>
-          {/each}
-          <!-- Shown only when the palette matches none of them, which is a real state rather than a
-               fault: a poster design may carry colours tuned to its paper, and two of them do. It is
-               not clickable — "custom" is something you arrive at by editing, not something you
-               pick. -->
-          {#if !selectedPreset}
-            <div class="preset custom-chip" title="These colours aren't one of the presets">
-              <span>custom</span><span class="preset-check">✓</span>
+        <p class="hint" style="margin:0 0 10px">The palette sets the colours <em>and</em> the light/dark look — there is no separate appearance switch.</p>
+        <!-- One loop, two columns: the swatch is written once, and the grouping is data. -->
+        <div class="preset-cols">
+          {#each PRESET_COLUMNS as col}
+            <div class="preset-col">
+              <div class="preset-col-h">{col.label}</div>
+              <div class="presets">
+                {#each col.keys as key}
+                  <button class="preset" class:selected={selectedPreset === key} title={THEME_PRESET_LABELS[key] ?? key} on:click={() => applyPreset(key)}
+                    style="background:{THEME_PRESETS[key].bg};border-color:{selectedPreset === key ? 'var(--accent)' : THEME_PRESETS[key].accent}">
+                    <span style="color:{THEME_PRESETS[key].text}">{THEME_PRESET_LABELS[key] ?? key}</span>
+                    {#if selectedPreset === key}<span class="preset-check">✓</span>{/if}
+                  </button>
+                {/each}
+              </div>
             </div>
-          {/if}
+          {/each}
+        </div>
+        <!-- Its own group rather than trailing the light column: a custom palette is neither, and
+             tacking it onto one of them says it is. -->
+        <div class="preset-col custom-col">
+          <div class="preset-col-h">Your own</div>
+          <div class="presets">
+          <!-- Permanent, and a way IN rather than a read-out.
+               It used to be rendered only while the palette matched none of the presets, so the one
+               entry that could have invited a host to their own colours instead appeared unbidden,
+               said "custom", and vanished again the moment they picked a named palette. And since
+               every poster design now names a built-in palette, that state had stopped arising at
+               all: the chip had become a thing nobody could see and nobody could reach.
+               Two states. IDLE — no custom colours — is an invitation: dashed edge, muted label, a
+               + where the tick goes. IN USE paints the event's actual colours like every other
+               swatch in the row and carries the same tick, because it IS the selected palette. -->
+          <button class="preset custom-chip" class:selected={hasCustomPalette} class:idle={!hasCustomPalette}
+            title={hasCustomPalette ? 'Your own colours — open to edit them' : 'Build a palette from a colour of your own'}
+            on:click={() => (paletteOpen = true)}
+            style={hasCustomPalette ? `background:${theme.bg};border-color:${theme.accent || 'var(--accent)'}` : ''}>
+            <span style={hasCustomPalette ? `color:${theme.text || 'var(--text)'}` : ''}>custom</span>
+            <span class="preset-check" class:add={!hasCustomPalette}>{hasCustomPalette ? '✓' : '+'}</span>
+          </button>
+          </div>
         </div>
       </div>
 
       <div class="field">
-        <label for="t-header">Event image <span class="hint">(shown behind the join screen + QR)</span></label>
+        <label for="t-header">Event image <span class="hint">(behind the join screen, and your poster if you want it)</span></label>
         <div class="row gap center">
           <!-- svelte-ignore a11y-no-static-element-interactions -->
           <label class="upload-btn grow" class:drag={headerDragOver}
             on:dragover|preventDefault={() => (headerDragOver = true)}
             on:dragleave={() => (headerDragOver = false)}
             on:drop={onHeaderDrop}>
-            {headerDragOver ? '⤓ Drop image to upload' : headerPreview ? '🖼 Change image…' : '🖼 Upload or drag an image…'}
+            {headerDragOver ? '⤓ Drop image to upload' : headerPreview ? '🖼️ Change image…' : '🖼️ Upload or drag an image…'}
             <input id="t-header" type="file" accept="image/*" on:change={onHeaderFile} hidden />
           </label>
+          {#if canReposition}<button class="btn ghost sm" on:click={repositionImage}>Reposition…</button>{/if}
           {#if headerPreview}<button class="btn ghost sm" on:click={clearHeaderImage}>Clear</button>{/if}
         </div>
         {#if headerPreview}
@@ -1879,7 +2339,7 @@
       <p class="hint" style="margin:4px 0 0">{savingTheme ? 'Saving…' : 'Changes apply and save automatically.'}</p>
     </div>
 
-    <div class="card">
+    <div class="card" class:sec-hide={section !== 'tricks'}>
       <div class="card-title">Trick list</div>
       <!-- One line of pitch and the current state; the case FOR a list is three more sentences
            that a host who already has one never needs to read again. Same reasoning as the join
@@ -1944,29 +2404,15 @@
     </div>
 
 
-    <!-- Upgrades (top up to a bigger config; only the difference is charged) -->
-    {#if billing && ev}
-      <!-- Remount the panel when the SAVED entitlement changes (e.g. after Save settings) so its
-           baseline + quote recompute and reflect what was just added (frame shapes, etc.). -->
-      {#key `${ev.guestCap}|${ev.maxPhotos}|${ev.videoSeconds}|${ev.retentionDays}|${ev.amountPaidCents}|${(ev.aspectRatios ?? []).join(',')}|${ev.expiresAt - ev.startsAt}`}
-        <UpgradePanel
-          {code} {orgCode} {billing} {options}
-          guestCap={ev.guestCap} maxPhotos={ev.maxPhotos} videoSeconds={ev.videoSeconds}
-          retentionDays={ev.retentionDays} amountPaidCents={ev.amountPaidCents}
-          aspectRatios={ev.aspectRatios}
-          durationHours={Math.max(1, Math.round((ev.expiresAt - ev.startsAt) / 3600000))}
-          blocked={settingsDirty}
-        />
-      {/key}
-    {/if}
-
     <!-- Review & curate (dedicated view) — only once there's something to review -->
     {#if allPhotos.length || pendingPhotos.length}
       <!-- The whole card used to be the <a>, which left nowhere to put a disclosure: a <details>
            inside a link is invalid, and tapping its summary would navigate instead of opening. The
            link is now the top row, so the "why" can sit under it without swallowing the tap. -->
-      <div class="card review-card">
-        <a class="review-link" href="/admin/{code}/review#{orgCode}">
+      <div class="card review-card" class:sec-hide={section !== 'photos'}>
+        <!-- Same reasoning as the setup button above: no secret in the markup. The review screen's
+             own resolveOrgCode reads localStorage, so this navigates plainly. -->
+        <a class="review-link" href="/admin/{code}/review">
           <div class="review-icon">⭐</div>
           <div class="review-text">
             <div class="card-title">Review &amp; curate photos</div>
@@ -1983,31 +2429,67 @@
         <details class="disc review-disc">
           <summary>You don't have to share everything — how share links work</summary>
           <div class="disc-body">
+            <!-- WHY you would curate, which is this section's job. What happens to the links
+                 afterwards is said on the Shared links card directly below, where the links and
+                 their Delete buttons actually are. -->
             <p class="hint">
-              Star the ones worth keeping, then create a <strong>share link</strong> for just those
+              Favourite the ones worth keeping, then create a <strong>share link</strong> for just those
               — favourites only, or a hand-picked set. Make as many as you like: one for the family,
-              one for work, one for the group chat. Each link is separate, so you can revoke one
-              without touching the others.
+              one for work, one for the group chat.
             </p>
+
           </div>
         </details>
       </div>
+    {:else}
+      <!-- The Photos section used to render NOTHING at all before the first photo — the card above
+           is gated on there being something to review, and nothing stood in for it. So a host who
+           had just bought an event and pressed Photos got an empty panel that neither explained
+           itself nor said what to do next, which is the same fault the review screen had.
+           Same rule, same words: reviewEmptyState() is shared with /review so the two surfaces
+           cannot drift into saying different things about the same event. Only the ACTION differs,
+           because the useful next step is different here — on /review "get your QR" means go back
+           to Manage; on Manage it means open Share & invite, which is one press away. -->
+      {@const empty = reviewEmptyState(ev && {
+        isExpired: ev.isExpired,
+        isUpcoming: ev.isUpcoming,
+        participantCount: ev.participantCount,
+        startsAtLabel: new Date(ev.startsAt).toLocaleString([], {
+          timeZone: ev.timezone || undefined, dateStyle: 'medium', timeStyle: 'short',
+        }),
+      })}
+      <div class="card ph-empty" class:sec-hide={section !== 'photos'}>
+        <div class="phe-i" aria-hidden="true">{empty.icon}</div>
+        <h2 class="phe-t">{empty.title}</h2>
+        <p class="phe-b">{empty.body}</p>
+        {#if empty.action?.kind === 'link'}
+          <button class="btn primary" on:click={() => (section = 'share')}>Get your QR and join link →</button>
+        {:else if empty.action?.kind === 'refresh'}
+          <button class="btn ghost" on:click={refresh}>{empty.action.label}</button>
+        {/if}
+      </div>
     {/if}
 
-    <!-- Directly under Review & curate, because that is the order the host works in: curate
-         the photos, then decide who gets to see which of them. It used to sit below Co-hosts,
-         which put an unrelated card between the two halves of one job. -->
+    <!-- Directly under Review & curate — and now in the same SECTION as it, which is what that
+         sentence always meant. It sat in Share & invite, so the section menu had split the two
+         halves of one job across two tiles and this comment went on describing an adjacency that
+         no longer existed.
+         The grouping was by the word "share" rather than by the work: Share & invite is about
+         getting people IN, before the event — QR, join link, co-hosts. This card is about getting
+         photos OUT, after it. Different jobs at different times, and this half belongs beside the
+         curation that feeds it. -->
     <!-- Shared links: the standing gallery link, plus every public link you've created (those are
          made from Review & Curate → Share). Everything here is about sharing the RESULT. -->
-    <div class="card">
+    <div class="card" class:sec-hide={section !== 'photos'}>
       <div class="card-title">Shared links</div>
       <!-- Not one of the rows below it: those are links the host made and can delete, this one
            simply always exists. Dashed and tagged so it never reads as a created share. -->
       <div class="standing">
         <ShareLinkRow
           url={galleryUrl}
-          title="🖼 Gallery-only link"
-          subtitle="Send it after the event to people who just want to see the photos"
+          title="🖼️ Gallery-only link"
+          subtitle={`Send it after the event to people who just want to see the photos${
+            galleryHearts || galleryComments ? ' — they can react without joining' : ''}`}
           shareId={null}
           canEmail={!!ev.emailEnabled}
           {sends}
@@ -2016,9 +2498,27 @@
           on:send={(e) => sendLink(e.detail.emails, e.detail.shareId)}
         >
           <span slot="tag" class="cohost-tag standing-tag">Always on</span>
+          <!-- Its OWN pair, editable here like every other link's. The event's guest switches govern
+               the people who scanned the QR; these govern whoever is holding this link, which is a
+               different audience and deserves a different answer. -->
+          <svelte:fragment slot="pills">
+            <span class="rx-pills">
+              <span class="rx" class:on={galleryHearts}>♥ Hearts {galleryHearts ? 'on' : 'off'}</span>
+              <span class="rx" class:on={galleryComments}>💬 Comments {galleryComments ? 'on' : 'off'}</span>
+            </span>
+          </svelte:fragment>
+          <svelte:fragment slot="extra">
+            <button class="btn ghost sm" on:click={() => (galleryLinkEdit = true)}>Edit</button>
+          </svelte:fragment>
         </ShareLinkRow>
       </div>
       <div class="divider shares-div"></div>
+      <!-- Said HERE, beside the Delete buttons it is about. It used to live on the Review & curate
+           card two sections away, where a host could read it and had nothing to act on. -->
+      {#if sharesList.length}
+        <p class="hint" style="margin:0 0 10px">Each link is separate — delete one and the others
+          keep working, including the gallery link above.</p>
+      {/if}
       {#if sharesList.length}
         <div class="cohost-list">
           {#each sharesList as s (s.id)}
@@ -2033,9 +2533,18 @@
               on:copy={(e) => copyShare(e.detail.url)}
               on:send={(e) => sendLink(e.detail.emails, e.detail.shareId)}
             >
+              <!-- Both states shown, never just the on ones: "no pill" would be indistinguishable
+                   from an older link the server did not report on, and the question a host actually
+                   has is "can people comment on this one", which needs a No as much as a Yes. -->
+              <svelte:fragment slot="pills">
+                <span class="rx-pills">
+                  <span class="rx" class:on={s.heartsEnabled}>♥ Hearts {s.heartsEnabled ? 'on' : 'off'}</span>
+                  <span class="rx" class:on={s.commentsEnabled}>💬 Comments {s.commentsEnabled ? 'on' : 'off'}</span>
+                </span>
+              </svelte:fragment>
               <svelte:fragment slot="extra">
                 <button class="btn ghost sm" on:click={() => (editShare = s)}>Edit</button>
-                <button class="btn ghost sm" on:click={() => dropShare(s.id)} aria-label="Delete share">Delete</button>
+                <button class="btn ghost sm" on:click={() => dropShare(s)} aria-label="Delete share">Delete</button>
               </svelte:fragment>
             </ShareLinkRow>
           {/each}
@@ -2046,7 +2555,7 @@
     </div>
 
     <!-- Co-hosts: invite people to manage this event with you -->
-    <div class="card">
+    <div class="card" class:sec-hide={section !== 'share'}>
       <!-- The action lives in the header, where an action on a card belongs, and opens the field
            directly beneath itself — so the thing you revealed appears where you were looking rather
            than below a list you have to scroll past. -->
@@ -2085,12 +2594,66 @@
         {/if}
       </div>
 
+      <!-- The organiser code, where somebody looking to delegate will actually look.
+           It is minted when the event is made, dropped into one URL, and never shown again — so an
+           owner who wanted to hand access to a partner or a photographer had nothing to send, and
+           the code wall could only tell them to go and find a link they no longer had.
+           Behind a disclosure because it is a long-lived secret, not a setting. Owner only: a
+           co-host manages by identity and this key would outlive their removal. -->
+      {#if ev.organizerCode}
+        <div class="divider"></div>
+        <button class="part-head" aria-expanded={adminCodeOpen} on:click={() => (adminCodeOpen = !adminCodeOpen)}>
+          <span class="chev" class:open={adminCodeOpen}>›</span>
+          <span class="card-title part-title">Organiser code</span>
+          <span class="part-hint">{adminCodeOpen ? 'hide' : 'show'}</span>
+        </button>
+        {#if adminCodeOpen}
+          <p class="hint" style="margin:0 0 10px">
+            Lets someone manage this event <b>without an account</b> — useful for a partner or your
+            photographer. A co-host invite is better where you can use one: it is tied to a person
+            and you can take it back. This cannot be revoked, and anyone who has it can do anything
+            you can, so treat it like a password.
+          </p>
+          <!-- MASKED, not merely blurred. The placeholder is a run of dots of the same length — the
+               real code is NOT in the markup until Reveal is pressed, so it cannot be read out of
+               the DOM, lifted by an extension, or caught by a screen-share or a screenshot of an
+               opened panel. A CSS blur alone would look private while the value sat in the page in
+               plain text. The blur is on top of that, to say "hidden" rather than "loading". -->
+          <div class="linkbox">
+            <span class="link mono" class:masked={!codeShown}>{codeShown ? (ev?.organizerCode ?? '') : CODE_MASK}</span>
+            <button class="eye" on:click={() => (codeShown = !codeShown)}
+                    aria-pressed={codeShown}
+                    title={codeShown ? 'Hide the code' : 'Reveal the code'}
+                    aria-label={codeShown ? 'Hide the organiser code' : 'Reveal the organiser code'}>
+              {codeShown ? '🙈' : '👁️'}
+            </button>
+          </div>
+          <div class="actions" style="margin-top:8px">
+            <!-- Inert until revealed, so a mis-tap on a panel somebody opened to read the warning
+                 cannot put the key on their clipboard. -->
+            <button class="btn ghost sm" disabled={!codeShown}
+                    on:click={() => copy(ev?.organizerCode ?? '', 'Organiser code copied')}>🔑 Copy code</button>
+            <!-- The link is the thing you actually send: it carries the code in the fragment, so it
+                 opens the dashboard straight away rather than asking them to paste anything. Built
+                 on click, never rendered — an href would put the secret in the markup, which is the
+                 whole thing this panel is avoiding. -->
+            <button class="btn ghost sm" disabled={!codeShown}
+                    on:click={() => copy(`${location.origin}/admin/${code}#${encodeURIComponent(ev?.organizerCode ?? '')}`, 'Manage link copied')}>
+              🔗 Copy manage link
+            </button>
+          </div>
+          {#if !codeShown}
+            <p class="hint" style="margin:8px 0 0">Press the eye to reveal it.</p>
+          {/if}
+        {/if}
+      {/if}
+
     </div>
 
     <!-- Slideshow now lives in Review & Curate (🎬) — linked from the card above. -->
 
     <!-- Participants -->
-    <div class="card">
+    <div class="card" class:sec-hide={section !== 'guests'}>
       <!-- A summary until asked. The list is the longest thing on this page — 150 guests is 150 rows
            of name, email, shot count and a card selector — and most visits to the admin page are not
            about any individual guest. The headline number answers the usual question on its own;
@@ -2136,7 +2699,7 @@
                     <a class="p-shots" href="/admin/{code}/review?who={p.id}#{orgCode}"
                        target="_blank" rel="noopener">{p.photosTaken} photo{p.photosTaken === 1 ? '' : 's'} ↗</a> ·
                   {/if}
-                  {#if p.tricksDone}<span class="p-tricks">🎩 {p.tricksDone} trick{p.tricksDone === 1 ? '' : 's'}</span> · {/if}
+                  {#if p.tricksDone}<span class="p-tricks">🃏 {p.tricksDone} trick{p.tricksDone === 1 ? '' : 's'}</span> · {/if}
                   joined {fmtTime(p.joinedAt)}
                 </div>
               </div>
@@ -2177,14 +2740,87 @@
       {/if}
     </div>
 
+    <!-- Below every section on purpose. This panel always shows, and it used to sit in the
+         middle of the card stack — so choosing a section put its content above the panel,
+         below it, or (for Share & invite, whose cards sat on both sides) in two pieces with
+         the upsell wedged between them. The thing you asked to see now always comes first. -->
+    <!-- Upgrades (top up to a bigger config; only the difference is charged) -->
+    <!-- An id, so the read-only pages of the setup walkthrough can point AT the thing rather than
+         at the top of a long page and a hunt. Not a plain #upgrade link from there: this page
+         reads its organizer code out of the hash (resolveOrgCode), so any other hash on the URL
+         would be read as a credential and hand the host the code wall instead. ?upgrade=1 carries
+         it and the hash stays the code.
+         A marker rather than an id on the panel itself, because the panel renders nothing at all
+         when there is nothing left to sell — and an anchor that disappears is an anchor that lands
+         the host somewhere else without saying so. -->
+    {#if section === 'upgrade' && billing && ev}
+      <!-- Remount the panel when the SAVED entitlement changes (e.g. after Save settings) so its
+           baseline + quote recompute and reflect what was just added (frame shapes, etc.). -->
+      {#key `${ev.guestCap}|${ev.maxPhotos}|${ev.videoSeconds}|${ev.retentionDays}|${ev.amountPaidCents}|${(ev.aspectRatios ?? []).join(',')}|${ev.expiresAt - ev.startsAt}`}
+        <UpgradePanel
+          {code} {orgCode} {billing} {options}
+          guestCap={ev.guestCap} maxPhotos={ev.maxPhotos} videoSeconds={ev.videoSeconds}
+          retentionDays={ev.retentionDays} amountPaidCents={ev.amountPaidCents}
+          aspectRatios={ev.aspectRatios}
+          durationHours={Math.max(1, Math.round((ev.expiresAt - ev.startsAt) / 3600000))}
+          blocked={settingsDirty}
+          bind:offersAvailable={upgradeOffers}
+        />
+      {/key}
+      {#if !upgradeOffers}
+        <!-- The panel draws nothing when there is nothing left to sell, and a section that renders
+             as a blank page reads as broken rather than as good news. -->
+        <div class="card">
+          <div class="card-title">{SECTION_META.upgrade.icon} {SECTION_META.upgrade.title}</div>
+          <p class="muted small" style="margin:0">This event already has the lot — every guest slot,
+            shot, second of video and day of keeping we sell. Nothing left to add.</p>
+        </div>
+      {/if}
+    {/if}
+
     {#if ev.purged}
       <div class="card"><div class="muted small">Photos were removed at the end of this event's retention period. Your event details and stats are kept for your records.</div></div>
     {/if}
   </div>
 {/if}
 
+{#if galleryLinkEdit}
+  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
+  <div class="back" on:click|self={() => (galleryLinkEdit = false)} role="dialog" aria-modal="true" aria-label="Gallery link settings">
+    <div class="sheet">
+      <div class="head"><span>🖼️ Gallery-only link</span>
+        <button class="x" on:click={() => (galleryLinkEdit = false)} aria-label="Close">✕</button></div>
+      <p class="hint" style="margin:0 0 12px">This link's address never changes and it can't be deleted —
+        it is the event's own. What you can set is what the people holding it may do.</p>
+      <div class="toggle-row">
+        <div>
+          <label class="t-label" for="gl-hearts">Hearts</label>
+          <div class="t-sub">Anyone with the link can love a photo. They are never asked for a name —
+            nothing shows who hearted what.</div>
+        </div>
+        <Toggle id="gl-hearts" bind:checked={galleryHearts} />
+      </div>
+      <div class="toggle-row">
+        <div>
+          <label class="t-label" for="gl-comments">Comments</label>
+          <div class="t-sub">They give a name the first time they write. You can delete any of them
+            from <b>Review → Captions &amp; comments</b>.</div>
+        </div>
+        <Toggle id="gl-comments" bind:checked={galleryComments} />
+      </div>
+      <p class="hint" style="margin:12px 0 0">Separate from <b>Guest hearts</b> and <b>Guest comments</b>
+        in Event settings — those are for people who joined and are shooting.</p>
+      <button class="btn primary" style="margin-top:14px" on:click={applyGalleryLink} disabled={galleryLinkBusy}>
+        {galleryLinkBusy ? 'Saving…' : 'Save'}
+      </button>
+    </div>
+  </div>
+{/if}
+
 {#if editShare}
-  <ShareModal {code} {orgCode} share={editShare} on:changed={loadShares} on:close={() => (editShare = null)} />
+  <ShareModal {code} {orgCode} share={editShare}
+    sentCount={sends.filter((x) => x.shareId === editShare?.id && x.ok).length}
+    on:changed={loadShares} on:close={() => (editShare = null)} />
 {/if}
 
 {#if posterOpen && ev}
@@ -2196,8 +2832,11 @@
     joinCode={code}
     qrDataUrl={qrCode}
     themeImageUrl={ev.theme?.headerImage ?? null}
+    themeOriginalUrl={ev.theme?.imageOriginal ?? null}
     orgCode={orgCode}
     initialConfig={posterSeed ?? ev.posterConfig}
+    on:restyle={restylePoster}
+    on:missions={(e) => editMissionsFromPoster(e)}
     on:close={() => { posterOpen = false; posterSeed = null; void loadEvent(); }}
   />
 {/if}
@@ -2248,20 +2887,26 @@
     savedTick={ev.challengeTick ?? null}
     maxPhotos={ev.maxPhotos}
     videoSeconds={ev.videoSeconds ?? 0}
-    onClose={() => (missionsOpen = false)}
+    onClose={() => void closeMissions()}
     onSaved={(sets) => { missionsRetry = null; if (ev) ev.challengeSets = sets; }}
     onSaveFailed={(sets) => { missionsRetry = sets; missionsOpen = true; }}
   />
 {/if}
 
 
-{#if editorFile}
+{#if paletteOpen}
+  <PaletteModal {theme} eventName={ev?.name ?? sName} on:apply={onPaletteApply} on:close={() => (paletteOpen = false)} />
+{/if}
+
+{#if editorOpen}
   <EventImageEditor
     file={editorFile}
-    qrDataUrl={qrCode}
+    src={editorSrc}
+    initialCrop={editorSrc ? imageCrop : ''}
+    confirmLabel={editorSrc ? 'Save position' : 'Use image'}
     eventName={ev?.name ?? ''}
     on:confirm={onImageConfirm}
-    on:cancel={() => (editorFile = null)}
+    on:cancel={() => { editorFile = null; editorSrc = ''; }}
   />
 {/if}
 
@@ -2289,7 +2934,10 @@
              with a brand-new event. Dismissing to the page instead leaves the host looking at
              sixteen cards with no idea which one matters. -->
         <button class="btn ghost grow" on:click={() => (welcome = null)}>Start managing</button>
-        <button class="btn primary grow" on:click={() => { welcome = null; answerPosterAsk(true); }}>🎩 Make the poster →</button>
+        <!-- No trailing arrow. It shares a row with "Start managing", both at flex: 1, so each
+             gets about half a 420px card — and the arrow was the character that tipped the label
+             onto a second line. The arrow was decoration; the words are the instruction. -->
+        <button class="btn primary grow" on:click={() => { welcome = null; answerPosterAsk(true); }}>🎩 Make the poster</button>
       </div>
     </div>
   </div>
@@ -2330,29 +2978,27 @@
     font-size: .82rem; cursor: pointer; box-shadow: 0 6px 18px rgba(0,0,0,.18); }
   .fb-fab:hover { color: var(--text); border-color: var(--accent); }
 
-  /* Fixed-height nav bar, consistent across pages. */
-  /* This bar overflowed on a phone, and only for a SITE ADMIN — they get a third item the rest of
-     the world never sees, and nothing here could shrink: both links are nowrap and neither side had
-     min-width:0, so the row simply ran past the viewport. The giveaway was the border-bottom
-     stopping short of the last link, because the border is the viewport's width and the content was
-     not. It also dragged the whole PAGE wider, which is where the stray horizontal scroll came from.
-     Both sides may now shrink, and below 460px the wordy parts give way rather than the layout. */
-  .topnav { display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    height: 56px; padding: 0 16px; border-bottom: 1px solid var(--border); min-width: 0; }
-  .topnav .brand { min-width: 0; flex: 0 1 auto; overflow: hidden; }
-  .topnav-right { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 0 1 auto; }
   @media (max-width: 460px) {
     /* The mark stays — it is a red pill and unmistakable — and the words go. "My events" keeps its
        words, because it is the one people actually press. */
     .nav-link.site-admin .nav-label { display: none; }
-    .nav-link { padding: 6px 8px; font-size: 0.8rem; }
+    .nav-link { padding: 7px 11px; font-size: 0.8rem; }
     .topnav { gap: 8px; padding: 0 12px; }
   }
-  .nav-link { color: var(--text); text-decoration: none; font-weight: 700; font-size: 0.84rem;
-    white-space: nowrap; padding: 6px 10px; border-radius: 8px; }
-  .nav-link:hover { background: var(--surface-2); }
-  .nav-link.site-admin { background: #7a1f2b; color: #fff; }
-  .nav-link.site-admin:hover { background: #93202f; }
+  /* Same treatment as the dashboard's header buttons (`.btn.ghost` there): a bordered pill, not
+     bare text that only grows a background on hover. These two bars sit one click apart and the
+     same control was reading as a link in one and a button in the other. Values match the
+     dashboard's .btn exactly (10px 18px / 0.9rem / --radius-sm) rather than approximately.
+     Restyled here rather than swapped to `class="btn ghost"` so the ≤460px shrink above — which
+     exists because this row once ran past the viewport and dragged the page wider — keeps working. */
+  .nav-link { color: var(--text); text-decoration: none; font-weight: 700; font-size: 0.9rem;
+    white-space: nowrap; padding: 10px 18px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: transparent; }
+  .nav-link:hover { border-color: var(--accent); }
+  /* The red pill keeps its fill; it gets a matching border so it sits at the same size as its
+     neighbour rather than 2px shorter. */
+  .nav-link.site-admin { background: #7a1f2b; color: #fff; border-color: #7a1f2b; }
+  .nav-link.site-admin:hover { background: #93202f; border-color: #93202f; }
   .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 120;
     display: flex; align-items: center; justify-content: center; padding: 16px; }
   .welcome-card { width: 100%; max-width: 420px; max-height: 90dvh; overflow-y: auto; text-align: center; }
@@ -2360,10 +3006,18 @@
   .welcome-title { margin: 10px 0 6px; font-size: 1.25rem; }
   .welcome-sub { color: var(--text-muted); font-size: 0.88rem; margin: 0 0 16px; }
   .welcome-qr { width: 180px; height: 180px; border-radius: 10px; background: #fff; }
+  /* The stack below the blurb is QR -> event code -> join link -> two buttons: four separate
+     things a host is meant to act on, and every one of them had zero vertical margin, so they ran
+     together as a single slab with no telling where one ended and the next began.
+     Scoped to .welcome-card rather than fixing .copybox itself, because that class is shared with
+     the Share & invite section, which lays its own copies out in a grid with its own spacing. */
+  .welcome-card .welcome-qr { margin: 4px 0 18px; }
+  .welcome-card .code-label { margin-bottom: 8px; }
+  .welcome-card .copybox + .copybox { margin-top: 10px; }
+  .welcome-card .row.gap { margin-top: 20px; }
   .welcome-card .grow { flex: 1; }
   .brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 800; text-decoration: none;
     color: var(--text); }
-  .brand small { font-size: 0.6em; color: var(--text-muted); font-weight: 700; }
 
   .state { text-align: center; padding: 60px 16px; color: var(--text-muted); }
 
@@ -2375,10 +3029,19 @@
   .wrap { max-width: 720px; margin: 0 auto; padding: 12px 16px 80px; display: flex; flex-direction: column; gap: 16px; }
 
   /* Buttons */
-  .btn { display: inline-block; font-weight: 700; border-radius: var(--radius-sm); padding: 10px 18px; font-size: 0.9rem;
-    border: 1px solid transparent; cursor: pointer; text-decoration: none; font: inherit; text-align: center; }
-  .btn.sm { padding: 7px 14px; font-size: 0.82rem; border-radius: var(--radius-sm); }
-  .primary { background: var(--accent); color: var(--accent-ink, #111); }
+  /* inline-FLEX with a set line-height and a minimum height, so every button in a row comes out the
+     same regardless of what it is made of: a <button> takes `line-height: normal` from the UA while
+     an <a> inherits the page's, and an emoji raises the line box above a plain letter. Without this
+     a single row of actions mixed three heights — Edit at 31px beside "🔗 Copy" at 31.8px beside a
+     link at 33px — which reads as carelessness rather than as anything deliberate.
+     It has to live HERE as well as in ShareLinkRow: buttons passed into that component's slots are
+     the caller's markup, so they carry the admin page's styles, not the row's. */
+  .btn { display: inline-flex; align-items: center; justify-content: center; line-height: 1.2;
+    font-weight: 700; border-radius: var(--radius-sm); padding: 10px 18px; font-size: 0.9rem;
+    border: 1px solid transparent; cursor: pointer; text-decoration: none; font-family: inherit;
+    text-align: center; min-height: 40px; }
+  .btn.sm { padding: 7px 14px; font-size: 0.82rem; border-radius: var(--radius-sm); min-height: 32px; }
+  .primary { background: var(--accent-fill); color: var(--accent-ink, #111); }
   .ghost { border-color: var(--border); color: var(--text); background: transparent; }
   .ghost:hover { border-color: var(--accent); }
   .danger { background: var(--danger); color: #fff; }
@@ -2400,6 +3063,54 @@
 
   /* Cards */
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
+  /* The Photos section with nothing in it yet. Centred and narrow, like the review screen's — the
+     two are the same message on two surfaces and should read as one thing. */
+  .ph-empty { text-align: center; padding: 34px 18px; }
+  .phe-i { font-size: 2.4rem; line-height: 1; margin-bottom: 10px; }
+  .phe-t { margin: 0 0 8px; font-size: 1.02rem; font-weight: 800; }
+  .phe-b { margin: 0 auto 18px; max-width: 420px; font-size: 0.86rem; line-height: 1.5; color: var(--text-muted); }
+
+  /* The section menu. display:none rather than {#if} on purpose: GuestList and the participants
+     table hold loaded data and their own open/closed state, and unmounting them on every hop back
+     to the menu would refetch and forget it. Nothing here is secret — the page is already behind
+     the organizer code — so keeping it in the DOM costs nothing but a little markup. */
+  .sec-hide { display: none; }
+  .hub { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); }
+  /* The whole row, whatever the row happens to be. `1 / -1` rather than a fixed `span 4`: the hub
+     is auto-fill, so its column count changes with the window, and a fixed span that is wider than
+     the grid gets clamped (fine) while one that is narrower leaves a hole beside the last tile
+     (not fine). Full-row is four columns where there are four, and one on a phone, with no media
+     query and nothing to keep in sync. */
+  .hub-tile.wide { grid-column: 1 / -1; }
+  .hub-tile {
+    position: relative; display: flex; flex-direction: column; gap: 4px; align-items: flex-start;
+    text-align: left; min-height: 104px; padding: 14px; font: inherit; cursor: pointer;
+    color: var(--text); text-decoration: none;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  }
+  .hub-tile:hover:not(:disabled) { border-color: var(--accent); }
+  .hub-tile:disabled { opacity: .55; cursor: default; }
+  .hub-i { font-size: 1.45rem; line-height: 1; }
+  .hub-t { font-weight: 700; font-size: 0.95rem; }
+  .hub-d { color: var(--text-muted); font-size: 0.76rem; line-height: 1.35; }
+  /* Sits at the bottom of the tile rather than beside the title, so a tile with a badge is the same
+     shape as one without and the grid does not step out of line. */
+  .hub-badge { margin-top: auto; align-self: flex-start; padding: 2px 8px; border-radius: 999px;
+    font-size: 0.68rem; font-weight: 700; background: var(--accent-fill); color: var(--accent-ink, #111); }
+  /* Full-bleed within .wrap (which pads 16px each side), so the bar reads as a bar rather than a
+     floating strip with the page showing through beside it. */
+  .sec-bar { position: sticky; top: var(--nav-h, 62px); z-index: 20; display: flex; align-items: center; gap: 10px;
+    margin: 0 -16px; padding: 10px 16px;
+    background: var(--bg); border-bottom: 1px solid var(--border); }
+  .sec-back { display: inline-flex; align-items: center; gap: 6px; flex: none;
+    padding: 9px 15px; min-height: 40px; border-radius: 999px; cursor: pointer;
+    background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    font: inherit; font-size: .85rem; font-weight: 600; }
+  .sec-back:hover { border-color: var(--accent); }
+  /* flex:none so the title, not the icon, is what gets ellipsised on a narrow phone. */
+  .sec-i { flex: none; font-size: 1.05rem; line-height: 1; }
+  .sec-now { font-weight: 700; font-size: .98rem; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
   .card-title { font-weight: 800; font-size: 0.95rem; margin-bottom: 14px; }
   .card-title.nomb { margin-bottom: 0; }
 
@@ -2446,13 +3157,60 @@
 
   .muted { color: var(--text-muted); }
   .small { font-size: 0.85rem; }
+  /* Reaction state on a share link. Off is the quiet default and on is the one that carries the
+     accent, because on is the state with a consequence. */
+  /* ── Things you PRESS, not things you read ────────────────────────────────────
+     A tap on any of these used to take a text selection with it on a phone, which pops the OS
+     lookup/copy bubble over the page — the masked organiser code was the worst of them, because
+     pressing the reveal selected the mask and offered to look up a row of bullets. `user-select`
+     alone is not enough on iOS: the callout is a separate switch, and the tap highlight is a
+     third. The copy box has its own copy button, and a pill is a label, so nothing here loses a
+     selection anyone wanted. The code itself stays selectable once REVEALED (see .link.masked),
+     which is the one place a host may genuinely want to drag over the text. */
+  .copybox, .rx, .eye, .link.masked {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .rx-pills { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+  .rx { font-size: 0.66rem; font-weight: 700; line-height: 1; padding: 4px 8px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--text-muted); background: transparent;
+    white-space: nowrap; }
+  .rx.on { border-color: var(--accent); color: var(--accent); }
+  /* Says where these two came from, because unlike every row below it this one cannot be edited
+     here — and a pill you cannot change is a puzzle without the sentence. */
+  /* The gallery-link dialog. Written here rather than reached for: Svelte scopes styles to their
+     own component, and ShareModal's identical-looking `.back`/`.sheet` have never applied outside
+     it — see the note in app.css about exactly this trap. */
+  .back { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 80;
+    display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .sheet { width: 100%; max-width: 460px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 16px; padding: 20px; }
+  .sheet .head { display: flex; align-items: center; justify-content: space-between;
+    font-weight: 800; margin-bottom: 12px; }
+  .sheet .x { background: none; border: 0; color: var(--text-muted); font-size: 1rem; cursor: pointer;
+    padding: 4px 6px; line-height: 1; }
+  .sheet .x:hover { color: var(--text); }
+  .sheet .btn.primary { width: 100%; }
   .hint { font-size: 0.78rem; color: var(--text-muted); }
   /* Had no rule at all, so it inherited full-strength --text and shouted next to every other piece
      of supporting copy on the page. It is an aside under the primary action, and should read like
      one — same size and weight as .hint, with the link carrying the emphasis instead. */
+  /* Written here, not borrowed: ShareModal has a `.linkbox` that looks like this, and Svelte scopes
+     it to that component — so the class alone would have styled nothing at all. */
+  .linkbox { display: flex; align-items: center; gap: 6px; padding: 9px 11px;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+  .linkbox .link { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: .82rem; color: var(--text); }
+  .linkbox .mono { font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
+  /* The blur is belt and braces — what is under it is a row of dots, not the code. It exists so the
+     field reads as deliberately hidden rather than empty or still loading. */
+  .link.masked { filter: blur(4px); user-select: none; letter-spacing: .08em; }
+  .eye { flex: none; background: none; border: 0; cursor: pointer; font-size: .95rem; line-height: 1;
+    padding: 4px 6px; opacity: .75; }
+  .eye:hover { opacity: 1; }
+  .auth-lead { font-size: .88rem; line-height: 1.5; color: var(--text); margin: 0 0 14px; }
   .auth-alt { margin: 14px 0 0; font-size: 0.78rem; line-height: 1.5; color: var(--text-muted); text-align: center; }
-  .auth-alt a { color: var(--accent); font-weight: 700; text-decoration: none; }
-  .auth-alt a:hover { text-decoration: underline; }
   .reveal-note { margin: -4px 0 12px; line-height: 1.5; }
   /* The two controls a host is most likely to poke at one-handed on a phone; iOS shrinks a bare
      date/time input below a comfortable tap. */
@@ -2473,7 +3231,7 @@
     min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cohost-who { flex: 1 1 auto; }
   .cohost-acts { display: flex; align-items: center; gap: 8px; flex: none; }
-  .cohost-tag { font-size: 0.7rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; padding: 2px 7px; border-radius: 5px; background: var(--accent); color: var(--accent-ink, #111); }
+  .cohost-tag { font-size: 0.7rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; padding: 2px 7px; border-radius: 5px; background: var(--accent-fill); color: var(--accent-ink, #111); }
   .cohost-tag.owner { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
   .cohost-tag.pending { background: transparent; color: var(--text-muted); border: 1px dashed var(--border); }
   /* 12px below, matching the hint above it — the field is revealed BETWEEN two blocks and had
@@ -2488,7 +3246,16 @@
   .standing {
     border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 2px 12px;
   }
-  .cohost-tag.standing-tag { background: transparent; color: var(--text-muted); border: 1px dashed var(--border); }
+  /* Shaped like the Hearts/Comments pills beside it, because that is what it is — a third mark
+     describing the same link. It was inheriting the co-host tag's metrics: a different size,
+     weight, radius and letter-case, so three pills in a row read as three unrelated things. The
+     border stays DASHED, which is the one difference that carries meaning: this one is a statement
+     about the link rather than a setting you can change. The co-host list keeps the tag as it was. */
+  .cohost-tag.standing-tag {
+    background: transparent; color: var(--text-muted); border: 1px dashed var(--border);
+    font-size: 0.66rem; font-weight: 700; line-height: 1; padding: 4px 8px;
+    border-radius: 999px; text-transform: none; letter-spacing: 0; white-space: nowrap;
+  }
   .shares-div { margin: 14px 0 12px; }
   .mt { margin-top: 12px; }
   .mb { margin-bottom: 12px; }
@@ -2499,7 +3266,7 @@
 
   /* Event header */
   .ev-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-  .ev-head h1 { font-size: 1.4rem; font-weight: 800; }
+  .ev-head h1 { unicode-bidi: plaintext; font-size: 1.4rem; font-weight: 800; }
   .ev-sub { font-size: 0.8rem; color: var(--text-muted); margin-top: 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .opens { font-size: 0.78rem; color: var(--accent); margin-top: 4px; }
 
@@ -2574,19 +3341,40 @@
   .cb-hint { font-size: 0.75rem; color: var(--text-muted); letter-spacing: .04em; }
   /* The QR and its download, as one object. */
   .qr-wrap { position: relative; display: inline-block; line-height: 0; }
+  /* The one save control that stays a dark plate ON the thing it saves, because the thing it
+     saves is a white QR code and there is nowhere else on it to stand. Everywhere a photo is
+     offered the plate has moved off the picture and into the card (see PhotoCard.svelte); the
+     ARROW is the same drawn icon at the same size in both places, which is the part a host
+     recognises. 44px, the product's touch-target floor. */
+  /* The PAINTED square is 32px; the TOUCHABLE one is still 44px.
+     It used to be 44px painted, which put a large dark plate over the corner of the QR the host is
+     trying to look at. Shrinking the button itself would have taken the tap target under this
+     product's 44px floor — the note above is explicit about that — so the box and the target are
+     now separate things: a 32px visual square, with `::after` reaching 6px past every edge to make
+     the hit area 44px again. The arrow inside is unchanged, which is the part a host recognises. */
   .qr-dl {
-    position: absolute; right: 6px; bottom: 6px;
-    width: 40px; height: 40px; border-radius: 8px; cursor: pointer;
+    position: absolute; right: 12px; bottom: 12px;
+    width: 32px; height: 32px; border-radius: 8px; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
-    font-size: 0.9rem; line-height: 1;
+    line-height: 1;
     background: rgba(0,0,0,0.78); color: #fff; border: 1px solid rgba(255,255,255,0.35);
   }
+  /* Invisible, and deliberately not a padding change: padding would grow the painted background
+     back to where it started. pointer-events stay on the button, so the reach is a hit area only. */
+  .qr-dl::after { content: ''; position: absolute; inset: -6px; border-radius: 12px; }
   .qr-dl:hover { background: #000; }
   .qr-dl:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 
   /* Toggle rows */
-  .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 0; }
+  /* A row that explains itself needs more air than one that does not. Guest hearts and Guest
+     comments sit next to each other and each carries two lines of description, so at 6px the
+     second row's title landed almost against the first row's last line and the pair read as one
+     block of text with two switches in it. Keyed off the description actually being there rather
+     than a hand-applied class, so any row that grows one gets the same treatment. */
+  .toggle-row:has(.t-sub) { padding: 13px 0; }
+  .toggle-row:has(.t-sub) + .toggle-row:has(.t-sub) { border-top: 1px solid var(--border); }
   /* Block, because half of these rows now label a Toggle and a <label> is inline by default —
      which would sit the title on the same line as the sub-text under it. */
   .t-label { display: block; font-weight: 700; font-size: 0.9rem; }
@@ -2632,23 +3420,31 @@
   .gd-note.bad { color: var(--danger); }
   .aspect-opt { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; font-size: 0.82rem;
     border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); cursor: pointer; }
-  .pro-tag { font-size: 0.6rem; background: var(--accent); color: var(--accent-ink, #111); padding: 1px 5px; border-radius: 4px; font-weight: 700; }
+  .pro-tag { font-size: 0.6rem; background: var(--accent-fill); color: var(--accent-ink, #111); padding: 1px 5px; border-radius: 4px; font-weight: 700; }
   .aspect-opt.locked { opacity: 0.5; cursor: not-allowed; }
   .aspect-opt.locked input { cursor: not-allowed; }
   .aspect-opt.locked { position: relative; }
 
-  /* Theme presets */
+  /* Theme presets. Two columns that collapse to one on a phone — 240px is four swatches plus
+     their gaps, so neither column ever ends on a single orphan. */
+  .preset-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .preset-col-h { margin: 0 0 7px; font-size: 0.66rem; font-weight: 800; letter-spacing: 0.07em;
+    text-transform: uppercase; color: var(--text-muted); }
+  .custom-col { margin-top: 14px; }
   .presets { display: flex; flex-wrap: wrap; gap: 8px; }
   .preset { position: relative; width: 64px; height: 48px; border-radius: var(--radius-sm); border: 2px solid; cursor: pointer;
     display: flex; align-items: center; justify-content: center; transition: transform .1s, box-shadow .1s; }
   .preset span { font-size: 0.72rem; font-weight: 700; text-transform: capitalize; }
-  .custom-chip {
-    background: var(--surface-2); border-color: var(--accent); color: var(--text-muted);
-    cursor: default; position: relative;
-  }
+  .custom-chip { background: var(--surface-2); border-color: var(--border); color: var(--text); position: relative; }
+  .custom-chip.idle { border-style: dashed; color: var(--text-muted); }
+  .custom-chip.idle:hover { border-color: var(--accent); color: var(--text); }
+  /* The badge in its invitation state. --surface-2 behind it, not --accent-fill: a filled gold
+     badge is the tick's job, and a + wearing it would read as already chosen. */
+  .preset-check.add { background: var(--surface-2); color: var(--text-muted);
+    border: 1px solid var(--border); font-size: 0.72rem; }
   .preset.selected { transform: scale(1.06); box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
   .preset-check { position: absolute; top: -7px; right: -7px; width: 18px; height: 18px; border-radius: 50%;
-    background: var(--accent); color: var(--accent-ink, #111); font-size: 0.62rem; font-weight: 800;
+    background: var(--accent-fill); color: var(--accent-ink, #111); font-size: 0.62rem; font-weight: 800;
     display: flex; align-items: center; justify-content: center; }
   /* styled file-upload button (replaces the default browser control) */
   .upload-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer;
@@ -2695,7 +3491,7 @@
   .participant-row { display: flex; gap: 12px; align-items: center; }
   .participant-row .p-info { flex: 1; min-width: 0; }
   .p-del { flex: none; }
-  .avatar { width: 38px; height: 38px; border-radius: 50%; background: var(--accent); color: var(--accent-ink, #111);
+  .avatar { width: 38px; height: 38px; border-radius: 50%; background: var(--accent-fill); color: var(--accent-ink, #111);
     display: flex; align-items: center; justify-content: center; font-weight: 800; flex-shrink: 0; }
   .p-name { font-weight: 700; font-size: 0.9rem; }
   .p-email { font-size: 0.78rem; color: var(--text); }
@@ -2712,4 +3508,11 @@
     padding: 8px 11px; border-radius: 9px; border: 1px solid var(--border); background: var(--bg); }
   .mset-name { font-weight: 700; font-size: .87rem; }
   .mset-n { font-size: .78rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+  /* The way back into the guided setup. Full width so it reads as a second route through this
+     whole card rather than as a control belonging to the field beneath it. */
+  .rerun { display: block; width: 100%; text-align: center; margin-bottom: 6px; }
+  .rerun-why { margin: 0 0 16px; line-height: 1.45; }
+  /* A scroll target with no box. .wrap is a flex column with a 16px gap, so an empty child would
+     otherwise open a 32px hole between two cards; the negative margin gives that gap back. */
 </style>

@@ -28,6 +28,10 @@ export type EventName =
   | 'scroll_depth'
   | 'page_dwell'
   | 'mission_list_opened'
+  // Which card a guest said they were holding, and how often nobody had one. The second is the
+  // number that says whether printing several cards is reaching anybody: all 'trick_card_none'
+  // means the cards are on the tables and not in anyone's hands.
+  | 'trick_card_chosen' | 'trick_card_none'
   | 'mission_captured'
   | 'missions_saved' | 'guest_gallery_opened'
   | 'guest_feedback_opened' | 'guest_feedback_sent' | 'referral_card_click' | 'face_finder_opened';

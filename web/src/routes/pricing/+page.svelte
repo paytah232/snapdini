@@ -1,17 +1,25 @@
 <script lang="ts">
+  import SiteNav from '$lib/components/SiteNav.svelte';
   import { onMount } from 'svelte';
   import { getConfig, getMe } from '$lib/api';
   import { page } from '$app/stores';
   import SiteFooter from '$lib/components/SiteFooter.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import { appearance, setAppearance } from '$lib/appearance';
-  import { guestTiers, addOns, pricingFaqs } from '$lib/pricing';
+  import { guestTiers, addOns, addOnsFor, pricingFaqs } from '$lib/pricing';
   import { track } from '$lib/analytics';
 
   let version = '';
   let loggedIn = false;
+  /** Starts as the unpriced prose and gains today's real figures once the config lands — see
+   *  addOnsFor. The page renders either way; it never waits on a price to show a card. */
+  let shownAddOns = addOns;
   onMount(async () => {
-    try { version = (await getConfig()).version; } catch { /* offline */ }
+    try {
+      const cfg = await getConfig();
+      version = cfg.version;
+      shownAddOns = addOnsFor(cfg.billing);
+    } catch { /* offline — the unpriced copy stands */ }
     try { loggedIn = !!(await getMe()).user; } catch { /* signed out */ }
   });
 
@@ -50,8 +58,7 @@
   {@html `<script type="application/ld+json">${JSON.stringify(ldFaq)}</` + `script>`}
 </svelte:head>
 
-<nav>
-  <a class="brand" href="/"><Logo /></a>
+<SiteNav>
   <div class="nav-links">
     <button class="theme-toggle" on:click={() => setAppearance($appearance === 'light' ? 'dark' : 'light')}
       title="Toggle light / dark" aria-label="Toggle light or dark mode">{$appearance === 'light' ? '🌙' : '☀️'}</button>
@@ -62,7 +69,7 @@
       <a class="btn primary" href="/signup">Start free</a>
     {/if}
   </div>
-</nav>
+</SiteNav>
 
 <main>
 <header class="hero">
@@ -102,7 +109,7 @@
   <div class="kicker">Optional add-ons</div>
   <h2>Tailor any event with one-off extras.</h2>
   <div class="addons">
-    {#each addOns as a}
+    {#each shownAddOns as a}
       <div class="addon"><div class="ic">{a.ic}</div><div><h3>{a.name}</h3><p>{a.detail}</p></div></div>
     {/each}
   </div>
@@ -142,23 +149,19 @@
 
 <style>
   :global(body) { overflow-x: hidden; }
-  nav { position: sticky; top: 0; z-index: 50; display: flex; align-items: center; justify-content: space-between;
-    height: 62px; padding: 0 24px; backdrop-filter: blur(10px); background: color-mix(in srgb, var(--bg) 78%, transparent);
-    border-bottom: 1px solid var(--border); }
-  .brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 800; text-decoration: none; }
   .nav-links { display: flex; gap: 8px; align-items: center; }
   .theme-toggle { background: transparent; border: 1px solid var(--border); border-radius: 10px; width: 38px; height: 38px; font-size: 1rem; cursor: pointer; line-height: 1; }
   .theme-toggle:hover { border-color: var(--accent); }
   .btn { display: inline-block; font-weight: 700; border-radius: var(--radius-sm); padding: 10px 18px; font-size: .9rem;
     border: 1px solid transparent; cursor: pointer; text-decoration: none; }
   .nav-links .btn { padding: 7px 14px; font-size: .82rem; }
-  .primary { background: var(--accent); color: var(--accent-ink, #111); }
+  .primary { background: var(--accent-fill); color: var(--accent-ink, #111); }
   .ghost { border-color: var(--border); color: var(--text); background: transparent; }
   .ghost:hover { border-color: var(--accent); }
   .hero { max-width: 760px; margin: 0 auto; padding: 80px 24px 40px; text-align: center; }
   .eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: .74rem; letter-spacing: .16em;
     text-transform: uppercase; color: var(--text-muted); font-weight: 700; margin-bottom: 22px; }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-fill); }
   h1 { font-size: clamp(2.3rem, 5.5vw, 3.6rem); font-weight: 850; line-height: 1.06; letter-spacing: -.02em; }
   :global(.hero h1 em) { font-style: normal; color: var(--accent); }
   .lede { font-size: 1.12rem; color: var(--text-muted); max-width: 50ch; margin: 22px auto 18px; }
@@ -178,7 +181,7 @@
   }
   .fine-cta:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
   .badge.soft { background: var(--surface-2, #23201a); color: var(--text); border: 1px solid var(--border); }
-  .badge { position: absolute; top: -10px; left: 50%; transform: translateX(-50%); background: var(--accent); color: var(--accent-ink,#111);
+  .badge { position: absolute; top: -10px; left: 50%; transform: translateX(-50%); background: var(--accent-fill); color: var(--accent-ink,#111);
     font-size: .64rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
   .tier-guests { font-size: .9rem; font-weight: 700; }
   .tier-price { font-size: 1.8rem; font-weight: 850; color: var(--accent); }

@@ -154,7 +154,7 @@
   }
   .brand {
     display: inline-block;
-    background: var(--accent);
+    background: var(--accent-fill);
     color: var(--accent-ink, #111);
     padding: 5px 11px;
     border-radius: 7px;
@@ -185,7 +185,7 @@
     font-weight: 700;
     font-size: 0.95rem;
     cursor: pointer;
-    background: var(--accent);
+    background: var(--accent-fill);
     color: var(--accent-ink, #111);
     font-family: var(--font);
   }

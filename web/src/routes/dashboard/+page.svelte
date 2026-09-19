@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SiteNav from '$lib/components/SiteNav.svelte';
   import { onMount, tick } from 'svelte';
   import { goto, replaceState } from '$app/navigation';
   import { page } from '$app/stores';
@@ -162,14 +163,13 @@
 
 <svelte:head><title>Dashboard — Snapdini</title></svelte:head>
 
-<header>
-  <a class="brand" href="/"><Logo /></a>
+<SiteNav>
   <div class="who-row">
     {#if who}<span class="who">{who}</span>{/if}
     {#if isAdmin}<a class="btn ghost" href="/siteadmin">🎩 Admin</a>{/if}
     <button class="btn ghost" on:click={logout}>Sign out</button>
   </div>
-</header>
+</SiteNav>
 
 <div class="wrap">
   {#if invites.length}
@@ -230,7 +230,7 @@
           </div>
           <div class="links">
             <a href={manageHref(ev)}>⚙ Manage</a>
-            <a href={galleryHref(ev)}>🖼 Gallery</a>
+            <a href={galleryHref(ev)}>🖼️ Gallery</a>
             <a href={joinHref(ev)}>📷 Join page</a>
           </div>
         </div>
@@ -243,15 +243,12 @@
 </div>
 
 <style>
-  header { display: flex; align-items: center; justify-content: space-between; gap: 16px;
-    padding: 16px 24px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
-  .brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 800; text-decoration: none; }
   .who-row { display: flex; align-items: center; gap: 14px; }
   .who { color: var(--text-muted); font-size: 0.85rem; }
 
   .btn { display: inline-block; font-weight: 700; border-radius: var(--radius-sm); padding: 10px 18px; font-size: 0.9rem;
-    border: 1px solid transparent; cursor: pointer; text-decoration: none; font: inherit; }
-  .primary { background: var(--accent); color: var(--accent-ink, #111); }
+    border: 1px solid transparent; cursor: pointer; text-decoration: none; font-family: inherit; }
+  .primary { background: var(--accent-fill); color: var(--accent-ink, #111); }
   .ghost { border-color: var(--border); color: var(--text); background: transparent; }
   .ghost:hover { border-color: var(--accent); }
 
@@ -270,7 +267,7 @@
     font-weight: 700; padding: 7px 14px; border-radius: 999px; cursor: pointer;
     background: var(--surface); border: 1px solid var(--border); color: var(--text-muted); }
   .chip-btn:hover { border-color: var(--accent); }
-  .chip-btn.on { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); }
+  .chip-btn.on { background: var(--accent-fill); color: var(--accent-ink, #111); border-color: var(--accent); }
   .chip-btn .n { font-size: 0.72rem; opacity: 0.7; }
   .chip-btn.on .n { opacity: 0.85; }
 

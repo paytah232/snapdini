@@ -30,5 +30,8 @@ export function trackGalleryView(joinCode: string): void {
 
 /** Batched so a scroll through 100 thumbnails is one request, not 100. */
 export function trackPhotos(joinCode: string, ids: string[], kind: 'view' | 'download'): void {
-  if (joinCode && ids.length) beacon('/api/track/photos', { joinCode, ids, kind });
+  // Capped to match the server, which takes the first 200 regardless. Uncapped, a 14,000-photo
+  // gallery posted a ~530 KB body — past express.json()'s 100 KB limit and well past sendBeacon's
+  // ~64 KB, so tracking silently stopped working on exactly the big events it is most wanted for.
+  if (joinCode && ids.length) beacon('/api/track/photos', { joinCode, ids: ids.slice(0, 200), kind });
 }

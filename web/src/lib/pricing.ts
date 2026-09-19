@@ -1,6 +1,17 @@
-// Pricing display data for the /pricing marketing page. MIRRORS the server billing config
-// (app billing tiers, currency AUD) — keep in sync if the server tiers change. Display-only;
-// the real charge is always computed server-side at checkout.
+// Pricing display copy for the /pricing marketing page. Display-only; the real charge is always
+// computed server-side at checkout.
+//
+// THE TWO VOLATILE LINES ARE DERIVED, the rest is prose. This file used to mirror the server by
+// hand, with a comment asking whoever changed billing.ts to remember — and it did not survive
+// contact: "36 (+A$5) or 48 (+A$8)" sat on the live pricing page for a whole release after those
+// rungs became $6 and $9, and the ladder had grown past 48 entirely. A page that quotes a price we
+// do not charge is worse than one that quotes none.
+//
+// So the shots and video lines are now built from the billing config the page already fetches (see
+// addOnsFor), and the STATIC fallback below carries no figures for them at all — it cannot be wrong
+// about a number it does not state. The remaining prose lines quote ladders that have not moved in
+// the product's life; if one of them starts moving, it belongs in addOnsFor too.
+import type { BillingConfig } from './types';
 
 /** `badge` is the ribbon on the card. `highlight` is the visual emphasis — the two are separate
  *  because the tier worth emphasising is not always the one carrying a claim. */
@@ -27,14 +38,16 @@ export const guestTiers: GuestTier[] = [
 ];
 
 export const addOns: AddOn[] = [
-  { ic: '🎞️', name: 'More shots per guest', detail: '12 free → 24 (+A$3), 36 (+A$5) or 48 (+A$8).' },
+  // No figures: this is what renders before the config arrives, and an unpriced sentence is the one
+  // thing that can never be out of date. addOnsFor() puts the real numbers in.
+  { ic: '🎞️', name: 'More shots per guest', detail: 'Everyone gets 12 included. Add more per guest, priced by the dozen.' },
   // KEEP IN STEP WITH app/src/server/billing.ts → DURATION_TIERS. This file is prose, not data: it
   // is written out by hand because marketing copy reads differently from a tier table, which means
   // a price changed in billing.ts does NOT change it here. The 2-week tier was added and this line
   // was the one place in the product that still said otherwise.
   { ic: '⏱️', name: 'Longer event window', detail: 'Up to 48h free → 72h (+A$2), 1 week (+A$5), 2 weeks (+A$7), 1 month (+A$10) or 3 months (+A$25).' },
   { ic: '📦', name: 'Photos kept a month', detail: 'Paid events include a full month (31 days). Extend to 3 months (+A$8), 6 months (+A$12) or a full year (+A$20). Free events keep photos 7 days.' },
-  { ic: '🎬', name: 'Video clips', detail: 'Let guests capture short video clips alongside photos (from +A$2).' },
+  { ic: '🎬', name: 'Video clips', detail: 'Let guests capture short video clips alongside photos.' },
   // This used to read "Clean photo frames and slideshow without the Snapdini mark", which made it
   // sound like the photos themselves are watermarked. They are not — every photo and video is
   // delivered clean on every tier, free included. The only Snapdini branding anywhere is the intro
@@ -42,6 +55,37 @@ export const addOns: AddOn[] = [
   { ic: '🎞️', name: 'Slideshow without our intro & outro', detail: 'Your photos are never watermarked — on any plan. The only Snapdini branding is the short intro and outro card on a generated slideshow; this removes them (+A$5).' },
   { ic: '🖼️', name: 'Extra photo shapes', detail: 'Square is standard. Add portrait and landscape shapes for guests to shoot in (+A$5, free on events up to 10 guests).' },
 ];
+
+const money = (cents: number) => `A$${(cents / 100).toFixed(0)}`;
+
+/** The add-on list with today's real numbers in it, for a page that has the billing config.
+ *
+ *  Falls back to the unpriced prose above whenever a ladder is missing — on the server render, on a
+ *  self-hosted instance with billing switched off, or if the config fetch fails. Quoting nothing is
+ *  always better than quoting a stale figure. */
+export function addOnsFor(billing: BillingConfig | null | undefined): AddOn[] {
+  const shots = billing?.shotsTiers ?? [];
+  const video = billing?.videoAddons ?? [];
+  const free = billing?.shotsFree ?? 12;
+  return addOns.map((a) => {
+    if (a.name === 'More shots per guest' && shots.length > 1) {
+      const next = shots.find((t) => t.maxShots > free);
+      const top = shots[shots.length - 1];
+      if (!next) return a;
+      return { ...a, detail:
+        `Everyone gets ${free} included, and you can go to ${top.maxShots} each. `
+        + `The next dozen is +${money(next.amountCents)}; the full roll is +${money(top.amountCents)}.` };
+    }
+    if (a.name === 'Video clips' && video.length) {
+      const lo = video[0], hi = video[video.length - 1];
+      return { ...a, detail:
+        `Let guests record short clips alongside photos — ${lo.seconds}s to ${hi.seconds}s, `
+        + `from +${money(lo.amountCents)}. Video is the one add-on that scales with your guest count, `
+        + `because every guest can record one.` };
+    }
+    return a;
+  });
+}
 
 export const pricingFaqs: Faq[] = [
   { q: 'How much does Snapdini cost?', a: 'It’s free for events of up to 10 guests with every feature included. Larger events are a one-off pass — A$5 for up to 25 guests, scaling to A$59 for up to 400 — with optional add-ons for extra shots, longer events, longer photo retention and video. Paid events keep photos for a full month (31 days) as standard.' },

@@ -56,9 +56,25 @@ export function shotsAddonCents(billing: BillingConfig | null, shots: number): n
 
 /** List price of a clip length. Matched on the exact length because the video tiers are a menu of
  *  lengths, not a ladder of caps — 45s is not "the 60s tier", it is not on sale. */
-export function videoAddonCents(billing: BillingConfig | null, seconds: number): number {
+/** List price of a clip length ON AN EVENT OF THIS SIZE.
+ *
+ *  Video is the one add-on that scales with the guest count, because it is the one whose cost is
+ *  guests × seconds rather than seconds alone — see PAID_TIERS.videoMul on the server for the
+ *  reasoning and the numbers. This must stay the same arithmetic as videoCentsFor() there, rounding
+ *  included: the wizard quotes a price before the server does, and a rung that says $18 and charges
+ *  $17.50 is worse than either number on its own. It reads the multiplier off the SAME tier list the
+ *  server sends, so there is no second copy of it to drift.
+ *
+ *  `guests` is optional only so a caller that has not got one yet still gets the base price rather
+ *  than a zero — the ≤10-guest case is handled by featuresFreeAt, not here. */
+export function videoAddonCents(billing: BillingConfig | null, seconds: number, guests?: number): number {
   const a = (billing?.videoAddons ?? []).find((v) => v.seconds === seconds);
-  return a ? a.amountCents : 0;
+  if (!a) return 0;
+  if (guests === undefined) return a.amountCents;
+  const tiers = billing?.paidTiers ?? [];
+  const tier = tiers.find((t) => guests <= t.maxGuests) ?? tiers[tiers.length - 1];
+  const mul = tier && 'videoMul' in tier ? Number((tier as { videoMul?: number }).videoMul) || 1 : 1;
+  return Math.round((a.amountCents * mul) / 100) * 100;
 }
 
 /** List price of an event length. */
@@ -82,7 +98,7 @@ export function shotsPrice(billing: BillingConfig | null, shots: number, guests:
  *  event, so it must not be dressed as a gift on small ones. */
 export function videoPrice(billing: BillingConfig | null, seconds: number, guests: number): FeaturePrice {
   if (seconds <= 0) return { kind: 'included' };
-  return priceAt(videoAddonCents(billing, seconds), featuresFreeAt(billing, guests));
+  return priceAt(videoAddonCents(billing, seconds, guests), featuresFreeAt(billing, guests));
 }
 
 export function framePackPrice(billing: BillingConfig | null, guests: number): FeaturePrice {

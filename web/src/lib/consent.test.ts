@@ -47,7 +47,7 @@ describe('isValidGtagId', () => {
 });
 
 describe('analyticsHead (Consent Mode v2 markup)', () => {
-  const html = analyticsHead('AW-TEST123456');
+  const html = analyticsHead('AW-TEST123456', '/pricing');
 
   it('emits TWO consent defaults: a granted baseline then a denied region override', () => {
     const defaults = html.match(/gtag\('consent','default'/g) ?? [];
@@ -86,7 +86,24 @@ describe('analyticsHead (Consent Mode v2 markup)', () => {
   it('enables ad redaction + url passthrough and configs the given id', () => {
     expect(html).toContain("gtag('set','ads_data_redaction',true)");
     expect(html).toContain("gtag('set','url_passthrough',true)");
-    expect(html).toContain("gtag('config','AW-TEST123456')");
+    expect(html).toContain("gtag('config','AW-TEST123456',{");
     expect(html).toContain('gtag/js?id=AW-TEST123456');
+  });
+
+  // The tag's own default page_location is document.location.href, which carries both the path
+  // (where the email preference-centre token lives) and the fragment (where the organizer code
+  // lives). Overriding it is the second layer under the hook's route deny-list.
+  it('overrides page_location instead of letting the tag read document.location', () => {
+    expect(html).toContain('page_location:location.origin+"/pricing"+location.search');
+    expect(html).not.toContain('location.href');
+    expect(html).not.toContain('location.hash');
+  });
+
+  it('interpolates the path as a JS string literal, so it cannot close the script', () => {
+    // pathname is URL-encoded in practice; belt and braces all the same, since this string is
+    // built server-side and dropped straight into an inline <script>.
+    const nasty = analyticsHead('AW-TEST123456', '/x</script><script>alert(1)</script>');
+    expect(nasty).not.toContain('</script><script>alert(1)');
+    expect(nasty).toContain('\\u003c/script>');
   });
 });

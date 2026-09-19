@@ -19,6 +19,15 @@ export interface Photo {
    *  nobody has written one. */
   caption?: string | null;
   isHighlighted: boolean;
+  /** How many guests have hearted this. Absent when the host has hearts off — absent, not zero, so
+   *  the UI can tell "nobody yet" from "not a thing here". */
+  hearts?: number;
+  /** Whether YOU have. Only ever present on a per-viewer reply: the public gallery payload is
+   *  shared-cacheable, so it carries counts and never this. See the hearts endpoint. */
+  hearted?: boolean;
+  /** How many comments this photo carries. Absent when the host has comments off — which is most
+   *  events, so most galleries never see this field. */
+  comments?: number;
   rating: number; // 0–5; 5 == favourite
   mediaType: 'photo' | 'video';
   status?: 'approved' | 'pending' | 'rejected';
@@ -50,6 +59,10 @@ export interface EventTheme {
   bg?: string; surface?: string; surface2?: string; border?: string; text?: string;
   textMuted?: string; accent?: string; accentDark?: string;
   mode?: 'system' | 'light' | 'dark'; font?: string; customCss?: string; headerImage?: string; preset?: string;
+  /** The untouched upload `headerImage` was cut from, and where the cut was taken ("sx,sy,sw,sh"
+   *  in the original's own 0–1 coordinates). Both optional: an event whose image predates them has
+   *  the crop and nothing to re-cut, and renders exactly as it always did. */
+  imageOriginal?: string; imageCrop?: string;
 }
 
 export interface PublicEvent {
@@ -61,6 +74,22 @@ export interface PublicEvent {
   revealAt?: number | null;
   aspectRatios: string[]; videoSeconds: number; startsAt: number; expiresAt: number;
   isDemo: boolean; isUpcoming: boolean; isExpired: boolean; isLocked: boolean; isRevealed: boolean;
+  /** Does the signed-in account own or co-host THIS event? Identity, not the organizer code — and
+   *  not merely "somebody is signed in". False for a guest, and false when signed in as anyone
+   *  other than this event's host. */
+  youManage?: boolean;
+  /** Whether the event belongs to an account at all — not who. Lets the organizer-code wall
+   *  tell "log in as the owner" apart from "no account exists on this event". */
+  hasOwner?: boolean;
+  /** Whether guests can heart photos on this event. Host opt-out; on by default. */
+  heartsEnabled?: boolean;
+  /** What the event's own `/gallery/<code>` link allows — separate from the guest pair above,
+   *  because it reaches a different audience. See 0064. */
+  galleryHeartsEnabled?: boolean;
+  galleryCommentsEnabled?: boolean;
+  /** Whether guests can comment. Opt-IN, off by default — a comment puts one guest's words on
+   *  somebody else's gallery, which is not a default to make on a host's behalf. */
+  commentsEnabled?: boolean;
   /** Server-side reschedule eligibility (usage-based, not time-based). Optional so an older API
    *  simply falls back to the previous time check. */
   canReschedule?: boolean; rescheduleUntil?: number;
@@ -176,28 +205,101 @@ export const uploadSlideshowAudio = async (code: string, organizerCode: string, 
 // Share links — whole gallery ('all'), the favourites ('favourites'), or a hand-picked subset
 // ('selected'). Each gets an editable pretty /s/<slug> URL the owner can rename or delete.
 export type ShareKind = 'all' | 'favourites' | 'selected';
-export interface ShareLink { id: string; kind: ShareKind; slug: string | null; label: string; count: number | null; url: string; createdAt: number; }
-export type CreatedShare = { token: string; slug: string; label: string; kind: ShareKind; url: string };
+export interface ShareLink { id: string; kind: ShareKind; slug: string | null; label: string; count: number | null; url: string; createdAt: number;
+  /** Reactions are per LINK: one event can have a family gallery that wants comments and a client
+   *  gallery that must not. Both default off. */
+  heartsEnabled?: boolean; commentsEnabled?: boolean; }
+export type CreatedShare = { token: string; slug: string; label: string; kind: ShareKind; url: string;
+  heartsEnabled?: boolean; commentsEnabled?: boolean };
 export const createShare = (code: string, organizerCode: string, kind: ShareKind, photoIds?: string[], label?: string) =>
   postJson<CreatedShare>(`/api/events/${code}/shares`, { kind, photoIds, label }, org(organizerCode));
 export const listShares = (code: string, organizerCode: string) =>
   api<{ shares: ShareLink[] }>(`/api/events/${code}/shares`, { headers: org(organizerCode) });
-export const updateShare = (code: string, organizerCode: string, id: string, body: { label?: string; slug?: string }) =>
-  api<{ ok: boolean; slug: string | null; label: string; url: string }>(`/api/events/${code}/shares/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify(body) });
+export const updateShare = (code: string, organizerCode: string, id: string,
+                            body: { label?: string; slug?: string; heartsEnabled?: boolean; commentsEnabled?: boolean }) =>
+  api<{ ok: boolean; slug: string | null; label: string; url: string; heartsEnabled?: boolean; commentsEnabled?: boolean }>(`/api/events/${code}/shares/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify(body) });
+/** Every written line in the event — captions and comments together, newest first — so the host has
+ *  one place to read and remove what people have written. Capped server-side; `capped` says so. */
+export interface HostWord {
+  kind: 'caption' | 'comment';
+  /** For a comment, the comment id. For a caption, the PHOTO id — a caption is cleared by saving an
+   *  empty one, which is what the host's own caption editor already does. */
+  id: string;
+  photoId: string; thumbUrl: string; text: string;
+  author: string;
+  /** 'visitor' = someone who only ever held a share link. Worth saying: a name typed into a
+   *  forwarded link is not the same claim as a guest who joined the event. */
+  authorKind: 'guest' | 'visitor' | 'host';
+  createdAt: number; status: string;
+  /** Hearts on the comment itself. Always 0 for a caption — nobody can heart one. */
+  hearts?: number;
+}
+export const getWords = (code: string, organizerCode: string) =>
+  api<{ words: HostWord[]; captionTotal: number; commentTotal: number; total: number; capped: boolean }>(
+    `/api/events/${code}/words`, { headers: org(organizerCode) });
+
 export const deleteShare = (code: string, organizerCode: string, id: string) =>
   api(`/api/events/${code}/shares/${id}`, { method: 'DELETE', headers: org(organizerCode) });
 export interface ShareView {
   /** `aspectRatios` is optional so an older API (or a cached response) simply falls back to the
    *  square tiles this page has always drawn. */
   event: { name: string; theme: EventTheme | null; allowDownloads: boolean; aspectRatios?: string[] };
+  /** The host's own name for THIS link — "For the family", "Work lot". The server has always sent
+   *  it; the page never read it. Null on a share that was never named. */
+  label?: string | null;
   kind: 'all' | 'selected';
   revealed: boolean;
   revealMode: string;
   revealAt: number | null;
   photoCount: number;
   photos: Photo[];
+  /** Whether THIS link lets the people who hold it react. Per link, not per event — see the shares
+   *  table. Absent on an older API, which is read as both off. */
+  reactions?: { hearts: boolean; comments: boolean };
+  /** Who this browser already is on this link, echoed back so a returning visitor is greeted rather
+   *  than asked their name a second time. */
+  visitor?: { name: string } | null;
+  /** Photo id → total. The PHOTO's total: a heart left by a guest during the event counts here too. */
+  hearts?: Record<string, number>;
+  comments?: Record<string, number>;
+  /** Which of them this visitor left, so the tiles come back already filled in. */
+  myHearts?: string[];
 }
-export const getShare = (token: string) => api<ShareView>(`/api/shares/${token}`);
+const vis = (t?: string | null): Record<string, string> => (t ? { 'X-Visitor-Token': t } : {});
+export const getShare = (token: string, visitorToken?: string | null) =>
+  api<ShareView>(`/api/shares/${token}`, { headers: vis(visitorToken) });
+
+// ── Reacting with nothing but the link ──────────────────────────────────────
+//
+// A share visitor is not a participant: no join code, no roll, no seat against the guest cap. All
+// they have is a name and a token scoped to this one link, carried in `X-Visitor-Token` the same
+// way a guest carries `X-Session-Token`.
+
+
+/** Give a name (or change one you already gave) and get the token back. */
+export const shareVisitorJoin = (token: string, name: string, visitorToken?: string | null) =>
+  postJson<{ token: string; name: string }>(`/api/shares/${token}/visitor`, { name }, vis(visitorToken));
+
+/** Explicit `heart`, never a toggle — a retried request has to land on what was asked for. */
+export const shareHeart = (token: string, photoId: string, visitorToken: string, heart: boolean) =>
+  postJson<{ hearted: boolean; hearts: number }>(
+    `/api/shares/${token}/photos/${photoId}/heart`, { heart }, vis(visitorToken));
+
+export const getShareComments = (token: string, ids: string[], visitorToken?: string | null) =>
+  api<{ comments: Record<string, PhotoComment[]> }>(
+    `/api/shares/${token}/comments?ids=${ids.join(',')}`, { headers: vis(visitorToken) });
+
+/** Heart a COMMENT, as a share-link visitor. Explicit boolean, never a toggle. */
+export const shareCommentHeart = (token: string, commentId: string, visitorToken: string, heart: boolean) =>
+  postJson<{ hearted: boolean; hearts: number }>(
+    `/api/shares/${token}/comments/${commentId}/heart`, { heart }, vis(visitorToken));
+
+export const addShareComment = (token: string, photoId: string, visitorToken: string, body: string) =>
+  postJson<PhotoComment>(`/api/shares/${token}/photos/${photoId}/comment`, { body }, vis(visitorToken));
+
+export const deleteShareComment = (token: string, commentId: string, visitorToken: string) =>
+  api<{ success: boolean }>(`/api/shares/${token}/comments/${commentId}`,
+    { method: 'DELETE', headers: vis(visitorToken) });
 
 // Co-hosts — invite by email, accept, manage. Co-hosts manage the event like the owner.
 export interface Cohost { id: string; email: string; status: string; accepted: boolean; inviteUrl: string | null; createdAt: number; }
@@ -214,10 +316,21 @@ export const acceptCohost = (token: string) => postJson<{ ok: boolean; joinCode?
 export interface MyCohostInvite { token: string; eventName: string; joinCode: string; inviter: string; }
 export const listMyCohostInvites = () => api<{ invites: MyCohostInvite[] }>(`/api/cohosts`);
 
+/** Is this share's custom URL free? Same three rules the PATCH enforces, asked before saving.
+ *  `shareId` so the share's OWN slug does not read as taken by itself. */
+export const checkShareSlug = (code: string, organizerCode: string, slug: string, shareId: string) =>
+  api<{ available: boolean; slug?: string; reason?: string }>(
+    `/api/events/${code}/shares/check-slug/${encodeURIComponent(slug)}?id=${encodeURIComponent(shareId)}`,
+    { headers: org(organizerCode) });
+
 export const savePoster = (code: string, organizerCode: string, config: Record<string, unknown>) =>
   api(`/api/events/${code}/poster`, { method: 'PUT', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify({ config }) });
 export const saveSettings = (code: string, organizerCode: string, body: Record<string, unknown>) =>
-  api<{ aspectsRefused?: boolean }>(`/api/events/${code}/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify(body) });
+  // The clamp flags are the server saying "I saved a DIFFERENT time from the one you sent". They
+  // have been returned since the reveal rules were written and nothing ever read them, so a host
+  // whose reveal was moved to their new event end saw a different time in the form and no reason
+  // for it — the exact failure the reveal code's own comments say this exists to prevent.
+  api<{ aspectsRefused?: boolean; revealAtClamped?: boolean; guestSendAtClamped?: boolean }>(`/api/events/${code}/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify(body) });
 export const setReveal = (code: string, organizerCode: string, on: boolean) =>
   postJson(`/api/events/${code}/${on ? 'reveal' : 'unreveal'}`, {}, org(organizerCode));
 export const toggleLock = (code: string, organizerCode: string) => postJson(`/api/events/${code}/lock`, {}, org(organizerCode));
@@ -230,7 +343,11 @@ export { CAPTION_MAX, CAPTION_MAX_RAW, clampCaption, captionLength, captionRemai
 
 // Reveal timing is a rule the server enforces and this side merely displays, so it is imported
 // rather than reimplemented — see shared/reveal.ts for what goes wrong when the two disagree.
-export { REVEAL_TICK_MS, REVEAL_CUSTOM, ceilToRevealTick, zonedWallTimeToMs, msToZonedWallTime, scheduledRevealAt } from '../../../shared/reveal';
+// revealInstantRefusal is re-exported so the two forms that let a host TYPE a reveal time refuse
+// exactly what the server refuses, in the server's own words. A second opinion here is how a
+// client ends up letting through what the API then rejects, or blocking what it would accept.
+export { REVEAL_TICK_MS, REVEAL_CUSTOM, ceilToRevealTick, zonedWallTimeToMs, msToZonedWallTime, scheduledRevealAt,
+         revealInstantRefusal } from '../../../shared/reveal';
 
 /** A reveal instant written the way a host reads a time: "Sat 3 Oct, 7:15 pm AEST".
  *
@@ -265,6 +382,96 @@ export const savePhotoCaption = (photoId: string, caption: string,
     body: JSON.stringify({ caption, ...('sessionToken' in who ? { sessionToken: who.sessionToken } : {}) }),
   });
 
+/** Heart or unheart a photo. EXPLICIT, never a toggle — a retried request must land on what the
+ *  guest asked for, not the opposite of it. Comes back with the authoritative count. */
+/** One endpoint, two kinds of caller: a guest passes their session, a gallery-link visitor passes
+ *  their token in the header. Exactly one of them is ever set. */
+export const setHeart = (photoId: string, sessionToken: string, heart: boolean, visitorToken?: string | null) =>
+  postJson<{ hearted: boolean; hearts: number }>(
+    `/api/photos/${photoId}/heart`, { sessionToken, heart }, vis(visitorToken));
+
+/** Live counts for an event, and which of them are this guest's.
+ *
+ *  `ids` scopes it to what is on screen: a big event holds thousands of photos and this is polled,
+ *  so asking for all of them every few seconds is a payload nobody reads. */
+export const getHearts = (code: string, sessionToken?: string, ids?: string[], visitorToken?: string | null) => {
+  const q = new URLSearchParams();
+  if (ids?.length) q.set('ids', ids.join(','));
+  const s = q.toString();
+  // The token goes in a HEADER, never the query — as every other session-bearing read here does
+  // (getPhotosBySession, chooseCard, getMe). It is a bearer credential good for the whole event,
+  // and this is polled every 45s by every open gallery: in the query it was writing itself into
+  // nginx, Traefik and Cloudflare access logs for the life of the event, once per poll per guest.
+  // (The ZIP endpoint's query token is unavoidable — that one is reached by navigating to a URL,
+  // which cannot carry headers. This is a fetch, so it can.)
+  // Same rule for the visitor token: a bearer credential belongs in a header, not in a query that
+  // every proxy between here and the server writes to disk.
+  const headers = sessionToken ? { 'X-Session-Token': sessionToken } : vis(visitorToken);
+  return api<{ hearts: Record<string, number>; mine: string[] }>(
+    `/api/photos/${code}/hearts${s ? `?${s}` : ''}`,
+    Object.keys(headers).length ? { headers } : undefined,
+  );
+};
+
+export type PhotoComment = {
+  id: string; body: string; author: string; createdAt: number;
+  /** Resolved by the SERVER, not by comparing ids here — the client does not need to know who
+   *  everyone is in order to know which message is its own. True for the writer and for the host. */
+  canDelete: boolean;
+  /** 'visitor' = somebody who only ever held a link, never joined the event. Shown in the thread,
+   *  because a name alone is not a claim anyone can check. */
+  authorKind?: 'guest' | 'visitor';
+  /** Hearts on the COMMENT itself. `hearts` absent means an older API that did not send them, which
+   *  reads the same as none. */
+  hearts?: number;
+  hearted?: boolean;
+};
+
+/** Threads for the photos named. Scoped by id on purpose: a thread is only read when a photo is
+ *  open, so asking for a whole event's comments would be sending something nobody will look at. */
+export const getComments = (code: string, ids: string[], who?: { sessionToken?: string; organizerCode?: string; visitorToken?: string | null }) =>
+  api<{ comments: Record<string, PhotoComment[]> }>(
+    `/api/photos/${code}/comments?ids=${ids.join(',')}`,
+    { headers: {
+        ...(who?.sessionToken ? { 'X-Session-Token': who.sessionToken } : {}),
+        ...(who?.organizerCode ? org(who.organizerCode) : {}),
+        ...vis(who?.visitorToken),
+      } },
+  );
+
+export const addComment = (photoId: string, sessionToken: string, body: string, visitorToken?: string | null) =>
+  postJson<PhotoComment>(`/api/photos/${photoId}/comment`, { body },
+    sessionToken ? { 'X-Session-Token': sessionToken } : vis(visitorToken));
+
+/** Give a name (or just take a token) on the EVENT'S OWN gallery link — the same two-step identity
+ *  a share visitor has, for somebody who never joined. Reactions here inherit the event's switches,
+ *  because the gallery link IS the event. */
+/** What the event's own gallery link lets people do. Its own endpoint, not the settings form — see
+ *  the note on the route for why a partial save there would clobber. */
+export const saveGalleryLink = (code: string, organizerCode: string,
+                               body: { galleryHeartsEnabled?: boolean; galleryCommentsEnabled?: boolean }) =>
+  api<{ ok: boolean; galleryHeartsEnabled: boolean; galleryCommentsEnabled: boolean }>(
+    `/api/events/${code}/gallery-link`,
+    { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify(body) });
+
+export const galleryVisitorJoin = (code: string, name: string, visitorToken?: string | null) =>
+  postJson<{ token: string; name: string }>(`/api/photos/${code}/visitor`, { name }, vis(visitorToken));
+
+/** Heart a COMMENT, as a guest of the event. */
+export const setCommentHeart = (commentId: string, sessionToken: string, heart: boolean, visitorToken?: string | null) =>
+  postJson<{ hearted: boolean; hearts: number }>(
+    `/api/photos/comments/${commentId}/heart`, { sessionToken, heart }, vis(visitorToken));
+
+export const deleteComment = (commentId: string, who: { sessionToken?: string; organizerCode?: string; visitorToken?: string | null }) =>
+  api<{ success: boolean }>(`/api/photos/comments/${commentId}`, {
+    method: 'DELETE',
+    headers: {
+      ...(who.sessionToken ? { 'X-Session-Token': who.sessionToken } : {}),
+      ...(who.organizerCode ? org(who.organizerCode) : {}),
+      ...vis(who.visitorToken),
+    },
+  });
+
 export const setHighlights = (code: string, organizerCode: string, photoIds: string[], highlight: boolean) =>
   postJson(`/api/events/${code}/highlights`, { photoIds, highlight }, org(organizerCode));
 export const moderate = (code: string, organizerCode: string, photoIds: string[], action: 'approve' | 'reject' | 'restore') =>
@@ -277,7 +484,12 @@ export const saveTheme = (code: string, organizerCode: string, theme: EventTheme
 /** Email a link to a list of addresses. Omit shareId for the event's standing gallery link; pass
  *  one to send a curated share instead. Every attempt is recorded server-side — see linkSends. */
 export const emailLink = (code: string, organizerCode: string, emails: string[], shareId?: string | null) =>
-  postJson<{ sent: number; errors: number }>(
+  // `notSent` is how many of the submitted addresses were past the per-press batch and therefore
+  // never attempted — not refused, not failed, not considered. It was reported nowhere for as long
+  // as the cap has existed, so 250 addresses answered `sent: 200, errors: 0` and fifty people never
+  // got the link to their own photos. `perSend` is the cap itself, so the UI can say how many are
+  // left without hardcoding a number that lives on the server.
+  postJson<{ sent: number; errors: number; skipped: number; notSent: number; perSend: number }>(
     `/api/events/${code}/email-link`, { emails, shareId: shareId ?? null }, org(organizerCode));
 
 export interface LinkSend { shareId: string | null; email: string; ok: boolean; sentAt: number; }
@@ -343,16 +555,45 @@ export const setAllowDownloads = (code: string, organizerCode: string, allowDown
   postJson(`/api/events/${code}/allow-downloads`, { allowDownloads }, org(organizerCode));
 
 export interface PhotosResponse {
+  /** More to come when this is a string; null or absent means this is the last page. */
+  nextCursor?: string | null;
   revealed: boolean; photoCount?: number; revealMode?: string; revealAt?: number | null;
   hasHighlights?: boolean; allowDownloads?: boolean; moderationEnabled?: boolean;
+  /** Moderated events only: how many photos are waiting for the host. THE signal that separates
+   *  "the host is still approving" from "this event is empty" — two states that look identical from
+   *  a revealed gallery with no photos in it, and which the client used to guess at (always
+   *  wrongly, in the second case) and then poll for ever. Optional because a server that predates
+   *  it does not send it, and absent must read as "keep asking", not as "stop". */
+  pendingCount?: number;
+  /** Participant mode only. How many shots are this guest's, and how many of everyone else's they
+   *  are allowed to see. Numbers rather than rows, because `own=true` no longer ships the rows —
+   *  see the ?own comment in the server's photos route. */
+  ownCount?: number; othersCount?: number;
   myParticipantId?: string; photos?: Photo[];
 }
-export const getPhotosBySession = (code: string, sessionToken: string, highlightsOnly = false) =>
-  api<PhotosResponse>(`/api/photos/${code}${highlightsOnly ? '?highlightsOnly=true' : ''}`, { headers: { 'X-Session-Token': sessionToken } });
+/** `ownOnly` asks the server for just this guest's shots. The camera's roll wants nothing else, and
+ *  without it a revealed event sends the whole gallery for the client to throw three quarters of
+ *  away — on a phone, at a venue, over the worst connection the product ever runs on. */
+export const getPhotosBySession = (code: string, sessionToken: string, highlightsOnly = false, ownOnly = false) => {
+  const q = [highlightsOnly ? 'highlightsOnly=true' : '', ownOnly ? 'own=true' : ''].filter(Boolean).join('&');
+  return api<PhotosResponse>(`/api/photos/${code}${q ? `?${q}` : ''}`, { headers: { 'X-Session-Token': sessionToken } });
+};
 export const getPhotosByOrganizer = (code: string, organizerCode: string) =>
   api<PhotosResponse>(`/api/photos/${code}`, { headers: org(organizerCode) });
-export const getGalleryPhotos = (code: string, highlightsOnly = false) =>
-  api<PhotosResponse>(`/api/photos/${code}?gallery=true${highlightsOnly ? '&highlightsOnly=true' : ''}`);
+/** One page of the gallery. `after` is the previous page's `nextCursor` — an opaque `<takenAt>_<id>`
+ *  key, NOT a page number: offsets renumber themselves when a photo is uploaded or rejected
+ *  mid-scroll, which shows a guest the same shot twice or skips one without saying so. */
+/** `fresh` adds a one-off cache-buster. The gallery answer is deliberately shared and cacheable
+ *  for 30s (galleryCacheSeconds) because the ORDER is everyone's, not yours — but a viewer who has
+ *  just hearted or unhearted something must see their own change take effect, and a cached page
+ *  would show them the old order for up to half a minute. Only their own write sets this, so the
+ *  cache still does its job for every other request. */
+export const getGalleryPhotos = (code: string, highlightsOnly = false, after?: string | null,
+                                sort?: 'newest' | 'hearted', fresh = false) =>
+  api<PhotosResponse>(`/api/photos/${code}?gallery=true${highlightsOnly ? '&highlightsOnly=true' : ''}`
+    + (sort === 'hearted' ? '&sort=hearted' : '')
+    + (after ? `&after=${encodeURIComponent(after)}` : '')
+    + (fresh ? `&fresh=${Date.now()}` : ''));
 
 /** The missions on THIS guest's card, and the ids they have already captured. A guest is handed
  *  one card of possibly several, so this is per-participant, never the event's whole list. */
@@ -361,11 +602,46 @@ export type GuestMissions = {
   challengesDone?: string[];
   challengeSet?: string | null;
   challengeTick?: string | null;
+} & GuestCardStatus;
+
+/** One of the host's printed cards, as somebody deciding which one is in their hand needs to see
+ *  it: the label printed on it, and enough of the list to tell two apart when both say "Card". */
+export type CardChoice = { key: string; label: string; preview: string[]; count: number };
+
+/** What the server says about WHICH card this guest has, beyond the list itself.
+ *
+ *  Every field optional, so a response from a server that does not serve them — or one already in
+ *  a cache — reads as a guest with nothing to answer, which is what such a guest is. */
+export type GuestCardStatus = {
+  /** 'qr' a printed card named it · 'self' they told us · 'auto' the round-robin. */
+  setSource?: 'qr' | 'self' | 'auto';
+  /** Is the “which card are you?” question still open for this guest? THE gate on the prompt. */
+  setPending?: boolean;
+  /** Sent only while it is. */
+  setChoices?: CardChoice[];
+  /** ...and whether the cards at this event each carry their own code, so the better suggestion is
+   *  to go and scan the one in their hand. */
+  cardsHaveQr?: boolean;
 };
 
-export const joinEvent = (joinCode: string, name: string, email?: string) =>
+/** `set` is the key off a printed trick card's QR (`?set=b` on the join link).
+ *
+ *  It has to travel from the page URL into the join call, and for a while it did not: the server
+ *  has always honoured it, the QR endpoint has always printed it, and nothing in between ever
+ *  passed it on — so every guest who scanned a card got whatever the round-robin handed out. The
+ *  card in their hand disagreeing with the app is the one thing printing several cards is meant to
+ *  avoid, so this argument is the fix, and the server keeps the last word on whether the key is
+ *  real. */
+export const joinEvent = (joinCode: string, name: string, email?: string, set?: string) =>
   postJson<{ participant: { id: string; name: string }; sessionToken: string; joinCode: string; photosRemaining: number; eventName: string; noFlash?: boolean; recovered?: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; feedbackGiven?: boolean; emailFromPayment?: boolean; wantsPhotos?: boolean } & GuestMissions>(
-    '/api/participants', { joinCode, name, email: email || undefined });
+    '/api/participants', { joinCode, name, email: email || undefined, set: set || undefined });
+
+/** The guest saying which card they are holding — or, with `null`, that they have not got one, in
+ *  which case the round-robin's answer stands. Answerable once: the server refuses a second attempt
+ *  with 409 and hands back the card they already have. */
+export const chooseCard = (sessionToken: string, set: string | null) =>
+  postJson<{ ok: boolean } & GuestMissions>(
+    '/api/participants/card', { set }, { 'X-Session-Token': sessionToken });
 export const getMe = (sessionToken: string) =>
   api<{ participant: { id: string; name: string; photosTaken: number; email: string | null }; photosRemaining: number; eventName: string; joinCode: string; slug: string | null; startsAt: number; expiresAt: number; isLocked: boolean; maxPhotos: number; extraPhotos?: number; allowDownloads: boolean; noFlash: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; feedbackGiven?: boolean; emailFromPayment?: boolean; wantsPhotos?: boolean } & GuestMissions>(
     '/api/participants/me', { headers: { 'X-Session-Token': sessionToken } });
@@ -441,10 +717,15 @@ export interface Suppression { reason: string; detail: string | null; since: num
 export interface EventGuest {
   id: string;
   name: string | null;
-  /** Null is normal, not an error: a guest may be on the list for their phone number, or be a
-   *  plus-one whose address nobody has. They simply are not part of an email send. */
-  email: string | null;
-  phone: string | null;
+  /** Always present. The list exists to mail a lot of people one link, so a guest without an
+   *  address is a guest nothing here can reach — the column is NOT NULL (migration 0054) and the
+   *  server refuses a guest without one. Whoever the host has no address for gets a printed card,
+   *  which is the host's job and not this product's.
+   *
+   *  There is no `phone`. The server has no such column and the importer skips a phone column
+   *  rather than storing it — Snapdini sends email and nothing else, so a number is data nothing
+   *  here can act on. See looksPhone() in app/src/server/csv.ts. */
+  email: string;
   notes: string | null;
   createdAt: number;
   lastInvite: InviteState | null;
@@ -459,13 +740,16 @@ export interface GuestListPayload {
   deliveryTracking: boolean;
 }
 
-export type GuestField = 'name' | 'email' | 'phone' | 'notes' | 'ignore';
+export type GuestField = 'name' | 'email' | 'notes' | 'ignore';
 
 /** One line of the file as the preview shows it. `action: 'skip'` rows are rendered greyed rather
  *  than hidden — a file where 40 of 200 rows are duplicates is a file the host needs to look at. */
 export interface ImportRow {
   line: number;
-  guest: { name: string | null; email: string | null; phone: string | null; notes: string | null };
+  /** `email` is nullable HERE and nowhere else: a preview row is a line of the host's file, and a
+   *  line with no address is exactly the case the preview exists to show them. It is skipped, never
+   *  stored, so an EventGuest always has one. */
+  guest: { name: string | null; email: string | null; notes: string | null };
   action: 'add' | 'skip';
   problems: string[];
 }
@@ -477,7 +761,10 @@ export interface ImportPreview {
   headerless: boolean;
   delimiter: string;
   mapping: GuestField[];
-  counts: { add: number; skip: number; duplicate: number; invalid: number };
+  /** `noEmail` is broken out of `skip` deliberately: it is the one skip reason the host can do
+   *  something about, and a file where half the rows have no address must say so in its own words
+   *  rather than as part of a lump. */
+  counts: { add: number; skip: number; duplicate: number; invalid: number; noEmail: number };
   fatal: string | null;
   rows: ImportRow[];
   truncated: boolean;
@@ -508,11 +795,14 @@ export const commitGuestImport = (code: string, organizerCode: string, text: str
   postJson<{ imported: number; skipped: number } & GuestListPayload>(
     `/api/events/${code}/guests/import`, { text, mapping }, org(organizerCode));
 
-/** Send the Snapdini invite. Omit `guestIds` to mail everyone on the list who has an address.
+/** Send the Snapdini invite. Omit `guestIds` to mail everyone on the list who is not blocked.
  *
  *  `skipped` is the part that matters: addresses that were NOT mailed because they are suppressed,
  *  with the reason. A count of successes alone is how a guest ends up never invited. */
 export const sendInvites = (code: string, organizerCode: string, guestIds?: string[]) =>
-  postJson<{ sent: number; failed: number; noAddress: number;
+  // `notSent`: selected, and not attempted this press — the batch cap, reported rather than hidden.
+  // The server puts anyone who has never had an invite at the front of the queue, so pressing Send
+  // again reaches exactly the people this press could not.
+  postJson<{ sent: number; failed: number; notSent: number; perSend: number;
              skipped: { email: string; name: string | null; reason: string }[] } & GuestListPayload>(
     `/api/events/${code}/guests/invite`, { guestIds }, org(organizerCode));

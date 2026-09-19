@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { goto } from '$app/navigation';
   import { saveDraft, readDraft, clearDraft } from '$lib/eventDraft';
 
@@ -17,6 +17,31 @@
   let guided = true;
   let step = 1;
   const LAST_STEP = 5;
+
+  // ── …and the same path walked a second time ────────────────────────────────
+  //
+  // This page is also the only place the product ever EXPLAINS itself — what moderation does, what
+  // a reveal delay is for, what the guest email actually says. Once the event exists that whole
+  // explanation is gone, and all the host has is the admin page's settings card: correct, dense,
+  // and silent. So `?edit=<joinCode>#<organizerCode>` re-opens THIS wizard over an existing event
+  // rather than a second screen being written that would drift from it within a month.
+  //
+  // Everything below is additive and behind this flag. Creating an event is the thing this page is
+  // for, and nothing about it changes when the flag is off.
+  let editing = false;
+  let editCode = '';
+  let editOrg = '';
+  let editEvent: AdminEvent | null = null;
+  let editLoading = false;
+  let editError = '';
+  let saving = false;
+  /** Was the start already fixed when we loaded? Decided up front — see the note on loadForEdit. */
+  let startFixed = false;
+  /** The event as it was, labelled the way the last step shows it, for the change list. */
+  let editBefore: Record<string, string> = {};
+  /** Where to send a host who wants the part of this they cannot change here. */
+  $: upgradeHref = `/admin/${encodeURIComponent(editCode)}?upgrade=1#${encodeURIComponent(editOrg)}`;
+  $: adminHref = `/admin/${encodeURIComponent(editCode)}#${encodeURIComponent(editOrg)}`;
   // "Your guests" is its own step rather than another row inside Advanced settings. It is a
   // decision about what happens AFTER the event — who gets the photos and what they are told —
   // and folding it in with custom URLs and frame shapes is how it would never be read.
@@ -36,15 +61,13 @@
   // A plain function rather than only a reactive value, because going BACKWARDS needs the count of
   // the step being entered, and a `$:` has not recomputed at the moment the assignment runs.
   //
-  // `paid` is a PARAMETER, not read from scope. Svelte tracks what a reactive statement mentions
-  // directly, not what a function it calls happens to read — so `$: subCount = subsFor(step)` only
-  // ever recomputed when `step` changed, and billing arrives from /api/config after first paint.
-  // The count stayed at its pre-billing value and step 1 silently lost its guests-and-price page.
-  const subsFor = (st: number, paid: boolean): number =>
-    st === 1 ? (paid ? 3 : 2)   // without billing there is no guest/price page to show
-    : st === 4 ? 3
-    : 1;
-  $: subCount = subsFor(step, !!billing?.billingEnabled);
+  // It lives in $lib/eventEdit now so the create/edit difference is something a test can state.
+  // `paid` and `editing` are PARAMETERS, not read from scope. Svelte tracks what a reactive
+  // statement mentions directly, not what a function it calls happens to read — so
+  // `$: subCount = subsFor(step)` only ever recomputed when `step` changed, and billing arrives
+  // from /api/config after first paint. The count stayed at its pre-billing value and step 1
+  // silently lost its guests-and-price page.
+  $: subCount = subsFor(step, !!billing?.billingEnabled, editing);
   let sub = 1;
   // billing arrives from /api/config after first paint; a host standing on a page that just stopped
   // existing must not be stranded there.
@@ -87,6 +110,21 @@
     totalEl?.scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'start' });
   }
 
+  /** Breathing room above a jumped-to card, so it does not sit flush against the viewport edge. */
+  const SCROLL_PAD = 16;
+
+  let flashed: Element | null = null;
+  let flashTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Mark the card we just jumped to, briefly. Reduced-motion still gets the ring (it is a
+   *  colour change, not movement) — it just does not animate away. */
+  function flashCard(card: Element) {
+    clearTimeout(flashTimer);
+    flashed?.classList.remove('jump-flash');
+    card.classList.add('jump-flash');
+    flashed = card;
+    flashTimer = setTimeout(() => { card.classList.remove('jump-flash'); flashed = null; }, 1600);
+  }
+
   async function scrollToStepTop() {
     await tick();
     const el = document.querySelector('.steps');
@@ -110,7 +148,7 @@
   function prevStep() {
     markMailSeen();
     if (sub > 1) { sub -= 1; void scrollToStepTop(); return; }
-    if (step > 1) { step -= 1; sub = subsFor(step, !!billing?.billingEnabled); void scrollToStepTop(); }
+    if (step > 1) { step -= 1; sub = subsFor(step, !!billing?.billingEnabled, editing); void scrollToStepTop(); }
   }
   /** The furthest step reached. Anything up to it has been filled in and can be jumped to. */
   let maxStep = 1;
@@ -126,6 +164,51 @@
    * Forward still obeys the one real gate: the name. Clear it on step 1 and the strip cannot carry
    * you past it any more than the button can.
    */
+  /** Jump to a specific page WITHIN a step — what the summary's rows do.
+   *  goToStep() always lands on sub 1, which is right for the step strip (you are picking a
+   *  step) and wrong for the summary (you are picking a line, and the line for "Guests" lives
+   *  on 1 of 3). Same guards: never past what has been unlocked, never forward off an
+   *  incomplete page. */
+  async function goToSection(n: number, s = 1, anchor?: string) {
+    if (n < 1 || n > maxStep) return;
+    if (n > step && !canAdvance) return;
+    markMailSeen();
+    step = n;
+    sub = s;
+    if (!anchor) {
+      // No anchor still gets a flash. Guests reached this branch and was the one row that jumped
+      // without confirming where it had landed — a difference the host has no way to explain.
+      // Flash whatever card the step opens with, so a row added later cannot quietly lose it.
+      await scrollToStepTop();
+      const first = document.querySelector('.wrap .card');
+      if (first) flashCard(first);
+      return;
+    }
+    // Landing on the top of the right page still leaves the host hunting for the row they
+    // pressed — on step 3 that can be four cards down. Scroll to the setting itself instead,
+    // and NOT to the top as well: two smooth scrolls issued in the same frame fight, and the
+    // one that wins is a coin toss.
+    await tick();
+    // One frame for the browser to lay the new step out: tick() only gets it into the DOM, and
+    // scrollHeight read in the same frame can still be the previous (shorter) page.
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    const el = document.getElementById(anchor);
+    if (!el) { void scrollToStepTop(); return; }
+    // Aim the whole CARD at the top rather than the heading: the card opens with its
+    // illustration, so putting the heading flush at the top would cut the drawing off above the
+    // fold and read as a rendering fault.
+    const card = el.closest('.fx-item, .card') ?? el;
+    const still = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const y = card.getBoundingClientRect().top + window.scrollY - SCROLL_PAD;
+    window.scrollTo({ top: Math.max(0, y), behavior: still ? 'auto' : 'smooth' });
+    // The LAST card on a step can never reach the top — the page runs out of scroll first (on
+    // step 3 the retention card is 426px short of it, and no amount of scrolling fixes that
+    // without padding the page with dead space). So say where you landed instead of relying on
+    // position alone: a brief ring on the card the host actually asked for. Cheap, and it also
+    // covers the cards that DO reach the top, where the eye still has to find them.
+    flashCard(card);
+  }
+
   function goToStep(n: number) {
     if (n < 1 || n > maxStep || n === step) return;
     if (n > step && !canAdvance) return;
@@ -139,10 +222,14 @@
   import TimeField from '$lib/components/TimeField.svelte';
   import { getConfig, getMe, api } from '$lib/api';
   import { track } from '$lib/analytics';
-  import { createEvent, joinEvent, REVEAL_CUSTOM, REVEAL_TICK_MS,
-           ceilToRevealTick, zonedWallTimeToMs, msToZonedWallTime, revealMomentLabel } from '$lib/events';
+  import { createEvent, joinEvent, getAdmin, saveSettings, REVEAL_CUSTOM, REVEAL_TICK_MS,
+           ceilToRevealTick, zonedWallTimeToMs, msToZonedWallTime, revealMomentLabel, revealInstantRefusal,
+           type AdminEvent } from '$lib/events';
+  import { subsFor, startLocked, prefillFromEvent, editSettingsBody, editChanges,
+           editIdentifier, slugVerdict } from '$lib/eventEdit';
   import { GUEST_DELIVERY_DEFAULT, GUEST_DELIVERY_OPTIONS, GUEST_DELIVERY_AT_CREATION, guestReleaseAt, releaseDateKnown,
            reminderCanFire, reminderFiresAt, revealInstant, scheduledSendIssue, scopeFor,
+           isManualDelivery,
            type GuestDelivery, type GuestSendScope } from '$lib/guestDelivery';
   import { EVENT_TYPES, DEFAULT_COUNT, packFor, pickChallenges, tickFor, varySets } from '$lib/challenges';
   import { saveSession } from '$lib/session';
@@ -156,6 +243,7 @@
            priceTag, retentionChoices, retentionIncludedDays, retentionLabel, retentionPrice,
            retentionFor,
            shotsAddonCents, shotsPrice, videoAddonCents, videoPrice } from '$lib/featureUpsell';
+  import { shotWindowStart } from '$lib/shotWindow';
   import HelpTip from '$lib/components/HelpTip.svelte';
 
   let tab: 'create' | 'join' = 'create';
@@ -209,6 +297,31 @@
   // step flip gifted↔charged the instant the guest tier moves.
   const freeAtSize = (guests: number) => featuresFreeAt(billing, guests);
   const shotsAddon = (shots: number) => shotsAddonCents(billing, shots);
+
+  /** The shots ladder, shown three rungs at a time.
+   *
+   *  All six (12 … 72) as one row of chips made the big numbers look like ordinary choices sitting
+   *  there waiting to be picked, when what they actually are is a deliberate step up — and the row
+   *  only gets longer as the ladder does. Three at a time with "go bigger" / "go smaller" keeps the
+   *  question small, starts everyone at the included 12, and makes reaching 72 something a host
+   *  does on purpose.
+   *
+   *  The window follows the SELECTION rather than the other way round: whatever is chosen is always
+   *  on screen, so stepping the window can never hide the answer the host has already given. */
+  const SHOT_WINDOW = 3;
+  let shotWin = 0;
+  /** Opened ONCE, on whatever is already chosen — see shotWindowStart. After that the two step
+   *  buttons own the window, or pressing them does nothing. */
+  let shotWinOpened = false;
+  $: shotLadder = (options?.shotsPerPerson ?? []).map((sp) => ({ ...sp, n: Number(sp.value) }));
+  $: if (!shotWinOpened && shotLadder.length) {
+    shotWin = shotWindowStart(shotLadder.length, shotLadder.findIndex((sp) => sp.n === Number(maxPhotos)), 0, SHOT_WINDOW);
+    shotWinOpened = true;
+  }
+  const stepShots = (by: number) => { shotWin = shotWindowStart(shotLadder.length, -1, shotWin + by, SHOT_WINDOW); };
+  $: shotView = shotLadder.slice(shotWin, shotWin + SHOT_WINDOW);
+  $: canShotsBigger = shotWin + SHOT_WINDOW < shotLadder.length;
+  $: canShotsSmaller = shotWin > 0;
   const videoBase = (seconds: number) => videoAddonCents(billing, seconds);
   const durationAddon = (hours: number) => durationAddonCents(billing, hours);
   const guestLabel = (n: number, txt: string) => {
@@ -240,10 +353,21 @@
     const chosen = Math.max(Number(maxPhotos) || 0, 0);
     const included = billing?.shotsFree ?? 12;
     const rows = Math.max(Math.ceil(most / perRow), 1);
-    const top = (40 - rows * 6.5) / 2 + 3.25;
+    // The PITCH is computed, not fixed at 6.5, and that is the whole repair. 6.5 fitted four rows
+    // in a 78×40 box, which was every ladder this drawing had ever been asked to show — and then the
+    // ladder grew to 120, which is ten rows. The grid ran off the bottom of its own viewBox, `top`
+    // went negative, and the states were still correct on dots nobody could see. Whatever the top
+    // rung becomes, the grid now fits: the smaller of what the width allows and what the height
+    // does, so the dots stay round and stay inside.
+    const pitch = Math.min(78 / perRow, 40 / rows);
+    const r = pitch * 0.4;
+    // Centred both ways — a short ladder must not sit in the top-left corner of the box.
+    const left = (78 - Math.min(most, perRow) * pitch) / 2 + pitch / 2;
+    const top = (40 - rows * pitch) / 2 + pitch / 2;
     return Array.from({ length: most }, (_, i) => ({
-      cx: (i % perRow) * 6.5 + 3.25,
-      cy: Math.floor(i / perRow) * 6.5 + top,
+      cx: (i % perRow) * pitch + left,
+      cy: Math.floor(i / perRow) * pitch + top,
+      r,
       state: i >= chosen ? 'spare' : i >= included ? 'extra' : 'base',
     }));
   })();
@@ -255,10 +379,14 @@
   const shapeStyle = (value: string) => `aspect-ratio: ${aspectValue(value) ?? 0.75}`;
   /** "Tall · 9:16" → "Tall". The ratio is already on screen as the box itself. */
   const shapeName = (label: string) => label.split('·')[0].trim();
-  /** Lit = a shape guests can actually choose on this event. `packOn` and `sel` are arguments so
-   *  the tiles relight the moment either changes. */
-  const shapeLit = (value: string, packOn: boolean, sel: Record<string, boolean>) =>
-    (billing?.billingEnabled ? (packOn || value === '1:1') : !!sel[value]);
+  /** Lit = a shape guests can actually choose on this event. `packOn`, `sel` and `edit` are all
+   *  arguments so the tiles relight the moment any of them changes.
+   *
+   *  An edit reads the event's OWN shape list rather than the pack switch: a promo, or an upgrade
+   *  that bought some shapes and not others, leaves an event entitled to a set that "pack on/off"
+   *  cannot describe — and this drawing is the only place the host can see which. */
+  const shapeLit = (value: string, packOn: boolean, sel: Record<string, boolean>, edit: boolean) =>
+    edit ? !!sel[value] : (billing?.billingEnabled ? (packOn || value === '1:1') : !!sel[value]);
 
   $: framePrice = framePackPrice(billing, Number(maxGuests));
   $: frameTag = priceTag(framePrice, money);
@@ -274,10 +402,12 @@
   // OFF. It changes what a guest sees — a list of shots to hunt for appears in their camera — and
   // a default that alters somebody else's screen is not a default we get to make. The host opts in.
   let seedMissions = false;
-  /** Several cards instead of one, so guests are not all hunting the same five shots. Off for the
-   *  same reason seedMissions is: it changes what a guest is handed. */
+  /** Several LISTS instead of one, so guests are not all hunting the same five shots. Off for the
+   *  same reason seedMissions is: it changes what a guest is handed. (They become separate printed
+   *  cards later, on the poster step — but the wizard does not say "card" this early, because the
+   *  host has not met one yet.) */
   let trickVariety = false;
-  /** How many cards "change it up" makes. Three is enough for a room to feel different without
+  /** How many lists "change it up" makes. Three is enough for a room to feel different without
    *  making the host's print job a chore — and varySets guarantees the must-haves are on all of
    *  them, so nobody's cake goes unphotographed because of which table got which card. */
   const VARIETY_SETS = 3;
@@ -364,6 +494,16 @@
     ? (zonedWallTimeToMs(startDate, startTime || '00:00', timezone || 'UTC')
         ?? new Date(`${startDate}T${startTime || '00:00'}`).getTime())
     : Date.now()) + (Number(durationHours) || 24) * 3_600_000;
+  // The same refusal the server applies, run as the host types. Without it the wizard cheerfully
+  // accepted a reveal in the PAST — which opens the gallery while the party is still going, on a
+  // product whose whole promise is that it does not. Checked against `guestEndsAt`, the end read in
+  // the EVENT's zone: `eventEndsAt` above goes through the browser's clock, so a host in Sydney
+  // booking a Perth event is two hours out, which is exactly the size of mistake that matters here.
+  $: revealIssue = (wantsCustomReveal && actualRevealAt !== null)
+    ? revealInstantRefusal(actualRevealAt,
+        { expiresAt: guestEndsAt, purgeAt: guestEndsAt + (Number(retentionDays) || 7) * 86_400_000 },
+        Date.now())
+    : null;
   $: guestRevealAt = revealInstant({
     revealMode, endsAt: guestEndsAt,
     customAt: wantsCustomReveal ? actualRevealAt : null,
@@ -383,7 +523,7 @@
   // host presses the button themselves. It has no honest off state, so it is shown locked, saying
   // which of the two it is.
   $: guestDeliveryLabel = (GUEST_DELIVERY_OPTIONS.find((o) => o.value === guestDelivery)?.label ?? '').toLowerCase();
-  $: guestLiveAutomatic = guestDelivery === 'all_on_reveal' || guestDelivery === 'scheduled';
+  $: guestLiveAutomatic = !isManualDelivery(guestDelivery);
   $: guestReminderOffered = reminderCanFire(guestEndsAt, guestReleaseMs);
   // Both optional rows on the email page are HIDDEN when they do not apply, rather than shown
   // disabled. What that costs is the one thing a disabled row was doing: telling you it exists. So
@@ -444,6 +584,10 @@
   let blurb = '';
   let allowDownloads = true;
   let noFlash = false;
+  // Hearts on, comments off — the schema's defaults, and the reasoning is in migration 0057/0060:
+  // a heart only ADDS to a screen, while a comment puts one guest's words on another's gallery.
+  let heartsEnabled = true;
+  let commentsEnabled = false;
   let revealMode = 'at_end';   // default: hide until the event ends (overridden by config on load)
   let revealDelayHours: number | string = 0;
   // Only meaningful when the delay control is on REVEAL_CUSTOM. Wall-clock strings, never an epoch:
@@ -481,16 +625,29 @@
   // exist. The draft has to outlive the tab that created it, so it is stamped and expires instead.
   const DRAFT_FIELDS = () => ({
     name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, retentionTouched, timezone,
-    maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
+    maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, heartsEnabled, commentsEnabled, revealMode,
     revealDelayHours, revealDate, revealTime, moderationEnabled, eventType, seedMissions, trickVariety,
     guestDelivery, guestSendScope, guestSendDate, guestSendTime,
     guestMailThanks, guestMailReminder, guestMailLive,
   });
+  /**
+   * The draft, but never while editing.
+   *
+   * A create draft and an edit are the same set of field names over two completely different
+   * events, so they must not touch each other in either direction: a half-finished create must not
+   * leak its guest tier into somebody's live event, and an edit must not be restored over a later
+   * create as though it were an abandoned attempt. Edit mode never reads the draft (see onMount)
+   * and this is the other half — it never writes one.
+   */
+  function persistDraft() {
+    if (editing) return;
+    saveDraft(DRAFT_FIELDS());
+  }
   function restoreDraft() {
     const d = readDraft();
     if (!d) return false;
     ({ name, slug, startDate, startTime, durationHours, maxPhotos, retentionDays, retentionTouched, timezone,
-       maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, revealMode,
+       maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, heartsEnabled, commentsEnabled, revealMode,
        revealDelayHours, revealDate, revealTime, moderationEnabled, eventType, seedMissions, trickVariety,
        guestDelivery, guestSendScope, guestSendDate, guestSendTime,
        guestMailThanks, guestMailReminder, guestMailLive } = { ...DRAFT_FIELDS(), ...d });
@@ -498,7 +655,7 @@
   }
   /** Signed out: keep what they typed, then send them to sign in and come straight back. */
   function goSignIn(path: '/login' | '/signup') {
-    saveDraft(DRAFT_FIELDS());
+    persistDraft();
     goto(`${path}?next=/app`);
   }
 
@@ -510,17 +667,38 @@
   const pad = (n: number) => String(n).padStart(2, '0');
 
   onMount(async () => {
+    // It is a route, so the mode is in the URL. The organizer code travels in the HASH, matching
+    // the /admin/[code]#organizerCode convention the rest of the product already uses — it is a
+    // bearer credential and a hash is the one part of a URL that never reaches the server logs.
+    const qs = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null;
+    const editParam = qs?.get('edit') || '';
+    if (editParam) {
+      // A join code OR a custom slug — /admin/[code] resolves both, so this link carries whichever
+      // the host's own URL had. See editIdentifier(): uppercasing and stripping punctuation is right
+      // for a code and turns a slug into a 404.
+      editCode = editIdentifier(editParam);
+      try { editOrg = decodeURIComponent((location.hash || '').slice(1)); }
+      catch { editOrg = (location.hash || '').slice(1); }
+      editing = !!editCode && !!editOrg;
+      if (editCode && !editOrg) editError = 'This link is missing your organiser code — open your event page and try the button there again.';
+    }
+
     try { loggedIn = !!(await getMe()).user; } catch { /* anon */ }
-    // Coming back from sign-in: put their event back the way they left it.
-    if (restoreDraft()) draftRestored = true;
-    // Default the start to midnight at the beginning of the following day — events are almost
-    // always planned ahead, and this avoids accidentally starting one mid-creation.
+    // Coming back from sign-in: put their event back the way they left it. Never while editing —
+    // a half-finished create is about a different event entirely.
+    if (!editing && restoreDraft()) draftRestored = true;
     const tm = new Date();
     todayStr = `${tm.getFullYear()}-${pad(tm.getMonth() + 1)}-${pad(tm.getDate())}`;   // today = earliest allowed
-    tm.setDate(tm.getDate() + 1);
-    tm.setHours(0, 0, 0, 0);
-    startDate = `${tm.getFullYear()}-${pad(tm.getMonth() + 1)}-${pad(tm.getDate())}`;
-    startTime = '00:00';
+    if (!editing) {
+      // Default the start to midnight at the beginning of the following day — events are almost
+      // always planned ahead, and this avoids accidentally starting one mid-creation. An edit has
+      // a real start already, and moving it to tomorrow before the event has even loaded would be
+      // a reschedule the host never asked for.
+      tm.setDate(tm.getDate() + 1);
+      tm.setHours(0, 0, 0, 0);
+      startDate = `${tm.getFullYear()}-${pad(tm.getMonth() + 1)}-${pad(tm.getDate())}`;
+      startTime = '00:00';
+    }
 
     // Timezone list + detected default.
     try {
@@ -530,11 +708,11 @@
     }
     if (!timezones.length) timezones = ['UTC'];
     deviceTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    timezone = deviceTz;
+    if (!editing) timezone = deviceTz;   // an edit gets the event's own zone, below
 
-    // Pre-fill join code from ?code= and switch to the join tab.
-    const codeParam =
-      typeof location !== 'undefined' ? new URLSearchParams(location.search).get('code') : null;
+    // Pre-fill join code from ?code= and switch to the join tab. Not while editing: the two would
+    // fight over the same screen, and ?edit is unambiguous about which one the host asked for.
+    const codeParam = editing ? null : (qs?.get('code') ?? null);
     if (codeParam) {
       joinCode = codeParam.toUpperCase().replace(/[^A-Z0-9]/g, '');
       tab = 'join';
@@ -556,7 +734,65 @@
     } catch {
       /* offline — leave form unbuilt */
     }
+
+    // AFTER the config, never before: the block above assigns the defaults for duration, shots,
+    // reveal mode and the shape ticks, so loading the event first would have every one of the
+    // host's own answers overwritten a moment later by a default.
+    if (editing) await loadForEdit();
   });
+
+  // Both timers on this page outlive it otherwise, and both then act on a component that is gone:
+  // the slug check assigns `slugFeedback` (and holds a fetch open) up to 250ms plus a round trip
+  // after the host has navigated away, and the jump flash reaches into a card element that is no
+  // longer in the document to take a class off it. Neither has anything to flush — they are
+  // feedback, not work — so unlike the poster designer's save these are simply cancelled.
+  onDestroy(() => {
+    clearTimeout(slugCheckTimer);
+    clearTimeout(flashTimer);
+  });
+
+  /**
+   * Put a real event into the form.
+   *
+   * The organizer code in the hash is the whole of the authentication here — the same credential
+   * the admin page runs on — so there is no sign-in branch and no getMe() gate. Someone without it
+   * gets the server's 401, which is the correct answer.
+   */
+  async function loadForEdit() {
+    editLoading = true;
+    editError = '';
+    try {
+      const ev = await getAdmin(editCode, editOrg);
+      editEvent = ev;
+      // The same field list DRAFT_FIELDS enumerates, plus the blurb — which the draft has never
+      // carried (a separate, pre-existing gap) and which an edit plainly has to.
+      ({ name, blurb, slug, timezone, startDate, startTime, durationHours, maxPhotos, retentionDays,
+         maxGuests, videoSeconds, framePackOn, allowDownloads, noFlash, heartsEnabled, commentsEnabled, revealMode,
+         revealDelayHours, revealDate, revealTime, moderationEnabled, eventType,
+         guestDelivery, guestSendScope, guestSendDate, guestSendTime,
+         guestMailThanks, guestMailReminder, guestMailLive } = prefillFromEvent(ev));
+      // The host picked this length and paid for it; nothing here may quietly move it back to a
+      // tier default. (retentionFor() leaves a "touched" value alone.)
+      retentionTouched = true;
+      for (const a of options?.aspectRatios ?? []) selectedAspects[a.value] = ev.aspectRatios.includes(a.value);
+      selectedAspects = selectedAspects;
+      // Decided HERE, once, from what the server has already told us — not discovered on save. An
+      // event that has started and been used cannot be moved, and walking a host through choosing
+      // a new date and then answering them with a 409 four screens later is the exact failure this
+      // whole mode is meant to avoid.
+      startFixed = startLocked(ev);
+      // A tick, because every label below is a `$:` derivation of what was just assigned and none
+      // of them has recomputed yet. Captured before the tick, "what it was" would be a snapshot of
+      // the empty form and every single row would read as a change.
+      await tick();
+      editBefore = editSummaryRows();
+      if (slug) slugFeedback = slugVerdict(slug, { available: false }, slug);
+    } catch (e) {
+      editError = e instanceof Error ? e.message : 'Could not open that event';
+    } finally {
+      editLoading = false;
+    }
+  }
 
   // ── Slug helpers ──
   function slugify(str: string, allowTrailingHyphen = false): string {
@@ -583,19 +819,41 @@
       slugFeedback = { text: 'Too short — at least 2 characters', cls: 'err' };
       return;
     }
-    slugFeedback = { text: 'Checking…', cls: 'muted' };
+    // An event's OWN URL comes back from check-slug as unavailable — it is taken, by them. Without
+    // this the one field that was already correct is the one field marked as an error.
+    if (editing && editEvent?.slug && val === editEvent.slug) {
+      clearTimeout(slugCheckTimer);
+      slugFeedback = slugVerdict(val, { available: false }, editEvent.slug);
+      return;
+    }
+    // Whatever is on screen describes a shorter version of this name — most often the "Too short"
+    // from one or two characters ago — so it goes now rather than sitting there contradicting the
+    // box while the next answer is fetched.
+    slugFeedback = null;
+    // "Checking…" used to be set HERE, on every keystroke, and the timer below was 500ms and reset
+    // on every keystroke too. So from the second character onward the field said it was checking
+    // while nothing was happening, and the answer only landed half a second after you stopped
+    // typing — which reads as a very slow check. The request itself takes about five milliseconds.
+    //
+    // Now the word appears only when a request is actually in flight, and the wait before firing is
+    // short enough to feel like a response rather than a delay.
     slugCheckTimer = setTimeout(async () => {
+      slugFeedback = { text: 'Checking…', cls: 'muted' };
       try {
-        const data = await api<{ available: boolean; slug: string }>(
+        const data = await api<{ available: boolean; slug?: string; reason?: string }>(
           '/api/events/check-slug/' + encodeURIComponent(val)
         );
-        slugFeedback = data.available
-          ? { text: `✓ Available — URL will be /e/${data.slug}`, cls: 'ok' }
-          : { text: '✗ Already taken — try a different name', cls: 'err' };
+        // The answer is about `val`, which may no longer be what is in the box: on a slow
+        // connection two checks can be in flight and the older one can land last, leaving a verdict
+        // about a name the host has already changed.
+        if (val !== slug) return;
+        // A short reserved list exists now, and "✗ Already taken — try a different name" sent a
+        // host off inventing variations of a word nobody has. slugVerdict says which it is.
+        slugFeedback = slugVerdict(val, data, editing ? editEvent?.slug : null);
       } catch {
-        slugFeedback = null;
+        if (val === slug) slugFeedback = null;
       }
-    }, 500);
+    }, 250);
   }
 
   /**
@@ -675,6 +933,7 @@
       showToast('Pick the date and time for the reveal', true);
       return;
     }
+    if (revealIssue) { showToast(revealIssue, true); return; }
     // Same reasoning, one step further on: a send time is several taps back by the time Create is
     // pressed, and a scheduled send that lands before the reveal would email every guest a link to
     // a gallery that is still shut.
@@ -716,6 +975,8 @@
         startTime,
         allowDownloads,
         noFlash,
+        heartsEnabled,
+        commentsEnabled,
         // 'custom' on purpose — the server reads it as "the date and time below", and any number
         // here would be indistinguishable from an hour preset.
         revealDelayHours: wantsCustomReveal ? REVEAL_CUSTOM : parseInt(String(revealDelayHours), 10) || 0,
@@ -778,6 +1039,112 @@
     }
   }
 
+  // ── Save (edit mode) ───────────────────────────────────────────────────────
+
+  const onOff = (b: boolean) => (b ? 'On' : 'Off');
+
+  /**
+   * The event as a set of labelled lines, for the last step's change list.
+   *
+   * Only the EDITABLE half of the wizard appears here. A summary that listed the guest tier or the
+   * event's length would be listing rows that can never differ, which is a list that teaches a
+   * reader to stop reading it.
+   */
+  function editSummaryRows(): Record<string, string> {
+    const rows: Record<string, string> = {
+      'Event name': name.trim(),
+      // Now that it saves, it has to be on the change list — the last step asks "are you sure",
+      // and a field the wizard can change but does not report is the same lie in the other
+      // direction. '—' rather than "Not set": every other optional row on this list reads that way.
+      'Kind of event': EVENT_TYPES.find((t) => t.key === eventType)?.label ?? '—',
+      'Welcome blurb': blurb.trim() || '—',
+      'Timezone': timezone || '—',
+      'Custom URL': slug.trim() ? `/e/${slug.trim()}` : '—',
+      'Photos appear': (options?.revealModes ?? []).find((m) => m.value === revealMode)?.label ?? revealMode,
+      'Allow downloads': onOff(allowDownloads),
+      'No flash': onOff(noFlash),
+      'Guest hearts': onOff(heartsEnabled),
+      'Guest comments': onOff(commentsEnabled),
+      'Guests get their copy': GUEST_DELIVERY_OPTIONS.find((o) => o.value === guestDelivery)?.label ?? guestDelivery,
+      'Thank-you email': onOff(guestMailThanks),
+    };
+    // Omitted rather than shown as "—" when they do not apply: a row that cannot be set is not a
+    // row whose value is nothing, and the difference matters on a list whose whole job is to say
+    // what changed.
+    if (!startFixed) rows['Starts'] = startPreview || `${startDate} ${startTime}`;
+    if (revealMode !== 'instant') rows['Moderate photos'] = onOff(moderationEnabled);
+    if (guestRevealLabel) rows['Gallery opens'] = guestRevealLabel;
+    if (guestDelivery === 'scheduled' && guestSendLabel) rows['Sent to guests'] = guestSendLabel;
+    if (guestReminderOffered) rows['Day-before reminder'] = onOff(guestMailReminder);
+    return rows;
+  }
+  // A primitive signature of everything the summary reads, exactly as the live quote above does it.
+  // Svelte tracks what a reactive statement MENTIONS, not what a function it calls happens to read —
+  // so `$: editAfter = editSummaryRows()` recomputed only when `editing` or `editEvent` changed, and
+  // the last step listed no changes at all no matter what the host altered. Same bug that once
+  // deleted a wizard sub-page; the fix there was a parameter, and here it is a signature, because
+  // eighteen positional arguments would be a worse thing to keep in step.
+  $: editSig = JSON.stringify([
+    name, blurb, timezone, slug, eventType, revealMode, revealDelayHours, revealDate, revealTime,
+    allowDownloads, noFlash, heartsEnabled, commentsEnabled, moderationEnabled, guestDelivery, guestMailThanks, guestMailReminder,
+    guestReminderOffered, startDate, startTime, startFixed, startPreview,
+    guestRevealLabel, guestSendLabel, options?.revealModes?.length ?? 0,
+  ]);
+  $: editAfter = editing && editEvent && editSig ? editSummaryRows() : {};
+  $: editDiff = editing ? editChanges(editBefore, editAfter) : [];
+
+  async function submitEdit() {
+    if (saving || !editEvent) return;
+    if (!name.trim()) { showToast('Enter an event name', true); return; }
+    // The same three guards submitCreate uses, and for the same reason: by the time Save is pressed
+    // the control in question is several screens back, and a toast about a field you cannot see is
+    // not an answer.
+    if (wantsCustomReveal && actualRevealAt === null) {
+      showToast('Pick the date and time for the reveal', true); return;
+    }
+    if (revealIssue) { showToast(revealIssue, true); return; }
+    if (guestSendIssue === 'missing') {
+      showToast('Pick the date and time to send your guests the photos', true); return;
+    }
+    if (guestSendIssue === 'before-reveal') {
+      showToast('Your send time is before the photos are revealed — pick a later one', true); return;
+    }
+    // Resolved in the EVENT's zone, and rounded onto the same tick a reveal is checked on — the
+    // same two rules creating one follows, because a save that read the browser's zone would move
+    // a Perth event every time a host in Sydney opened it.
+    const startsAt = startDate
+      ? ceilToRevealTick(
+          zonedWallTimeToMs(startDate, startTime || '00:00', timezone || 'UTC')
+            ?? new Date(`${startDate}T${startTime || '00:00'}`).getTime())
+      : null;
+    saving = true;
+    try {
+      await saveSettings(editCode, editOrg, editSettingsBody({
+        name, blurb, slug, timezone,
+        startsAt, startDate, startTime,
+        originalStartsAt: editEvent.startsAt, startLocked: startFixed,
+        revealMode, revealDelayHours, wantsCustomReveal, revealDate, revealTime,
+        moderationEnabled, allowDownloads, noFlash, heartsEnabled, commentsEnabled,
+        // null included, and sent every time: the chips toggle off as well as on, so leaving the
+        // key out would make "actually, none of these fit" the one change that could not be saved.
+        eventType,
+        guestDelivery, guestSendScope, guestSendAt,
+        guestMailThanks, guestMailReminder, guestReminderOffered,
+        // The value the event already holds, NOT the derived one. editSettingsBody() forces it on
+        // for the automatic modes, where it is the mechanism, and leaves a manual mode's alone —
+        // which is the host's own choice, made on the admin page's switch, and not this wizard's to
+        // reset. prefillFromEvent() is where this arrived from.
+        guestMailLive,
+      }));
+      showToast('Saved');
+      goto(adminHref);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Save failed', true);
+      saving = false;   // NOT in a finally: the success path navigates away, and re-enabling the
+                        // button under a page that is leaving invites a second save of the same thing.
+    }
+  }
+
   // ── Manage existing event (organizer login) ──
   function goManage() {
     const c = joinCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -814,30 +1181,57 @@
   }
 </script>
 
-<svelte:head><title>Create or join — Snapdini</title></svelte:head>
+<svelte:head><title>{editing ? 'Your event setup — Snapdini' : 'Create or join — Snapdini'}</title></svelte:head>
 
 <main class="page">
   <!-- The tabs below are the visual heading, so this names the page for a screen reader without
        putting a title on a design that does not have one. -->
-  <h1 class="sr-only">Create or join an event</h1>
+  <h1 class="sr-only">{editing ? 'Walk through your event setup' : 'Create or join an event'}</h1>
   <div class="top">
     <!-- Home, like the mark on every other page. It used to go to /dashboard when signed in, which
          made it the one logo in the product that did something different — and pointless here,
          since "← My events" is the next element along and goes exactly there. -->
     <a class="brand" href="/"><Logo /></a>
-    {#if loggedIn}<a class="myevents" href="/dashboard">← My events</a>{/if}
+    {#if editing}
+      <a class="myevents" href={adminHref}>← Back to my event</a>
+    {:else if loggedIn}
+      <a class="myevents" href="/dashboard">← My events</a>
+    {/if}
   </div>
 
-  <div class="tabs">
-    <button class="tab" class:active={tab === 'create'} on:click={() => (tab = 'create')}>
-      Create Event
-    </button>
-    <button class="tab" class:active={tab === 'join'} on:click={() => (tab = 'join')}>
-      Join Event
-    </button>
-  </div>
+  {#if editing}
+    <!-- No Create/Join tabs: neither is what this page is doing, and a "Create Event" tab sitting
+         above a form full of an existing event's details is an invitation to make a second one by
+         accident. -->
+    <div class="edit-banner">
+      <div class="eb-t">Your setup, step by step</div>
+      <p class="eb-s">
+        {#if editEvent}The same questions you answered for <b>{editEvent.name}</b>, with your answers
+          filled in. Change what you like — nothing is saved until the last step.
+        {:else}Opening your event…{/if}
+      </p>
+    </div>
+    {#if editError}
+      <div class="card edit-err">
+        <p class="ee-t">We couldn't open that event.</p>
+        <p class="ee-s">{editError}</p>
+        <a class="btn ghost" href={adminHref}>← Back to my event</a>
+      </div>
+    {/if}
+  {:else}
+    <div class="tabs">
+      <button class="tab" class:active={tab === 'create'} on:click={() => (tab = 'create')}>
+        Create Event
+      </button>
+      <button class="tab" class:active={tab === 'join'} on:click={() => (tab = 'join')}>
+        Join Event
+      </button>
+    </div>
+  {/if}
 
-  {#if tab === 'create'}
+  {#if editing && (editLoading || !editEvent)}
+    {#if !editError}<p class="edit-loading">Loading your event…</p>{/if}
+  {:else if tab === 'create'}
     {#if guided}
       <!-- Where you are, and how much is left. A bare "Next" with no sense of length is what makes
            a wizard feel like an interrogation. -->
@@ -850,7 +1244,9 @@
            appears the moment you cost something and is silent otherwise teaches the host that the
            row means "bad news"; a standing "Free" is the same promise kept, and it is the only
            place the gift is ever counted up. -->
-      {#if quote}
+      <!-- No running total on an edit. Nothing on these pages can add a penny to the event, so a
+           price that never moves would be a number asking to be worried about. -->
+      {#if quote && !editing}
         <div class="wiz-total" use:watchTotal>
           <span class="wt-l">Running total</span>
           {#if quote.requiresPayment}
@@ -918,6 +1314,16 @@
       <div class="field">
         <!-- svelte-ignore a11y-label-has-associated-control -->
         <label id="event-type-label">What kind of event is it? <span class="hint">(optional)</span></label>
+        <!-- The SAME chips when editing. This was read-only text, on the reasoning that the type
+             is "written by the same endpoint" as the trick list and changing it would regenerate a
+             list the host had edited. Only half of that was true, and the wrong half: PUT
+             /challenges does write both columns at once and cannot be asked for the type alone —
+             but nothing derives the list from the type (the packs are front-end, seeding is a
+             one-shot client action at creation), so the type on its own is a plain column and
+             PUT /settings now writes it. See eventEdit.ts's EDIT_ELSEWHERE.
+             The read-only line also could not answer the one host who most needed it: with no type
+             ever chosen it rendered the words "Not set", in the weight and colour of a heading,
+             with nowhere to go. There was nothing to protect and no way forward. -->
         <div class="type-options" role="group" aria-labelledby="event-type-label">
           {#each EVENT_TYPES as t}
             <button
@@ -930,8 +1336,14 @@
           {/each}
         </div>
         <p class="field-hint">
-          We'll suit the photo ideas and the printed cards to it. Skip it if none of them fit —
-          your event works exactly the same either way, and you can say later.
+          {#if editing}
+            It decides the photo ideas we suggest and the look of the printed cards. Changing it
+            leaves your trick list exactly as it is —
+            <a href={adminHref}>add, edit or print those on your event page</a>.
+          {:else}
+            We'll suit the photo ideas and the printed cards to it. Skip it if none of them fit —
+            your event works exactly the same either way, and you can say later.
+          {/if}
         </p>
       </div>
     </div>
@@ -951,6 +1363,26 @@
            One row, always shown, rather than a branch: without an event type there is nothing to
            build a list FROM, so the switch dims (Toggle handles that itself) and the line beneath
            says why. A control that is simply absent reads as a bug. -->
+      {#if editing}
+        <!-- The switch here is a one-shot seed that runs at creation. Your event is past that: the
+             list exists (or does not), the host may have rewritten every line of it, and a "build
+             me a list" toggle would overwrite that with a generated one. So this says what the
+             list IS and points at the editor that can actually change it. -->
+        <div class="field">
+          <p class="ro-label">Trick list</p>
+          <p class="ro-line">
+            {#if editEvent?.challengeSets?.length}
+              <b>{editEvent.challengeSets.length} list{editEvent.challengeSets.length === 1 ? '' : 's'}</b>,
+              {editEvent.challengeSets[0].items.length} shots each
+            {:else}<span class="ro-none">None yet</span>{/if}
+          </p>
+          <p class="field-hint">
+            A few shots not to miss that guests tick off in their camera.
+            <a href={adminHref}>Add, edit or print them on your event page</a> — that editor can
+            change individual shots, which this page never could.
+          </p>
+        </div>
+      {:else}
       <div class="field">
         <div class="toggle-field" class:locked={!eventType}>
           <span class="tf-label"><label for="seed-missions">Trick list</label></span>
@@ -978,11 +1410,17 @@
             <span class="tf-label"><label for="trick-variety">Change it up</label></span>
             <Toggle id="trick-variety" bind:checked={trickVariety} />
           </div>
+          <!-- "lists", not "cards". The event-type page above does mention "the printed cards", so
+               the word is not brand new — the trouble is that it is AMBIGUOUS right here. The
+               control one line up is called *Trick list*, so "3 different cards" makes a reader
+               stop and work out whether it means three trick lists or three poster designs. It
+               means lists, so it says lists; the printing is a later step's business. -->
           <p class="field-hint">
-            Make {VARIETY_SETS} different cards instead of one, so guests aren't all hunting the same
-            shots. The must-haves stay on every card. Add, edit or remove any of them later.
+            Make {VARIETY_SETS} different lists instead of one, so guests aren't all hunting the same
+            shots. The must-haves stay on every list. Add, edit or remove any of them later.
           </p>
         </div>
+      {/if}
       {/if}
 
       <!-- It changes what a guest's phone DOES, which is this page's subject and not "Other
@@ -1004,7 +1442,7 @@
 
     <!-- 1c ── How big it is, and therefore what it costs. -->
     {#if !guided || sub === 3}
-    <div class="card">
+    <div class="card" id="guests-card">
       <div class="card-title">How many guests?{#if guided}<span class="sub-of">3 of {subCount}</span>{/if}</div>
 
       {#if billing?.billingEnabled}
@@ -1065,6 +1503,20 @@
     {#if !guided || step === 2}
     <div class="card">
       <div class="card-title">When</div>
+      {#if startFixed}
+        <!-- Said HERE, up front, not discovered on save. The server answers a moved start with a
+             409, and the alternative to this block is walking a host through picking a new date and
+             refusing it four screens later.
+             Plain markup rather than disabled inputs: a disabled control consumes no taps, so on a
+             phone the tap falls through to the text behind it and the browser throws up its own
+             selection menu over the page. -->
+        <p class="ro-label">Starts</p>
+        <p class="ro-line"><b>{startPreview || `${startDate} ${startTime}`}</b></p>
+        <p class="field-hint ro-why">
+          Locked. Your event has started and guests have joined, so moving it now would move it
+          under them. Everything else on these pages can still be changed.
+        </p>
+      {:else}
       <div class="field-row">
         <div class="field">
           <label for="start-date">Start date</label>
@@ -1078,13 +1530,14 @@
           <TimeField id="start-time" bind:value={startTime} />
         </div>
       </div>
+      {/if}
         <!-- The timezone picker lives in Advanced settings, which meant this card never said what
              these times MEAN. A host setting 7pm had no way to know the event was stored in another
              zone until the day it ran. -->
         <p class="tz-line">
           Times are in
           <button type="button" class="tz-name" on:click={openTimezone}
-                  title="Change the event's timezone">{timezone || '…'}</button>{#if startPreview} — starts {startPreview}{/if}
+                  title="Change the event's timezone">{timezone || '…'}</button>{#if startPreview}{' '}— starts {startPreview}{/if}
         </p>
         {#if tzOpen || !guided}
           <div class="field tz-field">
@@ -1105,15 +1558,31 @@
             </span>
           </div>
         {/if}
+      {#if editing}
+        <!-- Shown, not hidden. Length is a paid entitlement and Settings deliberately preserves it
+             across a reschedule — so offering the dropdown here would take an answer and drop it.
+             Taking the question away instead would remove the sentence that explains what the
+             length even is, which is most of why a host opened this. -->
+        <p class="ro-label">How long it runs</p>
+        <p class="ro-line">
+          <b>{(options?.durations ?? []).find((d) => Number(d.value) === Number(durationHours))?.label ?? `${durationHours}h`}</b>
+          <span class="ro-tag">included in your event</span>
+        </p>
+        <p class="field-hint">
+          The window guests can take photos in. Moving the start above keeps this length, so the
+          event ends the same number of hours later.{#if billing?.billingEnabled}{' '}<a href={upgradeHref}>Make it longer in Upgrades →</a>{/if}
+        </p>
+      {:else}
       <div class="field">
         <label for="duration">Duration</label>
         <select id="duration" bind:value={durationHours}>
           {#each options?.durations ?? [] as d}
-            <option value={d.value}>{d.label}{#if billing?.billingEnabled && Number(d.value) > (billing.durationFreeHours ?? 24) && durationAddon(Number(d.value)) > 0} (+{money(durationAddon(Number(d.value)))}){/if}</option>
+            <option value={d.value}>{d.label}{#if billing?.billingEnabled && Number(d.value) > (billing.durationFreeHours ?? 24) && durationAddon(Number(d.value)) > 0}{' '}(+{money(durationAddon(Number(d.value)))}){/if}</option>
           {/each}
         </select>
         {#if billing?.billingEnabled}<p class="field-hint">Up to {Math.round((billing.durationFreeHours ?? 48) / 24)} days is free · longer is a paid add-on.</p>{/if}
       </div>
+      {/if}
     </div>
 
     {/if}
@@ -1130,7 +1599,13 @@
     <div class="card">
       <div class="card-title">Make it yours</div>
 
-      {#if billing?.billingEnabled && freeAtSize(Number(maxGuests))}
+      {#if editing}
+        <!-- The whole of this step is bought, so on an edit it becomes a reading page: what this
+             event has, and what each one actually does. Nothing here submits anything. -->
+        <p class="fx-intro">This is what your event includes, and what each one does. These are the
+          parts you paid for, so they change in Upgrades rather than here —
+          <a href={upgradeHref}>open Upgrades →</a></p>
+      {:else if billing?.billingEnabled && freeAtSize(Number(maxGuests))}
         <!-- The gift, counted up, on the page where it is being given. It was previously visible
              only as a struck-through number in a quote breakdown two steps away. -->
         <p class="fx-gift">Your event is {billing.freeAllGuests} guests or fewer, so <b>all of this is
@@ -1138,6 +1613,23 @@
       {:else}
         <p class="fx-intro">None of this is switched on. Add whatever suits the day — your event
           works beautifully without any of it.</p>
+      {/if}
+
+      {#if editing && billing?.billingEnabled}
+        <!-- Step 1's guests-and-price page is dropped on an edit — it is the tier and the live
+             quote, which is a page about buying, on a thing already bought. The NUMBER is still
+             worth knowing, so it moves here with the rest of the entitlements. -->
+        <section class="fx-item">
+          <div class="fx-head">
+            <div class="fx-say">
+              <h2 class="fx-name">How many guests</h2>
+              <p class="fx-copy">How many people can join and take photos. Everyone gets their own
+                shot allowance; the gallery is shared.</p>
+            </div>
+          </div>
+          <p class="ro-line"><b>Up to {maxGuests} guests</b><span class="ro-tag">included in your event</span></p>
+          <p class="field-hint"><a href={upgradeHref}>Room for more in Upgrades →</a></p>
+        </section>
       {/if}
 
       {#if billing?.billingEnabled}
@@ -1157,12 +1649,19 @@
               </svg>
             </div>
             <div class="fx-say">
-              <h2 class="fx-name">Video clips</h2>
+              <h2 class="fx-name" id="fx-video">Video clips</h2>
               <p class="fx-copy">Some moments won't hold still — the speech, the first dance, the dog
                 getting the sausage. Guests get a record button beside the shutter, and the clips land
                 in the gallery with the photos.</p>
             </div>
           </div>
+          {#if editing}
+            <p class="ro-line">
+              {#if videoSeconds > 0}<b>{videoSeconds}-second clips</b><span class="ro-tag">included in your event</span>
+              {:else}<b>Off</b><span class="ro-tag">photos only</span>{/if}
+            </p>
+            <p class="field-hint"><a href={upgradeHref}>{videoSeconds > 0 ? 'Longer clips in Upgrades →' : 'Add video in Upgrades →'}</a></p>
+          {:else}
           <div class="fx-choices" role="group" aria-label="Video clip length">
             <button type="button" class="fx-chip" class:on={videoSeconds === 0}
                     aria-pressed={videoSeconds === 0} on:click={() => (videoSeconds = 0)}>
@@ -1180,6 +1679,7 @@
               </button>
             {/each}
           </div>
+          {/if}
         </section>
       {/if}
 
@@ -1191,23 +1691,33 @@
             <svg class="fx-svg" viewBox="0 0 78 40">
               {#each shotDots as d}
                 <circle class="s-dot" class:extra={d.state === 'extra'} class:spare={d.state === 'spare'}
-                        cx={d.cx} cy={d.cy} r="2.6" />
+                        cx={d.cx} cy={d.cy} r={d.r} />
               {/each}
             </svg>
           </div>
           <div class="fx-say">
-            <h2 class="fx-name">Shots each</h2>
+            <h2 class="fx-name" id="fx-shots">Shots each</h2>
             <p class="fx-copy">Everyone gets {billing?.shotsFree ?? 12} to start with. That's plenty
               over dinner and gone by the second song — give them more and they'll keep going all
               night.</p>
           </div>
         </div>
+        {#if editing}
+          <p class="ro-line"><b>{maxPhotos} each</b><span class="ro-tag">included in your event</span></p>
+          <p class="field-hint"><a href={upgradeHref}>Give everyone more in Upgrades →</a></p>
+        {:else}
         <div class="fx-choices" role="group" aria-label="Shots per guest">
-          {#each options?.shotsPerPerson ?? [] as sp}
-            {@const p = shotsPrice(billing, Number(sp.value), Number(maxGuests))}
+          <!-- ALWAYS rendered, disabled at the ends rather than removed. A step is not a choice — it
+               moves the window and picks nothing — and dropping it at the bottom of the ladder left
+               four cards where there are otherwise five, so the row changed width as you moved
+               through it and the rungs never sat in the same place twice. -->
+          <button type="button" class="fx-chip step" on:click={() => stepShots(-1)} disabled={!canShotsSmaller}
+                  aria-label="Show smaller options"><span class="fc-t">←</span><span class="fc-p">go smaller</span></button>
+          {#each shotView as sp (sp.value)}
+            {@const p = shotsPrice(billing, sp.n, Number(maxGuests))}
             {@const tag = priceTag(p, money)}
-            <button type="button" class="fx-chip" class:on={Number(maxPhotos) === Number(sp.value)}
-                    aria-pressed={Number(maxPhotos) === Number(sp.value)}
+            <button type="button" class="fx-chip" class:on={Number(maxPhotos) === sp.n}
+                    aria-pressed={Number(maxPhotos) === sp.n}
                     aria-label={billing?.billingEnabled ? `${sp.label} shots each, ${priceAria(p, money)}` : `${sp.label} shots each`}
                     on:click={() => (maxPhotos = sp.value)}>
               <span class="fc-t">{sp.label}</span>
@@ -1215,13 +1725,16 @@
                       class:incl={tag.cls === 'incl'}>{tag.text}</span>{/if}
             </button>
           {/each}
+          <button type="button" class="fx-chip step" on:click={() => stepShots(1)} disabled={!canShotsBigger}
+                  aria-label="Show bigger options"><span class="fc-t">→</span><span class="fc-p">go bigger</span></button>
         </div>
+        {/if}
       </section>
 
       <section class="fx-item">
         <div class="fx-head">
           <div class="fx-say">
-            <h2 class="fx-name">Frame shapes</h2>
+            <h2 class="fx-name" id="fx-shapes">Frame shapes</h2>
             <p class="fx-copy">Square is what every event gets. Open the rest and guests choose the
               shape that suits the photo — tall for a person, wide for the room.</p>
           </div>
@@ -1231,15 +1744,26 @@
              the only thing they are here to show. -->
         <div class="shapes">
           {#each options?.aspectRatios ?? [] as a}
-            <span class="shape-cell" class:lit={shapeLit(a.value, framePackOn, selectedAspects)}
+            <span class="shape-cell" class:lit={shapeLit(a.value, framePackOn, selectedAspects, editing)}
                   title={a.value === 'full' ? 'Full — no crop, whatever the phone gives' : a.label}>
-              <span class="shape" class:lit={shapeLit(a.value, framePackOn, selectedAspects)}
+              <span class="shape" class:lit={shapeLit(a.value, framePackOn, selectedAspects, editing)}
                     class:open={a.value === 'full'} style={shapeStyle(a.value)}></span>
               <span class="shape-n">{shapeName(a.label)}</span>
             </span>
           {/each}
         </div>
-        {#if billing?.billingEnabled}
+        {#if editing}
+          <!-- The drawing above is already the read-only answer: the shapes this event has are lit
+               and the rest are not. All this line has to add is a name for the set and the way to
+               change it. -->
+          <p class="ro-line">
+            <b>{editEvent && editEvent.aspectRatios.length > 1 ? `${editEvent.aspectRatios.length} shapes` : 'Square only'}</b>
+            <span class="ro-tag">included in your event</span>
+          </p>
+          {#if billing?.billingEnabled}
+            <p class="field-hint"><a href={upgradeHref}>{framePackOn ? 'Manage shapes in Upgrades →' : 'Open the rest in Upgrades →'}</a></p>
+          {/if}
+        {:else if billing?.billingEnabled}
           <div class="fx-choices" role="group" aria-label="Photo shapes">
             <button type="button" class="fx-chip" class:on={!framePackOn} aria-pressed={!framePackOn}
                     on:click={() => (framePackOn = false)}>
@@ -1266,7 +1790,7 @@
         {/if}
       </section>
 
-      {#if retentionOptions.length}
+      {#if editing || retentionOptions.length}
         <section class="fx-item">
           <div class="fx-head">
             <div class="fx-art" aria-hidden="true">
@@ -1285,9 +1809,12 @@
               </svg>
             </div>
             <div class="fx-say">
-              <h2 class="fx-name">Keep them longer</h2>
+              <h2 class="fx-name" id="fx-retention">Keep them longer</h2>
               <p class="fx-copy">
-                {#if billing?.billingEnabled}
+                {#if editing}
+                  After the event ends your photos stay up for a while, and then they are gone for
+                  good — there is no copy anywhere else. This is that window.
+                {:else if billing?.billingEnabled}
                   Photos stay up for <b>{retentionLabel(retentionIncluded)}</b> after the event ends,
                   then they're gone for good. Give people longer if they'll be slow getting round to
                   it — and they always are.
@@ -1297,6 +1824,12 @@
               </p>
             </div>
           </div>
+          {#if editing}
+            <p class="ro-line"><b>{retentionLabel(retentionDays)} after it ends</b><span class="ro-tag">included in your event</span></p>
+            {#if billing?.billingEnabled}
+              <p class="field-hint"><a href={upgradeHref}>Keep them longer in Upgrades →</a></p>
+            {/if}
+          {:else}
           <div class="fx-choices" role="group" aria-label="How long photos are kept">
             {#each retentionOptions as r}
               {@const tag = priceTag(retentionPrice(r), money, r.included ? 'included' : 'free')}
@@ -1310,6 +1843,7 @@
               </button>
             {/each}
           </div>
+          {/if}
         </section>
       {/if}
     </div>
@@ -1406,6 +1940,10 @@
           <p class="hint reveal-note">
             {#if actualRevealAt === null}
               Pick the date and time — it's read in the event's timezone{timezone ? ` (${timezone})` : ''}.
+            {:else if revealIssue}
+              <!-- The cheerful version used to print "Photos appear from ‹a date last week›" with no
+                   hint that it was impossible. Say what is wrong, in the server's own words. -->
+              <span class="bad">{revealIssue}</span>
             {:else}
               Photos appear from <b>{revealMomentLabel(actualRevealAt, timezone)}</b>.
               {#if revealMoved}
@@ -1485,6 +2023,39 @@
           </div>
         </div>
       </section>
+
+      <!-- Beside downloads because it is the same question in a different direction: what guests may
+           do with each OTHER's photos. Two settings on one card rather than two cards, because a
+           host weighs them together — and the pair is the whole of "can the gallery talk back". -->
+      <section class="fx-item">
+        <div class="fx-head">
+          <div class="fx-art" aria-hidden="true">
+            <svg class="fx-svg" viewBox="0 0 78 40">
+              <path class="s-fillstroke" d="M22 32C22 32 8 24 8 15.5A7.5 7.5 0 0 1 22 11a7.5 7.5 0 0 1 14 4.5C36 24 22 32 22 32Z" />
+              <rect class="s-line" x="46" y="8" width="24" height="17" rx="4" />
+              <path class="s-line" d="M52 31l4-6" />
+              <path class="s-line" d="M52 14h12M52 19h8" />
+            </svg>
+          </div>
+          <div class="fx-say">
+            <div class="fx-titlerow">
+              <h2 class="fx-name"><label for="hearts-enabled">Guest hearts</label></h2>
+              <Toggle id="hearts-enabled" bind:checked={heartsEnabled} />
+            </div>
+            <p class="fx-copy">Guests can heart each other's shots, and everyone sees how many each
+              one has — including the person who took it.</p>
+
+            <div class="fx-titlerow">
+              <h2 class="fx-name"><label for="comments-enabled">Guest comments</label></h2>
+              <Toggle id="comments-enabled" bind:checked={commentsEnabled} />
+            </div>
+            <!-- Says who can remove one, because that is the question a host weighs before turning
+                 this on: it puts other people's words on their gallery. -->
+            <p class="fx-copy">A short message on a photo, signed with the guest's name. Off unless
+              you turn it on. You can delete any comment; a guest can delete their own.</p>
+          </div>
+        </div>
+      </section>
     </div>
     {/if}
 
@@ -1531,7 +2102,7 @@
         </p>
       {/if}
 
-      <p class="field-hint gd-later">Two more options — send only the ones you star, or schedule an
+      <p class="field-hint gd-later">Two more options — send only your favourites, or schedule an
         exact time — are on your event page once the photos are in.</p>
 
     </div>
@@ -1552,9 +2123,8 @@
            page, and a permanently-on switch you cannot move is a row that wastes a reader's
            attention to tell them something they already decided. It is named here in a sentence
            instead, and guest_mail_live is still derived from the delivery mode on submit. -->
-      <p class="lead-note mail-lead">The gallery link itself is already covered — “{guestDeliveryLabel}”
-        sends it{#if guestLiveAutomatic && guestReleaseLabel}{' '}on {guestReleaseLabel}{/if}. These
-        are the extra messages, and only guests who asked for their photos are emailed at all.</p>
+      <p class="lead-note mail-lead">These are extra emails, on top of the gallery link you've already
+        set up. Only guests who asked for their photos get them.</p>
 
       <div class="mail-opt">
         <div class="field toggle-field">
@@ -1564,10 +2134,11 @@
         <!-- Not "email guests when the event ends": that would be a lie when this is off. The email
              is the guest's own doing — they asked for their photos — and this only decides what
              else it carries. -->
-        <p class="field-hint">Goes out when the event ends.{#if !guestThanksDated}{' '}Right now that
-          is also when the photos appear, so there is no later moment to promise and it would be the
-          thank-you on its own — a reveal delay, back on “When can people see the photos?”, gives it
-          a date.{/if}</p>
+        <p class="field-hint">
+          {#if guestThanksDated}Sent when your event ends, with the date their gallery opens.
+          {:else}Sent when your event ends. There's no opening date to include — your gallery opens
+            at that same moment.{/if}
+        </p>
       </div>
 
       {#if guestReminderOffered}
@@ -1576,7 +2147,7 @@
             <span class="tf-label"><label for="g-reminder">Day-before reminder</label>{#if mailNewReminder}<span class="fresh-pill">new</span>{/if}</span>
             <Toggle id="g-reminder" bind:checked={guestMailReminder} />
           </div>
-          <p class="field-hint">Goes out 24 hours before the gallery opens — {guestReminderLabel}.</p>
+          <p class="field-hint">Sent {guestReminderLabel} — the day before their gallery opens.</p>
         </div>
       {/if}
 
@@ -1587,7 +2158,7 @@
 
     <!-- Last step already shows the itemised quote, so the pill would be repeating what is on
          screen. Everywhere else it is the only copy of the number in view. -->
-    {#if guided && quote && totalOut && step !== LAST_STEP}
+    {#if guided && quote && totalOut && step !== LAST_STEP && !editing}
       <button type="button" class="total-pill" on:click={backToTotal}
               aria-label="Running total, {quote.requiresPayment ? money(quote.amountCents) : 'free'} — scroll back to it">
         <span class="tp-l">Total</span>
@@ -1596,23 +2167,96 @@
     {/if}
 
     {#if !guided || step === LAST_STEP}
+    {#if editing}
+      <!-- The create wizard ends on a price. An edit has no price, so it ends on a list: the
+           question a host has at this point is not "what does this cost" but "what am I about to
+           do to an event that is already out there on a printed card". -->
+      <div class="card">
+        <div class="card-title">What you're changing</div>
+        {#if editDiff.length === 0}
+          <p class="ec-none">Nothing — everything is exactly as it was. That's a perfectly good
+            outcome; you came to read, not to change.</p>
+        {:else}
+          <ul class="ec-list">
+            {#each editDiff as c}
+              <li class="ec-row">
+                <span class="ec-l">{c.label}</span>
+                <span class="ec-v"><s>{c.was}</s> → <b>{c.now}</b></span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if startFixed}
+          <p class="field-hint ec-foot">Your start time is locked and is not part of this save.</p>
+        {/if}
+        <p class="field-hint ec-foot">Guest numbers, length, video, shapes, shots and how long
+          photos are kept aren't changed here — <a href={upgradeHref}>those live in Upgrades</a>.</p>
+      </div>
+      <button class="btn primary" on:click={submitEdit} disabled={saving}>
+        {saving ? 'Saving…' : 'Save changes'}
+      </button>
+      <!-- A way out that is not a save. Most people who open this are here to read, and the only
+           button on the page being one that writes to their live event is a poor reward for it. -->
+      <a class="btn ghost signin-alt" href={adminHref}>← Back without saving</a>
+      <p class="foot-note">Saving takes you back to your event page.</p>
+    {:else}
     {#if guided && quote}
       <!-- The itemised quote, repeated here so the last thing before "Create" is what it costs and
            why. Rendered from the same `quote` object as step 1 — nothing is recomputed. -->
       <div class="card">
         <div class="card-title">What you're creating</div>
+        <!-- Every row is a button back to the page that set it, and carries its own share of the
+             price. Two reasons. A summary whose lines cannot be acted on makes a host who spots a
+             wrong number walk the whole wizard again to reach it. And a single Total answers "how
+             much" but never "why that much" — the per-line cost is what lets someone see that the
+             extra shots, not the guest count, is what moved the number. The money comes from the
+             same `quote` object as the itemised panel on step 1; nothing is recomputed here.
+             Free lines follow that panel's idiom too: an included feature shows its would-be price
+             struck through, so the line un-strikes into a real charge the moment the event grows
+             past the free tier, instead of silently appearing. -->
         <div class="sum-rows">
-          <div class="sum-row"><span>Event</span><b>{name.trim() || 'Untitled'}</b></div>
-          <div class="sum-row"><span>Guests</span><b>up to {quote.maxGuests}</b></div>
-          <div class="sum-row"><span>Shots each</span><b>{quote.maxPhotos}</b></div>
-          {#if quote.videoSeconds > 0}<div class="sum-row"><span>Video</span><b>{quote.videoSeconds}s clips</b></div>{/if}
-          {#if quote.framePack}<div class="sum-row"><span>Shapes</span><b>all shapes</b></div>{/if}
-          <div class="sum-row"><span>Runs for</span><b>{(options?.durations ?? []).find((d) => Number(d.value) === durationHours)?.label ?? `${durationHours}h`}</b></div>
+          <button type="button" class="sum-row" on:click={() => goToSection(1, 1, 'event-name')}
+                  aria-label="Event name — go back and change it">
+            <span>Event</span><b>{name.trim() || 'Untitled'}</b><span class="sum-cost"></span>
+          </button>
+          <button type="button" class="sum-row" on:click={() => goToSection(1, 3, 'guests-card')}
+                  aria-label="Guest count — go back and change it">
+            <span>Guests</span><b>up to {quote.maxGuests}</b>
+            <span class="sum-cost">{#if quote.baseCents}{money(quote.baseCents)}{:else}<span class="incl">Free</span>{/if}</span>
+          </button>
+          <button type="button" class="sum-row" on:click={() => goToSection(3, 1, 'fx-shots')}
+                  aria-label="Shots per guest — go back and change it">
+            <span>Shots each</span><b>{quote.maxPhotos}</b>
+            <span class="sum-cost">{#if quote.shotsCents}{money(quote.shotsCents)}{:else if billing && quote.maxPhotos > billing.shotsFree}<span class="was">{money(shotsAddon(quote.maxPhotos))}</span>{:else}<span class="incl">Free</span>{/if}</span>
+          </button>
+          {#if quote.videoSeconds > 0}
+            <button type="button" class="sum-row" on:click={() => goToSection(3, 1, 'fx-video')}
+                    aria-label="Video clips — go back and change it">
+              <span>Video</span><b>{quote.videoSeconds}s clips</b>
+              <span class="sum-cost">{#if quote.videoCents}{money(quote.videoCents)}{:else}<span class="was">{money(videoBase(quote.videoSeconds))}</span>{/if}</span>
+            </button>
+          {/if}
+          {#if quote.framePack}
+            <button type="button" class="sum-row" on:click={() => goToSection(3, 1, 'fx-shapes')}
+                    aria-label="Photo shapes — go back and change it">
+              <span>Shapes</span><b>all shapes</b>
+              <span class="sum-cost">{#if quote.frameCents}{money(quote.frameCents)}{:else if billing}<span class="was">{money(billing.framePackCents)}</span>{:else}<span class="incl">Free</span>{/if}</span>
+            </button>
+          {/if}
+          <button type="button" class="sum-row" on:click={() => goToSection(2, 1, 'duration')}
+                  aria-label="How long it runs — go back and change it">
+            <span>Runs for</span><b>{(options?.durations ?? []).find((d) => Number(d.value) === durationHours)?.label ?? `${durationHours}h`}</b>
+            <span class="sum-cost">{#if quote.durationCents}{money(quote.durationCents)}{:else}<span class="incl">Free</span>{/if}</span>
+          </button>
           <!-- The one line on this summary that is a deadline rather than a setting: after it the
                photos are deleted, and a host who never opened the disclosure it used to live in had
                no idea the clock existed. -->
-          <div class="sum-row"><span>Photos kept</span><b>{retentionLabel(quote.retentionDays)} after it ends</b></div>
-          <div class="sum-row total"><span>Total</span><b>{quote.requiresPayment ? money(quote.amountCents) : 'Free'}</b></div>
+          <button type="button" class="sum-row" on:click={() => goToSection(3, 1, 'fx-retention')}
+                  aria-label="How long photos are kept — go back and change it">
+            <span>Photos kept</span><b>{retentionLabel(quote.retentionDays)} after it ends</b>
+            <span class="sum-cost">{#if quote.retentionCents}{money(quote.retentionCents)}{:else}<span class="incl">Free</span>{/if}</span>
+          </button>
+          <div class="sum-row total"><span>Total</span><b class:free={!quote.requiresPayment}>{quote.requiresPayment ? money(quote.amountCents) : 'Free'}</b><span class="sum-cost"></span></div>
         </div>
       </div>
     {/if}
@@ -1628,6 +2272,7 @@
       <button class="btn primary" on:click={() => goSignIn('/signup')}>Create my account &amp; event</button>
       <button class="btn ghost signin-alt" on:click={() => goSignIn('/login')}>I already have an account</button>
       <p class="foot-note">Your event details are kept — you'll come straight back here to finish.</p>
+    {/if}
     {/if}
     {/if}
 
@@ -1752,7 +2397,7 @@
     font-family: var(--font);
   }
   .tab.active {
-    background: var(--accent);
+    background: var(--accent-fill);
     color: var(--accent-ink, #111);
   }
 
@@ -1995,7 +2640,7 @@
   .fresh-pill {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 0.58rem; letter-spacing: 0.1em; text-transform: uppercase;
-    color: #111; background: var(--accent); padding: 3px 7px; border-radius: 999px; margin-left: 8px;
+    color: #111; background: var(--accent-fill); padding: 3px 7px; border-radius: 999px; margin-left: 8px;
   }
   .mail-opt.fresh { border-left: 2px solid var(--accent); padding-left: 12px; margin-left: -14px; }
 
@@ -2092,8 +2737,9 @@
     text-align: center;
     text-decoration: none;
   }
+  .btn.ghost { background: transparent; color: var(--text); border-color: var(--border); }
   .btn.primary {
-    background: var(--accent);
+    background: var(--accent-fill);
     color: var(--accent-ink, #111);
   }
   .btn.secondary {
@@ -2190,8 +2836,15 @@
     justify-content: center; font-size: 0.75rem; font-weight: 700;
     background: var(--surface-2); border: 1px solid var(--border);
   }
-  .stepdot.on .sd-n { background: var(--accent); color: var(--accent-ink, #111); border-color: var(--accent); }
+  /* ORDER MATTERS, and it is the whole bug this fixes. The step you are ON is also a step you have
+     VISITED, so it carries both classes — and these two selectors have identical specificity, which
+     leaves the later one holding the pen. With `.visited` written last it repainted the number in
+     the accent, on a disc already filled with the accent: yellow on yellow, so the current step
+     read as a bare dot with no number in it at all. The other two wizards never showed this because
+     their `on` and `done` states are mutually exclusive.
+     `.on` goes last so the step you are standing on keeps its dark ink. */
   .stepdot.visited .sd-n { color: var(--accent); border-color: var(--accent); }
+  .stepdot.on .sd-n { background: var(--accent-fill); color: var(--accent-ink, #111); border-color: var(--accent); }
   /* The labels are the first thing to go when there is no room — the numbers and the track still
      say where you are, and four words squeezed to two characters each say nothing. */
   @media (max-width: 460px) { .sd-t { display: none; } }
@@ -2269,8 +2922,15 @@
   .fx-svg { display: block; width: 78px; height: 40px; }
   .fx-say { flex: 1 1 0; min-width: 0; }
   /* Name left, control right, with the description free to use the full width underneath. */
-  .fx-titlerow { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .fx-titlerow { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
   .fx-titlerow .fx-name { margin-bottom: 0; }
+  /* A SECOND switch in the same card needs to look like a second question.
+     Guest hearts and Guest comments share one card and one art slot, and each is a title row with
+     two lines of copy under it. Stacked with nothing between them the second title started right
+     off the back of the first one's last line, so the pair read as one setting with two switches
+     rather than two settings. Keyed off "a title row that follows copy", so any card that grows a
+     second toggle gets the same separation without being told. */
+  .fx-copy + .fx-titlerow { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border); }
   /* One feature to a card here, so nothing above to rule off against. */
   .card > .fx-item:only-of-type { border-top: 0; padding: 0; }
   .fx-item .fx-copy { margin-top: 5px; }
@@ -2317,6 +2977,12 @@
   }
   .fx-chip:hover { border-color: var(--accent); }
   .fx-chip.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
+  /* A step, not an option. Dashed and muted so it never reads as one of the numbers — and it can
+     never take the .on treatment, because it selects nothing. */
+  .fx-chip.step { border-style: dashed; color: var(--text-muted); }
+  .fx-chip.step:hover:not(:disabled) { color: var(--text); }
+  /* At the end of the ladder it stays in place and stops responding, so the row keeps its shape. */
+  .fx-chip.step:disabled { opacity: 0.35; cursor: default; }
   .fc-t { text-align: center; }
   /* The label may wrap inside a narrow column; the price may not. A price broken across two lines
      is a different number for the half-second before you read the second half. */
@@ -2365,9 +3031,98 @@
      version of one the host already has. */
   .s-dot.spare { fill: none; stroke: currentColor; stroke-width: 1.2; opacity: 0.38; }
 
-  .sum-rows { display: flex; flex-direction: column; gap: 6px; }
-  .sum-row { display: flex; justify-content: space-between; gap: 12px; font-size: 0.85rem; }
+  .sum-rows { display: flex; flex-direction: column; gap: 2px; }
+  /* Three tracks, not space-between: the prices must line up in a column of their own, or the
+     eye cannot add them up. tabular-nums so the digits themselves line up too. */
+  .sum-row { display: grid; grid-template-columns: minmax(5.5rem, auto) 1fr auto;
+    align-items: baseline; gap: 12px; font-size: 0.85rem; text-align: left; width: 100%; }
   .sum-row span { color: var(--text-muted); }
-  .sum-row.total { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 8px; font-size: 1rem; }
+  .sum-row b { min-width: 0; overflow-wrap: anywhere; }
+  .sum-cost { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  /* Most rows are buttons back to the page that set them. Neutralise only what a <button> adds —
+     the same lesson as the step strip, where a blanket reset killed the accent track and shrank
+     every dot. `font: inherit` is NOT used: placed after a font-size it wipes it (it was doing
+     exactly that in 7 files until today). */
+  button.sum-row { background: none; border: 0; border-radius: 6px;
+    font-family: inherit; color: inherit; cursor: pointer;
+    padding: 5px 6px; margin: 0 -6px; }
+  button.sum-row:hover { background: var(--surface-2); }
+  button.sum-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  /* Non-interactive rows keep the same box so nothing shifts between them and the buttons. */
+  .sum-row.total { padding: 8px 6px 0; margin: 4px -6px 0;
+    border-top: 1px solid var(--border); font-size: 1rem; }
   .sum-row.total b { color: var(--accent); }
+  /* Free is green everywhere else in this wizard (.quote-lines .incl, .tp-v.free, .wt-v.free,
+     .fc-p.incl) and gold means "this costs money". The summary was the one place that said it in
+     plain grey, which read as a different kind of answer. `.incl` exists already but is scoped to
+     .quote-lines, so it needed saying here too. */
+  .sum-cost .incl { color: var(--success); font-weight: 700; }
+  /* :global because the class is added to a DOM node by hand, and Svelte's scoper only rewrites
+     selectors it can see used in this component's markup.
+     `outline`, not `box-shadow`, and offset: .fx-item has no horizontal padding, so a ring drawn
+     on the border box runs flush along the option buttons inside it and reads as cut into them.
+     An outline takes no space (so nothing reflows) and outline-offset lifts it clear of them.
+     position/z-index because the ring is drawn OUTSIDE the box, in space the next sibling owns —
+     and a later sibling with a background paints straight over it. That is what was clipping it. */
+  :global(.jump-flash) {
+    position: relative;
+    z-index: 2;
+    border-radius: var(--radius);
+    animation: jumpflash 1.6s ease-out;
+  }
+  /* `-global-` on the KEYFRAMES, not just the class. Svelte scopes keyframe NAMES to the component
+     that declares them, so `:global(.jump-flash)` was handing every other component a rule whose
+     `animation: jumpflash` resolved to a scoped name that does not exist there — the class applied,
+     the ring never painted, and nothing errored. The poster designer hit exactly this and had to
+     work around it with a class of its own. Global rule, global keyframes, or neither. */
+  @keyframes -global-jumpflash {
+    0%, 55% { outline: 2px solid var(--accent); outline-offset: 4px; }
+    100%    { outline: 2px solid transparent;   outline-offset: 4px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :global(.jump-flash) { animation: none; outline: 2px solid var(--accent); outline-offset: 4px; }
+  }
+  .sum-row.total b.free { color: var(--success); }
+
+  /* ── Edit mode ─────────────────────────────────────────────────────────────
+     A read-only answer, used everywhere a paid entitlement is shown instead of offered.
+     Deliberately NOT a disabled control: a disabled button consumes no taps, so the press falls
+     through to the text behind and a phone reads that as the start of a text selection, throwing
+     its own Copy/Search menu over the page. Plain text cannot do that. */
+  .ro-label { font-size: 0.8rem; font-weight: 700; margin: 0 0 4px; }
+  .ro-line {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px;
+    margin: 0; font-size: 0.95rem; color: var(--text);
+  }
+  .ro-line b { font-weight: 800; }
+  /* An absence is not a value. Rendered as a <b> it took the weight and the full --text colour of
+     a real answer, so "None yet" read as a section title announcing nothing — which is exactly how
+     the event-kind field's old "Not set" looked, and the complaint that started this. Subordinate
+     to its own .ro-label, not dominant over it. Scoped to this class rather than applied to
+     .ro-line, because every other read-only line on this page carries a real answer (a start time,
+     a guest count, a retention window) that a host should be able to read at a glance. */
+  .ro-line .ro-none { font-weight: 600; color: var(--text-muted); }
+  .ro-tag {
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase;
+    color: var(--text-muted); background: var(--surface-2); border-radius: 999px; padding: 2px 8px;
+  }
+  .ro-why { margin-top: 8px; }
+
+  .edit-banner { margin: 0 0 18px; }
+  .eb-t { font-size: 1.1rem; font-weight: 800; }
+  .eb-s { margin: 4px 0 0; font-size: 0.82rem; line-height: 1.5; color: var(--text-muted); }
+  .edit-loading { font-size: 0.85rem; color: var(--text-muted); }
+  .edit-err .ee-t { margin: 0; font-weight: 800; }
+  .edit-err .ee-s { margin: 6px 0 14px; font-size: 0.82rem; color: var(--text-muted); }
+
+  .ec-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+  /* Wraps to two lines rather than sitting in two columns: "was → now" is a sentence, and at
+     400px a right-aligned value column leaves the label with three words per line. */
+  .ec-row { display: flex; flex-direction: column; gap: 2px; font-size: 0.85rem; }
+  .ec-l { color: var(--text-muted); font-size: 0.76rem; font-weight: 700; }
+  .ec-v s { color: var(--text-muted); }
+  .ec-v b { color: var(--accent); }
+  .ec-none { margin: 0; font-size: 0.85rem; line-height: 1.5; color: var(--text-muted); }
+  .ec-foot { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 10px; }
+  .ec-foot + .ec-foot { border-top: 0; margin-top: 6px; padding-top: 0; }
 </style>
