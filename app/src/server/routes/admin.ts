@@ -78,7 +78,7 @@ router.get('/overview', async (_req: Request, res: Response) => {
        FROM photos p JOIN events e ON e.id = p.event_id
       WHERE p.media_type = 'video' AND e.video_seconds > 0
         AND p.duration_ms > (e.video_seconds + 3) * 1000
-      ORDER BY p.taken_at DESC
+      ORDER BY p.taken_at DESC, p.id
       LIMIT 20`);
   res.json({ stats, videoOverages, now });
 });
@@ -106,7 +106,7 @@ router.get('/referral-funnel', async (_req: Request, res: Response) => {
             (SELECT count(*) FROM events c WHERE c.referred_by_event_id = e.id) AS events_created
        FROM events e
       WHERE e.gallery_views > 0 OR e.referral_clicks > 0
-      ORDER BY e.referral_clicks DESC, e.gallery_views DESC
+      ORDER BY e.referral_clicks DESC, e.gallery_views DESC, e.id
       LIMIT 50`);
 
   // Engagement, so "did anyone look at the photos" is answerable without a separate tool.
@@ -141,20 +141,40 @@ router.get('/events', async (req: Request, res: Response) => {
     `WITH page AS (
        SELECT e.id, e.join_code, e.slug, e.name, e.guest_cap, e.video_seconds, e.paid,
               e.amount_paid_cents, e.refunded_at, e.organizer_code, e.purged_at, e.purge_at,
-              e.expires_at, e.created_at, e.owner_user_id
+              e.starts_at, e.expires_at, e.created_at, e.owner_user_id,
+              -- What the host actually set up. Scalars only, plus DERIVED flags for the text
+              -- columns holding serialised blobs: challenges is a whole prompt pack, theme and
+              -- poster_config are designs, and 200 of any of them would be most of the response
+              -- for something the row only needs a yes/no from.
+              -- (No backticks in here: this SQL lives inside a JS template literal.)
+              e.max_photos, e.event_type, e.reveal_mode, e.reveal_delay_hours, e.moderation_enabled,
+              e.allow_downloads, e.hearts_enabled, e.comments_enabled, e.gallery_hearts_enabled,
+              e.gallery_comments_enabled, e.face_matching_enabled, e.aspect_ratios, e.rating_mode,
+              e.no_flash, e.retention_days, e.branding_removal_paid, e.timezone,
+              e.guest_may_buy_shots, e.guest_may_buy_video, e.guest_may_buy_frames, e.guest_may_request,
+              (e.challenges IS NOT NULL AND e.challenges <> '') AS has_challenges,
+              (e.theme IS NOT NULL AND e.theme <> '') AS has_theme,
+              (e.poster_config IS NOT NULL AND e.poster_config <> '') AS has_poster,
+              (e.blurb IS NOT NULL AND e.blurb <> '') AS has_blurb
          FROM events e${where}
-        ORDER BY e.created_at DESC
+        ORDER BY e.created_at DESC, e.id
         LIMIT 200)
      SELECT p.id, p.join_code, p.slug, p.name, p.guest_cap, p.video_seconds, p.paid,
             (p.owner_user_id IS NULL AND p.name = ?) AS is_demo,
             p.amount_paid_cents, p.refunded_at, p.organizer_code, p.purged_at, p.purge_at,
-            p.expires_at, p.created_at,
+            p.starts_at, p.expires_at, p.created_at,
+            p.max_photos, p.event_type, p.reveal_mode, p.reveal_delay_hours, p.moderation_enabled,
+            p.allow_downloads, p.hearts_enabled, p.comments_enabled, p.gallery_hearts_enabled,
+            p.gallery_comments_enabled, p.face_matching_enabled, p.aspect_ratios, p.rating_mode,
+            p.no_flash, p.retention_days, p.branding_removal_paid, p.timezone,
+            p.guest_may_buy_shots, p.guest_may_buy_video, p.guest_may_buy_frames, p.guest_may_request,
+            p.has_challenges, p.has_theme, p.has_poster, p.has_blurb,
             (SELECT count(*) FROM participants x WHERE x.event_id = p.id) AS participants,
             (SELECT count(*) FROM photos       x WHERE x.event_id = p.id) AS photos,
             u.email AS owner
        FROM page p
        LEFT JOIN users u ON u.id = p.owner_user_id
-      ORDER BY p.created_at DESC`, [...whereParams, DEMO_NAME]);
+      ORDER BY p.created_at DESC, p.id`, [...whereParams, DEMO_NAME]);
 
   // Tab counts, so the page can label them without fetching every row.
   const tallies = await get<{ real: number; demo: number }>(
@@ -190,7 +210,12 @@ router.get('/users', async (req: Request, res: Response) => {
               ON ec.owner_user_id = u.id` + where;
 
   const total = await countOf(base, params);
-  const users = await all(`${base} ORDER BY u.created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  // A paged ORDER BY needs a UNIQUE final key. `created_at` is not one — two signups in the same
+  // millisecond, or any bulk insert, give Postgres a tie it may break differently per query. With
+  // LIMIT/OFFSET that means consecutive pages OVERLAP: a row appears twice and another is never
+  // shown at all. Demonstrated on this endpoint — page 1 gave [A, B] and page 2 gave [A, C], so B
+  // simply stopped existing as far as the operator was concerned. Same defect the guest list had.
+  const users = await all(`${base} ORDER BY u.created_at DESC, u.id LIMIT ? OFFSET ?`, [...params, limit, offset]);
   res.json({ users, total, limit, offset });
 });
 
@@ -198,7 +223,7 @@ router.get('/users', async (req: Request, res: Response) => {
 router.get('/contact', async (_req: Request, res: Response) => {
   const messages = await all(
     `SELECT id, name, email, message, kind, image_filename AS "imageFilename", emailed, handled, created_at
-       FROM contact_messages ORDER BY handled ASC, created_at DESC LIMIT 200`);
+       FROM contact_messages ORDER BY handled ASC, created_at DESC, id LIMIT 200`);
   const unhandled = await get<{ n: number }>(`SELECT count(*) AS n FROM contact_messages WHERE NOT handled`);
   res.json({ messages, unhandled: Number(unhandled?.n ?? 0) });
 });
@@ -218,7 +243,7 @@ router.post('/contact/:id/handled', async (req: Request, res: Response) => {
 router.get('/client-errors', async (_req: Request, res: Response) => {
   const errors = await all(
     `SELECT id, message, context, event_code, user_agent, url, handled, created_at
-       FROM client_errors ORDER BY handled ASC, created_at DESC LIMIT 300`);
+       FROM client_errors ORDER BY handled ASC, created_at DESC, id LIMIT 300`);
   const open = await get<{ n: number }>(`SELECT count(*) AS n FROM client_errors WHERE NOT handled`);
   res.json({ errors, open: Number(open?.n ?? 0) });
 });
@@ -248,7 +273,8 @@ router.get('/survey-responses', async (req: Request, res: Response) => {
             e.name AS "eventName", e.join_code AS "joinCode"
        FROM survey_responses s JOIN events e ON e.id = s.event_id` + where;
   const total = await countOf(base, params);
-  const responses = await all(`${base} ORDER BY s.created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  // Unique final key, same reason as the user listing above.
+  const responses = await all(`${base} ORDER BY s.created_at DESC, s.id LIMIT ? OFFSET ?`, [...params, limit, offset]);
   res.json({ responses, total, limit, offset });
 });
 
@@ -283,7 +309,7 @@ router.get('/guest-payments', async (_req: Request, res: Response) => {
             e.join_code, e.name AS event_name
        FROM participants p JOIN events e ON e.id = p.event_id
       WHERE p.amount_paid_cents > 0
-      ORDER BY p.joined_at DESC
+      ORDER BY p.joined_at DESC, p.id
       LIMIT 100`);
   res.json({ payments: rows });
 });
@@ -317,7 +343,7 @@ router.get('/guest-feedback', async (_req: Request, res: Response) => {
        FROM guest_feedback gf
        LEFT JOIN participants p ON p.id = gf.participant_id
        JOIN events e            ON e.id = gf.event_id
-      ORDER BY gf.created_at DESC
+      ORDER BY gf.created_at DESC, gf.id
       LIMIT 100`);
   const stats = await get<{ n: number; avg: number | null }>(
     `SELECT count(*) AS n, avg(rating)::float AS avg FROM guest_feedback WHERE rating IS NOT NULL`);
@@ -389,22 +415,22 @@ router.get('/analytics', async (req: Request, res: Response) => {
   const topPages = await all(
     `SELECT path, count(DISTINCT visit) + count(*) FILTER (WHERE visit IS NULL) AS visits, count(*) AS views
        FROM site_events WHERE name = 'page_view' AND created_at >= ? AND path IS NOT NULL
-      GROUP BY path ORDER BY visits DESC LIMIT 15`, [since]);
+      GROUP BY path ORDER BY visits DESC, path LIMIT 15`, [since]);
 
   // Which pricing tier gets clicked, and which FAQs get opened — the two "what are people
   // responding to" questions the marketing pages could not answer.
   const tierClicks = await all(
     `SELECT props->>'tier' AS tier, count(*) AS clicks
        FROM site_events WHERE name = 'pricing_tier_click' AND created_at >= ?
-      GROUP BY 1 ORDER BY clicks DESC`, [since]);
+      GROUP BY 1 ORDER BY clicks DESC, 1`, [since]);
   const ctaClicks = await all(
     `SELECT props->>'cta' AS cta, count(*) AS clicks
        FROM site_events WHERE name = 'cta_click' AND created_at >= ?
-      GROUP BY 1 ORDER BY clicks DESC LIMIT 10`, [since]);
+      GROUP BY 1 ORDER BY clicks DESC, 1 LIMIT 10`, [since]);
   const faqOpens = await all(
     `SELECT props->>'q' AS q, count(*) AS opens
        FROM site_events WHERE name = 'faq_open' AND created_at >= ?
-      GROUP BY 1 ORDER BY opens DESC LIMIT 10`, [since]);
+      GROUP BY 1 ORDER BY opens DESC, 1 LIMIT 10`, [since]);
 
   const totals = await get<{ events: number; visits: number }>(
     `SELECT count(*) AS events, count(DISTINCT visit) AS visits FROM site_events WHERE created_at >= ?`, [since]);
@@ -519,7 +545,8 @@ router.get('/revenue', async (req: Request, res: Response) => {
       GROUP BY COALESCE(u.id, '(none)')`;
   const totalCustomers = await countOf(groupBase, search.params);
   const groups = await all<{ key: string; userid: string | null; email: string; displayname: string | null; totalcents: number }>(
-    `${groupBase} ORDER BY totalcents DESC LIMIT ? OFFSET ?`, [...search.params, limit, offset]);
+    // `key` is the GROUP BY expression, so it is unique per row here — the stable tiebreaker.
+    `${groupBase} ORDER BY totalcents DESC, key LIMIT ? OFFSET ?`, [...search.params, limit, offset]);
 
   // Only the events belonging to the customers on THIS page.
   const keys = groups.map((g) => g.key);
@@ -529,7 +556,7 @@ router.get('/revenue', async (req: Request, res: Response) => {
                 e.branding_removal_paid AS branding, COALESCE(e.owner_user_id, '(none)') AS key
            FROM events e
           WHERE e.amount_paid_cents > 0 AND COALESCE(e.owner_user_id, '(none)') IN (${keys.map(() => '?').join(',')})
-          ORDER BY e.created_at DESC`, keys)
+          ORDER BY e.created_at DESC, e.id`, keys)
     : [];
 
   const map = new Map<string, { userId: string | null; email: string; displayName: string | null; totalCents: number; events: { id: string; name: string; cents: number; createdAt: number; branding: boolean }[] }>();

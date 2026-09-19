@@ -1,3 +1,5 @@
+import { SHOTS_TIERS } from './billing';
+
 // Single source of truth for the selectable options the UI renders. The frontend pulls
 // these from /api/config and builds every dropdown from them, so option lists are never
 // hard-coded (or duplicated) in the HTML/JS. Add/adjust choices here only.
@@ -26,8 +28,11 @@ const options = {
     { value: 720, label: '1 month' },
     { value: 2160, label: '3 months' },
   ],
-  // Values aligned to the price tiers (12 free · 24 +$3 · 36 +$5 · 48 +$8) so each option is its own price.
-  shotsPerPerson: [12, 24, 36, 48].map((n) => ({ value: n, label: String(n) })),
+  // DERIVED from the price ladder, not a second copy of it. The comment that used to sit here read
+  // "12 free · 24 +$3 · 36 +$5 · 48 +$8" — three of those four prices were wrong, because the ladder
+  // had moved twice and this list had not. Every rung is its own price by construction now, and a
+  // rung added to SHOTS_TIERS appears in the wizard without anyone remembering to add it here.
+  shotsPerPerson: SHOTS_TIERS.map((t) => ({ value: t.maxShots, label: String(t.maxShots) })),
   revealModes: [
     { value: 'instant', label: 'Instant',    icon: '⚡', desc: 'Photos visible immediately to everyone with the link' },
     { value: 'at_end',  label: 'At the End', icon: '⏳', desc: 'Hidden until the event ends, then visible to all' },

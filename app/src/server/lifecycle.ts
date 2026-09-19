@@ -96,7 +96,7 @@ export async function sendWelcome(eventId: string): Promise<void> {
   const startsSoon = info.ev.startsAt - Date.now() < CHECKIN_MIN_LEAD_MS;
   const mail = welcomeEmail(buildView(info.ev, info.ownerName, { startsSoon }));
   try {
-    await email.sendMail({ to: info.ownerEmail, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com' });
+    await email.sendMail({ to: info.ownerEmail, subject: mail.subject, html: mail.html, text: mail.text, replyTo: 'support@snapdini.com' });
   } catch (e) {
     await db.update(events).set({ welcomeSentAt: null }).where(eq(events.id, eventId)); // un-claim → retry not applicable, but don't lie
     console.error(`[lifecycle] welcome ${eventId} failed: ${(e as Error).message}`);
@@ -145,7 +145,7 @@ async function sweep(): Promise<void> {
     // everyone reads — the earliest chance to say no to the optional ones that follow.
     const mail = accountWelcomeEmail({ ownerName: firstName(u.name, u.email), createUrl: `${BASE()}/app`,
       unsubUrl: await prefsUrlFor(u.id, BASE()) });
-    try { await email.sendMail({ to: u.email, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com' }); }
+    try { await email.sendMail({ to: u.email, subject: mail.subject, html: mail.html, text: mail.text, replyTo: 'support@snapdini.com' }); }
     catch (e) { await db.update(users).set({ accountWelcomeSentAt: null }).where(eq(users.id, u.id)); console.error(`[lifecycle] account welcome ${u.id} failed: ${(e as Error).message}`); }
   }
 
@@ -170,7 +170,7 @@ async function sweep(): Promise<void> {
     if (!claimed.length) continue;
     const mail = activationNudgeEmail({ ownerName: firstName(u.name, u.email), createUrl: `${BASE()}/app`,
       unsubUrl: await prefsUrlFor(u.id, BASE()) });
-    try { await email.sendMail({ to: u.email, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com' }); }
+    try { await email.sendMail({ to: u.email, subject: mail.subject, html: mail.html, text: mail.text, replyTo: 'support@snapdini.com' }); }
     catch (e) { await db.update(users).set({ activationNudgeSentAt: null }).where(eq(users.id, u.id)); console.error(`[lifecycle] nudge ${u.id} failed: ${(e as Error).message}`); }
   }
 
@@ -191,7 +191,7 @@ async function sweep(): Promise<void> {
       .where(and(eq(events.id, ev.id), isNull(events.checkinSentAt))).returning({ id: events.id });
     if (!claimed.length) continue;
     const mail = checkinEmail(buildView(info.ev, info.ownerName));
-    try { await email.sendMail({ to: info.ownerEmail, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com' }); }
+    try { await email.sendMail({ to: info.ownerEmail, subject: mail.subject, html: mail.html, text: mail.text, replyTo: 'support@snapdini.com' }); }
     catch (e) { await db.update(events).set({ checkinSentAt: null }).where(eq(events.id, ev.id)); console.error(`[lifecycle] checkin ${ev.id} failed: ${(e as Error).message}`); }
   }
 
@@ -236,7 +236,7 @@ async function sweep(): Promise<void> {
       unsubUrl: await prefsUrlFor(ownerId, BASE()),
     });
     const mail = surveyEmail({ ...view, hostReward: reward ?? undefined, slideshow });
-    try { await email.sendMail({ to: info.ownerEmail, subject: mail.subject, html: mail.html, replyTo: 'support@snapdini.com' }); }
+    try { await email.sendMail({ to: info.ownerEmail, subject: mail.subject, html: mail.html, text: mail.text, replyTo: 'support@snapdini.com' }); }
     catch (e) { await db.update(events).set({ feedbackSentAt: null }).where(eq(events.id, ev.id)); console.error(`[lifecycle] survey ${ev.id} failed: ${(e as Error).message}`); }
   }
 

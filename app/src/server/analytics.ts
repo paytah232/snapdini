@@ -17,6 +17,7 @@
 import crypto from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { db } from './db';
+import { redactPath } from '../../../shared/token-paths';
 
 /** Every event the product may record. Anything else is dropped, silently and deliberately. */
 export const EVENT_NAMES = [
@@ -93,13 +94,20 @@ export function cleanProps(input: unknown): Record<string, string | number | boo
   return out;
 }
 
-/** Route PATTERN, not the visited URL: no query string, and ids collapsed to placeholders. */
+/**
+ * Route PATTERN, not the visited URL: no query string, no fragment, and anything that is a
+ * credential rather than a name collapsed to a placeholder.
+ *
+ * The credential rules live in shared/token-paths.ts because the browser half of the product has
+ * to make the SAME judgement about the SAME path — it decides there whether a third-party tag may
+ * be injected on the page at all — and the two were already disagreeing. This function keeps only
+ * the rule that is nobody else's business: a join code is not a secret (it is printed on the
+ * cards), but /join/:code is the useful pattern, so it is folded here rather than in shared.
+ */
 export function cleanPath(input: unknown): string | null {
   if (typeof input !== 'string' || !input.startsWith('/')) return null;
-  return input.split('?')[0].split('#')[0]
-    .replace(/\/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, '/:id')      // uuids
+  return redactPath(input.split('?')[0].split('#')[0])
     .replace(/\/[A-Z0-9]{8}(?=\/|$)/g, '/:code')            // join codes
-    .replace(/\/[0-9a-f]{32}(?=\/|$)/gi, '/:token')         // organizer codes
     .slice(0, 160) || '/';
 }
 

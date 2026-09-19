@@ -8,9 +8,26 @@ export const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../../data
 // Default = <DATA_DIR>/uploads (current behaviour). The public `/uploads` URL maps here.
 export const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(DATA_DIR, 'uploads');
 
+// True when `abs` resolves to UPLOADS_DIR itself or something beneath it.
+// path.join does NOT neutralise "..", it RESOLVES it — join(UPLOADS_DIR, '../../etc/passwd')
+// walks straight out of the volume. Only resolve-then-compare catches that.
+export function insideUploads(abs: string): boolean {
+  const root = path.resolve(UPLOADS_DIR);
+  const p = path.resolve(abs);
+  return p === root || p.startsWith(root + path.sep);
+}
+
 // Map a stored "/uploads/…" web path to its on-disk location under UPLOADS_DIR.
+//
+// Throws rather than returning an escaping path. The strip is deliberately anchored: the old
+// `.replace('/uploads/', '')` was unanchored and removed only the FIRST occurrence, so
+// "/uploads/../../etc/passwd" became "../../etc/passwd" and joined to /etc/passwd. Two callers
+// fed that to sharp (read) and to unlink (delete), reachable by an anonymous caller via the demo
+// event's organizer code. Callers already sit inside try/catch that degrades to no header image.
 export function uploadDiskPath(webPath: string): string {
-  return path.join(UPLOADS_DIR, webPath.replace(/^\/?uploads\//, ''));
+  const abs = path.join(UPLOADS_DIR, String(webPath).replace(/^\/?uploads\//, ''));
+  if (!insideUploads(abs)) throw new Error('unsafe uploads path: ' + webPath);
+  return abs;
 }
 
 // ── Per-event storage ────────────────────────────────────────────────────────

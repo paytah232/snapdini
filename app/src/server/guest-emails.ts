@@ -25,12 +25,23 @@
 // Every builder is pure: the caller (guest-delivery.ts) resolves the view model, so the copy rules
 // can be pinned by tests that never touch a database or a mail transport.
 
-const C = {
-  bg: '#0f0e0b', card: '#14110b', border: '#2b2519', line: '#221d13',
-  accent: '#f0b429', ink: '#efe9dc', head: '#fdfaf2', muted: '#b0a894', subtle: '#8a816d',
-};
+// The shell, the palette and every link and button come from email-theme.ts — see that file's
+// header for WHY an email is built the way it is (tables, bgcolor attributes, an inline colour on
+// every anchor, nothing load-bearing in a <style> block). This file used to carry its own copy of
+// all of it.
+import { C, button, emailShell, esc, footerLine, heading, link, para, textEmail, textLink } from './email-theme';
 
-const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
+/** What every builder in this file returns.
+ *
+ *  `text` is the plain-text alternative part: written from the same view model as the HTML, never
+ *  by stripping its tags, and carrying RAW strings — an escaped name in a text part reaches the
+ *  inbox as "Priya &amp; Tom". */
+export interface GuestMessage {
+  subject: string;
+  preheader: string;
+  html: string;
+  text: string;
+}
 
 /** What the three messages always carry. */
 export interface GuestView {
@@ -76,40 +87,38 @@ export function momentLabel(ms: number, timeZone?: string | null): string {
 // that is the line this whole file is built around.
 function shell(preheader: string, inner: string, v: GuestView): string {
   const contact = v.contactEmail || SUPPORT;
-  const because = v.hostName
-    ? `You are receiving this because you joined ${esc(v.eventName)}, hosted by ${esc(v.hostName)}, and asked for the photos.`
-    : `You are receiving this because you joined ${esc(v.eventName)} and asked for the photos.`;
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body bgcolor="${C.bg}" style="margin:0;padding:0;background:${C.bg};color:${C.ink};font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
-<span style="display:none!important;opacity:0;color:${C.bg};height:0;width:0;overflow:hidden">${esc(preheader)}</span>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="${C.bg}" style="background:${C.bg}"><tr><td align="center" bgcolor="${C.bg}" style="padding:32px 16px">
-<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%">
-  <tr><td style="padding:0 4px 22px">
-    <span style="display:inline-block;background:${C.accent};color:#17140e;padding:8px 14px;border-radius:9px;font-weight:800;font-size:16px;letter-spacing:-0.2px">🎩 Snapdini</span>
-  </td></tr>
-  <tr><td style="background:${C.card};border:1px solid ${C.border};border-radius:16px;padding:32px 30px">
-    ${inner}
-  </td></tr>
-  <tr><td style="padding:20px 6px 0;color:${C.subtle};font-size:12px;line-height:1.6">
-    ${because}<br>
-    Snapdini · <a href="mailto:${esc(contact)}" style="color:${C.subtle};text-decoration:underline">${esc(contact)}</a>
-  </td></tr>
-</table>
-</td></tr></table>
-</body></html>`;
+  return emailShell({
+    preheader,
+    inner,
+    footer: `${becauseLine(v, esc)}<br>Snapdini &middot; ${link(`mailto:${contact}`, esc(contact), 'quiet')}`,
+  });
 }
 
-const h2 = (t: string) => `<h1 style="margin:0 0 6px;color:${C.head};font-size:23px;line-height:1.2;font-weight:800;letter-spacing:-0.3px">${t}</h1>`;
-const p = (t: string, hi = false) => `<p style="margin:14px 0;font-size:15px;line-height:1.6;color:${hi ? C.head : C.ink}">${t}</p>`;
-const btn = (label: string, href: string) =>
-  `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:18px 0"><tr><td style="border-radius:9px;background:${C.accent}">
-   <a href="${esc(href)}" style="display:inline-block;padding:13px 26px;font-size:15px;font-weight:800;text-decoration:none;color:#17140e">${label}</a>
-   </td></tr></table>`;
+/** Why this person is being written to. The one line in a guest email that is not about the event,
+ *  and the reason a designated commercial message can be sent to a stranger at all. `e` lets the
+ *  text part reuse the sentence with no escaping. */
+const becauseLine = (v: GuestView, e: (s: unknown) => string) => v.hostName
+  ? `You are receiving this because you joined ${e(v.eventName)}, hosted by ${e(v.hostName)}, and asked for the photos.`
+  : `You are receiving this because you joined ${e(v.eventName)} and asked for the photos.`;
+
+const raw = (s: unknown) => String(s);
+
+/** The text part of a guest message: the body, then the same two footer lines the HTML carries. */
+const guestText = (v: GuestView, blocks: Array<string | false | null | undefined>) =>
+  textEmail(blocks, [becauseLine(v, raw)]);
+
+const h2 = (t: string) => heading(t, 'h1');
+const p = (t: string, hi = false) => para(t, hi);
+const btn = (label: string, href: string) => button(label, href);
 
 const hi = (name: string) => (name ? `Hi ${esc(name)},` : 'Hi there,');
+/** The same, RAW, for the text part. */
+const hiText = (name: string) => (name ? `Hi ${name},` : 'Hi there,');
 
 const hostedBy = (v: GuestView) =>
   v.hostName ? `${esc(v.eventName)}, hosted by ${esc(v.hostName)}` : esc(v.eventName);
+const hostedByText = (v: GuestView) =>
+  v.hostName ? `${v.eventName}, hosted by ${v.hostName}` : v.eventName;
 
 // ── 1. The event-end message ─────────────────────────────────────────────────
 
@@ -138,7 +147,7 @@ export interface EventEndView extends GuestView {
  *   thanks off + opted in → their photos
  *   (not opted in         → nothing is built and nothing is sent — see guest-delivery.ts)
  */
-export function eventEndEmail(v: EventEndView): { subject: string; preheader: string; html: string } {
+export function eventEndEmail(v: EventEndView): GuestMessage {
   const releaseAhead = typeof v.releaseAt === 'number' && v.releaseAt > Date.now() ? v.releaseAt : null;
   const shots = v.ownPhotoCount === 1 ? '1 photo' : `${v.ownPhotoCount} photos`;
 
@@ -166,7 +175,20 @@ export function eventEndEmail(v: EventEndView): { subject: string; preheader: st
       : '',
   ].join('');
 
-  return { subject, preheader, html: shell(preheader, inner, v) };
+  const text = guestText(v, [
+    v.thanks ? `Thanks for coming to ${v.eventName}` : `Your photos from ${v.eventName}`,
+    hiText(v.guestName),
+    v.thanks
+      ? `${hostedByText(v)} has finished. You asked us to send you the photos, so here they are.`
+      : `You asked us to send you your photos from ${hostedByText(v)}.`,
+    v.ownPhotoCount > 0 ? `You took ${shots}. You can see them now.` : 'Your photos are on this page.',
+    textLink('View your photos', v.galleryUrl),
+    v.thanks && releaseAhead
+      ? `Everyone's photos from the event become visible on ${momentLabel(releaseAhead, v.timezone)}.`
+      : '',
+  ]);
+
+  return { subject, preheader, html: shell(preheader, inner, v), text };
 }
 
 // ── 2. The day before ────────────────────────────────────────────────────────
@@ -176,7 +198,7 @@ export interface ReleaseReminderView extends GuestView {
   releaseAt: number;
 }
 
-export function releaseReminderEmail(v: ReleaseReminderView): { subject: string; preheader: string; html: string } {
+export function releaseReminderEmail(v: ReleaseReminderView): GuestMessage {
   const when = momentLabel(v.releaseAt, v.timezone);
   const subject = `Photos from ${v.eventName} open tomorrow`;
   const preheader = `The photos from ${v.eventName} become visible on ${when}.`;
@@ -187,7 +209,14 @@ export function releaseReminderEmail(v: ReleaseReminderView): { subject: string;
     p(`Your own photos are on the same page now.`),
     btn('View your photos', v.galleryUrl),
   ].join('');
-  return { subject, preheader, html: shell(preheader, inner, v) };
+  const text = guestText(v, [
+    `Photos from ${v.eventName} open tomorrow`,
+    hiText(v.guestName),
+    `The photos from ${hostedByText(v)} become visible on ${when}.`,
+    'Your own photos are on the same page now.',
+    textLink('View your photos', v.galleryUrl),
+  ]);
+  return { subject, preheader, html: shell(preheader, inner, v), text };
 }
 
 // ── 3. The photos are live ───────────────────────────────────────────────────
@@ -201,7 +230,7 @@ export interface PhotosLiveView extends GuestView {
   photoCount: number;
 }
 
-export function photosLiveEmail(v: PhotosLiveView): { subject: string; preheader: string; html: string } {
+export function photosLiveEmail(v: PhotosLiveView): GuestMessage {
   const n = v.photoCount === 1 ? '1 photo' : `${v.photoCount} photos`;
   const subject = `Photos from ${v.eventName} are ready`;
   const preheader = `${n} from ${v.eventName}.`;
@@ -213,5 +242,13 @@ export function photosLiveEmail(v: PhotosLiveView): { subject: string; preheader
       : p(`All <b>${n}</b> from ${hostedBy(v)} are now visible.`),
     btn(v.scope === 'favourites' ? 'View the photos' : 'View the gallery', v.galleryUrl),
   ].join('');
-  return { subject, preheader, html: shell(preheader, inner, v) };
+  const text = guestText(v, [
+    `Photos from ${v.eventName} are ready`,
+    hiText(v.guestName),
+    v.scope === 'favourites'
+      ? `${hostedByText(v)} has picked out ${n} to share.`
+      : `All ${n} from ${hostedByText(v)} are now visible.`,
+    textLink(v.scope === 'favourites' ? 'View the photos' : 'View the gallery', v.galleryUrl),
+  ]);
+  return { subject, preheader, html: shell(preheader, inner, v), text };
 }

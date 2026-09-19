@@ -40,6 +40,8 @@ import { scheduledRevealAt } from '../../../shared/reveal';
 import { guestReminderInstant } from '../../../shared/guest-reminder';
 import { guestSeesPhoto } from './routes/participants';
 import { eventEndEmail, releaseReminderEmail, photosLiveEmail } from './guest-emails';
+import { emptyScopeEmail } from './inline-emails';
+import { maskAddress } from './unsubscribe';
 
 const DAY = 86_400_000;
 
@@ -214,7 +216,11 @@ export async function guestRecipients(eventId: string): Promise<GuestRecipient[]
     const rows = await db.select({ id: participants.id, name: participants.name, email: participants.email, wantsPhotos: participants.wantsPhotos })
       .from(participants)
       .where(and(eq(participants.eventId, eventId), eq(participants.wantsPhotos, true), isNotNull(participants.email)))
-      .orderBy(participants.joinedAt);
+      // joinedAt DELIBERATELY, not alphabetical: dedupeRecipients is first-wins, so this order
+      // decides which participant's NAME represents a shared inbox — and the earliest joiner is the
+      // one the shared-inbox design above is written around. `id` only breaks the tie, so the
+      // choice is deterministic instead of depending on heap order.
+      .orderBy(participants.joinedAt, participants.id);
     return dedupeRecipients(rows);
   } catch (e) {
     console.error(`[guest-delivery] could not read recipients for ${eventId}: ${(e as Error).message}`);
@@ -241,14 +247,14 @@ export function eventEndMessages(
     eventName: string; hostName: string; galleryUrl: string; timezone: string | null;
     thanks: boolean; releaseAt: number | null; ownPhotoCount: (participantId: string) => number;
   },
-): Array<{ to: string; subject: string; html: string }> {
+): Array<{ to: string; subject: string; html: string; text: string }> {
   return recipients.map((r) => {
     const mail = eventEndEmail({
       guestName: firstName(r.name), eventName: v.eventName, hostName: v.hostName,
       galleryUrl: v.galleryUrl, timezone: v.timezone,
       thanks: v.thanks, releaseAt: v.releaseAt, ownPhotoCount: v.ownPhotoCount(r.participantId),
     });
-    return { to: r.email, subject: mail.subject, html: mail.html };
+    return { to: r.email, subject: mail.subject, html: mail.html, text: mail.text };
   });
 }
 
@@ -317,13 +323,25 @@ async function photoRows(eventId: string): Promise<Array<{ participantId: string
  * Failures are rows too, not omissions: a bounced guest address is precisely what the host needs to
  * see, and a missing row would leave the list quietly claiming everything went out. A failed WRITE
  * here must never fail the send — the mail has already gone.
+ *
+ * ONE INSERT FOR THE BATCH, so `.onConflictDoNothing()` is not optional. 0052 made the ledger one
+ * row per address per link, and this is a multi-row insert inside one statement: a single colliding
+ * address raises a unique violation that rolls back the WHOLE statement, and the catch below then
+ * swallows it. The mail has gone and nothing 500s — but every OTHER guest in the batch loses their
+ * row too, and a missing row reads as "never sent them the link", which is how the ledger ends up
+ * authorising the second copy it exists to prevent. Deferring to the index instead keeps the rows
+ * that are not in conflict and drops only the address that already has one, which is the truth:
+ * somebody else recorded that send first. Same treatment as routes/events.ts's claim.
+ *
+ * (Callers filter by priorLinkAddresses() first, so a conflict means a genuine race — the host's
+ * blast landing mid-sweep, or two app replicas — not an everyday duplicate.)
  */
 async function recordSends(eventId: string, sends: Array<{ email: string; ok: boolean }>, now: number): Promise<void> {
   if (!sends.length) return;
   try {
     await db.insert(shareSends).values(sends.map((s) => ({
       id: uuidv4(), eventId, shareId: null, email: s.email, ok: s.ok, sentAt: now,
-    })));
+    }))).onConflictDoNothing();
   } catch (e) {
     console.error(`[guest-delivery] could not record sends for ${eventId}:`, (e as Error).message);
   }
@@ -369,24 +387,23 @@ async function tellHostScopeIsEmpty(ev: Event, scope: GuestSendScope, waiting: n
   if (!email.enabled) return;
   const owner = await ownerOf(ev.id);
   if (!owner) return;
-  const reviewUrl = `${BASE()}/admin/${ev.joinCode}/review`;
-  const who = waiting === 1 ? '1 guest' : `${waiting} guests`;
-  // escapeForHost, because this subject is also passed as htmlEmail's TITLE, which interpolates it
-  // raw. The body below already escaped it; the heading did not.
-  const safeName = escapeForHost(ev.name);
-  const subject = scope === 'favourites'
-    ? `Nothing starred yet for ${safeName}`
-    : `No photos to send for ${safeName}`;
-  const body = scope === 'favourites'
-    ? `<p>We were about to send your guests the favourites link for <strong>${escapeForHost(ev.name)}</strong>, but nothing is starred yet — so we have sent nothing rather than an empty page.</p>
-       <p>${who} asked for their photos. Star the ones you want them to see, then send the link from the event page.</p>`
-    : `<p>We were about to send your guests the gallery link for <strong>${escapeForHost(ev.name)}</strong>, but there are no visible photos — so we have sent nothing rather than an empty page.</p>
-       <p>${who} asked for their photos. Send the link from the event page once there is something to see.</p>`;
+  // The copy moved to inline-emails.ts emptyScopeEmail(), which is also what the sampler renders,
+  // so there is one definition instead of two that drift. The builder takes the RAW event name and
+  // does all three encodings itself — the subject wants it raw, the <h2> escaped, the text part raw
+  // again, and mixing those up is the bug that was commented here for years.
+  const m = emptyScopeEmail({
+    eventName: ev.name,
+    scope: scope === 'favourites' ? 'favourites' : 'all',
+    moderationEnabled: !!ev.moderationEnabled,
+    waiting,
+    reviewUrl: `${BASE()}/admin/${ev.joinCode}/review`,
+  });
   try {
     await email.sendMail({
       to: owner.email,
-      subject,
-      html: email.htmlEmail(subject, `${body}<p style="margin:24px 0"><a href="${reviewUrl}" class="btn">Open the event →</a></p>`),
+      subject: m.subject,
+      html: m.html,
+      text: m.text,
       replyTo: 'support@snapdini.com',
     });
   } catch (e) {
@@ -414,23 +431,29 @@ export type GuestSendOutcome = 'sent' | 'suppressed' | 'failed';
 /** Exported for the test that pins the three outcomes apart. Everything else in this file should
  *  call it, not sendMail — that is the whole point of it existing. */
 export async function sendToGuest(
-  to: string, subject: string, html: string, eventId: string, what: string,
+  /** The built message. An OBJECT rather than four positional strings because it gained a `text`
+   *  part — the plain-text alternative every customer-facing email now carries — and
+   *  `(to, subject, html, text, eventId, what)` is six strings in a row that a caller can silently
+   *  transpose. The builders return this shape already. */
+  m: { to: string; subject: string; html: string; text?: string },
+  eventId: string, what: string,
   /** The transport, injectable so the three outcomes can be told apart in a test. It defaults to
    *  the real chokepoint and no caller passes it — tsx loads these as ES modules, whose namespace
    *  objects are frozen, so `email.sendMail` cannot be stubbed in place the way it could in CJS. */
   send: typeof email.sendMail = email.sendMail,
 ): Promise<GuestSendOutcome> {
+  const { to, subject, html, text } = m;
   try {
-    const r = await send({ to, subject, html, replyTo: 'support@snapdini.com', eventId });
+    const r = await send({ to, subject, html, text, replyTo: 'support@snapdini.com', eventId });
     return r.suppressed ? 'suppressed' : 'sent';
   } catch (e) {
-    console.error(`[guest-delivery] ${what} to ${to} failed: ${(e as Error).message}`);
+    // Masked, with the SAME helper the HTTP responses use (unsubscribe.maskAddress): a guest's
+    // address is the one piece of personal data this product holds about someone who never signed
+    // up, and logs are retained, shipped and read by more people than a response body is.
+    console.error(`[guest-delivery] ${what} to ${maskAddress(to)} failed: ${(e as Error).message}`);
     return 'failed';
   }
 }
-
-const escapeForHost = (s: unknown) =>
-  String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
 
 // ── Sending the gallery link ─────────────────────────────────────────────────
 
@@ -499,7 +522,7 @@ export async function sendGuestLink(
       guestName: firstName(r.name), eventName: ev.name, hostName: owner?.name || '',
       galleryUrl, timezone: ev.timezone, scope, photoCount,
     });
-    const out = await sendToGuest(r.email, mail.subject, mail.html, ev.id, 'link');
+    const out = await sendToGuest({ to: r.email, subject: mail.subject, html: mail.html, text: mail.text }, ev.id, 'link');
     if (out === 'sent') sent++;
     else if (out === 'failed') errors++;
     // ok=false for a suppressed address too, and that is the point: priorLinkAddresses reads this
@@ -591,7 +614,7 @@ async function sweepEventEnd(now: number): Promise<void> {
     });
     let sent = 0, errors = 0;
     for (const m of messages) {
-      const out = await sendToGuest(m.to, m.subject, m.html, ev.id, 'event-end');
+      const out = await sendToGuest(m, ev.id, 'event-end');
       if (out === 'sent') sent++;
       else if (out === 'failed') errors++;
     }
@@ -634,7 +657,7 @@ async function sweepReminder(now: number): Promise<void> {
         guestName: firstName(r.name), eventName: ev.name, hostName: owner?.name || '',
         galleryUrl, timezone: ev.timezone, releaseAt: opens,
       });
-      const out = await sendToGuest(r.email, mail.subject, mail.html, ev.id, 'reminder');
+      const out = await sendToGuest({ to: r.email, subject: mail.subject, html: mail.html, text: mail.text }, ev.id, 'reminder');
       if (out === 'sent') sent++;
       else if (out === 'failed') errors++;
     }

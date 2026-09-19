@@ -1,10 +1,33 @@
 // Customer lifecycle emails — welcome (on payment), check-in (~5 days before), and the
-// post-event feedback survey (3 days after). Warm, support-led, Snapdini-branded. All HTML is
-// inline-styled and table-based for broad email-client compatibility (Gmail/Outlook strip <style>
-// blocks and external CSS). Icons are emoji — they render everywhere with zero hosting.
+// post-event feedback survey (3 days after). Warm, support-led, Snapdini-branded. Icons are
+// emoji — they render everywhere with zero hosting.
 //
-// Each builder returns { subject, html, preheader } and is pure: the caller (sweep or test script)
-// resolves the view model. Replies are routed to support@ by the caller via sendMail's replyTo.
+// The shell, the palette and every link and button come from email-theme.ts, which is also where
+// the reasoning lives for why an email is built the way it is (tables, bgcolor attributes, an
+// inline colour on every anchor, no load-bearing <style>). This file had its own copy of all of
+// that, as did guest-emails.ts and email.ts — three shells, of which only two were table-based and
+// none of the three agreed on the palette.
+//
+// Each builder returns { subject, preheader, html, text } and is pure: the caller (sweep or test
+// script) resolves the view model. Replies are routed to support@ by the caller via sendMail's
+// replyTo.
+//
+// The `text` part is the plain-text alternative. It is written from the same view model as the
+// HTML, NOT by stripping tags off it, and it carries RAW strings — an escaped name in a text part
+// reaches the inbox as "Priya &amp; Tom". See the note on Mail.text in email.ts.
+import {
+  C, button, emailShell, esc, footerLine, heading, link, para,
+  textEmail, textLink,
+} from './email-theme';
+
+/** What every builder in this file returns. `text` is the plain-text alternative part. */
+export interface LifecycleMessage {
+  subject: string;
+  preheader: string;
+  html: string;
+  /** Plain text, built from the view model and carrying RAW strings (never escaped ones). */
+  text: string;
+}
 
 export interface LifecycleView {
   ownerName: string;                 // first name, or ''
@@ -37,53 +60,31 @@ const PREFLIGHT: Array<[string, string, string, string?]> = [
   ['✅', 'Check your QR opens the event', 'just confirm it loads — no snap needed'],
 ];
 
-const C = {
-  bg: '#0f0e0b', card: '#14110b', border: '#2b2519', line: '#221d13',
-  accent: '#f0b429', ink: '#efe9dc', head: '#fdfaf2', muted: '#b0a894', subtle: '#8a816d',
-};
-
-const esc = (s: string) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
-
 const revealLabel = (m: LifecycleView['revealMode']) =>
   m === 'manual' ? 'Manual — photos stay hidden until you unveil them'
   : m === 'at_end' ? 'At the end — revealed once the event wraps'
   : 'Instant — photos appear as guests take them';
 
-// Outer shell: dark ground, centred 600px, brand chip, hidden preheader, footer.
+// The shell is emailShell() in email-theme.ts. Only the footer differs between the host lifecycle
+// mail and the guest mail, so only the footer is built here.
+//
 // `unsubUrl` is a REAL preference-centre link or it is absent. It used to default to a
 // mailto:support@ that no inbound automation has ever read: a link labelled Unsubscribe that does
 // nothing is worse than no link, because it is the recipient's one attempt at s18 and it fails
 // silently. The optional emails (activation nudge, survey) pass prefsUrlFor(); the service messages
 // pass nothing and render no link, which is what a designated commercial message is entitled to do.
 function shell(preheader: string, inner: string, unsubUrl?: string): string {
-  const unsub = unsubUrl
-    ? ` · <a href="${esc(unsubUrl)}" style="color:${C.subtle};text-decoration:underline">Unsubscribe</a>`
-    : '';
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body bgcolor="${C.bg}" style="margin:0;padding:0;background:${C.bg};color:${C.ink};font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
-<span style="display:none!important;opacity:0;color:${C.bg};height:0;width:0;overflow:hidden">${esc(preheader)}</span>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="${C.bg}" style="background:${C.bg}"><tr><td align="center" bgcolor="${C.bg}" style="padding:32px 16px">
-<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%">
-  <tr><td style="padding:0 4px 22px">
-    <span style="display:inline-block;background:${C.accent};color:#17140e;padding:8px 14px;border-radius:9px;font-weight:800;font-size:16px;letter-spacing:-0.2px">🎩 Snapdini</span>
-  </td></tr>
-  <tr><td style="background:${C.card};border:1px solid ${C.border};border-radius:16px;padding:32px 30px">
-    ${inner}
-  </td></tr>
-  <tr><td style="padding:20px 6px 0;color:${C.subtle};font-size:12px;line-height:1.6">
-    Snapdini · <a href="mailto:support@snapdini.com" style="color:${C.subtle};text-decoration:underline">support@snapdini.com</a>${unsub}
-  </td></tr>
-</table>
-</td></tr></table>
-</body></html>`;
+  const unsub = unsubUrl ? ` &middot; ${link(unsubUrl, 'Unsubscribe', 'quiet')}` : '';
+  return emailShell({ preheader, inner, footer: footerLine(unsub) });
 }
 
-const h2 = (t: string) => `<h1 style="margin:0 0 6px;color:${C.head};font-size:23px;line-height:1.2;font-weight:800;letter-spacing:-0.3px">${t}</h1>`;
-const p  = (t: string, hi = false) => `<p style="margin:14px 0;font-size:15px;line-height:1.6;color:${hi ? C.head : C.ink}">${t}</p>`;
-const btn = (label: string, href: string, ghost = false) =>
-  `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:10px 0"><tr><td style="border-radius:9px;${ghost ? `border:1px solid #4a4230` : `background:${C.accent}`}">
-   <a href="${esc(href)}" style="display:inline-block;padding:13px 26px;font-size:15px;font-weight:800;text-decoration:none;color:${ghost ? C.accent : '#17140e'}">${label}</a>
-   </td></tr></table>`;
+/** The text part's own footer tail — the same unsubscribe, as a URL somebody can paste. */
+const textUnsub = (unsubUrl?: string): string[] =>
+  unsubUrl ? [`Unsubscribe or change what we send you: ${unsubUrl}`] : [];
+
+const h2 = (t: string) => heading(t, 'h1');
+const p = (t: string, hi = false) => para(t, hi);
+const btn = (label: string, href: string, ghost = false) => button(label, href, ghost);
 
 // summary card: rows of [emoji] label ......... value
 function rollCard(rows: Array<[string, string, string, string?]>): string {
@@ -93,22 +94,32 @@ function rollCard(rows: Array<[string, string, string, string?]>): string {
       <td style="padding:${i ? '11px' : '2px'} 0 11px;font-size:14px;color:${C.muted};vertical-align:top">${k}</td>
       <td style="padding:${i ? '11px' : '2px'} 0 11px;font-size:14px;color:${C.head};font-weight:700;text-align:right;vertical-align:top">${v}${sub ? `<br><span style="color:${C.subtle};font-weight:400;font-size:12px">${sub}</span>` : ''}</td>
     </tr>${i < rows.length - 1 ? `<tr><td colspan="3" style="border-bottom:1px solid ${C.line};font-size:0;line-height:0">&nbsp;</td></tr>` : ''}`).join('');
-  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${C.bg};border:1px solid ${C.border};border-radius:12px;padding:6px 18px;margin:20px 0">${tr}</table>`;
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${C.page};border:1px solid ${C.border};border-radius:12px;padding:6px 18px;margin:20px 0">${tr}</table>`;
 }
 
 function sign(lead: string): string {
   return `<div style="margin-top:26px;font-size:15px;line-height:1.6;color:${C.ink}">
     <p style="margin:0">${lead}</p>
     <p style="margin:12px 0 0">Warmly,<br><b style="color:${C.head}">The Snapdini team</b><br>
-    <a href="mailto:support@snapdini.com" style="color:${C.accent};text-decoration:none">support@snapdini.com</a></p>
+    <a href="mailto:support@snapdini.com" style="color:${C.link};text-decoration:none">support@snapdini.com</a></p>
   </div>`;
 }
 
 const hi = (name: string) => name ? `Hi ${esc(name)},` : 'Hi there,';
+/** The same greeting for the text part. RAW — an escaped name in a text part reaches the inbox as
+ *  "Hi Priya &amp; Tom,". */
+const hiText = (name: string) => name ? `Hi ${name},` : 'Hi there,';
+/** The sign-off the HTML `sign()` renders, as text. */
+const signText = (lead: string) => `${lead}\n\nWarmly,\nThe Snapdini team\nsupport@snapdini.com`;
+/** The pre-flight card as three text lines. */
+const preflightText = () => PREFLIGHT.map(([, k, v]) => `- ${k} (${v})`).join('\n');
 
 // ── 1. WELCOME (on payment) ──────────────────────────────────────────────────
-export function welcomeEmail(v: LifecycleView): { subject: string; preheader: string; html: string } {
-  const subject = `Your roll is loaded${v.ownerName ? `, ${v.ownerName}` : ''} 🎞️`;
+// No emoji in any subject line, host or guest. It nudges Gmail toward the Promotions tab, and the
+// brand mark is already in the email body — the 🎩 chip at the top of every message — so the
+// subject was paying a deliverability cost to repeat something the reader sees on opening.
+export function welcomeEmail(v: LifecycleView): LifecycleMessage {
+  const subject = `Your roll is loaded${v.ownerName ? `, ${v.ownerName}` : ''}`;
   const preheader = `${v.eventName} is all set for ${v.datesLabel}. Here's what's on your roll.`;
 
   const rows: Array<[string, string, string, string?]> = [
@@ -159,13 +170,34 @@ export function welcomeEmail(v: LifecycleView): { subject: string; preheader: st
     sign('Any questions at all, just hit reply — a real person reads every message.'),
   ].join('');
 
-  return { subject, preheader, html: shell(preheader, inner, v.unsubUrl) };
+  // The same message, from the same view model. RAW names — the roll rows above are escaped
+  // because they are going into markup; these are not.
+  const text = textEmail([
+    `Your roll is loaded${v.ownerName ? `, ${v.ownerName}` : ''}`,
+    v.startsSoon
+      ? `Thanks for setting up ${v.eventName} — you're all set for ${v.datesLabel}.`
+      : `Thanks for setting up ${v.eventName} — everything's ready and waiting for ${v.datesLabel}.`,
+    'Here\'s what\'s on your roll:',
+    [`- Event: ${v.eventName} (${v.datesLabel})`,
+     `- Guests: up to ${v.guestCap}`,
+     `- Shots per guest: ${v.shotsPerGuest}`,
+     `- Frame sizes: ${v.framesAll ? 'all unlocked' : 'square (1:1)'}`,
+     `- Video: ${v.hasVideo ? `on — up to ${v.videoSeconds}s clips` : 'off'}`,
+     `- The reveal: ${revealLabel(v.revealMode)}`].join('\n'),
+    'Ready when you are: open your event to grab the QR code and join link to share with guests.',
+    textLink('Open your event', v.manageUrl),
+    v.startsSoon && 'Your event is coming up very soon, so here\'s a 20-second pre-flight to make sure you\'re ready:',
+    v.startsSoon && preflightText(),
+    signText('Any questions at all, just hit reply — a real person reads every message.'),
+  ], textUnsub(v.unsubUrl));
+
+  return { subject, preheader, html: shell(preheader, inner, v.unsubUrl), text };
 }
 
 
 // ── 2. CHECK-IN (~5 days before) ─────────────────────────────────────────────
-export function checkinEmail(v: LifecycleView): { subject: string; preheader: string; html: string } {
-  const subject = `Nearly there — anything you need? 🎩`;
+export function checkinEmail(v: LifecycleView): LifecycleMessage {
+  const subject = `Nearly there — anything you need?`;
   const preheader = `${v.eventName} is almost here. A quick check-in before the day.`;
 
   const inner = [
@@ -179,12 +211,23 @@ export function checkinEmail(v: LifecycleView): { subject: string; preheader: st
     sign('Wishing you a wonderful event.'),
   ].join('');
 
-  return { subject, preheader, html: shell(preheader, inner, v.unsubUrl) };
+  const text = textEmail([
+    'Nearly there — anything you need?',
+    hiText(v.ownerName),
+    `${v.eventName} is coming up on ${v.datesLabel}. We wanted to check in before the day and make sure you're all set.`,
+    'A quick pre-flight, if it helps:',
+    preflightText(),
+    'Most of all — if you\'re unsure about anything, want a feature explained, or something doesn\'t look right, just reply. We\'d genuinely rather hear from you now than have you wonder on the day.',
+    textLink('Ask us anything', 'mailto:support@snapdini.com'),
+    signText('Wishing you a wonderful event.'),
+  ], textUnsub(v.unsubUrl));
+
+  return { subject, preheader, html: shell(preheader, inner, v.unsubUrl), text };
 }
 
 // ── 0a. ACCOUNT WELCOME (on sign-up) ─────────────────────────────────────────
-export function accountWelcomeEmail(v: { ownerName: string; createUrl: string; unsubUrl?: string }): { subject: string; preheader: string; html: string } {
-  const subject = `Welcome to Snapdini 🎩`;
+export function accountWelcomeEmail(v: { ownerName: string; createUrl: string; unsubUrl?: string }): LifecycleMessage {
+  const subject = `Welcome to Snapdini`;
   const preheader = `Your disposable camera for events — set up your first event in a couple of minutes.`;
   const inner = [
     h2(`Welcome to Snapdini${v.ownerName ? `, ${esc(v.ownerName)}` : ''} 🎩`),
@@ -193,12 +236,19 @@ export function accountWelcomeEmail(v: { ownerName: string; createUrl: string; u
     btn('Create your first event', v.createUrl),
     sign('Questions before you start? Just reply — a real person reads every message.'),
   ].join('');
-  return { subject, preheader, html: shell(preheader, inner, v.unsubUrl) };
+  const text = textEmail([
+    `Welcome to Snapdini${v.ownerName ? `, ${v.ownerName}` : ''}`,
+    'Thanks for joining! Snapdini is the disposable camera for your events — your guests scan a QR code, snap away on their phones, and every photo lands in one shared gallery. No app to install.',
+    'Whenever you\'re ready, setting up an event takes a couple of minutes — name it, pick the date, and share the code.',
+    textLink('Create your first event', v.createUrl),
+    signText('Questions before you start? Just reply — a real person reads every message.'),
+  ], textUnsub(v.unsubUrl));
+  return { subject, preheader, html: shell(preheader, inner, v.unsubUrl), text };
 }
 
 // ── 0b. ACTIVATION NUDGE (~1 week later, only if no event yet) ────────────────
-export function activationNudgeEmail(v: { ownerName: string; createUrl: string; unsubUrl?: string }): { subject: string; preheader: string; html: string } {
-  const subject = `Ready to set up your first event? 🎩`;
+export function activationNudgeEmail(v: { ownerName: string; createUrl: string; unsubUrl?: string }): LifecycleMessage {
+  const subject = `Ready to set up your first event?`;
   const preheader = `Whenever the moment's right — your first Snapdini event is a couple of minutes away.`;
   const inner = [
     h2('Your first event is a couple of minutes away'),
@@ -208,7 +258,15 @@ export function activationNudgeEmail(v: { ownerName: string; createUrl: string; 
     btn('Create your event', v.createUrl),
     sign(`Not sure if it's right for your event? Reply and tell us about it — happy to help.`),
   ].join('');
-  return { subject, preheader, html: shell(preheader, inner, v.unsubUrl) };
+  const text = textEmail([
+    'Your first event is a couple of minutes away',
+    hiText(v.ownerName),
+    'Just checking in — you signed up for Snapdini but haven\'t created an event yet. Whenever you\'ve got one coming up — a wedding, a birthday, a work do — it\'s a great way to capture the candid moments your guests actually take.',
+    'Free for events up to 10 guests, with everything included. It only takes a couple of minutes to set up.',
+    textLink('Create your event', v.createUrl),
+    signText('Not sure if it\'s right for your event? Reply and tell us about it — happy to help.'),
+  ], textUnsub(v.unsubUrl));
+  return { subject, preheader, html: shell(preheader, inner, v.unsubUrl), text };
 }
 
 // Retention is the host's choice, not a constant: about half of real events keep their photos a
@@ -224,7 +282,7 @@ function slideshowDeadline(photosUntil: number, now = Date.now()): string {
 }
 
 // ── 3. POST-EVENT SURVEY (3 days after) ──────────────────────────────────────
-export function surveyEmail(v: LifecycleView): { subject: string; preheader: string; html: string } {
+export function surveyEmail(v: LifecycleView): LifecycleMessage {
   // Thank-you discount for their NEXT event. Rendered only when one was minted (paid, unrefunded).
   const rewardBlock = v.hostReward
     ? `<div style="padding:18px 0 0">
@@ -258,12 +316,16 @@ export function surveyEmail(v: LifecycleView): { subject: string; preheader: str
          </div>
        </div>`
     : '';
-  const subject = `How did ${v.eventName} go? (2 mins) 🎩`;
+  const subject = `How did ${v.eventName} go? (2 mins)`;
   const preheader = `Two minutes to tell us how Snapdini did — it shapes what we build next.`;
   const base = v.surveyUrl || v.manageUrl;
   const face = (emoji: string, label: string, score: number) =>
-    `<td style="padding:0 3px" width="20%"><a href="${esc(base)}${base.includes('?') ? '&' : '?'}score=${score}" style="display:block;text-align:center;text-decoration:none;border:1px solid #3a3324;border-radius:10px;padding:12px 2px;background:${C.bg}">
-       <span style="font-size:24px;line-height:1;display:block">${emoji}</span>
+    // `color:` on the anchor, like every other anchor in this codebase now. These five were the
+    // worst of the eighteen that had none: five side-by-side default-blue boxes, and the emoji
+    // inside each one is its own child span, so the only thing the client's link colour had to
+    // paint was the little uppercase label under it. It read as five broken buttons.
+    `<td style="padding:0 3px" width="20%" bgcolor="${C.page}"><a href="${esc(base)}${base.includes('?') ? '&' : '?'}score=${score}" style="display:block;text-align:center;text-decoration:none;color:${C.ink};border:1px solid ${C.border};border-radius:10px;padding:12px 2px;background-color:${C.page}">
+       <span style="font-size:24px;line-height:24px;display:block">${emoji}</span>
        <span style="font-size:10px;letter-spacing:0.5px;text-transform:uppercase;color:${C.subtle};display:block;margin-top:6px">${label}</span></a></td>`;
 
   const inner = [
@@ -281,5 +343,29 @@ export function surveyEmail(v: LifecycleView): { subject: string; preheader: str
     sign('Thank you — truly.'),
   ].join('');
 
-  return { subject, preheader, html: shell(preheader, inner, v.unsubUrl) };
+  // The five faces are five DIFFERENT destinations — each opens the survey with that score already
+  // chosen — so the text part carries all five rather than collapsing them to the survey link. A
+  // text reader gets the same one-tap rating the HTML reader gets. Labelled and one per line,
+  // because five bare near-identical URLs is not a choice anybody can make.
+  const scoreLine = (label: string, score: number) =>
+    `  ${`${label}:`.padEnd(11)}${base}${base.includes('?') ? '&' : '?'}score=${score}`;
+  const text = textEmail([
+    `How did ${v.eventName} go?`,
+    hiText(v.ownerName),
+    'We hope the day was everything you wanted. Would you take two minutes to tell us how Snapdini did? It genuinely shapes what we build next.',
+    ['Start with your overall impression — open the one that fits:',
+     scoreLine('Poor', 1), scoreLine('Meh', 2), scoreLine('OK', 3),
+     scoreLine('Good', 4), scoreLine('Loved it', 5)].join('\n'),
+    'Then a handful of quick questions — comments optional, skip any you like.',
+    textLink('Take the 2-minute survey', base),
+    v.hostReward && `A thank-you for hosting: use code ${v.hostReward.code} for ${v.hostReward.percentOff}% off your next event, by `
+      + `${new Date(v.hostReward.expiresAt).toLocaleDateString('en-AU', { day: 'numeric', month: 'long', year: 'numeric' })}.`,
+    v.slideshow && `One more thing — Snapdini can turn the photos from ${v.eventName} into a slideshow: all `
+      + `${v.slideshow.photoCount} of them, set to music, as one video you can keep and send on. `
+      + slideshowDeadline(v.slideshow.photosUntil),
+    v.slideshow && textLink('Make the slideshow', v.slideshow.url),
+    signText('Thank you — truly.'),
+  ], textUnsub(v.unsubUrl));
+
+  return { subject, preheader, html: shell(preheader, inner, v.unsubUrl), text };
 }

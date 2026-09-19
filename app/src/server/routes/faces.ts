@@ -125,7 +125,11 @@ router.post('/enrol', selfieUpload.single('selfie'), async (req: Request, res: R
 // ── GET /api/faces/mine — the photos this guest appears in ────────────────────────────────────
 router.get('/mine', async (req: Request, res: Response) => {
   if (!faceMatchingAvailable()) return res.status(503).json({ error: 'Face matching is not enabled on this server' });
-  const sessionToken = String(req.header('X-Session-Token') || req.query.sessionToken || '');
+  // Header (or body) only — never the query string. nginx logs "$request", so a token in a
+  // URL is written into the access log, the browser history and every proxy between. The zip
+  // route is the ONE justified exception and says so: it is reached by navigating, and a
+  // navigation cannot carry a header. Everything here is a fetch.
+  const sessionToken = String(req.header('X-Session-Token') || '');
   if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
   const me = await guestFor(sessionToken);
   if (!me) return res.status(403).json({ error: 'Invalid session' });
@@ -141,7 +145,11 @@ router.get('/mine', async (req: Request, res: Response) => {
 // Deletes the template AND every link derived from it. Withdrawal has to actually undo the thing,
 // or consent was never meaningful.
 router.delete('/enrol', async (req: Request, res: Response) => {
-  const sessionToken = String(req.body?.sessionToken || req.query.sessionToken || '');
+  // Header (or body) only — never the query string. nginx logs "$request", so a token in a
+  // URL is written into the access log, the browser history and every proxy between. The zip
+  // route is the ONE justified exception and says so: it is reached by navigating, and a
+  // navigation cannot carry a header. Everything here is a fetch.
+  const sessionToken = String(req.body?.sessionToken || '');
   if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
   const me = await guestFor(sessionToken);
   if (!me) return res.status(403).json({ error: 'Invalid session' });

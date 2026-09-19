@@ -4,7 +4,7 @@ import { and, eq, isNotNull, lt, count } from 'drizzle-orm';
 import { db } from './db';
 import { RESCHEDULE_WINDOW_MS, RESCHEDULE_RETENTION_GRACE_MS } from './lib';
 import { events, photos, participants, clientErrors, slideshows, shares, emailTokens, sessions } from './schema';
-import { UPLOADS_DIR, uploadDiskPath, eventDir, INCOMING_DIR } from './paths';
+import { UPLOADS_DIR, uploadDiskPath, insideUploads, eventDir, INCOMING_DIR } from './paths';
 import { playName, thumbName } from './images';
 import { purgeOldSlideshows } from './slideshow';
 import { pruneAnalytics } from './analytics';
@@ -15,6 +15,10 @@ const CLIENT_ERROR_TTL_MS = 30 * 24 * 60 * 60 * 1000; // keep diagnostic reports
 const EXPIRED_TOKEN_GRACE_MS = 24 * 60 * 60 * 1000;
 
 function safeUnlink(file: string): void {
+  // Containment is checked HERE, not at the call sites, because every delete path funnels through
+  // this one function — event deletion, the retention purge and the thumb/proxy siblings. The
+  // filenames come from DB columns, which are only as trustworthy as whatever wrote them.
+  if (!insideUploads(file)) return;
   fs.promises.unlink(file).catch(() => {}); // best-effort; ignore missing
 }
 
@@ -32,14 +36,22 @@ export async function deleteEventFiles(eventId: string): Promise<void> {
   const rows = await db.select({ filename: photos.filename }).from(photos).where(eq(photos.eventId, eventId));
   for (const p of rows) unlinkUpload(p.filename);
 
-  const [ev] = await db.select({ theme: events.theme }).from(events).where(eq(events.id, eventId));
-  if (ev && ev.theme) {
-    try {
-      const t = JSON.parse(ev.theme) as { headerImage?: string };
-      // headerImage is stored as a "/uploads/themes/<file>" web path → map to UPLOADS_DIR.
-      if (t.headerImage && t.headerImage.startsWith('/uploads/'))
-        safeUnlink(uploadDiskPath(t.headerImage));
-    } catch { /* malformed theme JSON — nothing to clean */ }
+  // Every /uploads/ path the event's own JSON mentions, not a hand-listed key.
+  //
+  // This used to unlink `theme.headerImage` and nothing else, which was right while that was the
+  // only file a theme could own. It is now one of three (the original it was cut from, and a poster
+  // logo live beside it), and a list of keys here is a list that gets out of date silently — the
+  // symptom is orphaned files sitting in an event folder after the event is gone, which nobody
+  // sees. Walking the JSON for upload paths cannot fall behind a new key.
+  const [ev] = await db.select({ theme: events.theme, posterConfig: events.posterConfig })
+    .from(events).where(eq(events.id, eventId));
+  for (const raw of [ev?.theme, ev?.posterConfig]) {
+    if (!raw) continue;
+    // Deliberately over the RAW JSON rather than a parsed shape: it finds a path wherever it is
+    // nested, and a malformed blob still gets swept instead of throwing the whole delete away.
+    for (const m of raw.matchAll(/"(\/uploads\/[A-Za-z0-9._/-]+)"/g)) {
+      try { safeUnlink(uploadDiskPath(m[1])); } catch { /* outside UPLOADS_DIR — not ours to delete */ }
+    }
   }
 }
 
@@ -84,6 +96,15 @@ export async function sweep(): Promise<number> {
     // if any, were already handled by the per-file unlinks above.)
     try { fs.rmSync(eventDir(e.id), { recursive: true, force: true }); } catch { /* none */ }
 
+    // No `photos_taken` reconciliation here, and that is not an oversight. The counter lives on the
+    // participant row, and the very next statement deletes those rows for the same event — so no
+    // guest is left holding a count of photos that no longer exist. The same holds wherever else
+    // photo rows go: removing one participant cascades their photos away via
+    // `photos.participant_id ON DELETE CASCADE` (routes/events.ts), the per-photo guest delete
+    // decrements inside its own transaction (routes/photos.ts), and moderation REJECT is an UPDATE
+    // of `status`, never a delete — a rejected photo still spent a shot, so its count must NOT be
+    // refunded. There is no path that deletes a photo row and keeps the participant, which is the
+    // only shape that would strand a counter.
     await db.delete(photos).where(eq(photos.eventId, e.id));
     await db.delete(participants).where(eq(participants.eventId, e.id)); // clears guest PII
     await db.delete(shares).where(eq(shares.eventId, e.id));             // dead links; frees their /s/ slugs

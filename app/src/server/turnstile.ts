@@ -45,7 +45,10 @@ export async function verifyTurnstile(
     // firewalls), not because they are a bot. Hard-failing here silently locks those people out of
     // sign-up, login AND the contact form with no way to self-diagnose. When FAIL_OPEN is set we
     // let them through and rely on the honeypot and per-IP limits, which are unaffected.
-    if (failOpen()) { console.warn('[turnstile] no token — allowing (TURNSTILE_FAIL_OPEN)'); return { ok: true }; }
+    // The `fail-open:` prefix is not cosmetic: it is what lets the caller tell a pass that was
+    // EARNED from one that only happened because the escape hatch is open, and counting the second
+    // kind is the only safe way to decide whether the hatch can be closed. See requireTurnstile.
+    if (failOpen()) return { ok: true, reason: 'fail-open:missing-token' };
     return { ok: false, reason: 'missing-token' };
   }
   if (token.length > MAX_TOKEN_LEN) return { ok: false, reason: 'oversized-token' };
@@ -65,7 +68,9 @@ export async function verifyTurnstile(
     data = (await r.json()) as typeof data;
   } catch (e) {
     console.warn('[turnstile] siteverify unreachable:', (e as Error).message);
-    return failOpen() ? { ok: true } : { ok: false, reason: 'verify-unreachable' };
+    return failOpen()
+      ? { ok: true, reason: 'fail-open:verify-unreachable' }
+      : { ok: false, reason: 'verify-unreachable' };
   }
 
   if (data.success !== true) {
@@ -87,6 +92,43 @@ export async function verifyTurnstile(
   return { ok: true };
 }
 
+// ── What a refused person is actually told ─────────────────────────────────────
+//
+// The `reason` strings above are for our logs. These are for a person, and splitting them is the
+// point. "Bot check failed — reload the page and try again" was one line for three different
+// truths, and for the commonest of the three it was both wrong and unactionable: a MISSING token
+// means the widget never loaded, which is an ad blocker or a privacy DNS resolver swallowing
+// challenges.cloudflare.com far more often than it is a bot (see verifyTurnstile). Reloading
+// cannot fix that, so the old copy sent a real customer round the same loop for ever with nothing
+// to go on — the dead end DEVELOPMENT.md forbids: state the condition AND take them to whatever
+// is blocking it. So the blocked case names the address to allow and the network to try; only a
+// token we genuinely judged and rejected gets told to reload.
+//
+// `code` is the machine-readable half, so a client (or a test) can react without matching prose.
+export interface TurnstileRefusal { status: number; code: string; error: string }
+
+export function refusalFor(reason?: string): TurnstileRefusal {
+  if (reason === 'missing-token') return {
+    status: 403,
+    code: 'security-check-blocked',
+    error: 'Your browser couldn’t finish the security check on this page. That is nearly always an '
+      + 'ad blocker or a private DNS service blocking challenges.cloudflare.com — allow that address, '
+      + 'or try again on a different network.',
+  };
+  // Neither the visitor's fault nor anything they can fix, so it must not read as if it were. 503,
+  // not 403, so an outage that is locking every customer out looks like an outage in monitoring.
+  if (reason === 'verify-unreachable' || reason === 'no-hostname-allowlist') return {
+    status: 503,
+    code: 'security-check-unavailable',
+    error: 'Our security check isn’t answering right now. Please try again in a few minutes.',
+  };
+  return {
+    status: 403,
+    code: 'security-check-failed',
+    error: 'That security check didn’t go through. Please reload the page and try again.',
+  };
+}
+
 // Express guard. Reads the widget's single-use token from the canonical `cf-turnstile-response`
 // field (Cloudflare's name), falling back to a header for non-form callers.
 export function requireTurnstile(expectedAction?: string) {
@@ -97,8 +139,17 @@ export function requireTurnstile(expectedAction?: string) {
       || (body.turnstileToken as string | undefined)
       || (req.headers['cf-turnstile-response'] as string | undefined);
     const result = await verifyTurnstile(token, req.ip, expectedAction);
-    if (result.ok) return next();
-    console.warn('[turnstile] rejected %s %s: %s', req.method, req.path, result.reason);
-    return res.status(403).json({ error: 'Bot check failed — please reload the page and try again.' });
+    if (result.ok) {
+      // A pass that happened ONLY because the escape hatch is open is the one number the owner
+      // needs before closing it: it is precisely the set of real people who would start being
+      // refused. `docker compose logs app | grep 'fail-open'` counts them, per endpoint.
+      // originalUrl, not req.path: this is mounted with app.use on the full path, so req.path
+      // is '/' and every endpoint's line would read the same. The point of the line is WHICH one.
+      if (result.reason) console.warn('[turnstile] %s %s allowed: %s', req.method, req.originalUrl, result.reason);
+      return next();
+    }
+    console.warn('[turnstile] rejected %s %s: %s', req.method, req.originalUrl, result.reason);
+    const refusal = refusalFor(result.reason);
+    return res.status(refusal.status).json({ error: refusal.error, code: refusal.code });
   };
 }

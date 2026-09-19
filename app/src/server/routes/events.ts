@@ -1,26 +1,31 @@
 import crypto from 'crypto';
+import { MAIL_BATCH_SIZE } from '../../../../shared/mail-batch';
 import fs from 'fs';
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import QRCode from 'qrcode';
 import sharp from 'sharp';
-import { eq, and, or, sql, inArray, count, desc, isNotNull, isNull } from 'drizzle-orm';
+import { eq, and, or, sql, inArray, count, desc, isNotNull, isNull, asc } from 'drizzle-orm';
 import { db } from '../db';
-import { parseChallengeSets, readSets, readTick, parseTick, serialiseSets, parseEventType, MAX_CHALLENGES, MAX_SETS } from '../challenges';
-import { events, participants, photos, shares, shareSends, eventCohosts, users, type Event } from '../schema';
+import { parseChallengeSets, readSets, readTick, parseTick, serialiseSets, parseEventType, nextEventType, reseatParticipant, MAX_CHALLENGES, MAX_SETS } from '../challenges';
+import { events, participants, photos, photoComments, commentHearts, shareVisitors, shares, shareSends, eventCohosts, users, type Event } from '../schema';
+import { thumbName } from '../images';
 import { faceMatchingAvailable } from '../faces';
 import * as email from '../email';
 import * as auth from '../auth';
 import * as cleanup from '../cleanup';
-import { DEMO_NAME, RESCHEDULE_WINDOW_MS, RETENTION_DAYS, baseUrl, escapeHtml, isRevealed, purgeAtFor } from '../lib';
+import { DEMO_NAME, RESCHEDULE_WINDOW_MS, RETENTION_DAYS, baseUrl, isDemoEvent, isRevealed, purgeAtFor } from '../lib';
+import { normaliseAddress } from '../delivery';
 import { referrerFromCookie, isSelfReferral } from '../referrals';
 import { startSlideshow, slideshowInfo, toggleSlideshowFavourite, deleteSlideshow, slideshowFile, streamSlideshow1080 } from '../slideshow';
-import { billingEnabled, quote, FREE_ALL_GUESTS, brandingRemovable, RETENTION_PAID_DAYS, CUSTOM_PLAN_ERROR } from '../billing';
+import { billingEnabled, quote, FREE_ALL_GUESTS, brandingRemovable, RETENTION_PAID_DAYS, customPlanError } from '../billing';
 import { sendWelcome } from '../lifecycle';
 import options from '../options';
-import { REVEAL_CUSTOM, ceilToRevealTick, zonedWallTimeToMs } from '../../../../shared/reveal';
+import { REVEAL_CUSTOM, ceilToRevealTick, clampRevealAt, revealInstantRefusal, zonedWallTimeToMs } from '../../../../shared/reveal';
 import { parseGuestDelivery, parseGuestSendScope, effectiveGuestScope, revealOpensAt,
          clampGuestSendAt, sendGuestLink, type GuestTiming } from '../guest-delivery';
+import { isReservedSlug, RESERVED_SLUG_ERROR } from '../slugs';
+import { galleryLinkEmail, cohostInviteEmail } from '../inline-emails';
 
 const router = Router();
 
@@ -60,18 +65,34 @@ function sanitizeAspects(arr: unknown): string[] {
  *
  *  Returning an error rather than falling back to the delay is the point — a silent fallback saves
  *  a reveal at a time the host did not choose and reports it as saved. */
-function resolveCustomReveal(date: unknown, time: unknown, timezone: string | null, purgeAt: number):
-  { at: number } | { error: string } {
+/** Just the instant the host's wall-clock choice means. Null when it is not a time at all.
+ *
+ *  Split out from the validation below because the settings route needs to know WHETHER this save
+ *  is changing the reveal before it decides whether an old value is this save's to refuse. */
+function customRevealInstant(date: unknown, time: unknown, timezone: string | null): number | null {
   const at = zonedWallTimeToMs(String(date ?? ''), String(time ?? ''), timezone || 'UTC');
-  if (at === null) return { error: 'Pick the date and time you want the photos revealed.' };
   // Rounded before it is stored, never on the way out, so the instant the host was shown when they
   // picked it is the instant every countdown and every gate reads back afterwards.
-  const rounded = ceilToRevealTick(at);
-  // Retention deletes the photos. A reveal booked past that unlocks an empty gallery — the one
-  // outcome worse than refusing to save.
-  if (rounded > purgeAt)
-    return { error: 'That is after the photos are deleted at the end of retention. Pick an earlier reveal, or extend retention first.' };
-  return { at: rounded };
+  return at === null ? null : ceilToRevealTick(at);
+}
+
+const PICK_A_TIME = 'Pick the date and time you want the photos revealed.';
+
+/** …and the whole answer: the instant, or the reason in the host's words that it cannot be one.
+ *
+ *  `expiresAt` is here because it was NOT here, and that is the defect: only the purge ceiling was
+ *  ever checked, so a reveal in the past — or at any instant before the event ends — saved happily
+ *  and opened the gallery to the public while the party was still running. See
+ *  revealInstantRefusal() in shared/reveal.ts for what each bound costs when it is missing. */
+function resolveCustomReveal(
+  date: unknown, time: unknown, timezone: string | null,
+  window: { expiresAt: number; purgeAt: number },
+  now: number = Date.now(),
+): { at: number } | { error: string } {
+  const at = customRevealInstant(date, time, timezone);
+  if (at === null) return { error: PICK_A_TIME };
+  const why = revealInstantRefusal(at, window, now);
+  return why ? { error: why } : { at };
 }
 
 /** Turn the host's "send the guests the link at…" choice into the instant to store.
@@ -114,7 +135,21 @@ function slugify(str: string): string {
 }
 
 async function isSlugAvailable(slug: string): Promise<boolean> {
-  const [row] = await db.select({ id: events.id }).from(events).where(eq(events.slug, slug));
+  // Reserved words are folded in here rather than checked beside each call, so a call site added
+  // later is safe by default — it just reports the less precise "already taken" wording. The three
+  // callers that can produce a better message check isReservedSlug() first; see slugs.ts.
+  if (isReservedSlug(slug)) return false;
+  // A slug must not be able to BE another event's JOIN CODE. Every identifier lookup in the product
+  // is `joinCode = upper(x) OR slug = lower(x)`, and slugify() can produce any string of
+  // [a-z0-9-] — including the lowercase of a real join code, which is printed on a poster for
+  // anybody to read. Without this check somebody could name their own event after a stranger's join
+  // code and put two events behind one URL; what a guest scanning that poster then joined would
+  // come down to which row the planner returned first.
+  //
+  // Checked against join codes as well as slugs, in one query. The resolvers also prefer the join
+  // code on a tie, so neither half of this stands alone.
+  const [row] = await db.select({ id: events.id }).from(events)
+    .where(or(eq(events.slug, slug), eq(events.joinCode, slug.toUpperCase())));
   return !row;
 }
 
@@ -122,17 +157,31 @@ async function isSlugAvailable(slug: string): Promise<boolean> {
 // each on its own index — so two targeted equality lookups (the common join-code case resolves in
 // the first) beat an OR across both columns, which can't always use both indexes.
 export async function eventByIdentifier(raw: string): Promise<Event | undefined> {
-  const [byCode] = await db.select().from(events).where(eq(events.joinCode, raw.toUpperCase()));
-  if (byCode) return byCode;
-  const [bySlug] = await db.select().from(events).where(eq(events.slug, raw.toLowerCase()));
-  return bySlug;
+  // ONE round trip, not two. Every pretty-slug URL — which is most of the links a host hands out —
+  // used to pay a join-code lookup that could never match before it asked the question it meant.
+  // `EXPLAIN` gives this a clean BitmapOr over `events_join_code_unique` + `idx_events_slug`.
+  //
+  // JOIN CODE STILL WINS. The two namespaces can collide (an event's slug may equal another's
+  // lowercased join code), and a join code is the stronger claim, so the sort makes the choice
+  // explicit rather than leaving it to whichever row the planner happens to return first.
+  const rows = await db.select().from(events)
+    .where(or(eq(events.joinCode, raw.toUpperCase()), eq(events.slug, raw.toLowerCase())))
+    .limit(2);
+  if (rows.length < 2) return rows[0];
+  return rows.find((r) => r.joinCode === raw.toUpperCase()) ?? rows[0];
 }
 
 // Theme values are organizer-supplied and injected into the public gallery's CSS, so
 // validate them server-side (CSP is the primary guard; this is defense-in-depth).
 const COLOR_KEYS = ['bg', 'surface', 'surface2', 'border', 'text', 'textMuted', 'accent', 'accentDark'];
 const COLOR_RE = /^#[0-9a-fA-F]{3,8}$|^(rgb|rgba|hsl|hsla)\([0-9.,%\s/]+\)$|^[a-zA-Z]{3,24}$/;
-const UPLOADS_PATH_RE = /^\/uploads\/[A-Za-z0-9._/-]+$/; // same-origin upload path, no quotes/parens/spaces
+// Same-origin upload path: no quotes/parens/spaces, and no ".." segment. The dot has to stay —
+// file extensions need it — which is exactly what let "/uploads/../../etc/passwd" through the old
+// pattern, so the traversal is excluded explicitly instead. The lookahead scans from index 0 on
+// purpose: placed after the "/uploads/" prefix it has no preceding slash to anchor on, and
+// "/uploads/.." walks straight past it. uploadDiskPath() re-checks containment on the way to
+// disk and is the load-bearing guard; this one just keeps the bad value out of the database.
+const UPLOADS_PATH_RE = /^(?!.*(?:^|\/)\.\.(?:\/|$))\/uploads\/[A-Za-z0-9._/-]+$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const isEmail = (e: unknown): boolean =>
   typeof e === 'string' && e.length <= 200 && EMAIL_RE.test(e.trim());
@@ -145,6 +194,28 @@ function sanitizeCustomCss(css: unknown): string {
       /:\/\/|^\s*\/\//.test(u) ? 'none' : m);
 }
 
+/** A crop rectangle in the source image's own 0–1 coordinates: "sx,sy,sw,sh".
+ *
+ *  A STRING rather than an object, so the theme column stays the flat string map it has always
+ *  been — no widening of sanitizeTheme's return type, and one regex-ish check instead of a nested
+ *  validator. Anything that is not four sane numbers is dropped, exactly like a bad colour:
+ *  a missing crop means "not repositioned yet", which every reader already handles.
+ *
+ *  Width and height must be positive and the rectangle must start inside the image. It may run
+ *  past the far edge — the cropper lets a host pull the frame off the picture and fills the
+ *  overhang, and rejecting that here would silently discard a crop the editor allowed. */
+function sanitizeCrop(raw: unknown): string | null {
+  const parts = String(raw).split(',');
+  if (parts.length !== 4) return null;
+  const n = parts.map((x) => Number(x.trim()));
+  if (!n.every((v) => Number.isFinite(v))) return null;
+  const [sx, sy, sw, sh] = n;
+  if (sw <= 0 || sh <= 0) return null;
+  if (sx < -1 || sy < -1 || sx > 1 || sy > 1) return null;
+  if (sw > 4 || sh > 4) return null;
+  return n.map((v) => v.toFixed(5)).join(',');
+}
+
 function sanitizeTheme(theme: Record<string, unknown>): Record<string, string> {
   const out: Record<string, string> = {};
   if (typeof theme.preset === 'string') out.preset = theme.preset.slice(0, 40);
@@ -155,9 +226,20 @@ function sanitizeTheme(theme: Record<string, unknown>): Record<string, string> {
     }
   }
   if (theme.customCss !== undefined) out.customCss = sanitizeCustomCss(theme.customCss);
-  if (theme.headerImage !== undefined) {
-    const v = String(theme.headerImage).trim();
-    if (UPLOADS_PATH_RE.test(v)) out.headerImage = v; // only same-origin uploads paths
+  // headerImage is the RENDERED crop — what the join screen, gallery hero, OG card and slideshow
+  // all read, and the only one of the three that existed before. imageOriginal is the untouched
+  // upload it was cut from, kept so the host can reframe later without finding the file again;
+  // imageCrop is where the cut was taken. All three are optional and independent: an event that
+  // predates this has only the first, and still renders exactly as it did.
+  for (const k of ['headerImage', 'imageOriginal'] as const) {
+    if (theme[k] !== undefined) {
+      const v = String(theme[k]).trim();
+      if (UPLOADS_PATH_RE.test(v)) out[k] = v; // only same-origin uploads paths
+    }
+  }
+  if (theme.imageCrop !== undefined) {
+    const c = sanitizeCrop(theme.imageCrop);
+    if (c) out.imageCrop = c;
   }
   if (typeof theme.mode === 'string' && VALID_MODES.includes(theme.mode)) out.mode = theme.mode;
   if (typeof theme.font === 'string' && VALID_FONTS.includes(theme.font)) out.font = theme.font; // must match a known stack
@@ -172,11 +254,14 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Please verify your email before creating an event', needsVerification: true });
 
   const { name, blurb: rawBlurb, durationHours, maxPhotos, revealMode, slug: rawSlug,
-          startDate, startTime, startsAt: startsAtMs, allowDownloads, noFlash,
+          startDate, startTime, startsAt: startsAtMs, allowDownloads, noFlash, heartsEnabled, commentsEnabled,
+          galleryHeartsEnabled, galleryCommentsEnabled,
           revealDelayHours, revealDate, revealTime, moderationEnabled, timezone, maxGuests, videoSeconds, eventType } = req.body as {
     name?: string; blurb?: string; durationHours?: number | string; maxPhotos?: number | string;
     revealMode?: string; slug?: string; startDate?: string; startTime?: string;
-    startsAt?: number; allowDownloads?: boolean; noFlash?: boolean; revealDelayHours?: number | string;
+    startsAt?: number; allowDownloads?: boolean; noFlash?: boolean; heartsEnabled?: boolean; commentsEnabled?: boolean;
+    galleryHeartsEnabled?: boolean; galleryCommentsEnabled?: boolean;
+    revealDelayHours?: number | string;
     revealDate?: string; revealTime?: string;
     moderationEnabled?: boolean; timezone?: string; maxGuests?: number | string; videoSeconds?: number | string;
     eventType?: string;
@@ -196,8 +281,14 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
   if (rawSlug) {
     slug = slugify(rawSlug);
     if (slug.length < 2) return res.status(400).json({ error: 'Custom URL must be at least 2 characters' });
+    if (isReservedSlug(slug)) return res.status(409).json({ error: RESERVED_SLUG_ERROR });
     if (!(await isSlugAvailable(slug))) return res.status(409).json({ error: 'That custom URL is already taken' });
   }
+
+  // The timezone is resolved BEFORE the start time, because the start time is parsed against it.
+  // It used to be resolved after, so the fallback below had nothing to parse with and fell back to
+  // the SERVER's zone — see the note there.
+  const eventTz = (typeof timezone === 'string' && timezone) ? timezone.slice(0, 64) : null;
 
   // Resolve starts_at. Prefer an explicit epoch from the client (computed in the user's
   // own timezone) so we don't reparse a bare date/time string in the server's TZ (UTC).
@@ -205,8 +296,12 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
   if (typeof startsAtMs === 'number' && startsAtMs > 0) {
     startsAt = startsAtMs;
   } else if (startDate) {
-    const parsed = new Date(`${startDate}T${startTime || '00:00'}`).getTime();
-    if (!isNaN(parsed)) startsAt = parsed;
+    // zonedWallTimeToMs, not `new Date('YYYY-MM-DDTHH:mm')` — that parses in the SERVER's zone
+    // (UTC in the container), so a Sydney planner setting a 6pm start on a Perth event got 6pm UTC:
+    // two in the morning, local. The comment above already knew this was the hazard and the
+    // fallback did it anyway. Every other wall-clock field in this file goes through this helper.
+    const parsed = zonedWallTimeToMs(startDate, startTime || '00:00', eventTz || 'UTC');
+    if (parsed !== null) startsAt = parsed;
   }
 
   const expiresAt = startsAt + parseFloat(durationHours as string) * 3_600_000;
@@ -227,7 +322,9 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
   // A 'custom' quote is a referral, not a price — see MAX_QUOTABLE_GUESTS. Refused here rather than
   // clamped, because clamping would hand somebody who asked for 600 guests a 400-guest event and
   // tell them it worked. Self-hosters (billing off) are unaffected: there is no ladder to fall off.
-  if (billingEnabled && q.tier === 'custom') return res.status(400).json({ error: CUSTOM_PLAN_ERROR });
+  // Guests are no longer the only way to fall off: an off-the-ladder durationHours or retentionDays
+  // lands here too, and the message names whichever limit it was.
+  if (billingEnabled && q.tier === 'custom') return res.status(400).json({ error: customPlanError(q) });
   // When billing is on, store the entitled config from the quote (≤10 = free with everything; 11+ paid).
   const entGuestCap = reqGuests;
   const entVideoSeconds = billingEnabled ? q.videoSeconds : reqVideo;
@@ -239,14 +336,13 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
   );
   const entPaid = billingEnabled ? !q.requiresPayment : true;
 
-  const eventTz = (typeof timezone === 'string' && timezone) ? timezone.slice(0, 64) : null;
   const purgeAt = purgeAtFor(expiresAt, entRetentionDays);
 
   // Resolved down here rather than beside the mode, because the ceiling it is checked against is
   // the purge, and the purge is not known until the retention entitlement above is.
   let revealAt: number | null = null;
   if (mode === 'at_end' && String(revealDelayHours) === REVEAL_CUSTOM) {
-    const r = resolveCustomReveal(revealDate, revealTime, eventTz, purgeAt);
+    const r = resolveCustomReveal(revealDate, revealTime, eventTz, { expiresAt, purgeAt });
     if ('error' in r) return res.status(400).json({ error: r.error });
     revealAt = r.at;
   }
@@ -316,6 +412,22 @@ router.post('/', auth.requireAuth, async (req: Request, res: Response) => {
     isLocked:        false,
     allowDownloads:  allowDownloads !== false,
     noFlash:         noFlash === true,
+    // Each defaults to the column default when the key is absent, so an older client — or any
+    // caller that has never heard of these — creates an event with hearts on and comments off,
+    // which is what the schema says and what the wizard offers.
+    heartsEnabled:   heartsEnabled !== false,
+    commentsEnabled: commentsEnabled === true,
+    // Same defaults as the guest pair, and the same shape: absent means "leave it at the default",
+    // which for a NEW event is hearts on and comments off.
+    // INHERITED from the guest settings above unless the caller says otherwise. A host who has just
+    // turned guest comments on has told us what they are comfortable with; starting their gallery
+    // link at the opposite is a contradiction they then have to go and undo. Same the other way: a
+    // host who turned hearts OFF for guests is unlikely to want them on for the link.
+    //
+    // Only the STARTING POINT is inherited. The link keeps its own pair from then on — changing the
+    // guest settings later never reaches back and rewrites a link the host has already set.
+    galleryHeartsEnabled:   galleryHeartsEnabled ?? (heartsEnabled !== false),
+    galleryCommentsEnabled: galleryCommentsEnabled ?? (commentsEnabled === true),
     theme:           null,
     timezone:        eventTz,
     aspectRatios:    JSON.stringify(entAspects),
@@ -456,6 +568,7 @@ router.post('/demo', async (_req: Request, res: Response) => {
 router.get('/check-slug/:slug', async (req: Request, res: Response) => {
   const slug = slugify(String(req.params.slug));
   if (slug.length < 2) return res.json({ available: false, reason: 'Too short' });
+  if (isReservedSlug(slug)) return res.json({ available: false, reason: 'Reserved', slug });
   res.json({ available: await isSlugAvailable(slug), slug });
 });
 
@@ -475,14 +588,17 @@ router.get('/mine', auth.requireAuth, async (req: Request, res: Response) => {
     isLocked: events.isLocked,
     createdAt: events.createdAt,
   };
+  // `created_at` alone is not a total order — a host who creates two events in the same
+  // millisecond (or from one script) gets a tie whose order is undefined and reshuffles whenever
+  // either row is updated. `events.id` last pins it, here and in the co-host query below.
   const owned = await db.select(cols).from(events)
     .where(eq(events.ownerUserId, req.user!.id))
-    .orderBy(sql`${events.createdAt} DESC`);
+    .orderBy(sql`${events.createdAt} DESC`, events.id);
   // Events this user co-hosts (accepted) but doesn't own — managed like their own, badged "co-host".
   const cohosted = await db.select(cols).from(events)
     .innerJoin(eventCohosts, eq(eventCohosts.eventId, events.id))
     .where(and(eq(eventCohosts.userId, req.user!.id), eq(eventCohosts.status, 'accepted')))
-    .orderBy(sql`${events.createdAt} DESC`);
+    .orderBy(sql`${events.createdAt} DESC`, events.id);
   const ownedSet = new Set(owned.map((e) => e.id));
   const coOnly = cohosted.filter((e) => !ownedSet.has(e.id));
   const coSet = new Set(coOnly.map((e) => e.id));
@@ -523,8 +639,33 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
   const [{ c: participantCount }] = await db.select({ c: count() }).from(participants).where(eq(participants.eventId, event.id));
   const [{ c: photoCount }] = await db.select({ c: count() }).from(photos).where(eq(photos.eventId, event.id));
 
-  const isDemoEvent = !event.ownerUserId && event.name === DEMO_NAME;
+  const isDemo = isDemoEvent(event);
+  // Does the person asking MANAGE this event — by identity, not by holding the code? The admin API
+  // has always authorised an owner or accepted co-host this way (see requireOrganizer); this simply
+  // tells the guest-facing surfaces the same thing, so the camera can offer a host a way back to
+  // their own dashboard. Identity is the whole point: being signed in as somebody ELSE must not
+  // light this up, and it does not — the check is against THIS event's owner.
+  const viewer = await auth.currentUser(req);
+  const youManage = !!viewer && (
+    (!!event.ownerUserId && viewer.id === event.ownerUserId) || await isAcceptedCohost(event.id, viewer.id)
+  );
   res.json({
+    // No organizer code travels with this — it does not need to. The host link it enables is just
+    // /admin/<code>, which the server authorises off the session cookie.
+    youManage,
+    /** Does this event belong to an ACCOUNT at all? Not who — just whether there is one. That is
+     *  the difference between "log in as the owner and you are through" and "there is no account
+     *  on this event, so the organizer code is the only key that exists" — and without it the code
+     *  wall has to give the same unhelpful answer to both. It identifies nobody: the join flow
+     *  already makes an event's existence public. */
+    hasOwner: !!event.ownerUserId,
+    // The guest-facing surfaces need to know whether to draw hearts at all. Two pairs, because the
+    // gallery LINK has its own (0064): the first pair is what a guest may do, the second what
+    // somebody holding `/gallery/<code>` may do.
+    heartsEnabled: !!event.heartsEnabled,
+    commentsEnabled: !!event.commentsEnabled,
+    galleryHeartsEnabled: !!event.galleryHeartsEnabled,
+    galleryCommentsEnabled: !!event.galleryCommentsEnabled,
     id:             event.id,
     name:           event.name,
     blurb:          event.blurb || null,
@@ -546,7 +687,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
     // the event. Sets can differ in length, so this is the first card's count, which is
     // representative rather than a promise.
     challengeCount: readSets(event.challenges)[0]?.items.length ?? 0,
-    isDemo:         isDemoEvent,
+    isDemo:         isDemo,
     // A DEMO hands out its own organizer code, and only a demo ever does.
     //
     // The demo is a tour of three surfaces, and the link between them died on the one route people
@@ -560,7 +701,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
     // returns this code for exactly this reason. So it grants nothing that was not already a
     // request away. It is gated on the SAME expression as isDemo, not a second reading of the
     // conditions, so the two cannot drift apart and start leaking a real event's code.
-    organizerCode:  isDemoEvent ? event.organizerCode : undefined,
+    organizerCode:  isDemo ? event.organizerCode : undefined,
     isUpcoming:     now < event.startsAt,
     isExpired:      now > event.expiresAt,
     // Reschedule eligibility: an event no guest ever used can be moved, even after it has
@@ -658,12 +799,14 @@ export async function requireOrganizer(req: Request, res: Response, next: NextFu
   const user = await auth.currentUser(req);
   if (user && event.ownerUserId && user.id === event.ownerUserId) {
     req.event = event;
+    req.organizerVia = 'owner';
     return next();
   }
 
   // Accepted co-hosts manage the event by identity, exactly like the owner (no organizer code).
   if (user && await isAcceptedCohost(event.id, user.id)) {
     req.event = event;
+    req.organizerVia = 'cohost';
     return next();
   }
 
@@ -676,6 +819,7 @@ export async function requireOrganizer(req: Request, res: Response, next: NextFu
   if (organizerCode !== event.organizerCode) { res.status(403).json({ error: 'Invalid organizer code' }); return; }
 
   req.event = event;
+  req.organizerVia = 'code';
   next();
 }
 
@@ -693,7 +837,15 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     requestedMoreAt: participants.requestedMoreAt,
     challengeSet: participants.challengeSet,
     wantsPhotos: participants.wantsPhotos,
-  }).from(participants).where(eq(participants.eventId, ev.id)).orderBy(participants.joinedAt);
+  // Alphabetical, matching the guest list, because this is read to FIND a person. `joinedAt` is a
+  // non-unique bigint, so it was also unstable: a tie group reshuffles when any row in it is
+  // updated (an UPDATE rewrites the tuple and a scan then returns it last). `id` last makes the
+  // order total, which is the part that actually stops the reshuffle.
+  }).from(participants).where(eq(participants.eventId, ev.id)).orderBy(
+    sql`lower(${participants.name}) asc nulls last`,
+    sql`lower(${participants.email}) asc nulls last`,
+    participants.id,
+  );
   const [{ c: photoCount }] = await db.select({ c: count() }).from(photos).where(eq(photos.eventId, ev.id));
   // "Pending" only means "needs action" when moderation is ON. With it off, pending photos are
   // already live, so there's nothing awaiting approval — report 0 so the UI doesn't nag.
@@ -719,10 +871,15 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     const offeredBySet = new Map<string, Set<string>>();
     for (const set of readSets(ev.challenges)) offeredBySet.set(set.key, new Set(set.items.map((i) => i.id)));
     const firstSet = readSets(ev.challenges)[0];
+    // GROUPED, not row by row. This pulled EVERY photo in the event to JS to build a
+    // Map<participant, Set<challenge>> — 14,000 rows over the wire, on a page that refreshes itself
+    // every 30 seconds. The answer it builds is bounded by participants x challenges (say 400 x 20),
+    // not by how many photos were taken, and `idx_photos_challenge` serves the group directly.
     const doneRows = await db
       .select({ participantId: photos.participantId, challengeId: photos.challengeId })
       .from(photos)
-      .where(and(eq(photos.eventId, ev.id), isNotNull(photos.challengeId)));
+      .where(and(eq(photos.eventId, ev.id), isNotNull(photos.challengeId)))
+      .groupBy(photos.participantId, photos.challengeId);
     const seen = new Map<string, Set<string>>();   // participant → distinct challenge ids
     for (const r of doneRows) {
       if (!r.challengeId) continue;
@@ -781,6 +938,21 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     // Guests who asked for more. Shown on the host's own pages, never pushed at them mid-event.
     upgradeRequests:   participantRows.filter((r) => !!(r as { requestedMoreAt?: number | null }).requestedMoreAt).length,
     noFlash:        !!ev.noFlash,
+    heartsEnabled:  !!ev.heartsEnabled,
+    commentsEnabled: !!ev.commentsEnabled,
+    galleryHeartsEnabled: !!ev.galleryHeartsEnabled,
+    galleryCommentsEnabled: !!ev.galleryCommentsEnabled,
+    /** The organizer code — returned to the OWNER only, so they can hand admin access to somebody
+     *  without an account. Every real event has an owner (anonymous creation is demo-only), which
+     *  means the code is a convenience rather than the key to anything: the owner always gets in by
+     *  logging in. But it was unobtainable — minted at creation, dropped into one URL, and never
+     *  shown again — so an owner who wanted to delegate had nothing to send.
+     *
+     *  NOT for a co-host. They already manage by identity, and this code outlives their removal: a
+     *  co-host you take off the event would keep a working key. Withholding it costs them nothing
+     *  and closes that. Somebody who authorised WITH the code obviously has it already. */
+    organizerCode: (req.organizerVia === 'owner' || req.organizerVia === 'code')
+      ? ev.organizerCode : undefined,
     theme:          ev.theme ? JSON.parse(ev.theme) : null,
     // entitlement (for the upgrades section; only meaningful when billing is on)
     guestCap:       ev.guestCap,
@@ -836,10 +1008,20 @@ router.post('/:joinCode/highlights', requireOrganizer, async (req: Request, res:
 
   // Favourite == rating 5; keep both in sync so the two curation surfaces never disagree.
   // NOTE: featuring does NOT change moderation status — approve is a separate, explicit action.
-  await db.update(photos)
+  //
+  // REPORT THE WRITE, NOT THE REQUEST. `photoIds` is host input — ids from a gallery tab left open
+  // since before a purge, ids belonging to a different event, ids of photos a guest has deleted.
+  // The event-scoped WHERE drops every one of those silently, and echoing `photoIds.length` told
+  // the host "3 starred" when the answer was 0. A host who is given the right number never looks
+  // again, so a wrong one is not a cosmetic defect: it is the end of the investigation.
+  //
+  // `.returning()` rather than the driver's rowCount, for the reason routes/participants.ts gives:
+  // it is the portable answer across drivers, and it cannot read `undefined` as zero.
+  const starred = await db.update(photos)
     .set({ isHighlighted: !!highlight, rating: highlight ? 5 : 0 })
-    .where(and(inArray(photos.id, photoIds), eq(photos.eventId, req.event!.id)));
-  res.json({ success: true, highlightCount: photoIds.length, highlight: !!highlight });
+    .where(and(inArray(photos.id, photoIds), eq(photos.eventId, req.event!.id)))
+    .returning({ id: photos.id });
+  res.json({ success: true, highlightCount: starred.length, highlight: !!highlight });
 });
 
 // ── PUT /api/events/:joinCode/challenges — save the photo missions + event type ──
@@ -857,13 +1039,64 @@ router.put('/:joinCode/challenges', requireOrganizer, async (req: Request, res: 
   if (sets === null) return res.status(400).json({ error: 'challenges must be a list, or {sets:[…]}' });
   const tick = parseTick(body.tick);
   const blob = serialiseSets(sets, tick);
+  // serialiseSets returns null for TWO unrelated reasons: an empty list, which legitimately stores
+  // null, and a list too large to store. Writing the second one wiped the host's trick list and
+  // then answered `success: true` with the full list echoed back from what was PARSED — so the
+  // screen showed the lists they had just lost, and nothing anywhere said so. Refused instead.
+  if (sets.length && blob === null) {
+    return res.status(413).json({
+      error: 'That trick list is too long to save. Shorten a few of the lines, or remove some, and try again.',
+    });
+  }
   await db.update(events)
-    .set({ eventType: parseEventType(body.eventType), challenges: blob })
+    // nextEventType, not parseEventType: an ABSENT key must leave the setting alone, and
+    // parseEventType turns undefined into null — so a client that did not mention eventType wiped
+    // it. PUT /settings was given this helper in this release for exactly that reason; this is the
+    // other endpoint writing the same column, and it was still doing the old thing.
+    .set({ eventType: nextEventType(body.eventType, req.event!.eventType), challenges: blob })
     .where(eq(events.id, req.event!.id));
+
+  // ── Guests whose card this save just deleted ────────────────────────────────
+  //
+  // Without this the deletion is silent and total for them: every read falls through setByKey's
+  // `?? sets[0]` to somebody else's card, their ticks read zero, the captions on photos they have
+  // already taken resolve to nothing, and their source is 'self'/'qr' so the "which card are you?"
+  // question never comes back. They are simply moved to card A and told nothing.
+  //
+  // Done here rather than in the read path on purpose. A read has to answer with SOMETHING and
+  // cannot durably change anything; this is the one moment the set of valid keys actually changes,
+  // and the one place a decision about it belongs. reseatParticipant() carries the rules.
+  const holders = await db.select({ id: participants.id, challengeSet: participants.challengeSet })
+    .from(participants).where(eq(participants.eventId, req.event!.id));
+  // Grouped by the state they are moving TO, so a 200-guest event costs at most a couple of
+  // statements rather than one per guest inside a request the host is waiting on. There are only
+  // ever two distinct targets — the first remaining card, or no card at all.
+  const moves = new Map<string, { key: string | null; source: string | null; ids: string[] }>();
+  for (const h of holders) {
+    const next = reseatParticipant(sets, { key: h.challengeSet });
+    if (!next) continue;
+    const k = `${next.key}|${next.source}`;
+    const m = moves.get(k) ?? { key: next.key, source: next.source, ids: [] };
+    m.ids.push(h.id);
+    moves.set(k, m);
+  }
+  let reseated = 0;
+  for (const m of moves.values()) {
+    const movedGuests = await db.update(participants)
+      .set({ challengeSet: m.key, challengeSetSource: m.source })
+      .where(inArray(participants.id, m.ids))
+      .returning({ id: participants.id });
+    // The write's own answer, for the same reason as /moderate and /highlights: a guest removed
+    // between the read above and this update is not a guest who was reseated.
+    reseated += movedGuests.length;
+  }
+
   // Echo what was STORED, so a host whose malformed entry was dropped finds out now rather than on
   // the printed card. serialiseSets returns null when there are no usable sets, and the tick lives
   // INSIDE that blob — so echoing the parsed tick there would report a glyph that was never saved.
-  res.json({ success: true, sets, tick: blob ? tick : null, max: MAX_CHALLENGES, maxSets: MAX_SETS });
+  // `reseated` is how many guests will be asked which card they are holding when they next open the
+  // camera — worth saying out loud to a host who has just deleted one.
+  res.json({ success: true, sets, tick: blob ? tick : null, reseated, max: MAX_CHALLENGES, maxSets: MAX_SETS });
 });
 
 // The poster designer's saved settings. This is NOT a budget the host spends — every text field in
@@ -994,51 +1227,123 @@ const sharePhotoCount = (photoIds: string | null): number | null => {
 };
 
 router.post('/:joinCode/shares', requireOrganizer, async (req: Request, res: Response) => {
-  const body = req.body as { kind?: string; photoIds?: unknown; label?: string };
+  const body = req.body as { kind?: string; photoIds?: unknown; label?: string;
+                             heartsEnabled?: boolean; commentsEnabled?: boolean };
+  // Only an explicit boolean counts as an instruction — `undefined` means "the caller didn't ask",
+  // which must not quietly switch a link's reactions off.
+  const flags: { heartsEnabled?: boolean; commentsEnabled?: boolean } = {};
+  if (typeof body.heartsEnabled === 'boolean') flags.heartsEnabled = body.heartsEnabled;
+  if (typeof body.commentsEnabled === 'boolean') flags.commentsEnabled = body.commentsEnabled;
+  // Not told? Start where the EVENT is. A fixed default is a guess about a host we already know
+  // something about: if they left guest comments off, a new link defaulting them on is the wrong
+  // guess, and the same in reverse. The schema defaults stay as the backstop for any row written
+  // without going through here.
+  //
+  // Read from the event as it is NOW, not as it was when it was created — the host may well have
+  // changed their mind since, and the most recent decision is the better guess.
+  if (flags.heartsEnabled === undefined) flags.heartsEnabled = !!req.event!.heartsEnabled;
+  if (flags.commentsEnabled === undefined) flags.commentsEnabled = !!req.event!.commentsEnabled;
   const kind = body.kind === 'favourites' ? 'favourites' : body.kind === 'selected' ? 'selected' : 'all';
   const ids = kind === 'selected' && Array.isArray(body.photoIds) ? body.photoIds.map(String).filter(Boolean).slice(0, 2000) : null;
   if (kind === 'selected' && (!ids || !ids.length)) return res.status(400).json({ error: 'Select at least one photo to share' });
   // Normalise the photo set (sorted) so the SAME selection always produces the same stored value —
   // lets us reuse one "smart link" per identical content instead of minting a new one each time.
   const photoIds = ids ? JSON.stringify([...ids].sort()) : null;
-  const ret = (s: { id: string; slug: string | null; label: string | null; kind: string }) =>
-    res.json({ token: s.id, slug: s.slug, label: s.label, kind: s.kind, url: `${baseUrl(req)}/s/${s.slug || s.id}` });
+  const ret = (s: { id: string; slug: string | null; label: string | null; kind: string;
+                    heartsEnabled?: boolean; commentsEnabled?: boolean }) =>
+    res.json({ token: s.id, slug: s.slug, label: s.label, kind: s.kind,
+               heartsEnabled: !!s.heartsEnabled, commentsEnabled: !!s.commentsEnabled,
+               url: `${baseUrl(req)}/s/${s.slug || s.id}` });
 
   // Reuse an existing share for the same content (whole gallery / favourites / this exact selection).
   const existing = (await db.select().from(shares).where(and(eq(shares.eventId, req.event!.id), eq(shares.kind, kind))))
     .find((s) => kind !== 'selected' || (s.photoIds || null) === photoIds);
-  if (existing) return ret(existing);
+  if (existing) {
+    // Reuse hands back the SAME link, so the switches the host EXPLICITLY set have to land on it —
+    // else the dialog would show hearts on and the link they copied would have them off. But an
+    // INHERITED default must not: that would quietly rewrite a link the host had already tuned,
+    // just because they pressed Share again.
+    const asked: typeof flags = {};
+    if (typeof body.heartsEnabled === 'boolean') asked.heartsEnabled = body.heartsEnabled;
+    if (typeof body.commentsEnabled === 'boolean') asked.commentsEnabled = body.commentsEnabled;
+    if (Object.keys(asked).length) {
+      await db.update(shares).set(asked).where(eq(shares.id, existing.id));
+      return ret({ ...existing, ...asked });
+    }
+    return ret(existing);
+  }
 
   // No pretty slug by default — the link uses the unique token (/s/<token>). The owner can claim a
   // named /s/<custom> URL later from the share modal; this avoids burning nice slugs nobody asked for.
   const label = (typeof body.label === 'string' && body.label.trim()) ? body.label.trim().slice(0, 80) : shareDefaultLabel(req.event!.name, kind, ids?.length || 0);
   const token = uuidv4().replace(/-/g, '');
-  await db.insert(shares).values({ id: token, eventId: req.event!.id, kind, photoIds, label, slug: null, createdAt: Date.now() });
-  ret({ id: token, slug: null, label, kind });
+  await db.insert(shares).values({ id: token, eventId: req.event!.id, kind, photoIds, label, slug: null,
+                                  ...flags, createdAt: Date.now() });
+  ret({ id: token, slug: null, label, kind, ...flags });
 });
 
 // List every share for the event (so the owner can copy / rename / delete them).
 router.get('/:joinCode/shares', requireOrganizer, async (req: Request, res: Response) => {
-  const rows = await db.select().from(shares).where(eq(shares.eventId, req.event!.id)).orderBy(desc(shares.createdAt));
+  // `shares.id` last: two shares created in the same millisecond otherwise swap places between
+  // refreshes, which is a list of links the owner is copying out of.
+  const rows = await db.select().from(shares).where(eq(shares.eventId, req.event!.id))
+    .orderBy(desc(shares.createdAt), asc(shares.id));
   res.json({ shares: rows.map((s) => ({
     id: s.id, kind: s.kind, slug: s.slug,
     label: s.label || shareDefaultLabel(req.event!.name, s.kind, sharePhotoCount(s.photoIds) || 0),
     count: sharePhotoCount(s.photoIds),
+    heartsEnabled: !!s.heartsEnabled, commentsEnabled: !!s.commentsEnabled,
     url: `${baseUrl(req)}/s/${s.slug || s.id}`, createdAt: s.createdAt,
   })) });
 });
 
 // Rename a share (label) and/or change its custom URL (slug) — so the same link keeps working.
+// Is this custom URL free? The same three rules the PATCH below enforces, asked BEFORE saving.
+//
+// Without it the share modal could only find out by trying: you typed a name, pressed Save, and got
+// a 409 back — while the event's own Custom URL field had said "✓ Available" as you typed since it
+// was written. Two fields doing the same job on the same screen, answering at different moments.
+//
+// `?id=` is the share being edited, so its OWN slug reads as available rather than as taken by
+// itself — the same trap the event field has a branch for.
+/** A share id is 32 lowercase hex and slugify() leaves it untouched, so without this a host could
+ *  name their share after somebody else's token — `/s/<their-token>` would then be ambiguous, and
+ *  which one a visitor landed on would depend on row order. Refused at the point of claiming it;
+ *  resolveShare() also prefers the id, so neither half stands alone. */
+const LOOKS_LIKE_SHARE_ID = /^[0-9a-f]{32}$/;
+
+router.get('/:joinCode/shares/check-slug/:slug', requireOrganizer, async (req: Request, res: Response) => {
+  const desired = slugify(String(req.params.slug || '')).slice(0, 60);
+  const exclude = typeof req.query.id === 'string' ? req.query.id : '';
+  if (desired.length < 2) return res.json({ available: false, slug: desired, reason: 'Too short' });
+  if (isReservedSlug(desired)) return res.json({ available: false, slug: desired, reason: 'Reserved' });
+  if (LOOKS_LIKE_SHARE_ID.test(desired)) return res.json({ available: false, slug: desired, reason: 'Reserved' });
+  const [clash] = await db.select({ id: shares.id }).from(shares).where(eq(shares.slug, desired));
+  res.json({ available: !clash || clash.id === exclude, slug: desired });
+});
+
 router.patch('/:joinCode/shares/:id', requireOrganizer, async (req: Request, res: Response) => {
-  const { label, slug } = req.body as { label?: string; slug?: string };
+  const { label, slug, heartsEnabled, commentsEnabled } =
+    req.body as { label?: string; slug?: string; heartsEnabled?: boolean; commentsEnabled?: boolean };
   const [row] = await db.select().from(shares).where(and(eq(shares.id, String(req.params.id)), eq(shares.eventId, req.event!.id)));
   if (!row) return res.status(404).json({ error: 'Share not found' });
-  const patch: { label?: string; slug?: string } = {};
+  const patch: { label?: string; slug?: string; heartsEnabled?: boolean; commentsEnabled?: boolean } = {};
+  // Switchable after the fact, and after the link has gone out: a host who finds a gallery filling
+  // with comments they did not want needs one switch, not a new link and a round of apologies.
+  // Existing hearts and comments are KEPT — turning the switch back on restores them rather than
+  // making everybody type again.
+  if (typeof heartsEnabled === 'boolean') patch.heartsEnabled = heartsEnabled;
+  if (typeof commentsEnabled === 'boolean') patch.commentsEnabled = commentsEnabled;
   if (typeof label === 'string' && label.trim()) patch.label = label.trim().slice(0, 80);
   if (typeof slug === 'string' && slug.trim()) {
     const desired = slugify(slug).slice(0, 60);
     if (desired.length < 2) return res.status(400).json({ error: 'Custom URL must be at least 2 characters' });
+    if (LOOKS_LIKE_SHARE_ID.test(desired)) return res.status(409).json({ error: 'That custom URL is already taken' });
     if (desired !== row.slug) {
+      // /s/<slug> is a second slug namespace with its own uniqueness check, so it needs the
+      // reserved list too — `snapdini.com/s/billing` borrows exactly as much authority as
+      // `/e/billing`. This was nearly missed: share slugs never touch isSlugAvailable().
+      if (isReservedSlug(desired)) return res.status(409).json({ error: RESERVED_SLUG_ERROR });
       const [clash] = await db.select({ id: shares.id }).from(shares).where(eq(shares.slug, desired));
       if (clash && clash.id !== row.id) return res.status(409).json({ error: 'That custom URL is already taken' });
       patch.slug = desired;
@@ -1046,7 +1351,136 @@ router.patch('/:joinCode/shares/:id', requireOrganizer, async (req: Request, res
   }
   if (Object.keys(patch).length) await db.update(shares).set(patch).where(eq(shares.id, row.id));
   const finalSlug = patch.slug ?? row.slug;
-  res.json({ ok: true, slug: finalSlug, label: patch.label ?? row.label, url: `${baseUrl(req)}/s/${finalSlug || row.id}` });
+  res.json({ ok: true, slug: finalSlug, label: patch.label ?? row.label,
+             heartsEnabled: patch.heartsEnabled ?? row.heartsEnabled,
+             commentsEnabled: patch.commentsEnabled ?? row.commentsEnabled,
+             url: `${baseUrl(req)}/s/${finalSlug || row.id}` });
+});
+
+// ── GET /api/events/:joinCode/words — everything anybody wrote, in one place ──
+//
+// Captions and comments are two different things with the same problem: once an event is running,
+// the host has no single place to read what has been written on their photos. The caption editor
+// only ever opened one photo at a time, and comments — which can now come from share-link visitors
+// as well as guests — had no host-facing surface at all.
+//
+// So: one list, newest first, every written line in the event with the photo it sits on. Deleting
+// is done through the endpoints that already own each kind (clear the caption, delete the comment),
+// because both already take the organizer code and both already do the right thing.
+//
+// Capped rather than paged. This is a moderation feed, not an archive: a host is looking for the
+// thing somebody just wrote, and a 14,000-line scroll is not where they will find it. The total is
+// reported so a capped list says so.
+const WORDS_MAX = 300;
+
+// ── PATCH /api/events/:joinCode/gallery-link — what the gallery link lets people do ──
+//
+// Its own endpoint rather than two more fields on the settings form, and deliberately so: that one
+// is a full-form PUT which reads a fixed set of keys and writes all of them, so a partial save
+// there would quietly clear whatever it did not mention. This touches exactly two columns.
+//
+// They are NOT the event's `hearts_enabled` / `comments_enabled`. Those say what a GUEST may do;
+// these say what somebody holding `/gallery/<code>` may do — a different audience, and a host is
+// entitled to a different answer for each. See 0064.
+router.patch('/:joinCode/gallery-link', requireOrganizer, async (req: Request, res: Response) => {
+  const { galleryHeartsEnabled, galleryCommentsEnabled } =
+    req.body as { galleryHeartsEnabled?: boolean; galleryCommentsEnabled?: boolean };
+  const patch: { galleryHeartsEnabled?: boolean; galleryCommentsEnabled?: boolean } = {};
+  // Only an explicit boolean counts as an instruction — `undefined` means the caller did not ask.
+  if (typeof galleryHeartsEnabled === 'boolean') patch.galleryHeartsEnabled = galleryHeartsEnabled;
+  if (typeof galleryCommentsEnabled === 'boolean') patch.galleryCommentsEnabled = galleryCommentsEnabled;
+  if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to change' });
+
+  // Switching one off HIDES what is there rather than deleting it: turn it back on and the hearts
+  // and words come back, instead of everybody having to start again.
+  await db.update(events).set(patch).where(eq(events.id, req.event!.id));
+  const [row] = await db.select({
+    h: events.galleryHeartsEnabled, c: events.galleryCommentsEnabled,
+  }).from(events).where(eq(events.id, req.event!.id));
+  res.json({ ok: true, galleryHeartsEnabled: !!row.h, galleryCommentsEnabled: !!row.c });
+});
+
+router.get('/:joinCode/words', requireOrganizer, async (req: Request, res: Response) => {
+  const eventId = req.event!.id;
+  const kind = req.query.kind === 'captions' ? 'captions' : req.query.kind === 'comments' ? 'comments' : 'all';
+
+  type Word = {
+    kind: 'caption' | 'comment'; id: string; photoId: string; thumbUrl: string;
+    text: string; author: string; authorKind: 'guest' | 'visitor' | 'host'; createdAt: number;
+    status: string;
+    /** Hearts on the COMMENT itself — always 0 for a caption, which nobody can heart. */
+    hearts: number;
+  };
+  const out: Word[] = [];
+  let captionTotal = 0;
+  let commentTotal = 0;
+
+  if (kind !== 'comments') {
+    // A caption belongs to the photo, so its "id" IS the photo id — clearing it is a caption save
+    // with an empty string, which is exactly what the host's own caption editor already does.
+    const [{ n }] = await db.select({ n: count() }).from(photos)
+      .where(and(eq(photos.eventId, eventId), isNotNull(photos.caption), sql`${photos.caption} <> ''`));
+    captionTotal = Number(n);
+    const rows = await db
+      .select({ id: photos.id, filename: photos.filename, caption: photos.caption,
+                takenAt: photos.takenAt, status: photos.status, author: participants.name })
+      .from(photos)
+      .innerJoin(participants, eq(participants.id, photos.participantId))
+      .where(and(eq(photos.eventId, eventId), isNotNull(photos.caption), sql`${photos.caption} <> ''`))
+      .orderBy(desc(photos.takenAt), asc(photos.id))
+      .limit(WORDS_MAX);
+    for (const r of rows) {
+      out.push({ kind: 'caption', id: r.id, photoId: r.id, thumbUrl: `/uploads/${thumbName(r.filename)}`,
+                 text: r.caption || '', author: r.author, authorKind: 'guest',
+                 createdAt: r.takenAt, status: r.status, hearts: 0 });
+    }
+  }
+
+  if (kind !== 'captions') {
+    const [{ n }] = await db.select({ n: count() }).from(photoComments)
+      .where(eq(photoComments.eventId, eventId));
+    commentTotal = Number(n);
+    const rows = await db
+      .select({ id: photoComments.id, photoId: photoComments.photoId, body: photoComments.body,
+                createdAt: photoComments.createdAt, filename: photos.filename, status: photos.status,
+                guest: participants.name, visitor: shareVisitors.name })
+      .from(photoComments)
+      .innerJoin(photos, eq(photos.id, photoComments.photoId))
+      // LEFT joins, plural: a comment has one author but two possible KINDS of author since 0061 —
+      // a participant, or somebody who only ever held a share link. An inner join on either would
+      // silently hide the other kind from the host, which is the opposite of moderation.
+      .leftJoin(participants, eq(participants.id, photoComments.participantId))
+      .leftJoin(shareVisitors, eq(shareVisitors.id, photoComments.visitorId))
+      .where(eq(photoComments.eventId, eventId))
+      .orderBy(desc(photoComments.createdAt), asc(photoComments.id))
+      .limit(WORDS_MAX);
+    // One grouped query for the page, so the host can see what landed well.
+    const cIds = rows.map((r) => r.id);
+    const hearts = cIds.length ? await db
+      .select({ commentId: commentHearts.commentId, n: count() })
+      .from(commentHearts).where(inArray(commentHearts.commentId, cIds))
+      .groupBy(commentHearts.commentId) : [];
+    const heartBy = new Map(hearts.map((h) => [h.commentId, Number(h.n)]));
+    for (const r of rows) {
+      out.push({ kind: 'comment', id: r.id, photoId: r.photoId, thumbUrl: `/uploads/${thumbName(r.filename)}`,
+                 hearts: heartBy.get(r.id) ?? 0,
+                 text: r.body, author: r.guest || r.visitor || 'Someone',
+                 // Said plainly, because it changes how a host reads the line: a name typed into a
+                 // forwarded link is not the same claim as a guest who joined the event.
+                 authorKind: r.guest ? 'guest' : 'visitor',
+                 createdAt: r.createdAt, status: r.status });
+    }
+  }
+
+  // One list in one order. Two lists side by side would make the host read both to find the thing
+  // somebody wrote a minute ago.
+  out.sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? -1 : 1));
+  res.json({
+    words: out.slice(0, WORDS_MAX),
+    captionTotal, commentTotal,
+    total: captionTotal + commentTotal,
+    capped: out.length > WORDS_MAX || captionTotal + commentTotal > WORDS_MAX,
+  });
 });
 
 router.delete('/:joinCode/shares/:id', requireOrganizer, async (req: Request, res: Response) => {
@@ -1091,7 +1525,15 @@ function parseAddresses(raw: unknown): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const e of Array.isArray(raw) ? raw : []) {
-    const addr = String(e).trim();
+    // The trailing dot goes HERE, at the boundary, so nothing downstream has to know about it.
+    //
+    // normaliseAddress() strips one because a transport can report `user@x.com.` back in a webhook,
+    // and 0052's unique index is on `lower(btrim(email))`, which does not. For an address a host
+    // actually typed with a trailing dot the two therefore key it differently, and the resend DELETE
+    // could not find the row it was trying to clear. Removing it on the way in means the stored
+    // value, the index and every reader agree by construction — no second expression to keep in
+    // step, and no migration. Case is left alone: the host still sees the address as they wrote it.
+    const addr = String(e).trim().replace(/\.+$/, '');
     if (!isEmail(addr)) continue;
     const key = addr.toLowerCase();
     if (seen.has(key)) continue;
@@ -1100,6 +1542,12 @@ function parseAddresses(raw: unknown): string[] {
   }
   return out;
 }
+
+/** How many addresses ONE press of Send may mail. Named rather than a bare 200 in the middle of the
+ *  handler, because the number has to appear in the response too — a cap the caller cannot see is a
+ *  cap the caller silently violates. Matches MAX_PER_SEND in routes/guests.ts: the two blasts hold a
+ *  connection open the same way and there is no reason for them to disagree. */
+const MAX_PER_BLAST = MAIL_BATCH_SIZE;
 
 router.post('/:joinCode/email-link', requireOrganizer, async (req: Request, res: Response) => {
   if (!email.enabled) return res.status(503).json({ error: 'Email not configured on this server' });
@@ -1125,27 +1573,21 @@ router.post('/:joinCode/email-link', requireOrganizer, async (req: Request, res:
   const linkUrl  = share ? `${base}/s/${share.slug || share.id}` : base + galPath;
   const joinPath = ev.slug ? `/e/${ev.slug}` : `/join/${ev.joinCode}`;
   const joinUrl  = base + joinPath;
-  const safeName = escapeHtml(ev.name);   // organizer-controlled → escape in outbound HTML
-  // The host's own name for the share, when they gave it one. It is their words in an email that
-  // carries our branding, so it is escaped like any other organizer-controlled string.
-  const shareLabel = share?.label ? escapeHtml(share.label) : '';
-
-  const subject = share
-    ? `${share.label || 'Photos'} from ${ev.name} 📷`
-    : `Gallery from ${ev.name} 📷`;
-
-  // A curated share is a selection someone chose to send, so the email says so and does NOT carry
-  // the join code — that invites people into the event itself, which is the opposite of the point
-  // of handing out a narrowed link.
-  const body_html = share
-    ? `
-      <p>${shareLabel ? `<strong>${shareLabel}</strong> from ` : 'Photos from '}${safeName} are ready to view.</p>
-      <p style="margin:24px 0"><a href="${linkUrl}" class="btn">View photos →</a></p>`
-    : `
-      <p>The event gallery is ready to view.</p>
-      <p style="margin:24px 0"><a href="${linkUrl}" class="btn">View Gallery →</a></p>
-      <p>Or share the event and join code <strong>${escapeHtml(ev.joinCode)}</strong> at:<br>
-      <a href="${joinUrl}">${joinUrl}</a></p>`;
+  // The message itself is inline-emails.ts galleryLinkEmail() — the same builder the email sampler
+  // renders, so the two cannot drift. It takes the RAW event name and the RAW share label: it needs
+  // them raw for the Subject: header and the text part, and escaped for the <h2> and the body, and
+  // it is the only place that knows which is which. A curated share is a selection someone chose to
+  // send, so it does NOT carry the join code — that invites people into the event itself, which is
+  // the opposite of the point of handing out a narrowed link.
+  const message = galleryLinkEmail({
+    eventName: ev.name,
+    shareLabel: share?.label || null,
+    isShare: !!share,
+    linkUrl,
+    joinUrl: share ? undefined : joinUrl,
+    joinCode: share ? undefined : ev.joinCode,
+  });
+  const subject = message.subject;
 
   // Two presses of Send used to be two identical emails to everyone: the address list was deduped
   // within the request and nothing looked at what had already gone out. share_sends is that record,
@@ -1158,29 +1600,114 @@ router.post('/:joinCode/email-link', requireOrganizer, async (req: Request, res:
   // A ledger we cannot READ must not block a send the host asked for: the worst case there is the
   // duplicate this guard exists to avoid, which is a smaller failure than a link nobody gets.
   const resend = (req.body as { resend?: unknown }).resend === true;
+  const scope = share ? eq(shareSends.shareId, share.id) : isNull(shareSends.shareId);
   let alreadySent = new Set<string>();
   if (!resend) {
     try {
       const prior = await db.select({ email: shareSends.email }).from(shareSends).where(and(
-        eq(shareSends.eventId, ev.id),
-        share ? eq(shareSends.shareId, share.id) : isNull(shareSends.shareId),
-        eq(shareSends.ok, true),
+        eq(shareSends.eventId, ev.id), scope, eq(shareSends.ok, true),
       ));
-      alreadySent = new Set(prior.map((r) => (r.email || '').trim().toLowerCase()));
+      alreadySent = new Set(prior.map((r) => normaliseAddress(r.email || '')));
     } catch (e) { console.error('[email-link] could not read prior sends', e); }
   }
 
   const now = Date.now();
-  const rows: (typeof shareSends.$inferInsert)[] = [];
   let sent = 0, errors = 0, skipped = 0;
-  for (const addr of list.slice(0, 200)) {
-    if (alreadySent.has(addr.toLowerCase())) { skipped++; continue; }
-    let ok = true;
+  const batch = list.slice(0, MAX_PER_BLAST);
+  // WHAT WAS NOT EVEN TRIED. This slice has been here since 1.4.3 and nothing reported it: a host
+  // pasting 250 addresses was answered `{ sent: 200, errors: 0, skipped: 0 }` — a response in which
+  // every number is correct and the sum is a lie, because fifty people were never considered at
+  // all. `skipped` cannot carry them: it means "not mailed, and here is why", and these have no why
+  // — they were past the end of the batch. So they get their own number, and the host can press
+  // again: the ledger read above means the ones that DID go are not sent twice, so a second press
+  // reaches exactly the remainder.
+  const notSent = list.length - batch.length;
+
+  // A claim row is written `ok: true` BEFORE the send, so anything that is not a delivery has to
+  // correct it. `ok: false` is the row the host most needs to see in their sends list: under 0052
+  // that row is the address's ONE row, so a send that did not happen must not be left claiming it
+  // did — both the guard above and guest-delivery's priorLinkAddresses count `ok` rows only, and
+  // would otherwise treat a failure as delivered.
+  //
+  // It does NOT block a retry. The claim below reclaims a failed row rather than conflicting with
+  // it — which it did not used to do, and a transient SMTP 4xx therefore locked the address out of
+  // every future press.
+  //
+  // A failed correction is logged and nothing more: by here the mail has either gone or been
+  // refused, and turning that into a 500 would lose the addresses that DID go out in the same press.
+  const markNotSent = async (id: string | null) => {
+    if (!id) return;
+    try { await db.update(shareSends).set({ ok: false }).where(eq(shareSends.id, id)); }
+    catch (e) { console.error('[email-link] could not record a send that did not go out', e); }
+  };
+
+  // A resend is the host asking to mail an address the ledger says has already had this link, and
+  // the ledger now holds ONE row per address per link (0052) — so the old row has to go before the
+  // new attempt can claim its place. Cleared in one statement for the whole batch rather than per
+  // address: it is one round trip, and this is the only place the rows are ever removed.
+  if (resend) {
     try {
-      await email.sendMail({
+      await db.delete(shareSends).where(and(
+        eq(shareSends.eventId, ev.id), scope,
+        inArray(sql`lower(btrim(${shareSends.email}))`, batch.map(normaliseAddress)),
+      ));
+    } catch (e) { console.error('[email-link] could not clear prior sends for a resend', e); }
+  }
+
+  for (const addr of batch) {
+    if (alreadySent.has(normaliseAddress(addr))) { skipped++; continue; }
+
+    // CLAIM THE ADDRESS BEFORE SENDING, so the ledger decides rather than a read taken moments
+    // ago. The read above is a snapshot: two presses of Send both saw an empty set, both sent, and
+    // both wrote a row — and the automatic guest delivery reads the same table, so a host pressing
+    // Send while that sweep is running was the same race with nobody touching the button twice.
+    // With the unique index in place, ON CONFLICT DO NOTHING means exactly one of the racers gets
+    // a row back and only that one goes on to send.
+    //
+    // A claim that THROWS (as opposed to conflicting) is a broken database, not a prior send, and
+    // must not silence the host's send — same judgement as the failed read above: the worst case is
+    // the duplicate this guard exists to avoid, which is smaller than a link nobody gets.
+    const row = { id: uuidv4(), eventId: ev.id, shareId: share?.id ?? null, email: addr, ok: true, sentAt: now };
+    let claimId: string | null = row.id;
+    try {
+      // RECLAIM A FAILED ROW FIRST.
+      //
+      // markNotSent() leaves the row in place with ok:false, and the comment above this block used
+      // to say that is "what keeps this address mailable: both readers count ok rows only". There
+      // are THREE readers, not two — this claim is the third, and it did not filter on ok. 0052's
+      // unique index is on (event_id, lower(btrim(email))) with no ok in it, so the failed row still
+      // occupied the slot: the next press passed the alreadySent guard (ok-only), conflicted here,
+      // and counted the address as skipped without ever calling sendMail. Permanently, for a
+      // transient SMTP 4xx. The `resend: true` escape hatch does work but nothing in the client ever
+      // sends it, so a host had no way out at all.
+      const [reclaimed] = await db.update(shareSends)
+        .set({ ok: true, sentAt: now, shareId: row.shareId })
+        .where(and(
+          eq(shareSends.eventId, ev.id), scope,
+          sql`lower(btrim(${shareSends.email})) = ${normaliseAddress(addr)}`,
+          eq(shareSends.ok, false),
+        ))
+        .returning({ id: shareSends.id });
+      if (reclaimed) {
+        claimId = reclaimed.id;
+      } else {
+        // No failed row to take over, so this is a fresh claim. ON CONFLICT DO NOTHING still settles
+        // the race between two presses: exactly one gets a row back and only that one sends.
+        const [claimed] = await db.insert(shareSends).values(row)
+          .onConflictDoNothing().returning({ id: shareSends.id });
+        if (!claimed) { skipped++; continue; }
+      }
+    } catch (e) {
+      console.error('[email-link] could not claim a send; sending anyway', e);
+      claimId = null;
+    }
+
+    try {
+      const r = await email.sendMail({
         to: addr,
         subject,
-        html: email.htmlEmail(share ? `${share.label || 'Photos'} from ${safeName}` : `Gallery from ${safeName}`, body_html),
+        html: message.html,
+        text: message.text,
         // Without this the suppression check runs as blocksFor('') and sees only the GLOBAL list,
         // so a guest who chose "stop emailing me about this event" on the preference centre still
         // got the gallery link — the narrower of the two opt-outs was the one that did nothing, and
@@ -1188,28 +1715,42 @@ router.post('/:joinCode/email-link', requireOrganizer, async (req: Request, res:
         // if the send says which event it is.
         eventId: ev.id,
       });
-      sent++;
-    } catch { ok = false; errors++; }
-    rows.push({ id: uuidv4(), eventId: ev.id, shareId: share?.id ?? null, email: addr, ok, sentAt: now });
+      // WITHHELD IS NOT DELIVERED. sendMail RETURNS `{ suppressed: true }` rather than throwing
+      // when the address has opted out — deliberately, so a caller can record the truth instead of
+      // retrying a refusal for ever (email.ts SendResult). This loop discarded that return and ran
+      // `sent++` anyway: the host was shown a delivery that never happened, and the claim row above
+      // said `ok: true` about a link the guest does not hold. Under 0052 that is the address's only
+      // row, so the false `ok: true` would go on to refuse them the real link once their
+      // suppression is lifted — the exact failure guest-delivery.ts's sendToGuest() was written to
+      // stop, on the path it was never carried across to.
+      //
+      // Counted as `skipped`, which is already "everyone we did not mail" — the same bucket
+      // guest-delivery's sendGuestLink() puts an unsubscribed guest in, and the same choice
+      // routes/guests.ts makes for an invite the chokepoint refused.
+      if (r.suppressed) { skipped++; await markNotSent(claimId); }
+      else sent++;
+    } catch {
+      errors++;
+      await markNotSent(claimId);
+    }
   }
-  // One insert rather than one per address: a 200-address send is a single round trip, and the
-  // whole batch either lands or does not. A failed WRITE must not fail the response — the mail has
-  // genuinely gone out by this point, and reporting an error would invite a re-send of all of it.
-  try { if (rows.length) await db.insert(shareSends).values(rows); }
-  catch (e) { console.error('[email-link] could not record sends', e); }
 
-  // `skipped` is addresses that already had this exact link. Reported rather than folded into
-  // `sent`, so the host can see that Mum was not emailed twice AND that she was emailed.
-  res.json({ sent, errors, skipped });
+  // `skipped` is every address that was not mailed and was not an error: the ones that already had
+  // this exact link, and the ones the suppression chokepoint refused. Reported rather than folded
+  // into `sent`, so the host can see that Mum was not emailed twice AND that she was emailed — and
+  // so that `sent` only ever means "this many messages left the building".
+  res.json({ sent, errors, skipped, notSent, perSend: MAX_PER_BLAST });
 });
 
 // Who this event's links have been emailed to. One query for the lot — the admin page groups them
 // by share client-side, which is cheaper than a request per link and keeps the ordering consistent.
 router.get('/:joinCode/link-sends', requireOrganizer, async (req: Request, res: Response) => {
   const ev = req.event!;
+  // A truncating LIMIT over a non-unique key: `sent_at` is stamped per blast, so a 200-address
+  // send is a 200-row tie group and WHICH of them survive the cut at 1000 is otherwise arbitrary.
   const rows = await db.select().from(shareSends)
     .where(eq(shareSends.eventId, ev.id))
-    .orderBy(desc(shareSends.sentAt))
+    .orderBy(desc(shareSends.sentAt), asc(shareSends.id))
     .limit(1000);
   res.json({
     sends: rows.map((r) => ({ shareId: r.shareId, email: r.email, ok: r.ok, sentAt: r.sentAt })),
@@ -1221,14 +1762,15 @@ router.get('/:joinCode/link-sends', requireOrganizer, async (req: Request, res: 
 router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Response) => {
   const ev = req.event!;
   const { name, blurb, startDate, startTime, revealMode,
-          revealDelayHours, revealDate, revealTime, moderationEnabled, allowDownloads, noFlash, timezone, ratingMode, slug,
+          revealDelayHours, revealDate, revealTime, moderationEnabled, allowDownloads, noFlash, heartsEnabled, commentsEnabled, timezone, ratingMode, slug,
                   guestMayBuyShots, guestMayBuyVideo, guestMayBuyFrames, guestMayRequest, faceMatchingEnabled } = req.body as {
               guestMayBuyShots?: boolean; guestMayBuyVideo?: boolean; guestMayBuyFrames?: boolean;
     guestMayRequest?: boolean; faceMatchingEnabled?: boolean;
     name?: string; blurb?: string; startDate?: string; startTime?: string;
     revealMode?: string; revealDelayHours?: number | string; revealDate?: string; revealTime?: string;
     moderationEnabled?: boolean;
-    allowDownloads?: boolean; noFlash?: boolean; timezone?: string; ratingMode?: string; slug?: string;
+    allowDownloads?: boolean; noFlash?: boolean; heartsEnabled?: boolean; commentsEnabled?: boolean;
+    timezone?: string; ratingMode?: string; slug?: string;
   };
 
   // Custom event URL (slug): settable / changeable / clearable after creation.
@@ -1242,6 +1784,9 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
       const desired = slugify(trimmed);
       if (desired.length < 2) return res.status(400).json({ error: 'Custom URL must be at least 2 characters' });
       if (desired !== ev.slug) {
+        // Only a CHANGED slug is validated, so an event already holding a now-reserved word keeps
+        // working and keeps its URL. Taking one away after the fact would break a printed poster.
+        if (isReservedSlug(desired)) return res.status(409).json({ error: RESERVED_SLUG_ERROR });
         if (!(await isSlugAvailable(desired))) return res.status(409).json({ error: 'That custom URL is already taken' });
         newSlug = desired;
       }
@@ -1265,13 +1810,22 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
   const alreadyStarted = Date.now() >= ev.startsAt;
   const canReschedule = !alreadyStarted || !everUsed;
 
+  // The timezone is resolved BEFORE the start time, because the start time is parsed against it.
+  // It used to be resolved after, so the fallback below had nothing to parse with and fell back to
+  // the SERVER's zone — see the note there.
+  const tz       = (timezone === undefined) ? ev.timezone : ((typeof timezone === 'string' && timezone) ? timezone.slice(0, 64) : null);
+
   let startsAt = ev.startsAt;
   const bodyStartsAt = (req.body as { startsAt?: number }).startsAt;
   let requestedStart: number | null = null;
   if (typeof bodyStartsAt === 'number' && bodyStartsAt > 0) requestedStart = bodyStartsAt;
   else if (startDate) {
-    const parsed = new Date(`${startDate}T${startTime || '00:00'}`).getTime();
-    if (!isNaN(parsed)) requestedStart = parsed;
+    // zonedWallTimeToMs, not `new Date('YYYY-MM-DDTHH:mm')` — that parses in the SERVER's zone
+    // (UTC in the container), so a Sydney planner setting a 6pm start on a Perth event got 6pm UTC:
+    // two in the morning, local. The comment above already knew this was the hazard and the
+    // fallback did it anyway. Every other wall-clock field in this file goes through this helper.
+    const parsed = zonedWallTimeToMs(startDate, startTime || '00:00', tz || 'UTC');
+    if (parsed !== null) requestedStart = parsed;
   }
   // Tolerance: the client recomputes the epoch on every save, so only treat a real move as a move.
   if (requestedStart !== null && Math.abs(requestedStart - ev.startsAt) > 60_000) {
@@ -1304,7 +1858,10 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
   if (mode === 'instant') moderation = false;
   const allowDl  = (allowDownloads === undefined) ? ev.allowDownloads : (allowDownloads !== false);
   const noFlashV = (noFlash === undefined) ? ev.noFlash : (noFlash === true);
-  const tz       = (timezone === undefined) ? ev.timezone : ((typeof timezone === 'string' && timezone) ? timezone.slice(0, 64) : null);
+  // undefined means "not sent", which must leave the setting alone — a client that does not know
+  // about hearts yet must not be able to switch them off by omission.
+  const heartsV = (heartsEnabled === undefined) ? ev.heartsEnabled : (heartsEnabled === true);
+  const commentsV = (commentsEnabled === undefined) ? ev.commentsEnabled : (commentsEnabled === true);
   // Frame sizes are a PAID entitlement (the frame pack). Settings must NOT let an organizer add
   // non-square shapes without paying — that's what the Upgrades flow (Stripe) is for. We accept a
   // requested set only if: billing is off (self-host), OR it's a subset of what the event already
@@ -1322,7 +1879,11 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
     } else {
       const q = quote({ maxGuests: ev.guestCap, maxPhotos: ev.maxPhotos, aspectRatios: reqA,
         videoSeconds: ev.videoSeconds, durationHours: curHours, retentionDays: ev.retentionDays });
-      if (q.amountCents <= (ev.amountPaidCents || 0)) {
+      // A 'custom' quote carries no price at all (amountCents 0), so reading it as "this costs no
+      // more than has already been paid" would hand the frame pack out for free on any event no
+      // rung fits — a grandfathered over-cap guest count, or a retention window above the top rung.
+      // No price, no entitlement: it is refused here exactly as the create and upgrade routes do.
+      if (q.tier !== 'custom' && q.amountCents <= (ev.amountPaidCents || 0)) {
         aspects = JSON.stringify(q.aspectRatios);
       } else {
         // Keep saving the rest of the settings, but do NOT pretend this part happened. The client
@@ -1349,10 +1910,38 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
   if (mode === 'at_end') {
     if (revealDelayHours === undefined) revealAt = ev.revealMode === 'at_end' ? ev.revealAt : null;
     else if (String(revealDelayHours) === REVEAL_CUSTOM) {
-      const r = resolveCustomReveal(revealDate, revealTime, tz, purgeAt);
-      if ('error' in r) return res.status(400).json({ error: r.error });
-      revealAt = r.at;
+      const at = customRevealInstant(revealDate, revealTime, tz);
+      if (at === null) return res.status(400).json({ error: PICK_A_TIME });
+      // REFUSED ONLY WHEN THIS SAVE IS CHANGING IT. The real client re-sends the same wall-clock
+      // strings on every settings save, whether or not the host touched the reveal control
+      // (web/src/lib/eventEdit.ts) — so validating unconditionally would make "rename a finished
+      // event" fail with "that reveal time has already passed", about a reveal that fired days ago
+      // and that nobody is editing. A value that is not being changed is not this save's to refuse;
+      // the clamp below still holds it to the window this save is writing, which is the half that
+      // actually protects the photos.
+      const why = at === ev.revealAt ? null : revealInstantRefusal(at, { expiresAt, purgeAt }, Date.now());
+      if (why) return res.status(400).json({ error: why });
+      revealAt = at;
     }
+  }
+
+  // ── The reschedule clamp ───────────────────────────────────────────────────
+  //
+  // Whatever the three branches above decided, the stored instant is held to the window THIS SAVE
+  // is writing. All three needed it and none had it:
+  //   · the carry-over branch (no reveal keys at all — a name-only save) kept ev.revealAt verbatim;
+  //   · the custom branch re-resolved the same wall time, which does not move when the event does;
+  //   · and a preset rung clears it, which is the only one that was safe.
+  // Moving an event two weeks out therefore left reveal_at two weeks BEFORE the event — the gallery
+  // public for the whole of it. Reproduced through both of the first two paths.
+  //
+  // Nothing here is reachable for 'instant' or 'manual': revealAt is null for both.
+  let revealAtClamped = false;
+  if (revealAt !== null) {
+    const c = clampRevealAt(revealAt, { expiresAt, purgeAt });
+    if ('error' in c) return res.status(400).json({ error: c.error });
+    revealAt = c.at;
+    revealAtClamped = c.clamped;
   }
 
   // ── Guest delivery (0046) ──────────────────────────────────────────────────
@@ -1396,11 +1985,32 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
   // permitted while the event has no participants and no photos — there is nothing to un-delete.
   const clearedPurgedAt = startsAt !== ev.startsAt ? { purgedAt: null } : {};
 
+  // ── The kind of event ──────────────────────────────────────────────────────
+  //
+  // One column, and deliberately NOT routed through PUT /challenges. That endpoint writes
+  // event_type and challenges in the SAME statement and 400s unless the body carries a parseable
+  // list, so "change the type" through it always also means "and here is the whole trick list
+  // again" — and a body whose list is empty clears the column outright (serialiseSets returns null)
+  // and reseats every guest holding a card. That coupling, and nothing else, is why the wizard used
+  // to show this field as read-only text.
+  //
+  // What it is NOT is a regeneration risk. Nothing on the server ever derives the trick list from
+  // the type: the mission packs live in the front end (web/src/lib/challenges.ts) because a host can
+  // write their own, and seeding a list from a pack is a client action taken once at creation. So
+  // the type is safe to set by itself, on an event whose list the host has rewritten line by line —
+  // which is what makes it a setting, and this is where a setting belongs.
+  //
+  // Present-key rule, the same one the toggles below follow: undefined leaves it alone, so an older
+  // client or a save that only touched the name cannot wipe it. Anything unparseable — including ''
+  // — is null, which is how a host un-says it after picking one by mistake.
+  const eventTypeGiven = gBody.eventType !== undefined;
+  const newEventType = nextEventType(gBody.eventType, ev.eventType);
+
   await db.update(events).set({
     ...clearedPurgedAt,
     name: newName, blurb: newBlurb, startsAt, expiresAt, revealMode: mode,
     revealDelayHours: revealDelay, revealAt, moderationEnabled: moderation, allowDownloads: allowDl,
-    noFlash: noFlashV,
+    noFlash: noFlashV, heartsEnabled: heartsV, commentsEnabled: commentsV,
     // Only written when the key is present: a settings save from an older client, or one that only
     // touches the name, must not silently switch guest top-ups off.
     ...(typeof guestMayBuyShots  === 'boolean' ? { guestMayBuyShots }  : {}),
@@ -1412,13 +2022,17 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
     ...(typeof gBody.guestMailThanks   === 'boolean' ? { guestMailThanks:   gBody.guestMailThanks }   : {}),
     ...(typeof gBody.guestMailReminder === 'boolean' ? { guestMailReminder: gBody.guestMailReminder } : {}),
     ...(typeof gBody.guestMailLive     === 'boolean' ? { guestMailLive:     gBody.guestMailLive }     : {}),
+    ...(eventTypeGiven ? { eventType: newEventType } : {}),
   }).where(eq(events.id, ev.id));
 
   res.json({
     success: true, name: newName, startsAt, expiresAt, revealMode: mode,
     revealDelayHours: revealDelay, revealAt, moderationEnabled: moderation, allowDownloads: allowDl,
-    noFlash: noFlashV, timezone: tz, slug: newSlug, aspectRatios: aspects ? JSON.parse(aspects) : ['1:1'], ratingMode: rMode,
+    noFlash: noFlashV, heartsEnabled: heartsV, commentsEnabled: commentsV, timezone: tz, slug: newSlug, aspectRatios: aspects ? JSON.parse(aspects) : ['1:1'], ratingMode: rMode,
     aspectsRefused,
+    // Echoed so a host whose value the validator dropped finds out here rather than on the
+    // printed card, exactly as the challenges endpoint echoes the list it stored.
+    eventType: newEventType,
     guestDelivery, guestSendScope, guestSendAt,
     guestMailThanks:   typeof gBody.guestMailThanks   === 'boolean' ? gBody.guestMailThanks   : !!ev.guestMailThanks,
     guestMailReminder: typeof gBody.guestMailReminder === 'boolean' ? gBody.guestMailReminder : !!ev.guestMailReminder,
@@ -1428,6 +2042,9 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
     // UI must say so: showing a different time back with no explanation is how a host learns to
     // distrust the form.
     guestSendAtClamped,
+    // Same contract, one level up: the reveal the host had chosen was before the end of the event
+    // this save is writing — they rescheduled — and it has been moved to the new end.
+    revealAtClamped,
   });
 });
 
@@ -1493,9 +2110,16 @@ router.post('/:joinCode/moderate', requireOrganizer, async (req: Request, res: R
   // re-enters the approval queue (showing the Approve button again) rather than auto-publishing,
   // and with moderation off 'pending' is already visible. Final purge still removes everything.
   const status = action === 'approve' ? 'approved' : action === 'restore' ? 'pending' : 'rejected';
-  await db.update(photos).set({ status })
-    .where(and(inArray(photos.id, photoIds), eq(photos.eventId, req.event!.id)));
-  res.json({ success: true, action, status, count: photoIds.length });
+  //
+  // The same rule as /highlights, and the worst place to break it. Under moderation a photo that
+  // was never approved is invisible to everyone FOR EVER — so the only thing standing between a
+  // guest's photo and oblivion is the host coming back to the queue. `count: photoIds.length`
+  // answered {"success":true,"count":2} to an approve of two ids that do not exist, having written
+  // nothing at all. Report what the UPDATE actually moved.
+  const moved = await db.update(photos).set({ status })
+    .where(and(inArray(photos.id, photoIds), eq(photos.eventId, req.event!.id)))
+    .returning({ id: photos.id });
+  res.json({ success: true, action, status, count: moved.length });
 });
 
 // ── POST /api/events/:joinCode/reveal ─────────────────────────────────────────
@@ -1552,7 +2176,8 @@ router.get('/:joinCode/cohosts', requireOrganizer, async (req: Request, res: Res
   const rows = await db.select({
     id: eventCohosts.id, email: eventCohosts.email, status: eventCohosts.status,
     userId: eventCohosts.userId, token: eventCohosts.token, createdAt: eventCohosts.createdAt,
-  }).from(eventCohosts).where(eq(eventCohosts.eventId, ev.id)).orderBy(eventCohosts.createdAt);
+    // `eventCohosts.id` last — two invites sent from one form submission share a created_at.
+  }).from(eventCohosts).where(eq(eventCohosts.eventId, ev.id)).orderBy(eventCohosts.createdAt, eventCohosts.id);
   res.json({
     owner: owner ? { email: owner.email, name: owner.displayName || owner.email } : null,
     youAreOwner: !!me && !!ev.ownerUserId && me.id === ev.ownerUserId,
@@ -1590,13 +2215,14 @@ router.post('/:joinCode/cohosts', requireOrganizer, async (req: Request, res: Re
   const inviter = me?.displayName || me?.email || 'A Snapdini host';
   if (email.enabled) {
     try {
+      // inline-emails.ts cohostInviteEmail() — one definition, shared with the sampler, and it
+      // takes the raw names for the same reason galleryLinkEmail does.
+      const m = cohostInviteEmail({ inviter, eventName: ev.name, acceptUrl: link });
       await email.sendMail({
         to: inviteEmail,
-        subject: `You've been invited to co-host "${ev.name}" on Snapdini`,
-        html: email.htmlEmail('Co-host invitation',
-          `<p><strong>${escapeHtml(inviter)}</strong> invited you to co-host <strong>${escapeHtml(ev.name)}</strong> on Snapdini — you'll be able to manage the event just like they can.</p>
-           <p><a href="${link}" style="display:inline-block;padding:11px 18px;background:#f5c518;color:#111;border-radius:8px;font-weight:700;text-decoration:none">Accept invitation →</a></p>
-           <p style="color:#888;font-size:13px">If you don't have a Snapdini account yet, you'll be able to create one in a moment. If you didn't expect this, you can ignore this email.</p>`),
+        subject: m.subject,
+        html: m.html,
+        text: m.text,
         // Same reason as the gallery blast above: this is mail ABOUT one event, so the suppression
         // check has to be told which one or the per-event opt-out cannot apply to it.
         eventId: ev.id,
@@ -1649,7 +2275,10 @@ router.put('/:joinCode/participants/:id/card', requireOrganizer, async (req: Req
   if (!sets.some((x) => x.key === want))
     return res.status(400).json({ error: 'That card is not part of this event' });
 
-  await db.update(participants).set({ challengeSet: want }).where(eq(participants.id, p.id));
+  // Marked settled as well as moved. The guest's own "which card are you?" prompt only ever
+  // appears while the source is 'pending', so a host correcting someone must close that question
+  // too — otherwise the app would ask them to choose a card the host had just chosen for them.
+  await db.update(participants).set({ challengeSet: want, challengeSetSource: 'self' }).where(eq(participants.id, p.id));
   const set = sets.find((x) => x.key === want)!;
   res.json({ ok: true, challengeSet: want, label: set.label, tricks: set.items.length });
 });

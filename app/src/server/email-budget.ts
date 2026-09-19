@@ -18,9 +18,9 @@
 // number of people they reached is not recoverable from them. The figure here is therefore a FLOOR
 // on the real total. The default warning threshold leaves room for that tail, and the digest line
 // says so rather than implying an exact count.
-import { and, gte, lt, sql } from 'drizzle-orm';
+import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import { db } from './db';
-import { guestInvites, shareSends } from './schema';
+import { events, guestInvites, shareSends } from './schema';
 
 /** The plan's monthly allowance. Env-configurable because a paid plan changes it, and a hardcoded
  *  3000 would then be a number that quietly lies about how much room there is. */
@@ -100,7 +100,12 @@ export function budgetLevel(used: number, limit: number, warnAt: number = warnPe
 async function countBetween(w: MonthWindow): Promise<{ invites: number; shares: number }> {
   const [[inv], [sh]] = await Promise.all([
     db.select({ n: sql<number>`count(*)::int` }).from(guestInvites)
-      .where(and(gte(guestInvites.sentAt, w.from), lt(guestInvites.sentAt, w.to))),
+      // `mailed` excludes the rows a demo event writes: it records the send so the visitor sees the
+      // feature work, and hands nothing to a transport (0056, and the DEMO note in routes/guests.ts).
+      // Those spend none of Mailgun's allowance, and demo rolls are the MAJORITY of events on a live
+      // instance — counting them would make this figure useless in exactly the direction that hurts,
+      // by crying wolf until the operator stops reading it.
+      .where(and(eq(guestInvites.mailed, true), gte(guestInvites.sentAt, w.from), lt(guestInvites.sentAt, w.to))),
     db.select({ n: sql<number>`count(*)::int` }).from(shareSends)
       .where(and(gte(shareSends.sentAt, w.from), lt(shareSends.sentAt, w.to))),
   ]);
@@ -136,6 +141,99 @@ export async function monthUsage(now: number = Date.now()): Promise<MonthUsage> 
     percent: limit > 0 ? Math.round((total / limit) * 100) : 0,
     level: budgetLevel(total, limit),
   };
+}
+
+// ── Sending caps ─────────────────────────────────────────────────────────────
+//
+// The counts above are a REPORT. These two are ENFORCED, and they live here — beside the report —
+// because they are the same question asked of the same rows: how much mail has this product put in
+// other people's inboxes? A second module counting guest_invites its own way is a second answer to
+// drift away from this one.
+//
+// They are the third and fourth lines of defence on POST /:joinCode/guests/invite, behind the
+// identity gate and the demo exemption in routes/guests.ts. Neither is a product feature and no
+// screen mentions either: they are the bound on what a host whose account or organizer code has
+// been taken can do with our sending reputation before anyone notices.
+//
+// NOT env-tunable, deliberately, unlike monthlyLimit() above. That one is a fact about somebody's
+// Mailgun plan and changes when they change plan. These are "past here it is not a party any more",
+// which is a judgement this product makes and should make the same way everywhere.
+
+/** How many times over a host may mail their whole list, ever.
+ *
+ *  THREE PASSES, because three is what a real host actually does: send the invitations, re-send to
+ *  the people who did not open the first one, and mail the late additions. A fourth pass is already
+ *  unusual; a tenth is not a wedding.
+ *
+ *  Measured against the list's CURRENT size, so it grows as the host adds people — a host who
+ *  invites 40, then adds 60 more and invites again, is nowhere near it. */
+export const INVITE_PASSES = 3;
+
+/** …and the floor under that, so a small list is not governed by a tiny number.
+ *
+ *  3 x 4 guests = 12 would be a cap a real host with a tiny dinner party could hit by fiddling.
+ *  100 cannot be reached by anyone using the feature as a feature, and still bounds the worst case
+ *  on a small list to a hundred messages — two orders of magnitude below what a spam run needs to
+ *  be worth doing. */
+export const INVITE_FLOOR = 100;
+
+/** The lifetime invite ceiling for ONE event. */
+export const eventInviteCap = (guestCount: number): number =>
+  Math.max(INVITE_FLOOR, guestCount * INVITE_PASSES);
+
+/** Recipients one ACCOUNT may mail in a rolling 24 hours, across every event it owns.
+ *
+ *  The per-event cap is escapable by making more events, and making events is free. This is the
+ *  backstop for that, and it is the number that actually bounds the damage.
+ *
+ *  2000 because of what it has to sit between. Above it: the biggest real day this product can
+ *  have is a 2000-guest list (MAX_GUESTS_PER_EVENT) invited once, and even that host would have to
+ *  ALSO re-send to everybody on the same day to reach here — while a host that size has been in
+ *  touch with us long before their event. Below it: 2000 is already two thirds of Mailgun's entire
+ *  free monthly allowance (3000) in a single day, so anything past it is a number an operator
+ *  needs to have agreed to rather than discovered.
+ *
+ *  A ROLLING 24 hours rather than a calendar day, because a calendar day hands an attacker two full
+ *  budgets either side of midnight and gives a legitimate host nothing in return. */
+export const ACCOUNT_DAILY_RECIPIENTS = 2000;
+export const ACCOUNT_DAY_MS = 24 * 60 * 60 * 1000;
+
+/** How many invite recipients this event has ever had.
+ *
+ *  Derived from guest_invites rather than kept in a counter column, for the reason at the top of
+ *  this file: that table is already one row per recipient per press, so a counter would be a second
+ *  source of truth to keep in step with it. It is PERSISTED — those rows are the persistence — and
+ *  it survives restarts, deploys and every path that has ever sent an invite.
+ *
+ *  Demo rows are counted. They cost no mail, but they are still presses of the button, and a cap
+ *  whose job is "this is not what the feature is for any more" should not have a hole in it that is
+ *  reachable by anyone with an organizer code. */
+export async function eventInvitesEver(eventId: string): Promise<number> {
+  const [r] = await db.select({ n: sql<number>`count(*)::int` }).from(guestInvites)
+    .where(eq(guestInvites.eventId, eventId));
+  return Number(r?.n ?? 0);
+}
+
+/** Recipients this account has mailed in the last 24 hours, across all of its events.
+ *
+ *  BOTH bulk paths, because both take a list of addresses from the host and both send from our
+ *  domain: guest invites (guest_invites) and gallery/share links (share_sends). Capping one and not
+ *  the other would just move the abuse to the other one.
+ *
+ *  `mailed` again: a demo has no owner, so demo rows cannot reach this query anyway — the filter is
+ *  here so the two counts stay the same question, and so it keeps holding if a non-sending path is
+ *  ever added to an owned event. */
+export async function accountRecipientsInDay(ownerUserId: string, now: number = Date.now()): Promise<number> {
+  const from = now - ACCOUNT_DAY_MS;
+  const [[inv], [sh]] = await Promise.all([
+    db.select({ n: sql<number>`count(*)::int` }).from(guestInvites)
+      .innerJoin(events, eq(events.id, guestInvites.eventId))
+      .where(and(eq(events.ownerUserId, ownerUserId), eq(guestInvites.mailed, true), gte(guestInvites.sentAt, from))),
+    db.select({ n: sql<number>`count(*)::int` }).from(shareSends)
+      .innerJoin(events, eq(events.id, shareSends.eventId))
+      .where(and(eq(events.ownerUserId, ownerUserId), gte(shareSends.sentAt, from))),
+  ]);
+  return Number(inv?.n ?? 0) + Number(sh?.n ?? 0);
 }
 
 /** One line of plain words for an operator. Pure, so what the digest says can be tested without a

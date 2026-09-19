@@ -54,6 +54,16 @@ export const RESCHEDULE_RETENTION_GRACE_MS = 24 * 60 * 60 * 1000;   // one day
  *  NO owner — there is no is_demo column, so anything filtering demos derives it from those two. */
 export const DEMO_NAME = 'Demo Roll 🎞️';
 
+/** THE discriminator, in one place, so nothing has to re-derive it and nothing can get it subtly
+ *  different. Both halves are load-bearing and neither alone is enough:
+ *    · the NAME alone would catch a real host who titled their event "Demo Roll 🎞️" — anyone may;
+ *    · NO OWNER alone is not a demo either, it is just an un-owned event.
+ *  Deliberately NOT keyed on guestCap === 2 or on the 4h duration: both are ordinary settings a
+ *  host can choose, so either would hand a real event the demo's behaviour. routes/admin.ts and
+ *  guest-delivery.ts already filter on exactly this pair in SQL; this is the TypeScript half. */
+export const isDemoEvent = (e: { ownerUserId: string | null; name: string }): boolean =>
+  !e.ownerUserId && e.name === DEMO_NAME;
+
 // ── Retention ────────────────────────────────────────────────────────────────
 
 /** The global retention floor, in days, for an event that holds no longer allowance of its own.

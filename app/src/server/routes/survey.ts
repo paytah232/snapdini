@@ -61,7 +61,7 @@ router.post('/:token', async (req: Request, res: Response) => {
   const [ev] = await db.select({ id: events.id, name: events.name, joinCode: events.joinCode }).from(events).where(eq(events.surveyToken, token));
   if (!ev) return res.status(404).json({ error: 'Survey not found' });
 
-  // One response per event, enforced here and not only shown on the GET.
+  // One response per event. This SELECT is the friendly path, not the rule — see the insert below.
   //
   // The token sits in an emailed link and never expires, and this route inserted unconditionally —
   // so anyone holding it could write unbounded rows, and, because a low score fires an instant
@@ -111,12 +111,27 @@ router.post('/:token', async (req: Request, res: Response) => {
   const testimonialName = testimonialOk
     ? (String(b.testimonialName || '').trim().slice(0, 80) || null)
     : null;
-  await db.insert(surveyResponses).values({
+  // The DATABASE decides who was first, not the SELECT above.
+  //
+  // A check-then-insert over a non-unique index is not one response per event, it is one response
+  // per event most of the time: every concurrent POST passes the SELECT, every one of them inserts,
+  // and every one of them fires notifyUnhappySurvey. That is a row pile-up and — the part that
+  // actually hurts — an ntfy notification storm, from a token that sits in an inbox forever and can
+  // be replayed at will. `idx_survey_event` is UNIQUE as of 0050, so the insert is the arbiter:
+  // exactly one caller gets a row back, and only that caller goes on to notify.
+  //
+  // onConflictDoNothing rather than a caught unique violation, because a throw here would be
+  // indistinguishable from a real write failure, and this route must answer the same 200 for a
+  // double-tap either way.
+  const [written] = await db.insert(surveyResponses).values({
     id: uuidv4(), eventId: ev.id, overall, setup, guestExperience, value, nps, comments,
     contactOptIn, testimonialOk, testimonialName, createdAt: Date.now(),
-  });
+  }).onConflictDoNothing({ target: surveyResponses.eventId }).returning({ id: surveyResponses.id });
+  if (!written) return res.json({ ok: true, alreadySubmitted: true });
 
   // Instant operator alert on a low score (best-effort; never blocks the response).
+  // Reached only by the caller that actually stored a row — the notification is about the response,
+  // so a submission that stored nothing must not produce one.
   if (isUnhappy(overall, nps)) {
     notifyUnhappySurvey({ name: ev.name, joinCode: ev.joinCode }, { overall, setup, guestExperience, value, nps, comments, contactOptIn })
       .catch((e) => console.error('[ops] unhappy-survey alert:', (e as Error).message));

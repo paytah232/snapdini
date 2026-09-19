@@ -147,22 +147,31 @@ export async function optionalSendDecision(userId: string, kind: OptionalEmailKi
 /**
  * Replace an account's whole opt-out set.
  *
- * Inserts first, then removes what is no longer wanted. Without a transaction the two statements
- * have a gap between them, and this order makes the gap over-suppress rather than under-suppress:
- * a sweep landing mid-save skips an email it might have sent, instead of sending one the host has
- * just asked us not to.
+ * ONE TRANSACTION, because the two statements are one edit. The insert-then-delete ORDER was
+ * chosen so that a reader landing in the gap over-suppresses rather than under-suppresses, and
+ * that reasoning is sound as far as it goes — but it only covers a reader. It does not cover a
+ * second WRITER: two saves from the same account (two tabs, a double-submitted form, the page
+ * re-saved while the first request is still in flight) interleave as
+ * insert(A) · insert(B) · delete(not B) · delete(not A), and the last delete removes the opt-out
+ * the last save asked for. The host is then shown their saved preferences and mailed anyway, which
+ * is the one outcome this table exists to prevent.
+ *
+ * Statement order is kept inside the transaction all the same: it costs nothing, and it is still
+ * the right order for anything reading with a weaker isolation level than the write.
  */
 export async function setOptOuts(userId: string, kinds: OptionalEmailKind[]): Promise<void> {
   const wanted = [...new Set(kinds)];
-  if (wanted.length) {
-    await db.insert(emailPreferences)
-      .values(wanted.map((kind) => ({ userId, kind, optedOutAt: Date.now() })))
-      // Re-saving an unchanged page must not move the date they said no — that date is the record
-      // of when the request was made.
-      .onConflictDoNothing();
-  }
-  await db.delete(emailPreferences).where(and(
-    eq(emailPreferences.userId, userId),
-    wanted.length ? notInArray(emailPreferences.kind, wanted) : undefined,
-  ));
+  await db.transaction(async (tx) => {
+    if (wanted.length) {
+      await tx.insert(emailPreferences)
+        .values(wanted.map((kind) => ({ userId, kind, optedOutAt: Date.now() })))
+        // Re-saving an unchanged page must not move the date they said no — that date is the record
+        // of when the request was made.
+        .onConflictDoNothing();
+    }
+    await tx.delete(emailPreferences).where(and(
+      eq(emailPreferences.userId, userId),
+      wanted.length ? notInArray(emailPreferences.kind, wanted) : undefined,
+    ));
+  });
 }

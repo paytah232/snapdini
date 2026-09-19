@@ -1,9 +1,9 @@
 import { Router, type Request, type Response } from 'express';
-import { eq, and, or } from 'drizzle-orm';
-import { billingEnabled, stripe, CURRENCY, publicBillingConfig, quote, brandingRemovable, BRANDING_REMOVAL_CENTS, CUSTOM_PLAN_ERROR } from '../billing';
+import { eq, and, or, sql } from 'drizzle-orm';
+import { billingEnabled, stripe, CURRENCY, publicBillingConfig, quote, brandingRemovable, BRANDING_REMOVAL_CENTS, customPlanError } from '../billing';
 import { db } from '../db';
 import { GUEST_SHOT_PACK, GUEST_SHOT_PACK_CENTS, GUEST_UPGRADE_CUTOFF_MS, effectiveMaxPhotos } from '../allowance';
-import { events, participants } from '../schema';
+import { events, participants, processedStripeEvents } from '../schema';
 import { sendWelcome } from '../lifecycle';
 import { RETENTION_DAYS, purgeAtFor } from '../lib';
 
@@ -29,7 +29,23 @@ router.post('/quote', (req: Request, res: Response) => {
   if (!Number.isFinite(maxGuests) || maxGuests < 1) {
     return res.status(400).json({ error: 'maxGuests must be a positive number' });
   }
-  res.json({ ...quote({ maxGuests, maxPhotos, aspectRatios, videoSeconds, durationHours, retentionDays }), billingEnabled });
+  // `current` is what the event already HAS, so the panel can show the same number the upgrade route
+  // will charge: the difference between two configurations, both priced today. It is display only —
+  // /upgrade recomputes this from the event row and never trusts a client for it — so a caller who
+  // sends nonsense here can only mislead itself.
+  const cur = req.body?.current;
+  const coveredCents = cur && typeof cur === 'object'
+    ? quote({
+        maxGuests: parseInt(cur.maxGuests, 10) || 1,
+        maxPhotos: parseInt(cur.maxPhotos, 10) || undefined,
+        aspectRatios: Array.isArray(cur.aspectRatios) ? cur.aspectRatios.map(String) : undefined,
+        videoSeconds: parseInt(cur.videoSeconds, 10) || 0,
+        durationHours: parseInt(cur.durationHours, 10) || undefined,
+        retentionDays: parseInt(cur.retentionDays, 10) || undefined,
+      }).amountCents
+    : 0;
+  res.json({ ...quote({ maxGuests, maxPhotos, aspectRatios, videoSeconds, durationHours, retentionDays }),
+             coveredCents, billingEnabled });
 });
 
 // ── GET /api/billing/session/:id — minimal, non-PII lookup of a completed Checkout session ──
@@ -140,9 +156,15 @@ router.post('/checkout', async (req: Request, res: Response) => {
   const organizerCode = String(req.body?.organizerCode || '');
   if (!joinCode || !organizerCode) return res.status(400).json({ error: 'joinCode and organizerCode required' });
 
-  const [event] = await db.select().from(events).where(
+  // JOIN CODE WINS on a tie — the same rule eventByIdentifier applies, written here because this
+  // lookup does not go through it. The two namespaces can collide (see isSlugAvailable), and a join
+  // code is the stronger claim; without the sort, which event this resolves to is whichever row the
+  // planner happens to return first.
+  const evRows = await db.select().from(events).where(
     or(eq(events.joinCode, joinCode.toUpperCase()), eq(events.slug, joinCode.toLowerCase())),
-  );
+  ).limit(2);
+  const event = evRows.length < 2 ? evRows[0]
+    : (evRows.find((e) => e.joinCode === joinCode.toUpperCase()) ?? evRows[0]);
   if (!event) return res.status(404).json({ error: 'Event not found' });
   if (event.organizerCode !== organizerCode) return res.status(403).json({ error: 'Invalid organizer code' });
 
@@ -185,9 +207,15 @@ router.post('/upgrade', async (req: Request, res: Response) => {
   const organizerCode = String(req.body?.organizerCode || '');
   if (!joinCode || !organizerCode) return res.status(400).json({ error: 'joinCode and organizerCode required' });
 
-  const [event] = await db.select().from(events).where(
+  // JOIN CODE WINS on a tie — the same rule eventByIdentifier applies, written here because this
+  // lookup does not go through it. The two namespaces can collide (see isSlugAvailable), and a join
+  // code is the stronger claim; without the sort, which event this resolves to is whichever row the
+  // planner happens to return first.
+  const evRows = await db.select().from(events).where(
     or(eq(events.joinCode, joinCode.toUpperCase()), eq(events.slug, joinCode.toLowerCase())),
-  );
+  ).limit(2);
+  const event = evRows.length < 2 ? evRows[0]
+    : (evRows.find((e) => e.joinCode === joinCode.toUpperCase()) ?? evRows[0]);
   if (!event) return res.status(404).json({ error: 'Event not found' });
   if (event.organizerCode !== organizerCode) return res.status(403).json({ error: 'Invalid organizer code' });
 
@@ -205,20 +233,65 @@ router.post('/upgrade', async (req: Request, res: Response) => {
   const aspectRatios = Array.from(new Set([...curAspects, ...reqAspects]));   // can only add shapes
 
   const q = quote({ maxGuests, maxPhotos, aspectRatios, videoSeconds, durationHours, retentionDays });
-  // Off the top of the ladder there is no price to charge a difference against, and the difference
+  // Off the top of any ladder there is no price to charge a difference against, and the difference
   // is what this route bills. An upgrade to 1000 guests quotes baseCents 0, so `diff` goes negative
   // against what the host already paid and the free-delta branch below applies it at once — the
   // A$59 customer upgrades to unlimited by asking. Refused for the same reason create refuses it.
-  if (q.tier === 'custom') return res.status(400).json({ error: CUSTOM_PLAN_ERROR });
+  //
+  // This covers duration and retention as well as guests (see MAX_QUOTABLE_HOURS / _DAYS), which is
+  // where it mattered most: `durationHours: 100000` on a ≤10-guest event quoted $0, took the
+  // diff <= 0 branch, and wrote an expiresAt/purgeAt no cleanup sweep would ever reach.
+  if (q.tier === 'custom') return res.status(400).json({ error: customPlanError(q) });
   // Full price of the upgraded config. Use amountCents (NOT a tier check): under the current
   // model even ≤10-guest "free" events owe for paid add-ons (duration/retention), so gating on
   // tier==='paid' wrongly zeroed those and let them apply free + disagreed with the client quote.
   const newTotal = q.amountCents;
-  const diff = newTotal - event.amountPaidCents;
+
+  // WHAT THE EVENT ALREADY HAS, priced at TODAY'S prices — and the difference is the bill.
+  //
+  // This used to be `newTotal - event.amountPaidCents`, which quietly made every price change
+  // retroactive. amount_paid_cents is a record of real money taken at some past moment; newTotal is
+  // what the same configuration costs now. Move any rung and the two stop agreeing for every event
+  // already sold at the old one — so a host who had changed nothing was shown, and would have been
+  // charged, the difference. Observed: raising the 36-shot rung by $1 added $1 to the next upgrade
+  // of every existing 36-shot event.
+  //
+  // Pricing both sides at today's ladder makes the charge the delta between two configurations
+  // rather than between a configuration and a memory of a payment. Changing nothing is then always
+  // zero, whatever we do to prices afterwards.
+  //
+  // It is NOT a way to get something for nothing: every field above is clamped UP to what the event
+  // already holds, so `covered` can only ever describe a subset of `q`. And features that are free
+  // below the paid guest tier and charged above it still bill correctly on the way up — at the old
+  // tier `covered` prices them at zero, exactly as the host experienced them.
+  const covered = quote({
+    maxGuests: event.guestCap,
+    maxPhotos: event.maxPhotos,
+    aspectRatios: curAspects,
+    videoSeconds: event.videoSeconds,
+    durationHours: curDuration,
+    retentionDays: event.retentionDays,
+  }).amountCents;
+  //
+  // The BETTER of the two for the host, never just one of them. `covered` stops a price change from
+  // becoming a bill; `amountPaidCents` protects a host who has genuinely paid more than their
+  // configuration costs today — a promo, or a tier they later came down from — and pricing on
+  // `covered` alone would have quietly confiscated that credit. Whichever is larger is the one they
+  // are entitled to have already spent.
+  const alreadyCovered = Math.max(covered, event.amountPaidCents);
+  const diff = newTotal - alreadyCovered;
   const newExpiresAt = event.startsAt + Math.round(durationHours * 3_600_000);
 
+  // The entitled roll is the QUOTE's number, which is the rung's cap — not the number requested.
+  // quote() used to hand `maxPhotos` straight back, so `maxPhotos: 1000000` was written to the
+  // event here for the top rung's $8 (and on a ≤10-guest event, where shots are free, for nothing).
+  // Floored at what the event already holds so an upgrade can never be a downgrade: a grandfathered
+  // row above MAX_QUOTABLE_SHOTS (created while billing was off, or before the cap existed) keeps
+  // what it has.
+  const entMaxPhotos = Math.max(event.maxPhotos, q.maxPhotos);
+
   const entitlement = {
-    guestCap: maxGuests, maxPhotos: q.maxPhotos, videoSeconds: q.videoSeconds,
+    guestCap: maxGuests, maxPhotos: entMaxPhotos, videoSeconds: q.videoSeconds,
     retentionDays, aspectRatios: JSON.stringify(q.aspectRatios), expiresAt: newExpiresAt,
     purgeAt: purgeAtFor(newExpiresAt, retentionDays),
   };
@@ -236,7 +309,7 @@ router.post('/upgrade', async (req: Request, res: Response) => {
     allow_promotion_codes: true,
     metadata: {
       eventId: event.id, kind: 'upgrade', amountCents: String(newTotal),
-      guestCap: String(maxGuests), maxPhotos: String(q.maxPhotos), videoSeconds: String(q.videoSeconds),
+      guestCap: String(maxGuests), maxPhotos: String(entMaxPhotos), videoSeconds: String(q.videoSeconds),
       retentionDays: String(retentionDays), aspectRatios: JSON.stringify(q.aspectRatios), expiresAt: String(newExpiresAt),
     },
     success_url: `${BASE_URL}/admin/${event.joinCode}?upgraded=1&session_id={CHECKOUT_SESSION_ID}#${encodeURIComponent(organizerCode)}`,
@@ -250,9 +323,15 @@ router.post('/branding-removal', async (req: Request, res: Response) => {
   const joinCode = String(req.body?.joinCode || '');
   const organizerCode = String(req.body?.organizerCode || '');
   if (!joinCode || !organizerCode) return res.status(400).json({ error: 'joinCode and organizerCode required' });
-  const [event] = await db.select().from(events).where(
+  // JOIN CODE WINS on a tie — the same rule eventByIdentifier applies, written here because this
+  // lookup does not go through it. The two namespaces can collide (see isSlugAvailable), and a join
+  // code is the stronger claim; without the sort, which event this resolves to is whichever row the
+  // planner happens to return first.
+  const evRows = await db.select().from(events).where(
     or(eq(events.joinCode, joinCode.toUpperCase()), eq(events.slug, joinCode.toLowerCase())),
-  );
+  ).limit(2);
+  const event = evRows.length < 2 ? evRows[0]
+    : (evRows.find((e) => e.joinCode === joinCode.toUpperCase()) ?? evRows[0]);
   if (!event) return res.status(404).json({ error: 'Event not found' });
   if (event.organizerCode !== organizerCode) return res.status(403).json({ error: 'Invalid organizer code' });
 
@@ -271,6 +350,39 @@ router.post('/branding-removal', async (req: Request, res: Response) => {
   res.json({ url: session.url });
 });
 
+// ── Webhook replay guard ─────────────────────────────────────────────────────
+// Stripe redelivers any event it does not get a 2xx for, with backoff, for up to three days, and
+// can deliver the same event twice regardless. Most of the handler below is idempotent by accident
+// (it SETs a total, or flips a boolean); the `upgrade` branch is not, because amountPaidCents is
+// cumulative — and an inflated total makes the host's NEXT upgrade free, since the upgrade route
+// only charges newTotal − amountPaidCents. See processed_stripe_events (0050) for why this is a
+// table and not another payment-intent column.
+
+/** Claim a Stripe event id. False means this deployment has already processed it.
+ *
+ *  The INSERT *is* the claim, so two deliveries racing each other cannot both win — which a
+ *  read-then-write check could not promise. */
+async function claimStripeEvent(id: string, type: string): Promise<boolean> {
+  const rows = await db.insert(processedStripeEvents)
+    .values({ id, type, processedAt: Date.now() })
+    .onConflictDoNothing()
+    .returning({ id: processedStripeEvents.id });
+  return rows.length > 0;
+}
+
+/** Hand the claim back, so Stripe's retry is processed instead of swallowed.
+ *
+ *  Claiming before the work is what makes the guard atomic, but it means a failure half-way would
+ *  otherwise leave the event marked done and the payment never credited — a permanently lost
+ *  payment, which is the worse of the two failures. */
+async function releaseStripeEvent(id: string): Promise<void> {
+  try {
+    await db.delete(processedStripeEvents).where(eq(processedStripeEvents.id, id));
+  } catch (e) {
+    console.error('[billing] could not release webhook claim', id, (e as Error).message);
+  }
+}
+
 // ── Stripe webhook ────────────────────────────────────────────────────────────
 // Mounted in index.ts with express.raw (BEFORE express.json) so the signature can be
 // verified against the raw body. On successful payment, marks the event paid (active).
@@ -286,7 +398,17 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
     return res.status(400).send(`Webhook signature error: ${(err as Error).message}`);
   }
 
-  if (evt.type === 'checkout.session.completed') {
+  // Every other event type is acknowledged and ignored — and deliberately NOT claimed, so the
+  // table holds only deliveries that actually changed something.
+  if (evt.type !== 'checkout.session.completed') return res.json({ received: true });
+
+  // Claimed before any of the work, and given back below if the work throws.
+  if (!(await claimStripeEvent(evt.id, evt.type))) {
+    console.log(`[billing] ignoring replayed Stripe event ${evt.id}`);
+    return res.json({ received: true, duplicate: true });
+  }
+
+  try {
     const session = evt.data.object as { metadata?: Record<string, string>; payment_status?: string; amount_total?: number | null; payment_intent?: string | null };
     const paymentIntent = typeof session.payment_intent === 'string' ? session.payment_intent : null;
     const m = session.metadata ?? {};
@@ -300,26 +422,67 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
     if (settled && m.kind === 'guest_upgrade' && m.participantId) {
       const shots = parseInt(m.shots, 10) || 0;
       const paidNow = typeof session.amount_total === 'number' ? session.amount_total : 0;
-      const [cur] = await db.select({
-          extraPhotos: participants.extraPhotos,
-          amountPaidCents: participants.amountPaidCents,
-          stripePaymentIntent: participants.stripePaymentIntent,
-          email: participants.email,
-        }).from(participants).where(eq(participants.id, m.participantId));
-      if (!cur) return res.json({ received: true });
-      // Stripe retries webhooks; without this a redelivery grants the shots twice.
-      if (paymentIntent && cur.stripePaymentIntent === paymentIntent) return res.json({ received: true });
       // The guest's OWN address wins — it is what they will type to recover this session on another
       // device, so overwriting it with the card's billing email would strand their paid roll.
       const stripeEmail = (session as { customer_details?: { email?: string | null } }).customer_details?.email || null;
-      await db.update(participants).set({
-        extraPhotos: (cur.extraPhotos || 0) + shots,
-        amountPaidCents: (cur.amountPaidCents || 0) + paidNow,
-        stripePaymentIntent: paymentIntent,
+
+      // Granting the shots and recording the money are ONE statement, and the arithmetic is the
+      // DATABASE's — never a number this process read a moment ago and added a pack to.
+      //
+      // It used to be a SELECT followed by `set({ extraPhotos: (cur.extraPhotos || 0) + shots,
+      // amountPaidCents: (cur.amountPaidCents || 0) + paidNow })`. Six settled top-ups for one
+      // guest, delivered together, all read extra_photos=0 and all wrote 12: the guest was handed
+      // ONE pack for six payments, and amount_paid_cents recorded A$3 of the A$18 taken. Measured
+      // exactly that on this box before this change — see 22-guest-topup-race, which fires the
+      // deliveries for real. The lost money column is also what HID it: the refund the guest then
+      // asks for is priced off a total that never recorded the charge.
+      //
+      // Money taken for an entitlement we then failed to grant is the worst thing this product can
+      // do, so it does not depend on how the deliveries happen to interleave.
+      //
+      // The replay guard is the WHERE, for the same reason the upload path's roll cap is
+      // (routes/photos.ts): a guard that reads the row and decides in JS is check-then-act, and
+      // under concurrency every racer reads the same NULL. Postgres re-evaluates this predicate
+      // against the row it has locked, so a racer that arrives second sees what the first wrote.
+      //
+      // `IS DISTINCT FROM` rather than `<>`: the column is NULL until a guest's first top-up, and
+      // `NULL <> 'pi_x'` is NULL, which no WHERE clause ever honours.
+      //
+      // Added only when Stripe named a payment intent. A genuine $0 comp (no_payment_required) has
+      // none, and a missing intent must never read as "already credited" — a replayed comp is the
+      // event-id claim's job, above.
+      //
+      // Which is also why this is the SECOND line of defence and not the first: claimStripeEvent()
+      // already makes a redelivery of one event id atomically impossible. What it cannot see is a
+      // NEW event id carrying a payment we have already credited, or — on the release path, where
+      // a transient failure deliberately hands the claim back — a retry of a delivery whose UPDATE
+      // had in fact landed.
+      const notYetCredited = paymentIntent
+        ? sql`${participants.stripePaymentIntent} is distinct from ${paymentIntent}`
+        : undefined;
+      const [granted] = await db.update(participants).set({
+        extraPhotos: sql`${participants.extraPhotos} + ${shots}`,
+        amountPaidCents: sql`${participants.amountPaidCents} + ${paidNow}`,
+        // Left alone when this session named no intent, rather than overwritten with NULL: the
+        // column is the operator's one-click refund handle, so a $0 comp must not erase the handle
+        // for the real payment before it.
+        stripePaymentIntent: paymentIntent ?? undefined,
         upgradeEmail: stripeEmail,
-        email: cur.email || stripeEmail,
-      }).where(eq(participants.id, m.participantId));
-      console.log(`[billing] guest top-up: +${shots} shots to participant ${m.participantId} (${paidNow}c)`);
+        // The SQL of `cur.email || stripeEmail`, and only written when there is something to write:
+        // a top-up Stripe gave us no address for leaves the guest's own address exactly as it was.
+        email: stripeEmail ? sql`coalesce(nullif(${participants.email}, ''), ${stripeEmail})` : undefined,
+      }).where(and(eq(participants.id, m.participantId), notYetCredited))
+        .returning({ extraPhotos: participants.extraPhotos, amountPaidCents: participants.amountPaidCents });
+      // Nothing came back: this payment was already credited, or the participant is gone (purged,
+      // or a host removing a duplicate join while the guest was in checkout). Both are
+      // acknowledged — a non-2xx only makes Stripe redeliver something we have decided not to act
+      // on, and the claim above is what keeps that decision stable.
+      if (!granted) {
+        console.log(`[billing] guest top-up not applied for participant ${m.participantId} — already credited, or the guest is gone`);
+        return res.json({ received: true });
+      }
+      console.log(`[billing] guest top-up: +${shots} shots to participant ${m.participantId} (${paidNow}c)`
+        + ` → ${granted.extraPhotos} extra shots, ${granted.amountPaidCents}c paid in total`);
       return res.json({ received: true });
     }
 
@@ -330,8 +493,11 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
       const paidNow = typeof session.amount_total === 'number' ? session.amount_total : (parseInt(m.amountCents, 10) || 0);
       if (m.kind === 'upgrade') {
         // amountPaidCents is cumulative real money, so an upgrade ADDS what it actually charged.
+        // amountPaidCents is NOT read here any more — see the UPDATE below. What is left is read
+        // only to fill in for metadata this delivery did not carry, and every one of those is a
+        // plain SET, where "the last delivery wins" is the correct answer rather than a lost one.
         const [cur] = await db.select({
-          amountPaidCents: events.amountPaidCents, expiresAt: events.expiresAt,
+          expiresAt: events.expiresAt,
           retentionDays: events.retentionDays, purgeAt: events.purgeAt,
         }).from(events).where(eq(events.id, eventId));
 
@@ -354,7 +520,13 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
 
         await db.update(events).set({
           paid: true,
-          amountPaidCents: (cur?.amountPaidCents || 0) + paidNow,
+          // The same defect as the guest branch above, on the host's side of the ladder and with
+          // the loss pointing the other way: the upgrade route charges `newTotal −
+          // amountPaidCents`, so a top-up whose credit is lost makes the host's NEXT upgrade
+          // cheaper than it should be. Two upgrade checkouts for one event settling together is
+          // the reachable case (two tabs, or Stripe's fleet delivering both at once), and the
+          // arithmetic belongs to Postgres for the same reason it does there.
+          amountPaidCents: sql`${events.amountPaidCents} + ${paidNow}`,
           guestCap: parseInt(m.guestCap, 10) || undefined,
           maxPhotos: parseInt(m.maxPhotos, 10) || undefined,
           videoSeconds: parseInt(m.videoSeconds, 10) || 0,
@@ -373,6 +545,13 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
         sendWelcome(eventId).catch((e) => console.error('[lifecycle] welcome trigger:', (e as Error).message));
       }
     }
+  } catch (err) {
+    // The handler had no catch at all: a transient database error left Express to answer 500, and
+    // Stripe's retry then re-applied whatever HAD succeeded — which on the upgrade branch is money.
+    // Now the claim goes back and the retry is a first delivery again.
+    await releaseStripeEvent(evt.id);
+    console.error(`[billing] webhook ${evt.id} failed:`, (err as Error).message);
+    return res.status(500).json({ error: 'Webhook processing failed' });
   }
   res.json({ received: true });
 }

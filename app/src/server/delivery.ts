@@ -89,13 +89,98 @@ export function suppressionReason(status: DeliveryStatus): 'bounced' | 'complain
   return suppresses(status) ? (status as 'bounced' | 'complained' | 'unsubscribed') : null;
 }
 
-/** Addresses are compared and stored lower-cased and trimmed, everywhere, without exception.
+/** THE canonical form of an address. Both sides of every suppression check run through here — the
+ *  rows are written normalised (routes/guests.ts for the add form, csv.ts for the importer) and
+ *  the lookup key is built the same way (unsubscribe.ts blocksFor) — so whatever this function
+ *  collapses, a suppression covers, and whatever it leaves alone escapes one.
  *
- *  The local part of an address is technically case-sensitive, but no mail provider in practice
- *  treats it that way — and the cost of being pedantically correct here is that a suppressed
- *  `Mum@x.com` is re-mailed as `mum@x.com`, which is the precise failure suppression exists to
- *  prevent. Consistency beats correctness on this one. */
-export const normaliseAddress = (s: string): string => s.trim().toLowerCase();
+ *  ONE definition, and "one" is load bearing. csv.ts spelled the rule as `rawEmail.toLowerCase()`
+ *  and agreed with this on everything but the trailing dot, which was enough to put
+ *  `mum@example.com.` and `mum@example.com` on one guest list as two rows for one person — past
+ *  both dedupe checks, and past the unique index too, because the index keys on
+ *  lower(btrim(email)) and therefore sees exactly the bytes a writer chose to store. A second
+ *  spelling of this function is a second answer to "who is this", and the database cannot arbitrate
+ *  between them: it can only compare what it was given.
+ *
+ *  WHY THE TRAILING-DOT STRIP STAYED, rather than being dropped to match the index literally. The
+ *  index is a rule about what may coexist in one event, and it holds whatever this collapses,
+ *  because every writer normalises FIRST: the stored string is already in canonical form, so
+ *  lower(btrim(stored)) IS stored and the index key and the app's identity are the same value.
+ *  Dropping the strip would also make the two sides agree — and would un-suppress a real bounce,
+ *  since `x.com.` and `x.com` are one domain to every MTA and `isEmail` accepts both, so a host who
+ *  typed the dot would mail an address we have a permanent failure on record for. Of the two ways
+ *  to agree, only one of them also keeps the suppression list working.
+ *
+ *  Three things are collapsed, and the list is deliberately short:
+ *
+ *    trim         — a pasted address carries whitespace, and " a@x.com" is not a second person.
+ *    lower-case   — the local part is technically case-sensitive, but no provider in practice
+ *                   treats it that way, and the cost of being pedantically correct is that a
+ *                   suppressed `Mum@x.com` is re-mailed as `mum@x.com`, which is the precise
+ *                   failure suppression exists to prevent.
+ *    trailing dot — `x.com.` is the fully-qualified spelling of `x.com`: the final dot is the DNS
+ *                   root label, not part of the name. Every resolver and every MTA treats the two
+ *                   as one domain, and `isEmail` accepts both (`/^[^\s@]+@[^\s@]+\.[^\s@]+$/`
+ *                   matches `a@x.com.`), so without this a host who typed the trailing dot mails
+ *                   an address we have a bounce on record for. This is the only one of the three
+ *                   that is a fact about DNS rather than a judgement about providers.
+ *
+ *  What is deliberately NOT collapsed, because over-normalising suppresses a DIFFERENT real person
+ *  and does it silently:
+ *
+ *    `+tag` subaddressing — `a+shop@x.com` → `a@x.com` is a Gmail/Fastmail/Outlook convention, not
+ *      a rule. RFC 5321 says the local part is opaque to everyone but the delivering host, and
+ *      plenty of hosts (cPanel mailboxes, Exchange without plus-addressing, anything with a literal
+ *      `+` in the account name) deliver `a+shop@` to a mailbox that has nothing to do with `a@`.
+ *      Strip it and one person's spam complaint silently blocks a colleague's invitation.
+ *    Gmail dot-insensitivity — `j.smith@` → `jsmith@`. Same objection, worse odds: dots are
+ *      ordinary local-part characters at most providers and `j.smith` and `jsmith` are routinely
+ *      two different employees.
+ *    Provider tables generally — getting this right per provider means shipping and maintaining a
+ *      list of MX patterns, and a wrong entry fails closed: mail that is never sent, to someone who
+ *      never asked us to stop, with nothing anywhere saying why. An under-normalised address that
+ *      slips a suppression is a visible, fixable mistake; an over-normalised one is not. */
+export const normaliseAddress = (s: string): string => s.trim().toLowerCase().replace(/\.+$/, '');
+
+// ── Quarantine: the delivery that is not really a delivery ───────────────────
+//
+// Mailgun reports a message Gmail QUARANTINED as `delivered`, with a 2xx code, and the only trace
+// of what happened is a phrase inside `delivery-status.message`:
+//
+//     2.0.0 OK DMARC:Quarantine
+//
+// Confirmed on a real send from this deployment. The receiving server did accept the message — so
+// `delivered` is not a lie, exactly — and then applied its DMARC policy and filed it where nobody
+// will look. Reading only the status, delivery tracking puts a green tick beside mail that landed
+// in spam, which is worse than no tracking at all: the host stops looking for the problem.
+//
+// Nothing extra has to be RECORDED to fix this. The webhook already stores the receiving server's
+// own words in `guest_invites.reason` (routes/guests.ts writes `reason: ev.reason`, and mailgun.ts
+// normaliseEvent reads `delivery-status.message` first, ahead of Mailgun's own description,
+// precisely because the server's words are the useful ones). The signal was being stored and
+// thrown away at the point of display. So this is a classifier over a string we already have, not
+// a new column — which is also why it needs no migration and no change to the webhook.
+//
+// Deliberately narrow. It matches the DMARC quarantine phrase and nothing else: "spam" appears in
+// plenty of benign 2xx greetings, and a false positive here tells a host their mail is being
+// filtered when it is not, which sends them off tuning DNS for no reason.
+const QUARANTINE_RE = /\bdmarc\s*[:=]?\s*quarantine\b/i;
+
+/** Did the receiving server accept this and then quarantine it?
+ *
+ *  Only ever true of a `delivered`. On any other status the state already tells the host what
+ *  happened, and a bounce or a complaint is not improved by also mentioning DMARC. */
+export function quarantined(status: DeliveryStatus, reason: string | null | undefined): boolean {
+  return status === 'delivered' && !!reason && QUARANTINE_RE.test(reason);
+}
+
+/** What to tell the host about it. One sentence: what happened, and where the message went.
+ *
+ *  Not diagnostic advice — that belongs in docs/DELIVERY-TRACKING.md, which the operator reads and
+ *  the host does not. The host needs to know the guest probably has not seen it. */
+export const QUARANTINE_NOTE =
+  'The receiving server accepted this and then quarantined it — it most likely landed in spam, '
+  + 'so treat it as not yet seen.';
 
 /** How the host should read a state, given that some transports never report back.
  *
@@ -103,7 +188,14 @@ export const normaliseAddress = (s: string): string => s.trim().toLowerCase();
  *  ask again in a minute". On plain SMTP there is no webhook and there never will be, so 'sent'
  *  is the final state — and presenting it as if an update were coming would be a lie the host
  *  waits on. Saying "we can't tell" is worth more than implying success. */
-export function describe(status: DeliveryStatus, provider: string | null): { label: string; tone: 'good' | 'bad' | 'warn' | 'muted' } {
+export function describe(
+  status: DeliveryStatus,
+  provider: string | null,
+  /** The receiving server's own words, when there were any. Read for one thing only: a `delivered`
+   *  that says DMARC:Quarantine is not a green tick. */
+  reason: string | null = null,
+): { label: string; tone: 'good' | 'bad' | 'warn' | 'muted' } {
+  if (quarantined(status, reason)) return { label: 'Delivered to spam', tone: 'warn' };
   switch (status) {
     case 'delivered':    return { label: 'Delivered', tone: 'good' };
     case 'bounced':      return { label: 'Bounced', tone: 'bad' };

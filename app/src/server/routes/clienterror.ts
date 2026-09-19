@@ -12,6 +12,12 @@ const INFORMATIONAL = new Set(['camera-denied']);
 // POST /api/client-error — lightweight client-side diagnostic capture (e.g. a failed upload).
 // Public (guests aren't authenticated) and best-effort: we never want error reporting to itself
 // throw. Stores TECHNICAL data only — message + where it happened — never photos or content.
+/** Everything before the first `?` or `#` — see the note at its use. */
+function stripQuery(u: string): string {
+  const cut = u.search(/[?#]/);
+  return cut === -1 ? u : u.slice(0, cut);
+}
+
 router.post('/', async (req: Request, res: Response) => {
   try {
     const b = req.body as { message?: string; context?: string; eventCode?: string; url?: string };
@@ -23,7 +29,11 @@ router.post('/', async (req: Request, res: Response) => {
       message,
       context,
       eventCode: b?.eventCode ? String(b.eventCode).slice(0, 40) : null,
-      url: b?.url ? String(b.url).slice(0, 300) : null,
+      // PATH ONLY. This is a caller-supplied string we store and then show in the admin queue, and a
+      // URL is exactly where a credential ends up — a session token or organizer code in a query
+      // string would be persisted here by the client's own error reporter. Rendering was never the
+      // risk (Svelte escapes it); keeping the secret was.
+      url: b?.url ? stripQuery(String(b.url)).slice(0, 300) : null,
       userAgent: String(req.get('user-agent') || '').slice(0, 300) || null,
       // Informational reports arrive already handled. A guest declining or dismissing the camera
       // prompt is a CHOICE, not a fault — the client already gives it its own context precisely so

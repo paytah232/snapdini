@@ -1,12 +1,17 @@
 import { Router, type Request, type Response } from 'express';
+import rateLimit from 'express-rate-limit';
 import { v4 as uuidv4 } from 'uuid';
 import { eq, or, and, count, sql, isNotNull } from 'drizzle-orm';
 import { db } from '../db';
 import { effectiveMaxPhotos, photosRemaining as remainingFor } from '../allowance';
 import { events, guestFeedback, participants, photos } from '../schema';
-import { readSets, setByKey, assignSet, readTick } from '../challenges';
+import {
+  readSets, setByKey, assignSetWithSource, readTick,
+  readSetSource, publicSetSource, shouldAskWhichSet, setChoices, resolveSetChoice, cardDesignHasQr,
+} from '../challenges';
 import { faceMatchingAvailable } from '../faces';
 import { billingEnabled } from '../billing';
+import { isRiskyRecovery, notifyRiskyRecovery } from '../ops-notify';
 
 const router = Router();
 
@@ -38,6 +43,41 @@ export async function missionsFor(eventChallenges: string | null, setKey: string
     challengesDone: rows.map((r) => r.id).filter((x): x is string => !!x && offered.has(x)),
     challengeSet: set.key,
     challengeTick: readTick(eventChallenges),
+  };
+}
+
+/** Everything the camera needs to know about the guest's card BEYOND which one it is.
+ *
+ *  Three fields rather than one because they answer three different questions, and a client that
+ *  had to derive any of them would be deriving it from state it cannot see:
+ *
+ *   · `setSource` — where the card came from. Only interesting for the nudge below.
+ *   · `setPending` — is there still a question open for this guest? THE gate on the prompt, and the
+ *     reason no event already running is disturbed: their participants have no stored source, an
+ *     absent source reads as 'auto', and 'auto' is settled.
+ *   · `setChoices` — the cards, as something recognisable rather than as keys. Sent only while the
+ *     question is open, so the ordinary case ships nothing extra.
+ *
+ *  `cardsHaveQr` rides along on the same condition: if the cards at THIS event each carry their own
+ *  code, the better suggestion is to go and scan the one in their hand rather than to pick from a
+ *  list, and the client cannot know that on its own.
+ */
+export function setStatusFor(o: {
+  challenges: string | null;
+  posterConfig: string | null;
+  challengeSet: string | null;
+  challengeSetSource: string | null;
+}) {
+  const sets = readSets(o.challenges);
+  const source = readSetSource(o.challengeSetSource);
+  const ask = shouldAskWhichSet(sets, source);
+  return {
+    setSource: publicSetSource(source),
+    setPending: ask,
+    // undefined, not [] / false: JSON drops the key entirely, so a guest with nothing to answer
+    // gets the payload they have always got.
+    setChoices: ask ? setChoices(sets) : undefined,
+    cardsHaveQr: ask ? cardDesignHasQr(o.posterConfig) : undefined,
   };
 }
 
@@ -91,6 +131,64 @@ const isDuplicate = (e: unknown): boolean => {
   return err?.code === '23505' || err?.cause?.code === '23505';
 };
 
+// ── Throttling email recovery (the branch inside the join below) ──────────────
+//
+// Recovery is keyed on the address alone, on purpose (the note on the branch itself explains why,
+// and specs/97-participant-email.mjs pins it). The cost of that is an oracle-and-takeover pair: an
+// event's join code is printed on a venue sign, so code + a guest's address mints a fresh session
+// on that guest's roll. This limiter does not close that — it makes walking a guest list SLOW, and
+// ops-notify.notifyRiskyRecovery makes the takeover NOISY. Nothing a real guest does changes.
+//
+// KEYED ON (event id + lower(address)). NOT on the IP, and this is the whole design decision:
+//   · a whole venue is ONE NAT address — the GUEST_READ note in index.ts spells out what an
+//     IP-keyed limiter does to a wedding, and a prior audit found `trust proxy` resolving to the
+//     venue NAT. An IP bucket on a guest write path throttles the party, not the attacker.
+//   · the event ROW, not the join code the client sent: joinCode AND slug both resolve to the same
+//     event (see the lookup above), so keying on the client's string would hand out two budgets.
+//   · lower(), to agree with the recovery lookup and the UNIQUE index on (event_id, lower(email)) —
+//     otherwise flipping one letter's case is a fresh bucket.
+//
+// COUNTS EVERY ATTEMPT, including the ones that succeed. Skipping successes would leave this
+// limiter with nothing to count: an attacker who has the address gets a SUCCESSFUL recovery every
+// single time, so failures are not the abuse signal — volume is. A real returning guest makes one
+// attempt, or two if they fat-fingered the address; 5 per 15 minutes per address leaves them a wide
+// margin (specs/97-participant-email.mjs legitimately makes 5 and is unaffected), while an
+// enumerator gets 5 tries per address per quarter of an hour.
+//
+// Not in index.ts with its siblings — where a reader will look first — because it CANNOT be mounted
+// as middleware: the key needs the resolved event row, and whether a request is a recovery at all
+// is only known after the lookup below. So it is built here and CALLED mid-handler, on the recovery
+// path only. A first-time join never reaches it.
+const RECOVERY_BLOCKED = Symbol('recovery-rate-limited');
+
+/** The bucket a recovery attempt counts against. Exported for the unit test. */
+export const recoveryKey = (eventId: string, email: string) => `${eventId}:${email.trim().toLowerCase()}`;
+
+export const recoveryLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, limit: Number(process.env.RECOVERY_RATE_LIMIT || 5),
+  standardHeaders: 'draft-7', legacyHeaders: false,
+  // res.locals, set by recoveryAllowed() immediately before it calls this. The default generator
+  // is req.ip, which is the one thing this must not be.
+  keyGenerator: (_req: Request, res: Response) => String(res.locals.recoveryKey || ''),
+  // Running inside the route, the limiter must not answer the request itself — the handler is
+  // still holding it. next(sentinel) hands the decision back to recoveryAllowed().
+  handler: (_req, _res, next) => next(RECOVERY_BLOCKED),
+});
+
+/** false = over budget; the caller answers 429. Throws on a real store failure rather than
+ *  quietly failing open. Exported so the unit test can drive the REAL gate rather than a copy of
+ *  it — the keyGenerator/sentinel handshake is the part worth testing. */
+export function recoveryAllowed(req: Request, res: Response, key: string): Promise<boolean> {
+  res.locals.recoveryKey = key;
+  return new Promise<boolean>((resolve, reject) => {
+    recoveryLimiter(req, res, (err?: unknown) => {
+      if (!err) return resolve(true);
+      if (err === RECOVERY_BLOCKED) return resolve(false);
+      reject(err);
+    });
+  });
+}
+
 // ── POST /api/participants — join an event ─────────────────────────────────────
 
 router.post('/', async (req: Request, res: Response) => {
@@ -104,9 +202,15 @@ router.post('/', async (req: Request, res: Response) => {
   if (cleanEmail && !isEmail(cleanEmail))
     return res.status(400).json({ error: 'Enter a valid email address (or leave it blank)' });
 
-  const [event] = await db.select().from(events).where(
+  // JOIN CODE WINS on a tie — the same rule eventByIdentifier applies, written here because this
+  // lookup does not go through it. The two namespaces can collide (see isSlugAvailable), and a join
+  // code is the stronger claim; without the sort, which event this resolves to is whichever row the
+  // planner happens to return first.
+  const evRows = await db.select().from(events).where(
     or(eq(events.joinCode, joinCode.toUpperCase().trim()), eq(events.slug, joinCode.toLowerCase().trim())),
-  );
+  ).limit(2);
+  const event = evRows.length < 2 ? evRows[0]
+    : (evRows.find((e) => e.joinCode === joinCode.toUpperCase().trim()) ?? evRows[0]);
   if (!event) return res.status(404).json({ error: 'Event not found' });
 
   const now = Date.now();
@@ -142,9 +246,21 @@ router.post('/', async (req: Request, res: Response) => {
       .where(and(eq(participants.eventId, event.id),
                  sql`lower(${participants.email}) = lower(${cleanEmail})`));
     if (existing) {
+      // Before anything is written, and only on this branch: over budget for this address at this
+      // event means no new session token, so the roll is not handed over. See recoveryLimiter.
+      if (!await recoveryAllowed(req, res, recoveryKey(event.id, cleanEmail)))
+        return res.status(429).json({ error: 'Too many attempts to rejoin with that email — please wait a few minutes and try again.' });
       const sessionToken = newToken();
       const newName = name.trim().slice(0, 40) || existing.name;
       await db.update(participants).set({ sessionToken, name: newName }).where(eq(participants.id, existing.id));
+      // A rename of a roll that already has photos on it is the takeover shape — alert ops.
+      // Best-effort and never blocks the guest's response, exactly like the unhappy-survey alert
+      // in routes/survey.ts. The address is masked inside the helper.
+      if (isRiskyRecovery(existing, newName)) {
+        notifyRiskyRecovery({ name: event.name, joinCode: event.joinCode },
+          { email: cleanEmail, previousName: existing.name, newName, photosTaken: existing.photosTaken })
+          .catch((e) => console.error('[ops] risky-recovery alert:', (e as Error).message));
+      }
       return res.json({
         participant:     { id: existing.id, name: newName, photosTaken: existing.photosTaken },
         sessionToken,
@@ -157,30 +273,30 @@ router.post('/', async (req: Request, res: Response) => {
         eventName:       event.name,
         noFlash:         !!event.noFlash,
         ...(await missionsFor(event.challenges, existing.challengeSet, existing.id)),
+        // Read off the row they already had, so a guest coming back on a new device is told
+        // exactly what they were told before — including "settled", which is what every
+        // participant who predates the column reads as.
+        ...setStatusFor({ challenges: event.challenges, posterConfig: event.posterConfig,
+                          challengeSet: existing.challengeSet, challengeSetSource: existing.challengeSetSource }),
         recovered:       true,
       });
     }
   }
 
   // Billing entitlement (only enforced when billing is enabled; self-host has no caps).
-  if (billingEnabled) {
-    if (!event.paid)
-      return res.status(402).json({ error: "This event isn't active yet — the organizer needs to finish setting it up." });
-    const [{ c: joined }] = await db.select({ c: count() }).from(participants).where(eq(participants.eventId, event.id));
-    if (Number(joined) >= event.guestCap)
-      return res.status(403).json({ error: `This event is full (max ${event.guestCap} guests).` });
-  }
+  //
+  // Unpaid is refused up front: it does not depend on how many others have joined, so it does not
+  // belong inside the lock below.
+  if (billingEnabled && !event.paid)
+    return res.status(402).json({ error: "This event isn't active yet — the organizer needs to finish setting it up." });
 
   const sessionToken = newToken();
 
-  // Which mission card this guest gets. A printed card may name its own set (?set=b on the QR);
-  // otherwise round-robin by how many have already joined, so the sets stay evenly spread.
+  // The mission cards this event hands out, and the one this guest's printed card asked for
+  // (?set=b on the QR). Parsed out here; USED inside the transaction, where the join count the
+  // round-robin needs is the one we are actually seating against.
   const sets = readSets(event.challenges);
-  let challengeSet: string | null = null;
-  if (sets.length) {
-    const [{ c: soFar }] = await db.select({ c: count() }).from(participants).where(eq(participants.eventId, event.id));
-    challengeSet = assignSet(sets, req.body?.set ?? req.query?.set, Number(soFar) || 0);
-  }
+  const requestedSet: unknown = req.body?.set ?? req.query?.set;
 
   const participant = {
     id:            uuidv4(),
@@ -190,21 +306,96 @@ router.post('/', async (req: Request, res: Response) => {
     sessionToken:  sessionToken,
     photosTaken:   0,
     joinedAt:      now,
-    challengeSet,
+    // Which mission card this guest gets, and whether that was their card or our guess — a guess
+    // at an event with several cards is written down as a question still open (source 'pending')
+    // and the camera then asks. Both filled in below. See assignSetWithSource.
+    challengeSet:       null as string | null,
+    challengeSetSource: null as string | null,
   };
 
-  try {
-    await db.insert(participants).values(participant);
-  } catch (e) {
-    if (!isDuplicate(e)) throw e;
-    // Recovery above should have caught this, so we are in a race (two devices joining with the
-    // same address at once) or a case the guard still cannot see. Either way, letting someone into
-    // the event with their OWN roll matters more than storing their address, so drop the address
-    // and keep going. They lose email-based recovery; they do not lose the event.
-    console.warn(`[participants] ${event.joinCode}: address already used in this event — joining without it`);
-    participant.email = null;
-    await db.insert(participants).values(participant);
-  }
+  // ── Seating the guest: count, cap, INSERT — one step, not three ─────────────
+  //
+  // `guestCap` is a PAID entitlement, and "count the guests, then insert one" is check-then-act.
+  // A QR code on a venue sign is scanned by a whole table at the same moment, which is the normal
+  // case and not an edge one: every request in the burst read the same count before any of them
+  // had inserted, so every one of them passed. Measured on dev before this change: twenty-five
+  // simultaneous joins at a cap of TEN admitted seventeen, and twelve joins at a cap with one free
+  // seat admitted all twelve. Guests beyond the tier the host paid for were getting in free, which
+  // is a revenue bug as much as a correctness one. testsuite/specs/16-guest-cap-race.mjs fires that
+  // burst for real rather than reasoning about it.
+  //
+  // So the count and the insert happen inside one transaction that first takes a row lock on the
+  // EVENT. Joins to the same event then queue behind each other, and each one counts the rows the
+  // one before it wrote. Joins to OTHER events are untouched — the lock is per event row.
+  //
+  //  · `for no key update`, not `for update`. It conflicts with itself, which is the entire point
+  //    (that is what serialises the joins), but it does NOT conflict with the `for key share` lock
+  //    that every INSERT into participants takes on this event row for its foreign key. With
+  //    `for update`, any other writer inserting a participant for this event would have queued
+  //    behind us for no reason.
+  //  · NOT `INSERT … SELECT … WHERE (SELECT count(*) …) < cap`. That looks atomic and is not: under
+  //    READ COMMITTED each statement's subquery reads a snapshot taken before the others committed,
+  //    so the whole burst still passes and the overshoot survives unchanged.
+  //  · NOT an advisory lock. It would work, but it needs the event's uuid hashed down to a bigint
+  //    (two unrelated events can then collide and serialise each other), and it is a lock with no
+  //    visible relationship to the row whose capacity it protects.
+  //
+  // The lock spans three statements against Postgres and NOTHING else. `missionsFor()` and the rest
+  // of the response are built after the commit, below, deliberately: none of it affects who gets a
+  // seat, and holding a row lock across unrelated work would turn one slow query into a queue of
+  // guests staring at a spinner.
+  //
+  // The cap is re-read from the LOCKED row rather than trusted from `event`, which was read before
+  // the lock existed: a host who buys a bigger tier mid-rush should be believed immediately.
+  const seat = await db.transaction(async (tx) => {
+    let cap: number | null = null;
+    if (billingEnabled) {
+      const [locked] = await tx.select({ guestCap: events.guestCap })
+        .from(events).where(eq(events.id, event.id)).for('no key update');
+      // Deleted while this join waited for the lock. The foreign key below would refuse the insert
+      // anyway; answering the same 404 the lookup above would have is the honest version of that.
+      if (!locked) return { gone: true } as const;
+      cap = locked.guestCap;
+    }
+
+    // ONE count, shared by the cap and the round-robin. They were two identical queries; inside
+    // the lock they could not disagree even if they wanted to.
+    if (cap !== null || sets.length) {
+      const [{ c: joined }] = await tx.select({ c: count() })
+        .from(participants).where(eq(participants.eventId, event.id));
+      if (cap !== null && Number(joined) >= cap) return { full: cap } as const;
+      if (sets.length)
+        ({ key: participant.challengeSet, source: participant.challengeSetSource } =
+          assignSetWithSource(sets, requestedSet, Number(joined) || 0));
+    }
+
+    try {
+      // A SAVEPOINT — which is what a nested Drizzle transaction compiles to — and it is load
+      // bearing, not decoration. In Postgres a failed statement poisons the whole transaction, so
+      // without it the catch below would fire its second INSERT into an aborted transaction, get
+      // 25P02 back, and hand the guest exactly the HTTP 500 that specs/97-participant-email.mjs
+      // exists to keep out of this route. The savepoint contains the failure to the one statement
+      // that caused it.
+      await tx.transaction(async (sp) => { await sp.insert(participants).values(participant); });
+    } catch (e) {
+      if (!isDuplicate(e)) throw e;
+      // Recovery above should have caught this, so we are in a race (two devices joining with the
+      // same address at once) or a case the guard still cannot see. Either way, letting someone into
+      // the event with their OWN roll matters more than storing their address, so drop the address
+      // and keep going. They lose email-based recovery; they do not lose the event.
+      console.warn(`[participants] ${event.joinCode}: address already used in this event — joining without it`);
+      participant.email = null;
+      // This one cannot trip the same index: it is partial (WHERE email IS NOT NULL), so a row with
+      // no address is not in it at all.
+      await tx.insert(participants).values(participant);
+    }
+    return { seated: true } as const;
+  });
+
+  // Answered out here, after the commit — a response written inside the transaction would hold the
+  // lock for as long as it took to build.
+  if ('gone' in seat) return res.status(404).json({ error: 'Event not found' });
+  if ('full' in seat) return res.status(403).json({ error: `This event is full (max ${seat.full} guests).` });
 
   res.json({
     participant:     { id: participant.id, name: participant.name, photosTaken: 0 },
@@ -217,14 +408,20 @@ router.post('/', async (req: Request, res: Response) => {
         faceEnrolled: false,
     eventName:       event.name,
     noFlash:         !!event.noFlash,
-    ...(await missionsFor(event.challenges, challengeSet, participant.id)),
+    ...(await missionsFor(event.challenges, participant.challengeSet, participant.id)),
+    ...setStatusFor({ challenges: event.challenges, posterConfig: event.posterConfig,
+                      challengeSet: participant.challengeSet, challengeSetSource: participant.challengeSetSource }),
   });
 });
 
 // ── GET /api/participants/me ───────────────────────────────────────────────────
 
 router.get('/me', async (req: Request, res: Response) => {
-  const sessionToken = req.get('x-session-token') || req.query.sessionToken;
+  // Header (or body) only — never the query string. nginx logs "$request", so a token in a
+  // URL is written into the access log, the browser history and every proxy between. The zip
+  // route is the ONE justified exception and says so: it is reached by navigating, and a
+  // navigation cannot carry a header. Everything here is a fetch.
+  const sessionToken = req.get('x-session-token');
   if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
 
   const [p] = await db
@@ -240,7 +437,11 @@ router.get('/me', async (req: Request, res: Response) => {
       faceMatching:     events.faceMatchingEnabled,
       faceConsentAt:    participants.faceConsentAt,
       challengeSet:     participants.challengeSet,
+      challengeSetSource: participants.challengeSetSource,
       challenges:       events.challenges,
+      // Only for cardDesignHasQr(): whether the printed cards at this event carry their own code,
+      // which decides whether "go and scan yours" is better advice than "pick one".
+      posterConfig:     events.posterConfig,
       upgradeEmail:     participants.upgradeEmail,
       eventName:      events.name,
       joinCode:       events.joinCode,
@@ -280,6 +481,8 @@ router.get('/me', async (req: Request, res: Response) => {
       faceMatching:    faceMatchingAvailable() && !!p.faceMatching,
       faceEnrolled:    !!p.faceConsentAt,
       ...(await missionsFor(p.challenges, p.challengeSet, p.id)),
+      ...setStatusFor({ challenges: p.challenges, posterConfig: p.posterConfig,
+                        challengeSet: p.challengeSet, challengeSetSource: p.challengeSetSource }),
       // Asked once, on whichever surface they saw first. Both the camera and the shared gallery
       // offer the ask, and neither should re-ask someone who already answered on the other.
       feedbackGiven:   !!p.feedbackAskedAt,
@@ -292,6 +495,94 @@ router.get('/me', async (req: Request, res: Response) => {
       emailFromPayment: !!p.upgradeEmail && (p.email || '').toLowerCase() === p.upgradeEmail.toLowerCase(),
     allowDownloads:  !!p.allowDownloads,
     noFlash:         !!p.noFlash,
+  });
+});
+
+// ── POST /api/participants/card — the guest says which trick card they are holding ────────
+//
+// Trick cards print without a QR by default now: most sets are deliberately minimal, and the guests
+// this exists for joined off the main event sign, which names no set at all. The round-robin then
+// hands out cards nobody is looking at — the app saying "card B" to someone with card A on the
+// table in front of them, which is the exact failure printing several cards is meant to avoid.
+//
+// So we ask. This is the only place that answer can be given, and all three rules are enforced HERE
+// rather than in the client, because the client is a phone at a party:
+//
+//  · only while the question is open (source 'pending'). A second attempt is refused: the guest was
+//    warned they cannot change it, and one who could would be free to shop around for the easier
+//    list. A printed ?set= card and a host's move are final for the same reason.
+//  · only a card this event HAS. An arbitrary key leaves them holding a set that does not exist, and
+//    missionsFor() would fall back to the first one — a silent wrong answer.
+//  · "I don't have a card" keeps the round-robin's answer, and is not a lesser option. For someone
+//    who never had a card in their hand, even coverage is a better answer than a guess; without it
+//    every such guest taps the first button and the coverage several cards exist for is gone.
+router.post('/card', async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { set?: unknown; sessionToken?: unknown };
+  const sessionToken = req.get('x-session-token') || (typeof body.sessionToken === 'string' ? body.sessionToken : '');
+  if (!sessionToken) return res.status(400).json({ error: 'sessionToken required' });
+
+  const [p] = await db.select().from(participants).where(eq(participants.sessionToken, String(sessionToken)));
+  if (!p) return res.status(404).json({ error: 'Session not found' });
+  const [event] = await db.select().from(events).where(eq(events.id, p.eventId));
+  if (!event) return res.status(404).json({ error: 'Event not found' });
+
+  const sets = readSets(event.challenges);
+
+  /** "You already have a card" — the answer whether we found that out by READING the row or by
+   *  losing the race to write it. Built from whatever the column says NOW, not from the copy read
+   *  at the top of the handler, because in the second case that copy is exactly what was stale. */
+  const alreadySettled = async (setKey: string | null, source: string | null) =>
+    res.status(409).json({
+      error: "You've already got your card for tonight.",
+      ...(await missionsFor(event.challenges, setKey, p.id)),
+      ...setStatusFor({ challenges: event.challenges, posterConfig: event.posterConfig,
+                        challengeSet: setKey, challengeSetSource: source }),
+    });
+
+  const out = resolveSetChoice(sets, { key: p.challengeSet, source: readSetSource(p.challengeSetSource) }, body.set);
+  if (!out.ok) {
+    // 409 rather than 403 for 'locked': nothing is forbidden, the question is already answered —
+    // two taps on a slow connection is the ordinary way to reach this. The card they actually have
+    // comes back with it, so the camera can show that instead of an error.
+    if (out.reason === 'locked') return alreadySettled(p.challengeSet, p.challengeSetSource);
+    return res.status(400).json({ error: 'That card is not part of this event' });
+  }
+
+  // ── The lock is this WHERE clause, and nothing above it ──────────────────────
+  //
+  // resolveSetChoice() reads the source and then, several awaits later, we write. Between those two
+  // moments a second request can do the same thing, and both would win: two taps on a phone at a
+  // party, a double-fire from a flaky connection, a guest with the camera open on two devices. The
+  // promise made to the guest before the tap is "you cannot change this" — and a promise kept by
+  // reading a value you then overwrite unconditionally is not kept at all. The first writer takes
+  // the row; the second changes nothing and is told the same thing it would have been told had it
+  // arrived a moment later.
+  //
+  // `= 'pending'` and NOT `IS NULL OR = 'pending'`, deliberately. NULL is every participant who
+  // joined before any of this existed: readSetSource() reads it as 'auto', which is SETTLED, and
+  // resolveSetChoice() refuses it. Making NULL lockable here would open a door the branch above has
+  // always kept shut — and would reassign the card of someone who was never asked.
+  //
+  // `returning()` rather than a rowCount: it is the portable answer across drivers, and it hands
+  // back the row we just wrote instead of a number we would have to trust.
+  const won = await db.update(participants)
+    .set({ challengeSet: out.key, challengeSetSource: out.source })
+    .where(and(eq(participants.id, p.id), eq(participants.challengeSetSource, 'pending')))
+    .returning({ challengeSet: participants.challengeSet, challengeSetSource: participants.challengeSetSource });
+
+  if (!won.length) {
+    // Lost the race. Re-read rather than echo `out`: the card the guest actually holds is whatever
+    // the winner wrote, and telling them about the one they did not get is the bug wearing a 409.
+    const [now] = await db.select({ challengeSet: participants.challengeSet, challengeSetSource: participants.challengeSetSource })
+      .from(participants).where(eq(participants.id, p.id));
+    return alreadySettled(now?.challengeSet ?? p.challengeSet, now?.challengeSetSource ?? p.challengeSetSource);
+  }
+
+  res.json({
+    ok: true,
+    ...(await missionsFor(event.challenges, out.key, p.id)),
+    ...setStatusFor({ challenges: event.challenges, posterConfig: event.posterConfig,
+                      challengeSet: out.key, challengeSetSource: out.source }),
   });
 });
 

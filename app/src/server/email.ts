@@ -1,6 +1,15 @@
 import nodemailer from 'nodemailer';
 import { blocksFor } from './unsubscribe';
 import { normaliseAddress } from './delivery';
+import {
+  C, button, buttonStyle, emailShell, footerLine, heading, link, para, fine,
+  textEmail, textLink, SUPPORT_EMAIL,
+} from './email-theme';
+
+// The shell, the palette and the link/button helpers all live in email-theme.ts — read the header
+// of that file for why an email is built the way it is. Re-exported here because `email.ts` is the
+// module every sender already imports, and a caller should not have to know there are two.
+export { C, button, link, para, fine, heading, emailShell, footerLine, textEmail, textLink } from './email-theme';
 
 // Two interchangeable transports: SMTP (any provider) or Mailgun's HTTP API. Mailgun is
 // preferred when configured; otherwise SMTP; otherwise email is disabled (dev logs links).
@@ -53,8 +62,24 @@ const FROM = process.env.SMTP_FROM
   || process.env.SMTP_USER
   || (mailgunConfigured ? `Snapdini <postmaster@${process.env.MAILGUN_DOMAIN}>` : 'Snapdini <noreply@snapdini.com>');
 
-interface Mail {
+export interface Mail {
   to: string; subject: string; html: string; replyTo?: string;
+  /** The plain-text alternative part.
+   *
+   *  Optional so an internal sender that has not been given one still sends rather than throwing,
+   *  but every CUSTOMER-FACING builder now supplies it, and the sweep test
+   *  (__tests__/email-shell.test.ts) fails if one stops.
+   *
+   *  Three reasons it is not decoration. It is the genuine fallback for a client that cannot render
+   *  our HTML — which is the whole class of bug this shell was rewritten to fix. It is what a
+   *  text-mode or screen-reader-driven client prefers outright. And HTML-only mail is a
+   *  deliverability penalty, which a domain that has already seen a DMARC quarantine can do
+   *  without.
+   *
+   *  It is generated from the same DATA as the HTML by each builder, never by stripping tags off
+   *  the rendered markup — that produces bare URLs mid-sentence and stranded button labels — and it
+   *  carries RAW strings, never escaped ones: `&amp;` in a text part reaches the inbox literally. */
+  text?: string;
   /** Metadata to attach to the message. Mailgun carries these through to its webhooks as
    *  `user-variables`, which is the ONLY thing that lets a delivery event arriving hours later be
    *  tied back to the row that sent it. Ignored by the SMTP transport, which has no such channel —
@@ -104,10 +129,14 @@ export interface SendResult {
 const unbracket = (id: string | null | undefined): string | null =>
   (id ? id.replace(/^</, '').replace(/>$/, '') || null : null);
 
-async function sendViaMailgun({ to, subject, html, replyTo, variables, tag, headers }: Mail): Promise<SendResult> {
+async function sendViaMailgun({ to, subject, html, text, replyTo, variables, tag, headers }: Mail): Promise<SendResult> {
   const base = process.env.MAILGUN_BASE || 'https://api.mailgun.net'; // EU: https://api.eu.mailgun.net
   const domain = process.env.MAILGUN_DOMAIN as string;
   const form = new URLSearchParams({ from: FROM, to, subject, html });
+  // Mailgun builds the multipart/alternative for us: `html` plus `text` on the same request is one
+  // message with two parts, in the right order. Set BEFORE the h:/v:/o: fields for no reason other
+  // than reading order — it is part of the message, not an option on it.
+  if (text) form.set('text', text);
   if (replyTo) form.set('h:Reply-To', replyTo);
   // `h:` = a header to set on the outgoing message. Worth knowing where this sits relative to
   // o:tracking below: with tracking off, Mailgun injects no unsubscribe of its own, so whatever is
@@ -149,7 +178,7 @@ async function sendViaMailgun({ to, subject, html, replyTo, variables, tag, head
   return { provider: 'mailgun', messageId: unbracket(body?.id) };
 }
 
-export async function sendMail({ to, subject, html, replyTo, variables, tag, headers, eventId, always }: Mail): Promise<SendResult> {
+export async function sendMail({ to, subject, html, text, replyTo, variables, tag, headers, eventId, always }: Mail): Promise<SendResult> {
   // ONE place, so every sender is covered — including the ones nobody has written yet.
   //
   // This check used to live in exactly one route (the guest invite), which meant a guest who chose
@@ -163,9 +192,13 @@ export async function sendMail({ to, subject, html, replyTo, variables, tag, hea
       return { provider: mailgunConfigured ? 'mailgun' : 'smtp', messageId: null, suppressed: true };
     }
   }
-  if (mailgunConfigured) return sendViaMailgun({ to, subject, html, replyTo, variables, tag, headers });
+  if (mailgunConfigured) return sendViaMailgun({ to, subject, html, text, replyTo, variables, tag, headers });
   if (transporter) {
-    const info = await transporter.sendMail({ from: FROM, to, subject, html, replyTo, headers });
+    // `text` goes to BOTH transports or it goes to neither. A field added to the Mail type and
+    // quietly dropped by one of the two is this project's recurring silent-failure shape: the
+    // plain-text part would exist on Mailgun deployments and vanish on SMTP ones, with nothing
+    // anywhere saying so. nodemailer builds multipart/alternative from html + text.
+    const info = await transporter.sendMail({ from: FROM, to, subject, html, text, replyTo, headers });
     return { provider: 'smtp', messageId: unbracket(info?.messageId) };
   }
   // This throws on a request path, and a caller's catch is what decides whether the text reaches a
@@ -181,12 +214,6 @@ export async function sendMail({ to, subject, html, replyTo, variables, tag, hea
 export async function sendAuthLink(
   { to, kind, link }: { to: string; kind: 'verify' | 'magic'; link: string }
 ): Promise<{ delivered: boolean; devLink?: string }> {
-  const copy = kind === 'verify'
-    ? { subject: 'Verify your Snapdini email', heading: 'Confirm your email',
-        body: 'Tap below to verify your email and finish setting up your account.', cta: 'Verify email' }
-    : { subject: 'Your Snapdini sign-in link', heading: 'Sign in to Snapdini',
-        body: 'Tap below to sign in. This link expires in 30 minutes and can be used once.', cta: 'Sign in' };
-
   const devFallback = process.env.NODE_ENV !== 'production' ? link : undefined;
 
   // No transport at all (local dev with neither Mailgun nor SMTP): log the link.
@@ -198,7 +225,8 @@ export async function sendAuthLink(
   try {
     // Never suppressed: this is a link the person asked for seconds ago, and withholding it locks
     // them out of their own account. It is also purely transactional — nothing is being sold.
-    await sendMail({ to, subject: copy.subject, html: authHtml(copy, link), always: true });
+    const m = authEmail(kind, link);
+    await sendMail({ to, subject: m.subject, html: m.html, text: m.text, always: true });
     return { delivered: true, devLink: devFallback };
   } catch (err) {
     // Common in dev: the Mailgun sandbox only delivers to *authorised* recipients,
@@ -208,36 +236,139 @@ export async function sendAuthLink(
   }
 }
 
-function authHtml({ heading, body, cta }: { heading: string; body: string; cta: string }, link: string): string {
-  return `<!DOCTYPE html><html><body style="margin:0;background:#0f0f0f;color:#f0ece6;font-family:sans-serif">
-  <div style="max-width:600px;margin:0 auto;padding:40px 24px">
-    <div style="margin-bottom:24px">
-      <span style="background:#f5c518;color:#111;padding:6px 12px;border-radius:6px;font-weight:bold;font-size:1.1rem">🎩 Snapdini</span>
-    </div>
-    <h2 style="margin-bottom:16px">${heading}</h2>
-    <p>${body}</p>
-    <p style="margin:24px 0"><a href="${link}" style="display:inline-block;background:#f5c518;color:#111;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold">${cta} →</a></p>
-    <p style="color:#666;font-size:0.8rem">If you didn't request this, you can ignore this email.</p>
-    <!-- Sender identification (Spam Act 2003 s17): the name AND a contact address that is
-         reasonably likely to be valid for 30 days. Both of these layouts carried the logo and
-         nothing to reach us by. Contact details are expressly permitted alongside factual
-         information (Sch 1 cl 3(2)), so adding this cannot cost any message its designated status. -->
-    <p style="color:#666;font-size:0.8rem">Snapdini · <a href="mailto:support@snapdini.com" style="color:#888">support@snapdini.com</a></p>
-  </div>
-</body></html>`;
+/** The sign-in / verify email, as a real builder rather than markup buried in the send path.
+ *
+ *  Exported for two reasons: `app/scripts/email-sampler.ts` used to reproduce this markup verbatim
+ *  (and drifted from it the moment either copy was touched), and a builder can be asserted against
+ *  by the sweep test. Nothing about it is secret — the LINK is the credential, and that is the
+ *  caller's to hold. */
+export function authEmail(kind: 'verify' | 'magic', url: string): { subject: string; preheader: string; html: string; text: string } {
+  const copy = kind === 'verify'
+    ? { subject: 'Verify your Snapdini email', heading: 'Confirm your email',
+        preheader: 'One tap to confirm your email and finish setting up your account.',
+        body: 'Tap below to verify your email and finish setting up your account.', cta: 'Verify email' }
+    : { subject: 'Your Snapdini sign-in link', heading: 'Sign in to Snapdini',
+        preheader: 'Your sign-in link — good for 30 minutes, and for one use.',
+        body: 'Tap below to sign in. This link expires in 30 minutes and can be used once.', cta: 'Sign in' };
+
+  const inner = [
+    heading(copy.heading, 'h2'),
+    para(copy.body),
+    button(`${copy.cta} &rarr;`, url),
+    fine('If you didn&rsquo;t request this, you can ignore this email.'),
+  ].join('');
+
+  // Sender identification (Spam Act 2003 s17): the name AND a contact address that is reasonably
+  // likely to be valid for 30 days. This layout carried the logo and nothing to reach us by.
+  // Contact details are expressly permitted alongside factual information (Sch 1 cl 3(2)), so
+  // adding this cannot cost any message its designated status.
+  return {
+    subject: copy.subject,
+    preheader: copy.preheader,
+    html: emailShell({ preheader: copy.preheader, inner, footer: footerLine() }),
+    text: textEmail([
+      copy.heading,
+      copy.body,
+      textLink(copy.cta, url),
+      'If you didn’t request this, you can ignore this email.',
+    ]),
+  };
 }
 
-// Shared Snapdini email layout for transactional mails (gallery links, "your photos").
-export function htmlEmail(title: string, body: string): string {
-  return `<!DOCTYPE html><html><body style="margin:0;background:#0f0f0f;color:#f0ece6;font-family:sans-serif">
-  <div style="max-width:600px;margin:0 auto;padding:40px 24px">
-    <div style="margin-bottom:24px">
-      <span style="background:#f5c518;color:#111;padding:6px 12px;border-radius:6px;font-weight:bold;font-size:1.1rem">🎩 Snapdini</span>
-    </div>
-    <h2 style="margin-bottom:16px">${title}</h2>
-    ${body}
-    <p style="margin-top:40px;color:#666;font-size:0.8rem">Snapdini · <a href="mailto:support@snapdini.com" style="color:#888">support@snapdini.com</a></p>
-  </div>
-  <style>.btn{display:inline-block;background:#f5c518;color:#111;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold}</style>
-</body></html>`;
+/**
+ * Shared Snapdini email layout for transactional mails (gallery links, invites, "your photos").
+ *
+ * ── The chokepoint ──
+ *
+ * `body` is markup written by a caller, and callers get two things wrong in the same two ways every
+ * time: an <a> with no inline `color:`, and a call-to-action marked `class="btn"`. Both were fine
+ * when there was a <style> block at the end of <body> to back them up. There is no longer one, and
+ * there should never have been: Outlook.com and the Gmail mobile app both DELETE <style>, which is
+ * how the owner came to see the primary call-to-action of a Snapdini email as a bare default-blue
+ * link on a near-black ground in one client and an unstyled link in the other. Two clients, one
+ * cause.
+ *
+ * So the shell repairs its own input, here, once — the same reasoning as sendMail's suppression
+ * check. Colouring 18 anchors by hand fixes today's 18; a chokepoint fixes the nineteenth, which
+ * somebody will write next month in a file nobody thought to look at. It is also the only way to
+ * fix `routes/guests.ts`'s invite while that file is owned by someone else.
+ *
+ * `title` is interpolated RAW into the <h2>, exactly as before — every caller escapes it and there
+ * are tests (release-hardening.test.ts) that pin both the raw interpolation and the escaping of
+ * every host-written value that reaches it. Do not "fix" it here; that would double-escape the lot.
+ */
+export function htmlEmail(title: string, body: string, opts: { preheader?: string } = {}): string {
+  return emailShell({
+    preheader: opts.preheader,
+    inner: `${heading(title, 'h2')}${hardenAnchors(body)}`,
+    footer: footerLine(),
+  });
 }
+
+// ── hardenAnchors: no link leaves this building uncoloured ───────────────────
+
+const attrOf = (tag: string, name: string): string | null => {
+  const m = new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"`, 'i').exec(tag);
+  return m ? m[1] : null;
+};
+
+const isBtn = (tag: string): boolean => /\bclass\s*=\s*"[^"]*\bbtn\b[^"]*"/i.test(tag);
+
+/** Does this <a …> carry its own `color:`? Anchored on `;` / whitespace / start-of-value so
+ *  `background-color:` does not count as one — that near-miss is how a sweep passes while every
+ *  link in the message is still the client's default. */
+export const anchorHasColour = (tag: string): boolean => {
+  const style = attrOf(tag, 'style');
+  return !!style && /(^|[;\s])color\s*:/i.test(style);
+};
+
+/** Make a caller's markup survive a client with no CSS at all. Three passes, narrowest first. */
+export function hardenAnchors(html: string): string {
+  // 1. `<p …><a class="btn" href=…>Label</a></p>` — the shape all six CTAs are written in — becomes
+  //    a real table-cell button. A table is what Outlook desktop needs to draw a filled box at all:
+  //    `background` and `border-radius` on an <a> are ignored by the Word engine even inline.
+  //    The <p> goes with it; the button table brings its own margin.
+  let out = html.replace(/<p\b[^>]*>\s*<a\b([^>]*)>([\s\S]*?)<\/a>\s*<\/p>/gi, (whole, attrs: string, label: string) => {
+    const tag = `<a${attrs}>`;
+    if (!isBtn(tag)) return whole;
+    const href = attrOf(tag, 'href');
+    return href ? button(label.trim(), href) : whole;
+  });
+
+  // 2. A `class="btn"` anchor in any other shape still gets every property the deleted rule had,
+  //    inline on the anchor itself. Not as good as a table cell, and never reached by current
+  //    callers — it is here so that "it degraded to a plain blue link" can never be the outcome.
+  out = out.replace(/<a\b([^>]*)>/gi, (tag: string, attrs: string) => {
+    if (!isBtn(tag)) return tag;
+    // EVERY OTHER ATTRIBUTE SURVIVES. This used to rebuild the tag out of the href alone, which
+    // threw away `rel="noopener"`, `target="_blank"` and anything else a caller had put on a
+    // button — and, because attrOf only reads double-quoted values, turned a single-quoted href
+    // into `href="#"`: a button that goes nowhere. Only the style is replaced, because replacing
+    // it is the entire job; the href is now left exactly as the caller wrote it, in whatever
+    // quoting they wrote it in.
+    const rest = attrs.replace(/\s*\bstyle\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+    return `<a${rest} style="${buttonStyle()}">`;
+  });
+
+  // 3. Everything else gets an explicit colour. An anchor that already states one is left alone —
+  //    a caller who chose a quieter grey for the fine print meant it.
+  out = out.replace(/<a\b([^>]*)>/gi, (tag: string, attrs: string) => {
+    if (anchorHasColour(tag)) return tag;
+    const style = attrOf(tag, 'style');
+    if (style === null) return `<a${attrs} style="color:${C.link};text-decoration:underline">`;
+    const sep = !style.trim() || style.trim().endsWith(';') ? '' : ';';
+    // A REPLACER FUNCTION, not a replacement string. In a string, `$&`, `` $` ``, `$'` and `$1`
+    // are substitution patterns — so a style attribute containing one of them would have the
+    // matched text spliced into the value, and `$'` (everything AFTER the match) ends the
+    // attribute and writes the rest of the document back inside the tag. No builder puts caller
+    // data in a style attribute today and esc() turns a quote into `&quot;`, so this is not
+    // reachable; it is one character of difference, and the next builder that interpolates into a
+    // style should not have to know any of the above.
+    return tag.replace(/style\s*=\s*"[^"]*"/i, () => `style="${style}${sep}color:${C.link}"`);
+  });
+
+  return out;
+}
+
+/** The plain-text counterpart of `htmlEmail`'s footer, for a caller assembling a text part. */
+export const textFooterAddress = SUPPORT_EMAIL;

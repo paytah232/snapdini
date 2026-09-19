@@ -20,6 +20,7 @@
 // answer costs nothing. Feedback that gated the opt-out would stop it being low-cost, which is both
 // a dark pattern and — for a facility the Spam Act requires to be simple and free — a compliance
 // problem.
+import crypto from 'crypto';
 import { and, eq, inArray } from 'drizzle-orm';
 import { db } from './db';
 import { emailSuppressions, eventGuests, events, guestInvites, guestUnsubscribes } from './schema';
@@ -329,7 +330,10 @@ async function markInviteUnsubscribed(token: string, now: number): Promise<void>
       .set({ status: 'unsubscribed', reason: null, severity: null, eventAt: now, updatedAt: now })
       .where(eq(guestInvites.id, row.id));
   } catch (e) {
-    console.error(`[unsubscribe] could not mark invite ${token}: ${(e as Error).message}`);
+    // The token, NOT logged: it is the bearer credential for this invite's unsubscribe, and a
+    // log line is the one place a credential is copied, shipped and kept. The fingerprint is
+    // enough to tell two failures apart and to match a report against a row.
+    console.error(`[unsubscribe] could not mark invite ${tokenFingerprint(token)}: ${(e as Error).message}`);
   }
 }
 
@@ -375,6 +379,18 @@ export async function unsubscribeState(target: UnsubTarget): Promise<UnsubState>
 /** Enough of an address to recognise, not enough to harvest — the same rule the account preference
  *  centre follows (email-prefs.maskEmail). Holding the link only makes someone the PRESUMED
  *  recipient, so the page names the address without handing it back in full. */
+/**
+ * A token reduced to something that can safely appear in a log: the first 8 hex of its SHA-256.
+ *
+ * Not reversible, not enough to replay, and stable — which is the whole job. Two log lines about
+ * the same invite match; a fingerprint lifted out of a log grants nothing. Same shape as the short
+ * user hash in auth.ts. If you find yourself wanting the raw value here, the answer is a database
+ * lookup, not a longer log line.
+ */
+export function tokenFingerprint(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex').slice(0, 8);
+}
+
 export function maskAddress(addr: string): string {
   const at = addr.lastIndexOf('@');
   if (at < 1) return '•••';
