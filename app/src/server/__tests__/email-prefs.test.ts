@@ -9,6 +9,8 @@ import {
   isOptionalKind, maskEmail, parseOptOutRequest,
 } from '../email-prefs';
 import { tokenUsable } from '../auth';
+import { readFileSync, existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 
 describe('which emails may be switched off', () => {
   test('only the two promotional kinds are optional', () => {
@@ -129,5 +131,50 @@ describe('the preference-centre token', () => {
     assert.equal(PREFS_TOKEN_RE.test('0123abcd'), false);            // too short
     assert.equal(PREFS_TOKEN_RE.test('../../etc/passwd'), false);
     assert.equal(PREFS_TOKEN_RE.test('0123456789abcdef'.repeat(4)), true);
+  });
+});
+
+describe('saving a preference page is ONE edit', () => {
+  // setOptOuts replaces the whole opt-out set as insert-then-delete. That order is right — a
+  // READER landing in the gap over-suppresses rather than under-suppresses — but it says nothing
+  // about a second WRITER. Two saves from the same account (two tabs, a double-submitted form, a
+  // retry while the first request is in flight) interleave as
+  //   insert(A) · insert(B) · delete(not B) · delete(not A)
+  // and the last delete removes the opt-out the last save asked for. The host is then shown their
+  // saved preferences and mailed anyway, which is the one outcome this table exists to prevent.
+  //
+  // Source-level because the failure is two concurrent connections against a live Postgres, which
+  // is not something this suite has. The shape is small enough to assert exactly: both statements,
+  // on the transaction handle, inside one db.transaction callback.
+  function serverDir(): string {
+    let d = process.cwd();
+    for (let i = 0; i < 6; i++) {
+      if (existsSync(join(d, 'src', 'server', 'email-prefs.ts'))) return join(d, 'src', 'server');
+      const up = dirname(d);
+      if (up === d) break;
+      d = up;
+    }
+    return join(process.cwd(), 'app', 'src', 'server');
+  }
+  const src = readFileSync(join(serverDir(), 'email-prefs.ts'), 'utf8');
+  const body = src.slice(src.indexOf('export async function setOptOuts'));
+
+  test('setOptOuts opens a transaction', () => {
+    assert.match(body, /db\.transaction\(async \(tx\) => \{/,
+      'setOptOuts writes outside a transaction again — an interleaved save can drop an opt-out');
+  });
+
+  test('both statements run on the transaction, not the pool', () => {
+    // Half-converted is the worst version of this: it reads as fixed and the delete still escapes.
+    assert.match(body, /tx\.insert\(emailPreferences\)/, 'the insert is still on db, outside the transaction');
+    assert.match(body, /tx\.delete\(emailPreferences\)/, 'the delete is still on db, outside the transaction');
+    const fn = body.slice(0, body.indexOf('\n}'));
+    assert.doesNotMatch(fn, /\bdb\.(insert|delete|update)\(/,
+      'a write in setOptOuts still goes straight to the pool');
+  });
+
+  test('the insert still comes first inside it', () => {
+    // Cheap, and still the right order for anything reading at a weaker isolation level.
+    assert.ok(body.indexOf('tx.insert') < body.indexOf('tx.delete'));
   });
 });

@@ -1,7 +1,7 @@
 // Snapdini integration spec — 'Reschedule an unused event (usage-gated, 6-month ceiling)'.
 //
 // SERIAL (9x- prefix): calls POST /api/admin/run-sweep (twice), which purges DB-wide.
-import { HOUR, api, createEvent, dbq, group, join, ok, org, session, spec, upload } from '../lib/harness.mjs';
+import { HOUR, adminLogin, api, createEvent, dbq, group, join, ok, org, session, spec, upload } from '../lib/harness.mjs';
 
 await spec('92-reschedule', async () => {
   const ownerCookie = session.cookie;   // the verified owner session bootstrapOwner() left us in
@@ -66,9 +66,7 @@ await spec('92-reschedule', async () => {
     const udTok = (await join(usedDue.joinCode, 'Sweeper Guest')).json?.sessionToken;
     if (udTok) await upload(udTok);
     dbq(`UPDATE events SET purge_at=${Date.now() - 1000} WHERE id IN ('${unusedDue.id}','${usedDue.id}')`);
-    const adminLogin2 = process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD
-      ? await api('POST', '/api/auth/login', { body: { email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD } })
-      : { status: 0 };
+    const adminLogin2 = await adminLogin();
     if (adminLogin2.status === 200) {
       ok('sweeper ran', (await api('POST', '/api/admin/run-sweep')).status === 200);
       // Control: the USED event must be purged, proving the sweeper did work this pass.
@@ -84,14 +82,27 @@ await spec('92-reschedule', async () => {
     // H1) An unused PAID event must still exist the day its reschedule deadline falls, not be
     //     swept that morning. Age it to one hour before the deadline and confirm it survives.
     const nearEdge = await createEvent({ startsAt: Date.now() - 4 * HOUR, durationHours: 1 });
-    const edgeAnchor = Date.now() - (183 * DAY) + HOUR;   // deadline is ~1h away
+    // The margin is written out rather than left to be re-derived. The sweeper's rule is
+    // `now < anchor + RESCHEDULE_WINDOW_MS (183d) + RESCHEDULE_RETENTION_GRACE_MS (1d)`, so the
+    // distance that actually has to survive the run is `EDGE_MARGIN + the grace day`. At the old
+    // `+ HOUR` the comment said "1h" and the real margin was 25h, which is the kind of gap that
+    // makes a reader either distrust the test or tighten it by accident. Six hours states the
+    // intent — still inside the deadline, still meaningfully near it — with 30h of slack.
+    const EDGE_MARGIN = 6 * HOUR;
+    const edgeAnchor = Date.now() - (183 * DAY) + EDGE_MARGIN;   // reschedule deadline is EDGE_MARGIN away
     dbq(`UPDATE events SET paid=true, amount_paid_cents=2000, original_starts_at=${edgeAnchor}, starts_at=${edgeAnchor}, purge_at=${Date.now() - 1000} WHERE id='${nearEdge.id}'`);
     if (adminLogin2.status === 200) {
       // Re-authenticate: the previous block restored the owner cookie, and run-sweep is admin-only.
-      await api('POST', '/api/auth/login', { body: { email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD } });
+      await adminLogin();
       await api('POST', '/api/admin/run-sweep');
       ok('unused paid event survives right up to its reschedule deadline',
          dbq(`SELECT COALESCE(purged_at::text,'null') FROM events WHERE id='${nearEdge.id}'`) === 'null');
+      // And the boundary is driven explicitly rather than inferred from the survival above: the
+      // organiser can still MOVE it, which is the whole reason the sweeper has to leave it alone.
+      const stillMovable = await api('GET', `/api/events/${nearEdge.joinCode}/admin`, { headers: org(nearEdge.organizerCode) });
+      ok('and it is still inside its reschedule window, not merely unswept',
+         stillMovable.json?.canReschedule === true && Number(stillMovable.json?.rescheduleUntil) > Date.now(),
+         `canReschedule=${stillMovable.json?.canReschedule} until=${stillMovable.json?.rescheduleUntil}`);
       // Past the deadline + grace it becomes purgeable like anything else.
       dbq(`UPDATE events SET original_starts_at=${Date.now() - (185 * DAY)}, starts_at=${Date.now() - (185 * DAY)}, purge_at=${Date.now() - 1000} WHERE id='${nearEdge.id}'`);
       ok('sweep authorised', (await api('POST', '/api/admin/run-sweep')).status === 200);

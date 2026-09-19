@@ -149,28 +149,71 @@ on their own.
 - Moderation default + enable-later hold, decouple (favourite ≠ approve), reveal/hide override, retention purge (thumbnails, custom audio, slideshows), `/mine` counts, reject-bin, client-error capture, custom-audio validation, **share v2 (all/favourites/selected + slug rename + reveal-gating + zip download)**, **slideshow versioning + download endpoint**, **frame-pack settings gate**, **no-flash persistence**, **restore→pending**, **own-photos-visible-after-reveal**, **11+ paid tier**, **co-hosts (invite/accept/manage-by-identity/owner-only-delete/remove)**, timezones, billing-amount audit.
 - **1.0 additions:** settings `noFlash` round-trip + `noFlash` on the join / `/me` / `/admin` responses; **event slug** set/clear + **too-short 400 / duplicate 409**; **reschedule locked once started** (allowed while upcoming); **share-create no longer auto-claims a slug** (token URL) + default label leads with the event name; **`/qr` returns a logo-baked PNG**; **co-host pending-invite list** (appears / drops off on accept); **10s video tier = $2**; **frame-removal always paid** (branding:false → 402 until bought); **purge frees the event slug + deletes share rows** (via admin `/run-sweep`); `photoIds` capped on moderate/highlights; login rate-limited.
 - Run from `devel/`: `npm test` (typecheck → unit → integration → e2e). Integration suite:
-  **386 integration + 31 unit passed, 0 failed** (integration ~40s). `run.mjs` lifts `ADMIN_EMAIL`/`ADMIN_PASSWORD` off the
+  **787 integration + 850 unit passed, 0 failed** (integration ~140s), and it gives the same totals
+  run three times back to back — and leaves every table's row count byte-identical while doing it — the dev stack raises the per-IP limiters the suite spends
+  (`FACE_ENROL_RATE_LIMIT`; see docs/DEVELOPMENT.md). `run.mjs` lifts `ADMIN_EMAIL`/`ADMIN_PASSWORD` off the
   local dev container when they aren't in your environment, so the operator-only assertions run
   by default instead of silently skipping (they were skipping, and it hid ~22 tests).
 - The integration suite is an orchestrator (`testsuite/run.mjs`) over per-area specs in
   `testsuite/specs/`, run as separate processes in a concurrency pool. Useful flags:
   `--only=<substring>` (one spec — a few seconds), `--jobs=N`, `--serial`, `--list`.
   Specs named `9x-` touch global DB state (`run-sweep`, admin-overview counts) and run alone
-  after the pool, so nothing can create an event while they are counting.
+  after the pool, so nothing can create an event while they are counting. `11-video-length` is now
+  `91b-video-length` for that reason. A determinism pass (see "Integration suite layout" in
+  docs/DEVELOPMENT.md) removed every fixed sleep before a DB read, scoped the whole-table counts to
+  each spec's own rows, and moved every clean-up into the teardown `finally`; the suite no longer
+  truncates `site_events`, no longer deletes users by a `LIKE` pattern, and no longer leaks
+  operator sessions (1,845 had accumulated) or operator-owned events.
 - **1.2 additions:** referral attribution (cookie is httpOnly and resolves to the event id;
   a referred signup *and* their first event are both attributed; a host referring themselves is
   not counted; a cookie outliving its event is ignored); write-behind counters coalesce and do
   not write on the request path; `download_count` is separate from `view_count`; no unpaid or
   refunded event holds a host reward code; testimonial consent is gated on positive feedback.
 - **1.5 additions:** the CSV import plan (header guessing, column mapping, duplicate identity by
-  address *and* by name+phone, per-row problems); Mailgun webhook signature verification and event
+  **the address alone** — `identityKey()` (name + note) went with 0054, since every guest now has
+  an address — a phone column detected and resolved to *don't import* rather than
+  stored, per-row problems); Mailgun webhook signature verification and event
   normalising; delivery-state ordering (a provider event older than the one already recorded cannot
   overwrite it); the suppression **chokepoint** — a test walks the server source and fails if
   anything but `email.ts` reaches for a transport, and pins the check as running *before* a transport
   is chosen; unsubscribe token/scope/feedback parsing and the merge of global vs per-event blocks;
   account email preferences; the guest-delivery rules shared by the create wizard and Settings
   (reminder window, scheduled-send vs reveal); the email-budget month window, floor and thresholds.
-  There is **no** integration spec for the guest list itself — §24 is manual.
+  Plus the **email-recovery hardening**: the recovery budget's key (per event + lower(address), a
+  guest list not locked out by one burned address, and a 30-guest venue on ONE NAT address passing
+  untouched), that a refused attempt mints no session token, and the takeover alert's masked address
+  and escaped names (`app/src/server/__tests__/recovery-hardening.test.ts`,
+  `testsuite/specs/97c-recovery-hardening.mjs`).
+  And the **guest list and invite sending end to end**, which until now had no integration spec at
+  all: `testsuite/specs/17-guest-list.mjs` (an address is required on create *and* on edit, with the
+  exact wording; a name is not; a case-folded duplicate is a 409; an organizer code reaches only its
+  own event's list; the order is alphabetical and an edit does not move a guest — built over a
+  batch import so the whole batch shares one `created_at`, which is the tie the old
+  `ORDER BY created_at` fell apart on; **and that one address per list is the DATABASE's rule** —
+  `idx_event_guests_event_email` is asserted to be keyed on `lower(btrim(email))` (migration
+  **0055**), and a plain `INSERT` that skips the writer's own `toLowerCase()`, or carries a stray
+  space, is refused by the index itself. Going round the writer is the only way to test a second
+  line of defence, and under 0047's byte-exact key those inserts both landed), `testsuite/specs/18-guest-import.mjs` (a `Name,Email,Phone`
+  sheet imports clean with the digits reaching no stored field; `{add, skip, duplicate, invalid,
+  noEmail}` with `noEmail` counted apart from `invalid`; per-row reasons that keep the guest's name;
+  one loud `fatal` when no column maps to Email; headerless inference from a 20-row sample and a
+  consumed header row reported; dedupe by the address alone) and
+  `testsuite/specs/19-guest-invites.mjs` (a suppressed address — global *or* event-scoped — is
+  reported as `skipped` with its reason and never counted as `sent`, and gets no `guest_invites`
+  row; deleting a guest leaves the invite behind with `guest_id` NULL; one `share_sends` row per
+  address for ever, surviving a second press, a case variant and an explicit resend; a withheld send
+  corrects its claim row to `ok:false`; a forged webhook signature is a 406).
+  **Those three send no real mail and do not depend on any leaving**: every address is
+  `@example.com` with a per-run unique prefix, suppression rows are written directly rather than
+  provoked with a real bounce, and every assertion is on the API's own accounting and on the
+  database. §24 stays as the manual pass over the SCREENS.
+- **Two latent guest-list defects fixed in 1.5.0, both second-line-of-defence answers that were
+  wrong** (neither reachable from outside, both found by deliberately removing the first line):
+  the `POST`/`PATCH` guest routes reported a **NOT NULL** violation as *"That email is already on
+  this guest list"*, and the unique index was keyed on the raw column so it could not catch what
+  the writer was trusted to do. `app/src/server/__tests__/db-errors.test.ts` pins the SQLSTATE
+  discriminator — including the shape that matters, a `DrizzleQueryError` whose `.code` is
+  `undefined` because the real code sits on its `cause`.
 - **DB:** migration `0019_perf_indexes` adds indexes on the hot paths (`photos(event_id)`, `(event_id,status)`, `(event_id,taken_at)`, `(participant_id)`, `participants(event_id)`, `event_cohosts lower(email)`, and the user-FK cascade columns).
 
 ## 17. Version 1.2 — referrals, gallery stats, retention (verify these)
@@ -196,8 +239,14 @@ on their own.
       leads with the free-under-10-guests tier and the post-event host code.
 - [ ] **Maker links:** hosted (billing on) → **no "Buy me a coffee"** on home / pricing / use-case /
       contact / login / signup. Self-hosted (billing off) → **always visible**.
-- [ ] **Turnstile:** contact, signup and login submit cleanly. Verify from **outside the LAN** — the
-      widget is blocked by Pi-hole on-network.
+- [ ] **Turnstile:** contact, signup and login all **render the widget** and submit cleanly. Verify
+      from **outside the LAN** — the widget is blocked by Pi-hole on-network. The submit button must
+      not jump when the widget appears.
+- [ ] **Turnstile blocked** (this one is best tested **on** the LAN, where Pi-hole blocks it): signup
+      and login show the "couldn't load the security check … challenges.cloudflare.com" notice in the
+      space the widget would have taken, in **both themes** and at **400px** with no sideways scroll.
+      With `TURNSTILE_FAIL_OPEN` unset, submitting then names the same address rather than answering
+      "bot check failed".
 - [ ] **Video over the tier:** on an event with a 10s video add-on, upload a ~20s clip from your
       camera roll → it is **accepted, with no message telling you it was over** (the tolerance must
       stay invisible to guests). On an event with **no** video add-on, the same upload is **refused**.
@@ -206,8 +255,10 @@ on their own.
 
 ## 18. Version 1.3 — delete window, guest top-ups (verify these)
 - [ ] **Take a shot back:** shoot a photo, open your own gallery → a **bin with a countdown** sits on
-      that photo. Tap it: the photo goes and the roll goes back up. Wait past 60s → the bin
-      disappears and the shot is permanent. **No delete control on the camera screen.**
+      that photo. Tap it: the photo goes and the roll goes back up. Wait past **30s** (the window is
+      `PHOTO_DELETE_WINDOW_SECONDS`, served to the client at `/api/config`, so a deployment that
+      changes it changes the countdown too) → the bin disappears and the shot is permanent.
+      **No delete control on the camera screen.**
 - [ ] **Two shots, two bins:** take two quickly; each carries its **own** countdown, and deleting one
       leaves the other ticking.
 - [ ] **Out of shots:** spend the roll → a panel offers *Ask the host for more* and *Get 12 more*.
@@ -432,26 +483,41 @@ on their own.
       **Other settings**. Reveal mode and moderation are still on this step.
 
 ### Guest list (Manage → Guest list)
-- [ ] **Add by hand:** name only, email only and phone only each save. Notes alone is refused in
-      words. A second guest with the same address on the same event is refused as a duplicate — a
-      409 with a sentence, not a 500.
+- [ ] **Add by hand:** an **email is required** and a name is not — email only saves, name only and
+      notes only are each refused in words ("Add an email address — that is how the join link is
+      sent. Print a card for anyone without one."), and so is a body carrying *only* a phone number.
+      The **Add to list** button is `aria-disabled` with an empty address box, never `disabled`, and
+      the press still answers. Clearing the address on an existing guest is refused the same way.
+      A second guest with the same address on the same event is refused as a duplicate — a 409 with
+      a sentence, not a 500.
+- [ ] **A phone column is recognised and skipped, never stored.** Paste `Name,Email,Phone` with and
+      without a header row, and with the phone column first — each previews as
+      *name · email · don't import* with the right counts, and the digits appear on no stored guest.
+      A phone-only paste — or any paste with no address column — is the one loud "Map a column to
+      Email", not a list of blank guests. Switching that column's dropdown to **notes** keeps the
+      digits as a note, which is the host's choice to make.
 - [ ] **Addresses are lower-cased on the way in.** Add `Mum@Example.com`, then try `mum@example.com`
       → refused as the duplicate it is.
 - [ ] **Import → Preview** shows your real column headings with a dropdown against each, a guessed
-      mapping you can correct, and counts (to add / already on the list / bad address / skipped).
-      Skipped rows are listed, greyed, each with its reason — never silently dropped.
+      mapping you can correct, and counts (to add / already on the list / **with no email** / bad
+      address / skipped). Skipped rows are listed, greyed, each with its reason — never silently
+      dropped.
+- [ ] **Paste a sheet where some rows have no address.** Those rows are greyed with "No email
+      address — skipped", they carry the guest's NAME so you can see who to print a card for, they
+      have their own number in the tally, and none of them is stored after the commit.
 - [ ] **Paste from a spreadsheet** (tab-separated) parses as happily as a comma CSV. Uploading an
       `.xlsx` is refused with "save it as CSV", not rendered as one guest of mojibake.
-- [ ] **Importing the same file twice adds nobody the second time** — including rows that have a name
-      and a phone but no address, which the email check cannot see.
+- [ ] **Importing the same file twice adds nobody the second time** — on the address, which every
+      guest now has, and case-insensitively (`JO@X.COM` is `jo@x.com`).
 - [ ] **A file with no header row** says so and keeps the first line as a guest rather than eating it.
 - [ ] **Limits:** an import over 2000 rows is refused by number, and the list cannot pass 2000 guests.
 - [ ] **Remove a guest who has already been invited** → the row goes, and the record of what was sent
       to them (and any bounce) is still there.
 
 ### Invites and delivery state
-- [ ] **Send invites (N)** counts only guests who have an address and are not blocked. A guest with
-      no address is reported as such, never as a failure.
+- [ ] **Send invites (N)** counts the guests who are not blocked. Every guest has an address, so
+      the only thing a send skips is a suppressed one — reported by address and reason, never as a
+      silent failure.
 - [ ] **The invite** carries the event name, the join link, the join code and an unsubscribe link.
       The event name is **escaped** — call an event `<b>Jo</b>` and the inbox must show the
       characters, not bold text.
@@ -525,3 +591,65 @@ on their own.
       leads the **subject line** rather than sitting halfway down the body.
 - [ ] **Nothing is ever blocked.** Past the limit, sends still go out and the digest simply says the
       allowance is spent.
+
+## 25. Version 1.5.0 — hearts, downloads, poster paper, admin sections
+
+### Guest hearts
+- [ ] **A guest can heart another guest's photo** after the reveal: the ♥ fills, the count goes up,
+      and a second tap takes it back. Reload → it is still where you left it.
+- [ ] **Your own roll, before the reveal:** the hearts on your own shots show there too. A stranger
+      with only the join code sees no counts for photos that are not revealed yet.
+- [ ] **Double tap, two tabs, flaky signal:** hearting twice never counts twice, and a heart made in
+      one tab shows in the other within a poll.
+- [ ] **Host opt-out:** *Manage → Event settings → Guest hearts* off → no ♥ anywhere, on the gallery
+      or on a guest's roll, and the two heart rows disappear from the download sheet. Turn it back
+      on → **the counts are all still there.**
+- [ ] **Rejected and pending photos carry no hearts** — reject a hearted photo under moderation and
+      it drops out of the counts and out of that guest's own hearted list.
+- [ ] **Locked event:** hearting is refused like uploading is. **Ended event:** hearting still works
+      — people browse the gallery for weeks.
+
+### Downloading
+- [ ] **The files-or-zip question is asked EVERY time.** Download, pick one, download again → it
+      asks again. There is no remembered preference, and nothing beside the button to change one.
+- [ ] **The scope sheet offers** the whole gallery, highlights only, *what everyone loved*
+      (hearted, most-hearted first), *highlights and hearts* (counted once — check the number is the
+      union, not the sum), pick them myself, and — when some are already saved on this device —
+      only the ones you don't have.
+- [ ] **The heart rows vanish** when every photo is hearted, when the union is the same as one of
+      its halves, and when hearts are off for the event.
+- [ ] **Sharing offers only three scopes** (gallery / favourites / hand-picked). No heart scopes —
+      a share link is a query the server re-resolves, and there is no such query.
+- [ ] **A guest zips their own roll before the reveal** from their camera gallery, and gets only
+      their own photos. Someone else's session token, or none, gets "Photos are not revealed yet".
+
+### The poster's Print tab
+- [ ] **One tab holds every way out** — poster, trick cards and front-and-back — rather than a row
+      at the foot of two different tabs.
+- [ ] **Paper size A6 → A2**, and the line above the buttons states the real dpi for the size picked
+      (A4 and below 300; A3 ≈288; A2 ≈203). The design itself does not change as you switch.
+- [ ] **An A2 PDF is not blank on an iPhone.** This is the reason the export is capped — test it on
+      a real iOS device if you have one.
+- [ ] **Cut guides** toggle off → the sheet prints with no dashed lines, and the cards still tile it
+      edge to edge with **no white gutter between them**.
+
+### The manager's section menu
+- [ ] **`/admin/<code>` opens on the menu** of eight tiles, with a pending count on Photos and the
+      guest count on Guests. Open one → it takes the page, **← All settings** comes back.
+- [ ] **Refresh inside a section** and you land back in it, not at the top. Open a second event in
+      another tab → the two remember their own places. Close the tab → it forgets.
+- [ ] **Poster is not a section** — the tile opens the designer.
+
+### Everything else
+- [ ] **One header** on the landing page, pricing, the dashboard, the manager and `/siteadmin` — the
+      same height, no jump moving between them, ADMIN on the two operator-facing ones. At 400px it
+      does not drag the page sideways.
+- [ ] **The offline page:** stop the `web` container → a branded "we'll be right back" page that
+      counts down and reloads itself when the container is back. Stop `app` → `/api` calls answer a
+      small JSON body, not an HTML document. Check the status code is still the original 502/504
+      (`curl -I`), not flattened to 503.
+- [ ] **A venue's worth of guests does not hit the rate limiter.** Reading the gallery, the event,
+      `/participants/me` and the hearts endpoint are exempt from `API_RATE_LIMIT`; uploads, auth and
+      writes are not.
+- [ ] **The CSV import limiter** (`IMPORT_RATE_LIMIT`, default 30/min) refuses the 31st import or
+      preview in a minute, and says so in words rather than failing silently.

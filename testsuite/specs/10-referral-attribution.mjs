@@ -4,7 +4,7 @@
 // of that was covered: `users.referred_by_event_id`, `events.referred_by_event_id` and the
 // `snapdini_ref` cookie had zero tests. The three cases that matter are a real referral, a host
 // referring themselves (must not count), and a cookie left over from a deleted event.
-import { BASE, TURNSTILE_DUMMY, UNIQ, api, createEvent, dbq, group, join, ok, session, spec, upload } from '../lib/harness.mjs';
+import { BASE, TURNSTILE_DUMMY, UNIQ, api, createEvent, dbq, group, join, ok, orphanEmails, session, spec, upload, waitFor } from '../lib/harness.mjs';
 
 // Raw fetch: the harness jar deliberately keeps only `sid`, so read Set-Cookie ourselves.
 async function refCookieFor(ref) {
@@ -34,6 +34,10 @@ await spec('10-referral-attribution', async () => {
   // A fresh visitor: no session, but carrying the referral cookie out of the gallery.
   session.cookie = ref.pair;
   const email2 = `ref_${UNIQ}@example.com`;
+  // Registered here, deleted in TEARDOWN (which is a `finally`) rather than on a line further down
+  // that an assertion above can throw past. A leftover `ref_…` account cascades an event nobody
+  // cleans up, and the address is per-process unique so nothing else can collide with it.
+  orphanEmails.push(email2);
   const reg2 = await api('POST', '/api/auth/register', { body: { email: email2, password: 'hunter2hunter2', displayName: 'Referred' } });
   ok('referred visitor can sign up', reg2.status === 201, `status ${reg2.status}`);
   ok('the signup is attributed to the source event',
@@ -49,7 +53,6 @@ await spec('10-referral-attribution', async () => {
   ok('the event they create is attributed to the source event',
      val(`SELECT referred_by_event_id FROM events WHERE id='${ev2.id}'`) === src.id,
      val(`SELECT referred_by_event_id FROM events WHERE id='${ev2.id}'`));
-  dbq(`DELETE FROM users WHERE email='${email2}'`);      // cascades their event; not covered by the harness teardown
 
   // The host clicking their own gallery link is not a referral.
   session.cookie = `${ownerCookie}; ${ref.pair}`;
@@ -74,11 +77,16 @@ await spec('10-referral-attribution', async () => {
   ok('photo present for the stats check', !!pid);
   if (pid) {
     await api('POST', '/api/track/photos', { body: { joinCode: src.joinCode, ids: [pid], kind: 'download' } });
-    await new Promise((r) => setTimeout(r, 3500));       // dev COUNTER_FLUSH_MS=2500
-    // Read ONCE. Querying again for the failure message lets a counter flush land between the two
-    // reads, producing the nonsense "expected 1, got 1".
-    const dl = dbq(`SELECT download_count FROM photos WHERE id='${pid}'`);
-    ok('download_count increments after the flush', Number(dl) === 1, dl);
+    // POLL for the row, do not sleep at it. `setTimeout(3500)` against a 2500ms flush interval is
+    // ~1s of slack before an exact-equality read, which is a bet on how busy the box is; waiting
+    // for the condition returns the moment it holds and is slow rather than red when it does not.
+    const dlq = `SELECT download_count FROM photos WHERE id='${pid}'`;
+    const landed = await waitFor(() => Number(dbq(dlq)) >= 1, 'the download count to flush');
+    const dl = dbq(dlq);
+    ok('download_count increments after the flush', landed && Number(dl) === 1, dl);
+    // Not a second sleep: flushCounters() writes photo VIEWS before photo DOWNLOADS in the same
+    // pass, so a landed download proves the view bucket for this photo has already been written
+    // too. A zero here is now a fact about what the endpoint accepted, not a timing guess.
     const vc = dbq(`SELECT view_count FROM photos WHERE id='${pid}'`);
     ok('a download does not inflate view_count', Number(vc) === 0, vc);
   }
@@ -87,10 +95,14 @@ await spec('10-referral-attribution', async () => {
   ok('an unpaid event carries no reward code',
      val(`SELECT host_reward_code FROM events WHERE id='${src.id}'`) === 'null',
      val(`SELECT host_reward_code FROM events WHERE id='${src.id}'`));
-  // Invariant, not a row count, so it holds regardless of what else is running.
-  ok('no unpaid or refunded event anywhere holds a reward code',
-     Number(dbq(`SELECT count(*) FROM events WHERE host_reward_code IS NOT NULL
-                  AND (COALESCE(amount_paid_cents,0) <= 0 OR refunded_at IS NOT NULL)`)) === 0,
-     dbq(`SELECT count(*) FROM events WHERE host_reward_code IS NOT NULL
-           AND (COALESCE(amount_paid_cents,0) <= 0 OR refunded_at IS NOT NULL)`));
+  // DELIBERATELY whole-table, and it stays that way. This is not arithmetic over other specs' rows
+  // (which would make it a claim about their behaviour) — it is an INVARIANT whose expected value is
+  // zero no matter what else exists: ensureHostReward() refuses to stamp a code on an event that
+  // took no money, so any row matching this is a product bug wherever it came from. What it lacked
+  // was a diagnosable failure, so it now names the offending events instead of printing a count and
+  // leaving the reader to go find them.
+  const offenders = dbq(`SELECT join_code FROM events WHERE host_reward_code IS NOT NULL
+                          AND (COALESCE(amount_paid_cents,0) <= 0 OR refunded_at IS NOT NULL)`);
+  ok('no unpaid or refunded event anywhere holds a reward code', offenders === '',
+     `rewarded but unpaid/refunded: ${offenders.split('\n').join(', ')}`);
 });

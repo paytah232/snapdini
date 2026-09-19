@@ -121,6 +121,37 @@ describe('both ad platforms ship OFF by default', () => {
   }
 });
 
+describe('every container rotates its logs', () => {
+  // The dev compose file had NO logging: block at all, so every dev container was an unrotated
+  // json-file log growing until the disk noticed. It matters more there than it sounds: dev is the
+  // stack that holds the Mailgun webhook signing key, so /api/webhooks/mailgun is live on it, and
+  // that handler logs a line for every POST — from an endpoint that is unauthenticated and
+  // unrate-limited. An append-only file fed by a public endpoint needs a cap.
+  //
+  // Asserted per SERVICE, not per file: a `logging:` block that exists but is attached to three of
+  // four services is the same defect wearing a hat.
+  for (const file of ['docker-compose.yml', 'docker-compose.dev.yml']) {
+    test(file, () => {
+      const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
+      assert.match(text, /max-size:\s*"50m"/, `${file} must cap each log file`);
+      assert.match(text, /max-file:\s*"5"/, `${file} must cap how many it keeps`);
+
+      // The services block, sliced out so `default:` under networks: is not counted as a service.
+      const start = text.indexOf('\nservices:\n');
+      assert.ok(start >= 0, `${file} has no services block`);
+      const rest = text.slice(start + '\nservices:\n'.length);
+      const end = rest.search(/\n[a-z]/);
+      const block = end >= 0 ? rest.slice(0, end) : rest;
+
+      const services = [...block.matchAll(/^  ([a-z0-9_-]+):\s*$/gm)].map((m) => m[1]);
+      assert.ok(services.length >= 4, `only found ${services.length} services in ${file}`);
+      const rotated = (block.match(/^    logging: \*default-logging$/gm) ?? []).length;
+      assert.equal(rotated, services.length,
+        `${file}: ${services.length} services (${services.join(', ')}) but ${rotated} rotate their logs`);
+    });
+  }
+});
+
 describe('the face-matching kill switch is documented as a switch', () => {
   test('MACHINE_LEARNING_URL defaults to empty in the shipped compose', () => {
     const text = fs.readFileSync(path.join(ROOT, 'docker-compose.yml'), 'utf8');

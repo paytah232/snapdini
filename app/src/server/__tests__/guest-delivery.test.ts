@@ -37,10 +37,13 @@ const guest = (n: number, over: Partial<{ email: string | null; wantsPhotos: boo
 // logged. The three outcomes are separated here so they cannot quietly merge again.
 
 describe('a message that was withheld is not a message that was sent', () => {
+  // sendToGuest takes the built message as an object now — it gained a plain-text alternative part,
+  // and (to, subject, html, text, eventId, what) is six strings in a row a caller can transpose.
+  const MSG = { to: 'guest@example.com', subject: 'Subject', html: '<p>Body</p>', text: 'Body' };
   const send = (r: SendResult) =>
-    sendToGuest('guest@example.com', 'Subject', '<p>Body</p>', 'ev1', 'test', async () => r);
+    sendToGuest(MSG, 'ev1', 'test', async () => r);
   const boom = () =>
-    sendToGuest('guest@example.com', 'Subject', '<p>Body</p>', 'ev1', 'test', async () => {
+    sendToGuest(MSG, 'ev1', 'test', async () => {
       throw new Error('provider 500');
     });
 

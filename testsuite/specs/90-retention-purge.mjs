@@ -1,7 +1,7 @@
 // Snapdini integration spec — 'Retention / purge'.
 //
 // SERIAL (9x- prefix): POST /api/admin/run-sweep purges every eligible event in the whole DB.
-import { TS, api, createEvent, dbq, group, join, ok, org, session, spec, upload } from '../lib/harness.mjs';
+import { TS, adminLogin, api, createEvent, dbq, group, join, ok, org, session, spec, upload } from '../lib/harness.mjs';
 
 await spec('90-retention-purge', async () => {
   const ownerCookie = session.cookie;   // the verified owner session bootstrapOwner() left us in
@@ -21,10 +21,8 @@ await spec('90-retention-purge', async () => {
   dbq(`UPDATE events SET purge_at=${Date.now() - 1000} WHERE id='${ePurge.id}'`);
   // Admin creds come from the env so no credential is baked into the repo. Set ADMIN_EMAIL +
   // ADMIN_PASSWORD (matching your deployment) to exercise this; otherwise it gracefully skips.
-  const adminLogin = process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD
-    ? await api('POST', '/api/auth/login', { body: { email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD } })
-    : { status: 0 };
-  if (adminLogin.status === 200) {
+  const admLogin = await adminLogin();
+  if (admLogin.status === 200) {
     ok('admin run-sweep → ok', (await api('POST', '/api/admin/run-sweep')).status === 200);
     ok('purge frees the event slug', dbq(`SELECT COALESCE(slug,'∅') FROM events WHERE id='${ePurge.id}'`) === '∅');
     ok('purge deletes share rows', Number(dbq(`SELECT count(*) FROM shares WHERE event_id='${ePurge.id}'`)) === 0);

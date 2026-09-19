@@ -3,7 +3,7 @@
 // The dangerous property is the ALLOWANCE, not the payment: a guest's purchased shots are added on
 // top of the event's roll, so a second sum anywhere would hand a paying guest their old limit back.
 // These tests pin that, plus the host's ability to switch the whole thing off.
-import { api, createEvent, dbq, group, join, ok, org, spec, upload } from '../lib/harness.mjs';
+import { adminLogin, api, createEvent, dbq, group, join, ok, org, session, spec, upload } from '../lib/harness.mjs';
 
 const remaining = async (tok) => (await api('GET', '/api/participants/me', { headers: { 'X-Session-Token': tok } })).json?.photosRemaining;
 
@@ -47,8 +47,9 @@ await spec('13-guest-upgrades', async () => {
   dbq(`UPDATE events SET guest_may_buy_shots = true WHERE id='${ev.id}'`);
 
   // Shots bought minutes before the camera closes are worthless and come back as refund requests.
-  const nearlyOver = Date.now() + 5 * 60 * 1000;
-  dbq(`UPDATE events SET expires_at = ${nearlyOver} WHERE id='${ev.id}'`);
+  // GUEST_UPGRADE_CUTOFF_MS is 15 minutes; one minute left is unambiguously inside it whatever the
+  // box is doing, where a value AT the boundary would be a bet on how long the next line takes.
+  dbq(`UPDATE events SET expires_at = ${Date.now() + 60_000} WHERE id='${ev.id}'`);
   const late = await api('POST', '/api/billing/guest-upgrade', { body: { sessionToken: t3 } });
   ok('top-up closes near the end of an event', late.status === 409, `status ${late.status}`);
   dbq(`UPDATE events SET expires_at = ${Date.now() + 86400000} WHERE id='${ev.id}'`);
@@ -64,11 +65,15 @@ await spec('13-guest-upgrades', async () => {
   ok('asking succeeds', (await api('POST', '/api/billing/guest-request-more', { body: { sessionToken: askTok } })).status === 200);
   const first = dbq(`SELECT requested_more_at FROM participants WHERE id='${askPid}'`);
   ok('the ask is recorded', first !== '' && first !== 'null', first);
-  await new Promise((r) => setTimeout(r, 1100));
+  // The old version slept 1.1s so that a re-write would land on a different millisecond and be
+  // visible. Age the stored value by an hour instead: a second ask that overwrote it would be
+  // unmistakably NOW rather than an hour ago, so the same claim is pinned harder and instantly —
+  // no sleep, and nothing that gets weaker on a slow box.
+  const aged = String(Number(first) - 3_600_000);
+  dbq(`UPDATE participants SET requested_more_at = ${aged} WHERE id='${askPid}'`);
   await api('POST', '/api/billing/guest-request-more', { body: { sessionToken: askTok } });
-  ok('asking twice does not move the timestamp — one ask per guest',
-     dbq(`SELECT requested_more_at FROM participants WHERE id='${askPid}'`) === first,
-     `${first} -> ${dbq(`SELECT requested_more_at FROM participants WHERE id='${askPid}'`)}`);
+  const after = dbq(`SELECT requested_more_at FROM participants WHERE id='${askPid}'`);
+  ok('asking twice does not move the timestamp — one ask per guest', after === aged, `${aged} -> ${after}`);
 
   group('Buying and asking are separate switches — all four combinations');
   // A host may want the money without the interruptions, or the control without refusing to be
@@ -113,21 +118,29 @@ await spec('13-guest-upgrades', async () => {
   ok('upgradeRequests counts a real ask', adm2.upgradeRequests === 1, `${adm2.upgradeRequests}`);
 
   group('Guest payments are visible and refundable to the operator');
-  const admLogin = process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD
-    ? await api('POST', '/api/auth/login', { body: { email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD } })
-    : { status: 0 };
+  // The paying guest's event is created BEFORE the operator login, and the owner session is put
+  // back afterwards. Created under the operator session it belonged to the OPERATOR account, which
+  // outlives the run — so the harness teardown (which deletes the test user and lets the cascade
+  // take their events) never reached it, and every run left one more behind.
+  const pev = await createEvent({ revealMode: 'instant', maxPhotos: 12 });
+  const pt = (await join(pev.joinCode, 'Payer')).json?.sessionToken;
+  const ownerCookie = session.cookie;
+  const admLogin = await adminLogin();
   if (admLogin.status === 200) {
-    const pev = await createEvent({ revealMode: 'instant', maxPhotos: 12 });
-    const pt = (await join(pev.joinCode, 'Payer')).json?.sessionToken;
     const ppid = dbq(`SELECT id FROM participants WHERE session_token='${pt}'`);
     // stand in for a settled webhook
     dbq(`UPDATE participants SET extra_photos=12, amount_paid_cents=300, upgrade_email='payer@example.com' WHERE id='${ppid}'`);
     const list = await api('GET', '/api/admin/guest-payments');
-    const mine = (list.json?.payments || []).find((g) => g.id === ppid);
+    // The endpoint pages (LIMIT 100, newest join first) and this guest joined moments ago, so the
+    // lookup is by OUR participant id — never by position, and never an assertion about how many
+    // rows the whole table happens to hold.
+    const payments = list.json?.payments || [];
+    const mine = payments.find((g) => g.id === ppid);
     ok('a paid guest appears in the operator list', !!mine && Number(mine.amount_paid_cents) === 300,
        JSON.stringify(mine || (list.json?.payments || []).slice(0, 1)));
-    ok('a guest who never paid does NOT appear',
-       !(list.json?.payments || []).some((g) => Number(g.amount_paid_cents) === 0));
+    // Deliberately over the whole page: this is the endpoint's own WHERE clause under test, and no
+    // other spec can put a zero-paying guest in it — only a product change could.
+    ok('a guest who never paid does NOT appear', !payments.some((g) => Number(g.amount_paid_cents) === 0));
     // no Stripe intent on file -> refund must refuse clearly rather than half-succeed
     const noPi = await api('POST', `/api/admin/refund-guest/${ppid}`);
     ok('refund without a Stripe payment on file is refused with a clear reason',
@@ -137,6 +150,7 @@ await spec('13-guest-upgrades', async () => {
        dbq(`SELECT extra_photos FROM participants WHERE id='${ppid}'`));
     ok('refunding an unknown guest is a 404',
        (await api('POST', '/api/admin/refund-guest/nope')).status === 404);
+    session.cookie = ownerCookie;   // hand the owner session back before teardown
   } else {
     ok('guest payment admin skipped — no admin creds on this env', true);
   }

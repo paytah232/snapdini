@@ -48,3 +48,13 @@ CLAUDE.md
 
 # scratch browser harness for camera work (not a deliverable)
 /web/.camtest/
+
+# Google Search Console ownership token for the DEV host
+# (snapdini-dev.pugno-nas.synology.me). Deliberately untracked rather than committed: devel builds
+# its image from this working tree, so the file is served there, while production pulls a ghcr
+# image built by CI from the repo — which will never contain it. That keeps a dev-only verification
+# token off the production domain and out of a public repo, without any conditional serving.
+# It must stay in place: Search Console re-checks ownership periodically. If devel is ever rebuilt
+# from a fresh clone this file will be missing and the property will fail verification — recreate it
+# with the one line Google expects, and nothing else.
+/web/static/google*.html

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   UNSUB_REASONS, isUnsubToken, isUnsubReason, parseScope, parseFeedback, FEEDBACK_MAX,
   oneClickUrl, unsubscribePageUrl, unsubscribeHeaders, mergeBlocks, partitionRecipients,
-  targetFromToken, maskAddress, type Block,
+  targetFromToken, maskAddress, tokenFingerprint, type Block,
 } from '../unsubscribe';
 import unsubscribeRouter from '../routes/unsubscribe';
 
@@ -57,6 +57,20 @@ describe('the token in the link', () => {
     assert.ok(!masked.includes('illian'), 'leaked the local part');
     // Fixed-width: the length of someone's name is part of what we are not handing back.
     assert.equal(maskAddress('jo@example.com').length, maskAddress('jonathan-fitzwilliam@example.com').length);
+  });
+
+  // A log line is where a credential gets copied, shipped and kept, and this token is the bearer
+  // credential for an unsubscribe — anyone holding it can stop someone else's mail. The failure
+  // path in markInviteUnsubscribed() used to print it in full.
+  test('a token in a log line is a fingerprint, not the token', () => {
+    const fp = tokenFingerprint(TOKEN);
+    assert.match(fp, /^[0-9a-f]{8}$/);
+    assert.ok(!TOKEN.includes(fp), 'the fingerprint is a slice of the token itself');
+    assert.equal(tokenFingerprint(TOKEN), fp, 'not stable — two lines about one invite would not match');
+    assert.notEqual(tokenFingerprint('9f0c2b41-6a7e-4f3d-8b21-5c0de7a41b9f'), fp);
+    // Short enough that it is not a token in disguise: 8 hex characters identify a row for a human
+    // reading a log and are useless for replaying anything.
+    assert.equal(fp.length, 8);
   });
 });
 

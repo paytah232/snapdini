@@ -1,12 +1,18 @@
 // Snapdini integration spec — 'Co-hosts'.
 //
 // Registers a SECOND user (the invitee) and swaps sessions, so it owns its own file.
-import { EMAIL, TS, api, createEvent, dbq, group, ok, org, session, spec } from '../lib/harness.mjs';
+import { EMAIL, UNIQ, api, createEvent, group, ok, org, orphanEmails, session, spec } from '../lib/harness.mjs';
 
 await spec('09-cohosts', async () => {
   group('Co-hosts');
   const ownerCookie = session.cookie;                       // current session = the owner (user1)
-  const coEmail = `cohost_${TS}@example.com`;
+  // UNIQ, never TS: TS has SECOND resolution, so two runs starting in the same second — or one run
+  // after another that was killed before its last line — reuse the address and "co-host user
+  // registers" fails on a 409 that has nothing to do with co-hosts. UNIQ is per PROCESS.
+  const coEmail = `cohost_${UNIQ}@example.com`;
+  // Deleted by TEARDOWN, which is a `finally`. It used to be deleted on the last line of the spec,
+  // so any throw above it left the account behind and broke the NEXT run.
+  orphanEmails.push(coEmail);
   const eCo = await createEvent({ revealMode: 'instant' });
   const inv = await api('POST', `/api/events/${eCo.joinCode}/cohosts`, { headers: org(eCo.organizerCode), body: { email: coEmail } });
   ok('invite co-host → ok + devLink', inv.status === 200 && !!inv.json?.devLink);
@@ -44,5 +50,4 @@ await spec('09-cohosts', async () => {
   const coId = list.cohosts.find((c) => c.email === coEmail).id;
   await api('DELETE', `/api/events/${eCo.joinCode}/cohosts/${coId}`, { headers: org(eCo.organizerCode) });
   ok('co-host removed', !(await api('GET', `/api/events/${eCo.joinCode}/cohosts`, { headers: org(eCo.organizerCode) })).json.cohosts.some((c) => c.email === coEmail));
-  dbq(`DELETE FROM users WHERE email='${coEmail}'`);   // tidy the second user (owns nothing)
 }, {});

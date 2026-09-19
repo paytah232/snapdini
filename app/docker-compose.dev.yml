@@ -3,6 +3,21 @@
 # (Learned the hard way.)
 name: snapdini-dev
 
+# Log rotation, same settings as the prod compose file.
+#
+# Without this every dev container is an UNROTATED json-file log that grows until the disk does
+# something about it. That is worse here than it sounds: the dev stack is the one holding the
+# Mailgun webhook signing key, so /api/webhooks/mailgun is live on it, and that handler logs a line
+# for every POST — unauthenticated and unrate-limited, i.e. once per request from anyone who finds
+# it. An append-only file fed by a public endpoint is not something to leave uncapped on a box
+# whose whole purpose is to be experimented with.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+    tag: "{{.Name}}"
+
 services:
   app:
     build:
@@ -10,6 +25,7 @@ services:
       dockerfile: app/Dockerfile.dev
     container_name: snapdini-dev-app
     restart: unless-stopped
+    logging: *default-logging
     # Dev: tsx watch auto-restarts the server on any src edit (src is bind-mounted below),
     # so backend changes need no rebuild and no manual `restart`.
     command: ["npm", "run", "dev"]
@@ -80,8 +96,19 @@ services:
       - AUTH_RATE_LIMIT=${AUTH_RATE_LIMIT:-}
       - LOGIN_RATE_LIMIT=${LOGIN_RATE_LIMIT:-}
       - API_RATE_LIMIT=${API_RATE_LIMIT:-}
+      - CSP_REPORT_RATE_LIMIT=${CSP_REPORT_RATE_LIMIT:-}
       - EMAIL_RATE_LIMIT=${EMAIL_RATE_LIMIT:-}
-      - PHOTO_DELETE_WINDOW_SECONDS=${PHOTO_DELETE_WINDOW_SECONDS:-60}
+      - IMPORT_RATE_LIMIT=${IMPORT_RATE_LIMIT:-400}
+      - RECOVERY_RATE_LIMIT=${RECOVERY_RATE_LIMIT:-}
+      # Empty falls through to the CODE default (routes/photos.ts), which is the one place the
+      # number is explained. A literal fallback here silently outranked it — the code said 30
+      # and every stack ran 60, because compose had already answered.
+      - PHOTO_DELETE_WINDOW_SECONDS=${PHOTO_DELETE_WINDOW_SECONDS:-}
+      # Empty, so the CODE owns the default — see the note above.
+      - COMMENT_RATE_LIMIT=${COMMENT_RATE_LIMIT:-}
+      - VISITOR_RATE_LIMIT=${VISITOR_RATE_LIMIT:-}
+      - PG_POOL_MAX=${PG_POOL_MAX:-}
+      - PG_STATEMENT_TIMEOUT_MS=${PG_STATEMENT_TIMEOUT_MS:-}
       - PHOTO_DELETE_CONFIRM_GRACE_SECONDS=${PHOTO_DELETE_CONFIRM_GRACE_SECONDS:-15}
       - IMAGE_CONCURRENCY=${IMAGE_CONCURRENCY:-}
       - MUSIC_DIR=${MUSIC_DIR:-/app/assets/music}
@@ -107,8 +134,17 @@ services:
       # threshold rejects perfectly good selfies.
       - FACE_SELFIE_MIN_SCORE=${FACE_SELFIE_MIN_SCORE:-0.5}
       # Face ENROLMENT is rate limited on its own (index.ts), because one enrol request costs
-      # an ML round trip per photo in the event. Raise it only for a test run.
-      - FACE_ENROL_RATE_LIMIT=${FACE_ENROL_RATE_LIMIT:-}
+      # an ML round trip per photo in the event. Production leaves this unset and keeps the tight
+      # code default of 3 per 15 minutes per IP.
+      #
+      # The DEV stack raises it, like CONTACT_RATE_LIMIT and DEMO_RATE_LIMIT before it, because the
+      # integration suite is one IP and testsuite/specs/14-face-matching.mjs needs six enrol POSTs
+      # (host-off refusal, no-consent, no-selfie, a real enrolment, an EXIF-rotated selfie). At 3 it
+      # passed on a cold window and then reported its own 429s as six product failures for the next
+      # fifteen minutes, so the suite could not be run twice in a row. There is no way to vary the
+      # key from the client: nginx overwrites X-Forwarded-For with $remote_addr, so req.ip is the
+      # suite's own address whatever it sends — which is correct, and not to be worked around.
+      - FACE_ENROL_RATE_LIMIT=${FACE_ENROL_RATE_LIMIT:-60}
       # How alike a re-submitted selfie has to be to count as the same one, which is what lets
       # a repeat enrolment skip that whole-gallery backfill. Cosine on unit vectors.
       - FACE_REENROL_SAME_THRESHOLD=${FACE_REENROL_SAME_THRESHOLD:-0.98}
@@ -156,6 +192,7 @@ services:
       dockerfile: web/Dockerfile
     container_name: snapdini-dev-web
     restart: unless-stopped
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       - PORT=3000
@@ -190,8 +227,41 @@ services:
 
   db:
     image: postgres:16-alpine
+    # Postgres ran entirely on its own defaults, which are sized for a small shared machine and not
+    # for this one (19GB of RAM, and the database is the only thing on it that wants memory in bulk).
+    # Every value here is deliberate:
+    #
+    #   shared_buffers        2GB   — ~10% of RAM. Conservative on purpose: the app, web and nginx
+    #                                 share this box, and Postgres also leans on the OS page cache.
+    #   effective_cache_size  8GB   — an ESTIMATE, not an allocation. It tells the planner how much
+    #                                 is likely cached, which is what makes it choose an index scan
+    #                                 over a sequential one. Costs nothing to raise.
+    #   work_mem             16MB   — PER SORT NODE PER CONNECTION, so it multiplies: this is the one
+    #                                 that hurts if you are greedy. 16MB against a pool capped at 20
+    #                                 is a worst case well inside the budget, and it stops a large
+    #                                 gallery's sort (~2.8MB at 14,000 photos, growing) from spilling
+    #                                 to disk at the stock 4MB.
+    #   maintenance_work_mem 512MB  — only for VACUUM / CREATE INDEX / REINDEX, one at a time.
+    #   random_page_cost      1.1   — the default of 4 assumes a spinning disk seeking. Storage here
+    #                                 is SSD-backed, so a random read costs almost what a sequential
+    #                                 one does, and 4 talks the planner out of index scans it should
+    #                                 be taking.
+    #   max_connections       100   — unchanged, and comfortably above the app's pool of 20.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=2GB
+      - -c
+      - effective_cache_size=8GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=512MB
+      - -c
+      - random_page_cost=1.1
     container_name: snapdini-dev-db
     restart: unless-stopped
+    logging: *default-logging
     environment:
       - POSTGRES_USER=snapdini
       - POSTGRES_PASSWORD=snapdini
@@ -211,10 +281,18 @@ services:
     image: nginx:alpine
     container_name: snapdini-dev-nginx
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "3001:80"              # reverse proxy (Traefik) routes the dev domain (see BASE_URL) → this host:3001
+      # HTTPS on the box itself, for LAN clients whose DNS points snapdini.com here — see
+      # nginx/dev-tls.conf for why that exists. Nothing public reaches this port: the public name
+      # resolves to Cloudflare, which goes to prod.
+      - "443:443"
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/dev-tls.conf:/etc/nginx/conf.d/dev-tls.conf:ro
+      # Read-only, and the private key never leaves this host. DEV COMPOSE ONLY.
+      - /opt/stacks/snapdini/private/letsencrypt:/etc/letsencrypt:ro
     # nginx resolves `app` and `web` ONCE, at startup, because they live in an upstream{} block —
     # and that block is not optional: without its keepalive pool nginx opens a new connection per
     # request and exhausts the ephemeral port range in ~34s at 840rps (see nginx/default.conf).

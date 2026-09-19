@@ -1,5 +1,5 @@
 // Snapdini integration spec — 'Sharing / downloads / rating', 'Share v2: filter-aware + manageable + custom URLs'.
-import { api, createEvent, dbq, gallery, group, join, ok, org, spec, upload } from '../lib/harness.mjs';
+import { UNIQ, api, createEvent, dbq, gallery, group, join, ok, org, spec, upload } from '../lib/harness.mjs';
 
 await spec('07-sharing-rating', async () => {
   // ── Sharing: downloads + highlights + rating modes ──
@@ -47,10 +47,15 @@ await spec('07-sharing-rating', async () => {
   const sel2 = await api('POST', `/api/events/${eShv.joinCode}/shares`, { headers: org(eShv.organizerCode), body: { kind: 'selected', photoIds: [shvPhotos[1].id, shvPhotos[0].id] } });
   ok('re-sharing the same selection (any order) reuses the link', !!sel1.json?.token && sel1.json.token === sel2.json.token);
   ok('owner lists their shares', ((await api('GET', `/api/events/${eShv.joinCode}/shares`, { headers: org(eShv.organizerCode) })).json?.shares?.length ?? 0) >= 2);
-  const ren = await api('PATCH', `/api/events/${eShv.joinCode}/shares/${allShare.json.token}`, { headers: org(eShv.organizerCode), body: { label: 'Everything', slug: 'my-custom-link' } });
-  ok('rename + custom URL', ren.status === 200 && ren.json.slug === 'my-custom-link');
-  ok('view by the NEW custom URL', (await api('GET', `/api/shares/my-custom-link`)).json?.photos?.length === 2);
-  ok('duplicate custom URL → 409', (await api('PATCH', `/api/events/${eShv.joinCode}/shares/${favShare.json.token}`, { headers: org(eShv.organizerCode), body: { slug: 'my-custom-link' } })).status === 409);
+  // Per-run, not a fixed literal: share slugs are a GLOBAL namespace and the duplicate-→409 claim
+  // below depends on nothing else already holding the name. A run killed before its teardown used
+  // to leave custom claimed for ever, and then this rename failed on a 409 instead of the
+  // duplicate test doing so.
+  const custom = `my-custom-link-${UNIQ}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  const ren = await api('PATCH', `/api/events/${eShv.joinCode}/shares/${allShare.json.token}`, { headers: org(eShv.organizerCode), body: { label: 'Everything', slug: custom } });
+  ok('rename + custom URL', ren.status === 200 && ren.json.slug === custom);
+  ok('view by the NEW custom URL', (await api('GET', `/api/shares/${custom}`)).json?.photos?.length === 2);
+  ok('duplicate custom URL → 409', (await api('PATCH', `/api/events/${eShv.joinCode}/shares/${favShare.json.token}`, { headers: org(eShv.organizerCode), body: { slug: custom } })).status === 409);
   await api('DELETE', `/api/events/${eShv.joinCode}/shares/${allShare.json.token}`, { headers: org(eShv.organizerCode) });
-  ok('deleted share 404s', (await api('GET', `/api/shares/my-custom-link`)).status === 404);
+  ok('deleted share 404s', (await api('GET', `/api/shares/${custom}`)).status === 404);
 }, {});

@@ -79,8 +79,19 @@ services:
       - AUTH_RATE_LIMIT=${AUTH_RATE_LIMIT:-}
       - LOGIN_RATE_LIMIT=${LOGIN_RATE_LIMIT:-}
       - API_RATE_LIMIT=${API_RATE_LIMIT:-}
+      - CSP_REPORT_RATE_LIMIT=${CSP_REPORT_RATE_LIMIT:-}
       - EMAIL_RATE_LIMIT=${EMAIL_RATE_LIMIT:-}
-      - PHOTO_DELETE_WINDOW_SECONDS=${PHOTO_DELETE_WINDOW_SECONDS:-60}
+      - IMPORT_RATE_LIMIT=${IMPORT_RATE_LIMIT:-}
+      - RECOVERY_RATE_LIMIT=${RECOVERY_RATE_LIMIT:-}
+      # Empty falls through to the CODE default (routes/photos.ts), which is the one place the
+      # number is explained. A literal fallback here silently outranked it — the code said 30
+      # and every stack ran 60, because compose had already answered.
+      - PHOTO_DELETE_WINDOW_SECONDS=${PHOTO_DELETE_WINDOW_SECONDS:-}
+      # Empty, so the CODE owns the default — see the note above.
+      - COMMENT_RATE_LIMIT=${COMMENT_RATE_LIMIT:-}
+      - VISITOR_RATE_LIMIT=${VISITOR_RATE_LIMIT:-}
+      - PG_POOL_MAX=${PG_POOL_MAX:-}
+      - PG_STATEMENT_TIMEOUT_MS=${PG_STATEMENT_TIMEOUT_MS:-}
       - PHOTO_DELETE_CONFIRM_GRACE_SECONDS=${PHOTO_DELETE_CONFIRM_GRACE_SECONDS:-15}
       # Thumbnail workers. Defaults to CPUs-1; lower it on a small VPS sharing a box.
       - IMAGE_CONCURRENCY=${IMAGE_CONCURRENCY:-}
@@ -188,6 +199,38 @@ services:
 
   db:
     image: postgres:16-alpine
+    # Postgres ran entirely on its own defaults, which are sized for a small shared machine and not
+    # for this one (19GB of RAM, and the database is the only thing on it that wants memory in bulk).
+    # Every value here is deliberate:
+    #
+    #   shared_buffers        2GB   — ~10% of RAM. Conservative on purpose: the app, web and nginx
+    #                                 share this box, and Postgres also leans on the OS page cache.
+    #   effective_cache_size  8GB   — an ESTIMATE, not an allocation. It tells the planner how much
+    #                                 is likely cached, which is what makes it choose an index scan
+    #                                 over a sequential one. Costs nothing to raise.
+    #   work_mem             16MB   — PER SORT NODE PER CONNECTION, so it multiplies: this is the one
+    #                                 that hurts if you are greedy. 16MB against a pool capped at 20
+    #                                 is a worst case well inside the budget, and it stops a large
+    #                                 gallery's sort (~2.8MB at 14,000 photos, growing) from spilling
+    #                                 to disk at the stock 4MB.
+    #   maintenance_work_mem 512MB  — only for VACUUM / CREATE INDEX / REINDEX, one at a time.
+    #   random_page_cost      1.1   — the default of 4 assumes a spinning disk seeking. Storage here
+    #                                 is SSD-backed, so a random read costs almost what a sequential
+    #                                 one does, and 4 talks the planner out of index scans it should
+    #                                 be taking.
+    #   max_connections       100   — unchanged, and comfortably above the app's pool of 20.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=2GB
+      - -c
+      - effective_cache_size=8GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=512MB
+      - -c
+      - random_page_cost=1.1
     restart: unless-stopped
     logging: *default-logging
     environment:

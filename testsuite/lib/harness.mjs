@@ -53,7 +53,9 @@ export async function api(method, p, { body, headers = {}, raw = false } = {}) {
   for (const c of setC) { const m = /^sid=[^;]*/.exec(c); if (m) session.cookie = m[0]; }
   const text = await res.text();
   let json; try { json = JSON.parse(text); } catch { json = null; }
-  return { status: res.status, json, text };
+  // Headers too: the rate-limited endpoints answer with the draft-7 `RateLimit` header, which is
+  // the only way a spec can tell "the product refused this" from "this run had no budget left".
+  return { status: res.status, json, text, headers: res.headers };
 }
 
 export const TS = dbq('SELECT extract(epoch from now())::bigint'); // server clock for unique email
@@ -68,8 +70,51 @@ export const createdJoinCodes = [];
 export const createdEventIds = [];
 // Ownerless/demo rows a spec created that are not covered by deleting the test user.
 export const orphanJoinCodes = [];
+// Extra accounts a spec registered itself (a co-host, a referred visitor, a conversion fixture).
+// They own nothing of ours, so deleting our test user does not reach them. Push the address here
+// instead of deleting it on the last line of the spec: teardown runs in a `finally`, the last line
+// does not, so an assertion that throws above it used to leave the row behind and break the NEXT
+// run's "register" assertion on the same address.
+export const orphanEmails = [];
+// Anything else a spec must undo that nothing cascades to. Same reason: it runs in teardown, so it
+// runs even when the spec throws. Statements are executed in order and failures are ignored.
+export const teardownSql = [];
 
 export const HOUR = 3_600_000;
+
+// ── Wait for a CONDITION, never for a duration ───────────────────────────────
+// A fixed `setTimeout(n)` before reading the DB is a bet that the box is as fast today as it was
+// when `n` was chosen, and it loses silently: the assertion fails for a reason that has nothing to
+// do with the product, which costs an investigation every time. Polling returns the moment the
+// condition holds, so a fast box does not wait and a slow one is slow rather than red.
+// Returns the predicate's value, or false if the deadline passed.
+export async function waitFor(pred, what, { timeoutMs = 20_000, everyMs = 100 } = {}) {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    let v = false;
+    try { v = await pred(); } catch { v = false; }
+    if (v) return v;
+    if (Date.now() >= until) { console.log(`  (gave up after ${timeoutMs}ms waiting for ${what})`); return false; }
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
+}
+
+// ── The operator session ─────────────────────────────────────────────────────
+// Every spec that logs in as ADMIN_EMAIL mints a `sessions` row, and nothing deleted them: the
+// admin account outlives the run, so the harness teardown (which deletes the TEST user and lets the
+// cascade take its sessions) never reached them. They accumulated on every spec of every run —
+// 1,832 of them on this dev box before this helper existed. Go through here and teardown removes
+// exactly the sessions this spec minted, by id, touching nobody else's.
+export const adminSessionIds = [];
+export function haveAdminCreds() { return !!(process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD); }
+export async function adminLogin() {
+  if (!haveAdminCreds()) return { status: 0, json: null, text: '' };
+  const r = await api('POST', '/api/auth/login',
+    { body: { email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD } });
+  const sid = /^sid=(.+)$/.exec(session.cookie || '')?.[1];
+  if (r.status === 200 && sid) adminSessionIds.push(sid);
+  return r;
+}
 
 export async function createEvent(over = {}) {
   const now = Date.now();
@@ -132,7 +177,16 @@ export async function cleanup({ clientErrors = false } = {}) {
     for (const id of createdEventIds) {
       try { fs.rmSync(path.join(POOL, id), { recursive: true, force: true }); } catch {}
     }
-    dbq(`DELETE FROM users WHERE email='${EMAIL}'`);
+    try { dbq(`DELETE FROM users WHERE email='${EMAIL}'`); } catch {}
+    // Second accounts the spec registered itself, by EXACT address. Never a LIKE pattern: a
+    // wildcard deletes rows the spec did not create, which is the same class of bug as counting
+    // them.
+    for (const e of orphanEmails) { try { dbq(`DELETE FROM users WHERE email='${e}'`); } catch {} }
+    // Sessions minted for the operator account, by id, so no other run's session is touched.
+    if (adminSessionIds.length) {
+      try { dbq(`DELETE FROM sessions WHERE id IN (${adminSessionIds.map((i) => `'${i}'`).join(',')})`); } catch {}
+    }
+    for (const stmt of teardownSql) { try { dbq(stmt); } catch {} }
     // Demo events are ownerless, so deleting the test user does not remove them and they would
     // otherwise accumulate and inflate the admin overview's demo count.
     for (const c of orphanJoinCodes) { try { dbq(`DELETE FROM events WHERE join_code='${c}'`); } catch {} }

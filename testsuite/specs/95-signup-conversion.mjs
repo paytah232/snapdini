@@ -10,7 +10,7 @@
 // a returning user as a new sign-up on every visit.
 //
 // SERIAL (9x- prefix): creates and deletes its own accounts.
-import { BASE, api, dbq, group, ok, session, spec } from '../lib/harness.mjs';
+import { BASE, UNIQ, api, dbq, group, ok, orphanEmails, session, spec } from '../lib/harness.mjs';
 import crypto from 'crypto';
 
 // Follow nothing — the redirect target IS the assertion. devLink comes back absolute against the
@@ -25,14 +25,19 @@ const digestOf = (userId) => crypto.createHash('sha256').update(userId).digest('
 
 await spec('95-signup-conversion', async () => {
   const ownerCookie = session.cookie;
-  const stamp = `${Date.now()}_${process.pid}`;
-  const emails = [];
+  // UNIQ, not a hand-rolled stamp: it is the suite's one uniqueness convention and it already
+  // carries the pid and a random suffix. Registering each address in `orphanEmails` hands the
+  // deletes to TEARDOWN, which is a `finally` — the trailing loop that used to do it never ran when
+  // an assertion above threw, and these `conv_*` rows are exactly what 93-admin-listing's
+  // whole-table user arithmetic counts, so a leak there fails a different spec entirely.
+  // (Their `email_tokens` cascade off the user row, so deleting the account takes those too.)
+  const stamp = UNIQ;
 
   group('Sign-up conversion fires on verification, once');
   {
     // ---- 1. the verification link marks the transition ----
     const email1 = `conv_verify_${stamp}@example.com`;
-    emails.push(email1);
+    orphanEmails.push(email1);
     const reg = await api('POST', '/api/auth/register',
       { body: { name: 'Conv Test', displayName: 'Conv Test', email: email1, password: 'Str0ngPass!23' } });
     ok('registration succeeds', reg.status === 201, `status ${reg.status} ${reg.text?.slice(0, 120)}`);
@@ -70,7 +75,7 @@ await spec('95-signup-conversion', async () => {
     // The link goes to their own inbox, so opening it proves the address just as a verification
     // link does. This path doubles as passwordless sign-up and must count.
     const email2 = `conv_magic_${stamp}@example.com`;
-    emails.push(email2);
+    orphanEmails.push(email2);
     const ml2 = await api('POST', '/api/auth/magic-link', { body: { email: email2 } });
     ok('magic-link creates the account for a new address', ml2.status === 200, `status ${ml2.status}`);
     const first = await location(ml2.json.devLink);
@@ -94,7 +99,7 @@ await spec('95-signup-conversion', async () => {
     // half-finished event in its own localStorage, so it needs to find out that the address was
     // proven elsewhere. That is what /api/auth/pending is for.
     const email3 = `conv_poll_${stamp}@example.com`;
-    emails.push(email3);
+    orphanEmails.push(email3);
     const reg = await api('POST', '/api/auth/register',
       { body: { name: 'Poll Test', displayName: 'Poll Test', email: email3, password: 'Str0ngPass!23' } });
     ok('registration returns a poll token', typeof reg.json?.pendingToken === 'string' && reg.json.pendingToken.length >= 32);
@@ -137,6 +142,5 @@ await spec('95-signup-conversion', async () => {
     ok('a spent token yields no marker', !replay.json?.marker);
   }
 
-  for (const e of emails) dbq(`DELETE FROM users WHERE email='${e}'`);
   session.cookie = ownerCookie;
 }, {});

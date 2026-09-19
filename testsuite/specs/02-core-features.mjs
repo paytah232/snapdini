@@ -6,7 +6,7 @@
 // 'Multi-event isolation' asserts >= 12 events exist in the process, which the at-end,
 // ending-timing and world-timezone groups supply (13). Splitting any of it would break a
 // dependency, so it stays one file.
-import { BASE, HOUR, api, createEvent, createdJoinCodes, dbq, gallery, group, join, ok, org, spec, upload } from '../lib/harness.mjs';
+import { BASE, HOUR, UNIQ, api, createdJoinCodes, createEvent, dbq, gallery, group, join, ok, org, spec, teardownSql, upload } from '../lib/harness.mjs';
 
 await spec('02-core-features', async () => {
   // ── Instant reveal + basic flow + DB ──
@@ -108,7 +108,17 @@ await spec('02-core-features', async () => {
   // denial count only means something against the number of people asked) but must arrive already
   // handled, or every dismissed permission prompt becomes an open issue for the operator to clear
   // by hand — which is exactly what was happening in production.
-  const denyMsg = `regression camera denial ${Date.now()}`;
+  // These four rows are cleaned up in TEARDOWN, not on a line further down. The spec's own
+  // `clientErrors: true` flag only clears `message='regression test'`, and the inline DELETE that
+  // used to clear these never ran when something above it threw — leaving four unhandled rows in
+  // the operator's queue for ever. They carry UNIQ so the deletes are exact rather than a LIKE
+  // sweep over rows this spec did not write.
+  const denyMsg = `regression camera denial ${UNIQ}`;
+  const faultMsg = `regression real fault ${UNIQ}`;
+  const uploadMsg = `regression upload fault ${UNIQ}`;
+  const noCtxMsg = `regression no context ${UNIQ}`;
+  // Registered BEFORE the rows are written, so a throw anywhere below is still covered.
+  teardownSql.push(`DELETE FROM client_errors WHERE message IN ('${denyMsg}','${faultMsg}','${uploadMsg}','${noCtxMsg}')`);
   ok('a declined-camera report is accepted',
     (await api('POST', '/api/client-error', { body: { message: denyMsg, context: 'camera-denied' } })).status === 200);
   ok('it is still recorded',
@@ -116,19 +126,15 @@ await spec('02-core-features', async () => {
   ok('but arrives already handled, so it never queues for action',
     dbq(`SELECT handled FROM client_errors WHERE message='${denyMsg}'`) === 't');
   // The other half matters more: a real fault must NOT be silenced by this.
-  const faultMsg = `regression real fault ${Date.now()}`;
   await api('POST', '/api/client-error', { body: { message: faultMsg, context: 'camera' } });
   ok('a genuine camera fault still demands attention',
     dbq(`SELECT handled FROM client_errors WHERE message='${faultMsg}'`) === 'f');
-  const uploadMsg = `regression upload fault ${Date.now()}`;
   await api('POST', '/api/client-error', { body: { message: uploadMsg, context: 'upload' } });
   ok('and so does an upload failure',
     dbq(`SELECT handled FROM client_errors WHERE message='${uploadMsg}'`) === 'f');
-  const noCtxMsg = `regression no context ${Date.now()}`;
   await api('POST', '/api/client-error', { body: { message: noCtxMsg } });
   ok('a report with no context is treated as a fault, not waved through',
     dbq(`SELECT handled FROM client_errors WHERE message='${noCtxMsg}'`) === 'f');
-  dbq(`DELETE FROM client_errors WHERE message LIKE 'regression camera denial%' OR message LIKE 'regression real fault%' OR message LIKE 'regression upload fault%' OR message LIKE 'regression no context%'`);
 
   // Custom slideshow audio rejects a non-audio file (MIME/extension filter is spoofable, so the
   // server ffprobe-validates it has a real audio stream).

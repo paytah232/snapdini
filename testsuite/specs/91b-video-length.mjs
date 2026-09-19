@@ -1,5 +1,13 @@
 // Snapdini integration spec — video LENGTH policy.
 //
+// SERIAL (`9x-` prefix, was `11-`): the last group reads DB-WIDE totals off /api/admin/overview
+// (`videos_over_limit`, `capture_overshoots`). Asserting a whole-database number from inside the
+// parallel pool makes the spec a claim about every other spec's behaviour — one leaked over-tier
+// video row anywhere, from a run that was killed before teardown, invalidated it. The `9x-` band
+// runs one spec at a time after the pool, so nothing can add a video mid-assertion, and the
+// assertions themselves are now DELTAS against a snapshot taken before this spec uploads anything,
+// so pre-existing rows are irrelevant too.
+//
 // An event's purchased videoSeconds is a PRICE tier (10s $2 … 90s $12), not a technical limit.
 // Enforcing it to the second punished the people who paid: a phone clip reading 11.4s against a 10s
 // plan is container rounding, and a guest who filmed the speeches cannot re-trim it at 1am. So an
@@ -7,7 +15,7 @@
 // still required — that is the fee, and it is still enforced.
 import fs from 'node:fs';
 import path from 'node:path';
-import { api, createEvent, dbq, group, join, ok, spec } from '../lib/harness.mjs';
+import { adminLogin, api, createEvent, dbq, group, join, ok, session, spec } from '../lib/harness.mjs';
 
 const clip = (name) => fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'loadtest', name));
 async function uploadClip(token, file, source) {
@@ -18,7 +26,18 @@ async function uploadClip(token, file, source) {
   return api('POST', '/api/photos', { body: fd });
 }
 
-await spec('11-video-length', async () => {
+await spec('91b-video-length', async () => {
+  // Snapshot BEFORE anything is uploaded, so every operator assertion below can be about what this
+  // spec added rather than about what the table happens to hold. Grab the OWNER session first and
+  // put it back straight after: every createEvent() below has to be owned by the test user, or the
+  // events belong to the operator account and the harness teardown never reaches them.
+  const ownerCookie = session.cookie;
+  const admLogin = await adminLogin();
+  const beforeStats = admLogin.status === 200
+    ? ((await api('GET', '/api/admin/overview')).json?.stats || {})
+    : {};
+  session.cookie = ownerCookie;
+
   group('Video length: a paid tier is a price, not a hard cutoff');
 
   // Free tier (<=10 guests) includes video, so videoSeconds is honoured without a payment step.
@@ -73,17 +92,21 @@ await spec('11-video-length', async () => {
      dbq(`SELECT DISTINCT COALESCE(source,'(null)') FROM photos WHERE event_id='${ev.id}'`));
 
   group('Video overages are reported to the operator');
-  const admLogin = process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD
-    ? await api('POST', '/api/auth/login', { body: { email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD } })
-    : { status: 0 };
   if (admLogin.status === 200) {
+    await adminLogin();
     const ov = await api('GET', '/api/admin/overview');
-    ok('overview counts videos over their tier', Number(ov.json?.stats?.videos_over_limit) >= 2,
-       JSON.stringify(ov.json?.stats?.videos_over_limit));
+    session.cookie = ownerCookie;   // hand the owner session back before teardown
+    const after = ov.json?.stats || {};
+    // Deltas, not levels. This spec uploaded exactly two over-tier clips (one camera-roll, one
+    // in-app capture), so that is exactly what the operator's counters must have moved by — an
+    // assertion that is true no matter what else is in the table.
+    const dOver    = Number(after.videos_over_limit)  - Number(beforeStats.videos_over_limit);
+    const dCapture = Number(after.capture_overshoots) - Number(beforeStats.capture_overshoots);
+    ok('overview counts videos over their tier', dOver === 2,
+       `videos_over_limit moved ${beforeStats.videos_over_limit} -> ${after.videos_over_limit}`);
     ok('in-app overshoots are counted SEPARATELY from camera-roll overages',
-       Number(ov.json?.stats?.capture_overshoots) >= 1
-         && Number(ov.json?.stats?.capture_overshoots) < Number(ov.json?.stats?.videos_over_limit),
-       `capture_overshoots=${ov.json?.stats?.capture_overshoots} of ${ov.json?.stats?.videos_over_limit}`);
+       dCapture === 1 && dCapture < dOver,
+       `capture_overshoots moved by ${dCapture} of ${dOver} new overages`);
     const rows = ov.json?.videoOverages || [];
     const mine = rows.find((r) => r.join_code === ev.joinCode);
     ok('the overage detail names the event and how far over it went',

@@ -134,8 +134,11 @@ docker compose up -d
 ## Version notes
 
 ### 1.5.0
-**Three new settings, and every one of them is optional** — the release works with none of them set,
-so trap 2 only applies if you want one. It is a large release, so here is what changes under you.
+**Five new settings, and every one of them is optional** — the release works with none of them set,
+so trap 2 only applies if you want one. Two things do change under you whether you want them or
+not: the **photo undo window** is now 30 seconds rather than 60, and **`nginx/default.conf` has
+moved on** without touching your copy. Both are below. It is a large release, so here is what
+changes under you.
 
 #### ⚠ If you send mail over SMTP, read this one first
 
@@ -163,6 +166,70 @@ Two ways out, in order of preference:
 
 Verify either way by sending yourself a test — see [Verifying](#verifying). A send that fails this
 way fails loudly in the app logs with a certificate error, so you will not be left guessing.
+
+#### ⚠ `nginx/default.conf` has changed, and the upgrade does not touch yours
+
+See [trap 2](#2-docker-composeyml-and-nginxdefaultconf-are-your-files). Nothing here breaks if you
+skip it — you simply keep the old behaviour. Diff your
+copy against
+[`app/nginx/default.conf`](https://raw.githubusercontent.com/paytah232/snapdini/main/app/nginx/default.conf)
+and take what you want:
+
+| What | Why you might want it |
+|---|---|
+| **An offline page for 5xx** | A guest mid-event who hits the bare `502 Bad Gateway` wall assumes the photos they just took are gone and mashes refresh, which is the worst possible traffic for a box that is already struggling. The replacement is a branded page that says nothing has been lost, polls both upstreams with jitter and backoff (3s → 15s), and reloads itself when they answer. `/api/` and `/uploads/` get a small JSON body instead, because those callers are XHR and `<img>`. |
+| **gzip on `application/json`** | There was none: nginx handed the gallery answer to the edge as plaintext and a cache MISS went out untouched. Measured on a 95-photo event: 48,994 bytes → 7,546, 6.49×. 150 guests crossing a reveal together is ~59 Mbit of JSON before this and ~9 after it — and the byte that costs money is the one leaving the house. |
+| **`proxy_connect_timeout 5s`** | The default is 60. A stopped container's address stops being *routable* rather than refusing, so the SYNs are swallowed and nginx waits the whole timeout out: measured at 22.7s to first byte with the web container down. Connect only — `/api/` keeps its 3600s read/send timeouts, so long uploads are untouched. |
+| **The static cache block matches filenames, not `/icons/`** | The old pattern covered a directory that has never existed, so `/icon.svg`, `/favicon.ico`, `/favicon-32.png` and `/og.png` were served on the edge's 4-hour default instead of the 30 days the block was written for. |
+| **`proxy_intercept_errors on` for the frontend** | Without it, a SvelteKit SSR 500 — or the node process shutting down mid-deploy — streams its own raw error page to a guest. The trade-off is that a *persistent* SSR 500 now hides behind "we'll be right back"; it is still `us=500` in the access log and in the app logs. |
+
+The offline page is inlined in the config rather than sitting beside it as `offline.html`, because
+the nginx container mounts exactly one path (`./nginx/default.conf`) — a file next to it is not in
+the container at all. If you edit the markup, note that it contains no ASCII apostrophe, no
+backslash and no `$` on purpose (nginx would read them as quoting and as variables), and that it
+arrives in seven chunks because nginx rejects any quoted parameter over 4096 bytes.
+
+#### The photo undo window is 30 seconds now, not 60 — and your compose file may still say 60
+
+`PHOTO_DELETE_WINDOW_SECONDS` is how long a guest may bin a shot they have just taken and get the
+frame back. The default moved to **30**, and — the part that matters for an upgrade — the shipped
+`docker-compose.yml` no longer supplies a literal:
+
+```yaml
+  app:
+    environment:
+      # was:  PHOTO_DELETE_WINDOW_SECONDS=${PHOTO_DELETE_WINDOW_SECONDS:-60}
+      - PHOTO_DELETE_WINDOW_SECONDS=${PHOTO_DELETE_WINDOW_SECONDS:-}
+```
+
+The old `:-60` silently outranked the application's own default: the code said one number and every
+stack ran another, because compose had already answered. **Your `docker-compose.yml` is your file,
+so it still says `:-60` until you change it** — if you want the new default, drop the `60`; if you
+liked 60, set `PHOTO_DELETE_WINDOW_SECONDS=60` in `.env` and you have it deliberately rather than by
+accident. Either way the camera now reads the real number from `/api/config` rather than counting
+down from a figure of its own, so the bin can no longer offer itself for longer than the server will
+accept.
+
+#### Guest hearts — new, on by default, nothing to configure
+
+Guests can heart each other's photos, and everyone sees the count. There is no setting: it is a
+per-event switch (`events.hearts_enabled`, **default on**) that a host turns off under *Event
+settings → Guest hearts*. Turning it off hides hearts and refuses the endpoints; **no rows are
+deleted**, so turning it back on restores every count.
+
+What it means operationally:
+
+- **Two endpoints**: `POST /api/photos/:id/heart` (a guest session token; explicit `heart: true|false`,
+  not a toggle, so a retry is idempotent) and `GET /api/photos/:code/hearts` (every count for one
+  event, plus which are the asker's own).
+- **The counts are a `COUNT(*)`, not a column.** There is no `photos.heart_count` to drift; see
+  `0057` below.
+- **The gallery polls the second endpoint**, which is why it is on the guest-read exemption list in
+  the section below. On a deployment with a hand-written per-IP limit in front of `/api`, that is
+  the path to exempt.
+- A host can download **what everyone loved** — everything with at least one ♥ — or that together
+  with their own stars, counted once. Existing events get hearts switched on by the column default,
+  which adds a control to the gallery and takes nothing away.
 
 #### Guest list & invite delivery tracking
 Adds a **guest list** per event (add by hand or import a CSV), Snapdini-branded **invite emails**,
@@ -256,11 +323,98 @@ The digest normally stays silent on a quiet day. It will break that silence for 
 over state is flagged in the **subject line** — a quiet week with no support messages and no errors
 is precisely when invites that have stopped going out go unnoticed.
 
+#### Guest recovery is budgeted, and one setting tunes it
+
+A returning guest is recognised by their **email address alone** — that is how someone who joined on
+one phone and opens the camera on another gets their own roll back, and it does not change in this
+release. What is new is a budget around it: **5 recovery attempts per 15 minutes per event, per
+address**. A real returning guest makes one, or two if they mistype the address; beyond the budget
+the join answers `429` and asks them to wait a few minutes. **First-time joins are not affected at
+all** — the budget applies only to the attempt that recovers an existing roll — and it is keyed on
+the address at that event, **never on the IP**, because every guest at a venue shares one.
+
+```yaml
+  app:
+    environment:
+      - RECOVERY_RATE_LIMIT=5      # optional; recovery attempts per 15 min, per event + address
+```
+
+Leave it unset and you get 5. Raise it only if you have a real reason to — a guest who hits it is
+told to wait, which is a worse experience than the thing the budget protects against.
+
+The reason it exists: your join code is printed on a sign at the venue, so it is semi-public, and an
+address is often guessable. Together they were enough to mint a session on another guest's roll at
+your event, as fast as a script could ask. Alongside the budget, a recovery that **renames a roll
+that already has photos on it** — the shape a takeover has — is now reported to `SUPPORT_EMAIL` when
+`OPS_NOTIFICATIONS=1`, and written to the app log either way, with the address masked. Neither
+change touches what a guest sees.
+
+#### Rate limits: the guest read path is now exempt, and the CSV import has its own
+
+Two changes, one new setting.
+
+**The `/api` backstop (`API_RATE_LIMIT`, 600/min per IP) now skips guest READS.** It never should
+have counted them. With the real-IP fix in place, `req.ip` is the actual client — and at a venue
+that is **one NAT address shared by every guest**. Opening the gallery costs about six requests, so
+600/min is a cliff at roughly 100 guests inside a minute, and a reveal is 150 people tapping one
+link at the same moment: the whole room would have been told "Too many requests — slow down" at the
+exact moment the product is being judged. GETs on the gallery, the event, `/participants/me` and the
+hearts endpoint are exempt now. **Writes, auth, uploads, email and Stripe still count.** If you run
+your own per-IP limiting in front of Snapdini — in nginx, Traefik or Cloudflare — those four paths
+are the ones to leave alone.
+
+**The CSV import is throttled separately**, because it is the only endpoint in the product that
+accepts a 2 MB body and parses all of it (measured: 576 ms of CPU for 2 MB). Under the backstop
+alone, one organizer code was enough to book ~345 s of CPU per minute on a single-process Node
+server.
+
+```yaml
+  app:
+    environment:
+      - IMPORT_RATE_LIMIT=30       # optional; CSV import + preview, per minute per IP
+```
+
+Leave it unset and you get 30, which is a DoS bound rather than a product rule — a host correcting a
+mapping and re-previewing five times in a row is ordinary use.
+
+#### If anything in front of you caches `/api`
+
+Every `/api` response now defaults to `Cache-Control: private, no-store`, and a route opts out
+explicitly. Nothing changes for a normal deployment; it matters if you have — or are about to add —
+a CDN rule over `/api/*`.
+
+- The obvious fix for "my gallery cache rule isn't working" is a Cloudflare **Cache Everything** rule
+  on `/api/*`. Cloudflare's default cache key is host + path + query and **ignores request
+  headers**, so a cached `GET /api/events/<code>/admin` — authorised by the `x-organizer-code`
+  *header* — would be served to anyone with the URL and no code at all. Defaulting closed is what
+  stops a mis-scoped rule leaking; do not "fix" it by removing the default.
+- The public gallery answer is the one reply that opts in, and its TTL is **computed per state**: 30s
+  once revealed, 5s for a manual reveal, and before a scheduled reveal never past 10s short of the
+  reveal instant — so a cached lock screen can never outlive the reveal it is denying. A Cache Rule
+  with a fixed **Edge Cache TTL** overrides `Cache-Control` outright and flattens all of that into
+  one blanket number, which is exactly what it exists to avoid. If you cache the gallery at the
+  edge, respect the origin TTL.
+
 #### Migrations
 
-Four of them, applied automatically on boot, and **no event that already exists changes behaviour
-because of any of them.** Every new table starts empty; every added column is either nullable or
-carries the previous behaviour as its default. Nothing is backfilled.
+Applied automatically on boot. Every new table starts empty, and every added column either carries
+the previous behaviour as its default or is nullable. One column is *dropped* (`0053`), one is
+*tightened* (`0054`) and one index is *re-keyed* (`0055`) — all three on a table that is itself new
+in this release, so none of them can touch a row you already have.
+
+**Share-link reactions (`0061`) change nothing without you either.** Every share link — including
+the ones you already made — starts with hearts and comments off. They are set **per link**, not per
+event, so one event can have a family gallery that takes comments and a client gallery that does
+not; you turn them on when you make a link or later from **Edit**.
+
+**Guest comments (`0060`) change nothing without you.** The column defaults to false, so every existing event and every new one starts with comments off until a host turns them on in Event settings (or in the wizard when creating one).
+
+**The one that changes an existing event is `0057`**: `events.hearts_enabled` defaults to **true**,
+so every event you already have gains guest hearts. That adds a control to a gallery and removes
+nothing, which is why it defaults on rather than off — and any host can switch it off per event.
+Every other column added here is either a new feature's own storage or defaults to what the
+deployment already did. `0059`'s `UPDATE` is the only backfill in the chain, and on a real upgrade
+it touches nothing: `photo_hearts` is created empty by `0057` a moment earlier in the same run.
 
 | Migration | What it adds |
 |---|---|
@@ -268,6 +422,59 @@ carries the previous behaviour as its default. Nothing is backfilled.
 | `0046` | `events.guest_delivery`, `guest_send_scope`, `guest_send_at`, three one-shot send guards and three per-event mail toggles — how and when guests get the photos. Plus `participants.wants_photos`, the consent gate. |
 | `0047` | `event_guests`, `guest_invites` and `email_suppressions` (new tables) — who the host means to invite, what became of each message sent to them, and the addresses that must never be mailed again. |
 | `0048` | `guest_unsubscribes` (new table) — per-event guest opt-outs, with the optional "why" if they gave one. |
+| `0049` | `participants.challenge_set_source` — how a guest's trick card was decided: scanned from the card itself, chosen by the guest, or guessed for them. NULL reads as "settled", so every participant that already exists is left alone and is never re-asked. |
+| `0050` | `processed_stripe_events` (new table) — one row per Stripe event id, claimed before the webhook does any work. Stripe retries on any non-2xx, and the upgrade branch used to add the money again on each retry; an inflated total then made the *next* upgrade free. |
+| `0051` | Makes `idx_survey_event` **unique**, so one event has one survey response. The route checked first and inserted second, which two simultaneous submissions both passed — each firing its own "unhappy survey" alert. Deduplicates first, keeping the published answer if there is one, else the earliest. |
+| `0052` | Two **partial unique** indexes on `share_sends`, keyed on `lower(btrim(email))` — one for the standing gallery link (`share_id IS NULL`), one for curated shares. Partial and paired rather than one three-column index, because Postgres treats NULLs as distinct: a single index would have constrained the curated shares and left the common case unconstrained. This is what makes "one gallery link per address, ever" a rule the database keeps. |
+| `0053` | **Drops** `event_guests.phone`. Data minimisation: Snapdini invites guests by email and by nothing else, so a phone number was personal data nothing in the product could act on. |
+| `0054` | Makes `event_guests.email` **`NOT NULL`**. The guest list exists to mail a lot of people one join link, so an entry with no address is one nothing in the product can ever reach. |
+| `0055` | Re-keys the guest-list unique index onto **`(event_id, lower(btrim(email)))`**, so one address per list is a rule the database keeps rather than one every writer has to remember. Matches `participants` (`0031`) and `share_sends` (`0052`), which were already case-folded. |
+| `0056` | `guest_invites.mailed` (default `true`) — marks an invite that was recorded but deliberately never handed to a transport. Demo events show their own guest list without mailing strangers from your sending domain, and the email-allowance count filters on this so a demo's fake sends never move the number you are billed on. |
+| `0057` | `photo_hearts` (new table) + `events.hearts_enabled` (default **true**). One row per guest per photo, with a unique index on `(photo_id, participant_id)` — there is deliberately **no counter column**, because a denormalised tally drifts the moment any path forgets it (a purge, a cascade, a moderation reject) and the drift is invisible until someone counts by hand. The unique index is also what makes the endpoint idempotent on a double tap or a retry. |
+| `0058` | Index on `photo_hearts (participant_id)` — "which of this event's photos have I hearted?" had no index path, because `0057`'s composite leads on `photo_id`. At a 400-guest event that is the difference between a keyed lookup of your own few dozen rows and reading every heart in the event. |
+| `0059` | `photo_hearts.event_id`, backfilled from `photos` and then set `NOT NULL`, plus two indexes on it. It removes the join on the live count: measured on a synthetic 400-guest event (14,000 photos, 60,215 hearts) the joined form was a 64.9 ms sequential scan of every heart on the server, growing with the number that grows fastest at a busy event. Not the counter-column mistake `0057` avoided — a photo's event never changes, so this is a copy of an immutable fact rather than a running total. |
+| `0060` | `photo_comments` (new table) + `events.comments_enabled` (default **false**). Same shape as hearts — no counter column, `event_id` carried on the row so the read needs no join — and the opposite default, deliberately: a heart only adds a number to a screen, while a comment puts one guest's words on another guest's gallery under their name. Existing events are unaffected; the host opts in. |
+| `0061` | `share_visitors` (new table) + `photo_hearts` / `photo_comments` widened to a **nullable** `participant_id` beside a new `visitor_id`, + `shares.hearts_enabled` / `shares.comments_enabled` (both default **false**). This is what lets someone holding a `/s/` link heart and comment without joining the event — a link visitor is deliberately **not** a participant, so a forwarded link never takes a seat against your guest cap, a roll, a trick card or a line in your guest list. Both reaction tables carry `CHECK ((participant_id IS NULL) <> (visitor_id IS NULL))` so a row always has exactly one author, added `NOT VALID` because the existing rows already satisfy it and validating would take a lock nothing needs. The visitor uniqueness index is **partial** — `WHERE visitor_id IS NOT NULL` — because Postgres treats NULLs as distinct and a plain composite over a nullable column would deduplicate nothing at all while looking exactly like idempotency. Existing events and existing links are unaffected: every share starts with both switches off and the host turns them on per link. |
+
+**About `0053`.** It is the only statement in this upgrade that removes anything, and on an existing
+deployment it removes **nothing that was ever there**: `event_guests` is itself new in 1.5.0, so
+`0047` creates the table a few statements earlier in the same run and `0053` drops the column again
+before the table has ever held a row. `DROP COLUMN IF EXISTS` makes it a no-op on any database that
+somehow lacks it. Rehearsed against a restored production dump: the whole `0039` → `0053` chain
+applies cleanly and `event_guests` ends as `id, event_id, name, email, notes, created_at,
+updated_at`. The importer still *recognises* a phone column in a host's spreadsheet and resolves it
+to "don't import", so an ordinary `Name,Email,Phone` paste is unaffected.
+
+**About `0054`.** It deletes any `event_guests` row with a null email before applying the
+constraint, so the `ALTER` cannot abort halfway on data it was always going to be applied over — and
+on a real upgrade it deletes nothing, for the same reason `0053` drops nothing: `0047` creates this
+table, empty, a few statements earlier in the same run. No released version has ever had it. The
+record of what was mailed is unaffected regardless (`guest_invites.guest_id` is `ON DELETE SET
+NULL`), and nothing without an address can have been mailed in any case. Rehearsed the same way as
+`0053` — a production dump restored into a scratch database, `0039` → `0054` applied over it, then
+repeated with a violating row inserted by hand: the delete removes exactly that row and the
+constraint takes.
+
+**About `0055`.** `0047` created the guest-list unique index on the raw `(event_id, email)` columns,
+deliberately, because the writer lower-cases and trims every address on the way in. It still does.
+What that arrangement could not do is catch a writer who *didn't*: going round the normalising call
+with a plain `INSERT` put `MUM@Example.COM` and `mum@example.com` on one event as **two rows**,
+which is exactly the duplicate the index exists to refuse. `0055` keys it on
+`lower(btrim(email))` instead, so the constraint enforces the rule rather than trusting one caller
+— the same choice `0031` made for `participants` and `0052` for `share_sends`. Nothing reads
+`event_guests` by email (every read is by `event_id` or by `id`), so no query plan changes.
+Like `0051` and `0052` it **deduplicates before rebuilding**, because the new key is stricter than
+the old one and a unique index cannot be built over rows that violate it: the earliest row of a
+colliding set survives — the one your list has been showing all along, and the one the product's own
+duplicate check already keeps — and any `guest_invites` rows belonging to the losers are re-pointed
+to it first, so a bounce stays attached to the person it was sent to. On a real upgrade it finds
+nothing, for the same reason `0053` and `0054` do. Rehearsed the same way as both: a production dump
+restored into a scratch database, `0039` → `0055` applied over it (a clean no-op, `event_guests`
+ending empty with the new index), then a second scratch database put back to `0047`'s byte-exact
+index and hand-loaded with collisions — six guest rows across three spellings of one inbox collapsed
+to three, all six invites kept a guest, and the rebuilt index then refused both a re-cased and a
+space-padded insert. The `WHERE email IS NOT NULL` predicate from `0047` goes with the rebuild;
+`0054` had already made it always true.
 
 **About `0046`.** `participants.wants_photos` defaults to **false** and is not backfilled, which is
 the honest reading of every row already in that table: there was no way to ask, so nobody asked. An
@@ -291,7 +498,66 @@ a guest *does* choose the global option that lands in `email_suppressions` as we
 records that it was a request rather than a bounce, and which event it came from.
 
 
-### 1.4.4
+#### The bot check on sign-up and sign-in now actually runs
+
+If you set `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET`, know that until this release the widget was
+rendered on the **contact form only**. `POST /api/auth/register` and `POST /api/auth/login` were
+guarded server-side, but no token was ever produced on those two pages, so every real sign-up and
+sign-in was decided by `TURNSTILE_FAIL_OPEN` — and a bot that simply omitted the field was treated
+exactly the same way. The bot check on your auth endpoints was, in practice, off.
+
+Both pages now render it. **Nothing to change if Turnstile is unset** — the widget stays invisible
+and both endpoints behave as before.
+
+**What to do about `TURNSTILE_FAIL_OPEN`.** Keep it set for now, then close it deliberately:
+
+1. A refusal now explains itself. Someone whose network eats `challenges.cloudflare.com` is told so,
+   in plain words, and told which address to allow — so closing the hatch is no longer the silent
+   lock-out it used to be. A Cloudflare outage answers `503`, not `403`, and says it is our end.
+2. Before closing it, measure who you would be refusing. Every pass that happened *only* because
+   the hatch is open is logged:
+
+   ```bash
+   docker compose logs --since 168h app | grep 'turnstile.*fail-open'
+   ```
+
+   `fail-open:missing-token` is a visitor whose widget never loaded — the people who start being
+   refused the moment you unset it. `fail-open:verify-unreachable` is Cloudflare being unreachable
+   from your server, which is a different problem and usually your own DNS or egress.
+3. If that count over a week is small, unset `TURNSTILE_FAIL_OPEN` and watch for contact-form
+   reports. If it is not small, leave it set: the honeypot and the per-IP limiters below are doing
+   the work either way, and locking out real customers to stop bots that a rate limit already
+   stops is a bad trade.
+
+The honeypot (`website`) and the per-IP limiters are unaffected by any of this, and are what carries
+the load while the hatch is open — but note the honeypot is on the **contact form only**; sign-up
+and sign-in have never had one.
+
+#### Also in this release, with nothing to configure
+
+Nothing below needs a setting or a migration; it is here so an upgrade does not surprise you. All of
+it is written up in the [page & feature guide](docs/GUIDE.md).
+
+- **The event manager opens on a menu** of eight sections instead of ten stacked cards, and
+  remembers which one you were in for as long as the tab is open. Nothing moved out of the page —
+  only how you reach it.
+- **One site header** across the landing page, pricing, the dashboard, the manager and
+  `/siteadmin`, which previously drew three different ones and, on the console, none.
+- **The poster prints at A6, A5, A4, A3 or A2**, rendered at that paper's own resolution rather than
+  one fixed size, with the real dpi stated beside the buttons. Printing and downloads for the poster
+  and the trick cards now live together on one **Print** tab. Trick cards **bleed to the cut line**
+  (no white gutter between them) and the dashed cut guides became a toggle.
+- **Downloads ask what, then how.** The files-or-zip question is asked **every time** — the
+  remembered per-device answer was deliberately removed, because the right answer changes with the
+  browser, the size of the set and what the person means to do with it. A guest can now zip **their
+  own roll before the reveal**, bounded by their session to their own photos.
+
+### 1.4.4 — never released; read this if you are coming from 1.4.3
+The version after 1.4.3 was **1.5.0**: 1.4.4 was written up but never stamped, so no one ever ran
+it. The section is kept because its migrations (`0040`–`0044`) are real and still have to be
+applied — if you are upgrading **1.4.3 → 1.5.0** you apply everything from `0040` to `0061`, and
+the notes for the first five of them are here rather than under 1.5.0.
+
 Adds a **trick list** — an optional shot list a host gives guests, printed on cards and ticked off
 in the camera. It is off for every existing event until a host sets one up.
 
@@ -412,7 +678,7 @@ New settings, all optional — everything works unchanged if you skip them:
 |---|---|---|
 | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET` | unset | Cloudflare Turnstile on contact/sign-up/login. **Both unset = feature entirely off.** |
 | `TURNSTILE_ALLOWED_HOSTNAMES` | `BASE_URL`'s host | Extra hostnames the widget may be solved on, comma-separated |
-| `TURNSTILE_FAIL_OPEN` | unset (strict) | `1` = allow through when Turnstile is unreachable or blocked. Recommended. |
+| `TURNSTILE_FAIL_OPEN` | unset (strict) | `1` = allow through when Turnstile is unreachable or blocked. See the 1.5.0 notes before deciding — the refusal it avoids now explains itself. |
 | `CONTACT_RATE_LIMIT` | 5/hour | Contact-form submissions per IP |
 | `AUTH_RATE_LIMIT` / `LOGIN_RATE_LIMIT` / `API_RATE_LIMIT` | 40/15m · 15/15m · 600/60s | Per-IP limits. Raise only for automated test runs. |
 

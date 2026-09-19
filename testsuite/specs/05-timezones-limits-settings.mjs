@@ -1,5 +1,5 @@
 // Snapdini integration spec — 'Timezones', 'Limits + lifecycle', 'Settings editor (PUT /settings)'.
-import { HOUR, api, createEvent, createdJoinCodes, dbq, group, join, ok, org, spec, upload } from '../lib/harness.mjs';
+import { HOUR, UNIQ, api, createdJoinCodes, createEvent, dbq, group, join, ok, org, spec, upload } from '../lib/harness.mjs';
 
 await spec('05-timezones-limits-settings', async () => {
   const past = Date.now() - 2 * HOUR;   // 'Limits + lifecycle' and the settings editor both build expired events
@@ -12,11 +12,20 @@ await spec('05-timezones-limits-settings', async () => {
   ok('DB timezone persisted', dbq(`SELECT timezone FROM events WHERE id='${eTz.id}'`) === tz);
   ok('DB starts_at = provided epoch', dbq(`SELECT starts_at FROM events WHERE id='${eTz.id}'`) === String(fixedEpoch));
   ok('getEvent returns timezone', (await api('GET', `/api/events/${eTz.joinCode}`)).json?.timezone === tz);
-  // server-parsed date/time (no epoch) → parsed as UTC
+  // Server-parsed date/time (no epoch) → parsed in the EVENT'S timezone, not the server's.
+  //
+  // This used to assert UTC, which was the bug rather than the rule: a host in Brisbane setting a
+  // 9:30 start had 9:30 UTC stored — 7:30pm their time. The route's own comment above the fallback
+  // already said reparsing "in the server's TZ (UTC)" was what it wanted to avoid, and then the
+  // fallback did exactly that. Every other wall-clock field in the product goes through
+  // zonedWallTimeToMs; this one now does too.
   const eParse = await api('POST', '/api/events', { body: { name: 'tzparse', durationHours: 1, maxPhotos: 6, revealMode: 'instant', startDate: '2030-06-15', startTime: '09:30', timezone: tz } });
   createdJoinCodes.push(eParse.json.joinCode);
   const parsedStarts = dbq(`SELECT starts_at FROM events WHERE join_code='${eParse.json.joinCode}'`);
-  ok('server parses startDate/startTime as UTC', parsedStarts === String(Date.parse('2030-06-15T09:30:00.000Z')), parsedStarts);
+  ok('server parses startDate/startTime in the event\u2019s own timezone',
+    parsedStarts === String(Date.parse('2030-06-15T09:30:00+10:00')), parsedStarts);
+  ok('\u2026and that is NOT the same instant as parsing it as UTC',
+    Date.parse('2030-06-15T09:30:00+10:00') !== Date.parse('2030-06-15T09:30:00.000Z'));
 
   // ── Limits + lifecycle ──
   group('Limits + lifecycle');
@@ -52,8 +61,14 @@ await spec('05-timezones-limits-settings', async () => {
   await api('PUT', `/api/events/${eSet.joinCode}/settings`, { headers: org(eSet.organizerCode), body: { noFlash: false } });
   ok('no-flash toggled off via settings', dbq(`SELECT no_flash||'' FROM events WHERE id='${eSet.id}'`) === 'false');
   // Event custom URL (slug) is editable post-create, and clearable.
-  await api('PUT', `/api/events/${eSet.joinCode}/settings`, { headers: org(eSet.organizerCode), body: { slug: 'my-event-url' } });
-  ok('event slug set via settings', dbq(`SELECT slug FROM events WHERE id='${eSet.id}'`) === 'my-event-url');
+  // Slugs are a GLOBAL namespace and the 409 below is the point of the test, so the literals have
+  // to be per-run: a fixed 'my-event-url' left behind by a run that was killed before teardown made
+  // the very first claim here fail on a 409 of its own. slugify() maps UNIQ's underscores to
+  // dashes, so the stored value is the slugified form.
+  const mySlug = `my-event-url-${UNIQ}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  const takenSlug = `taken-url-x-${UNIQ}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  await api('PUT', `/api/events/${eSet.joinCode}/settings`, { headers: org(eSet.organizerCode), body: { slug: mySlug } });
+  ok('event slug set via settings', dbq(`SELECT slug FROM events WHERE id='${eSet.id}'`) === mySlug);
   await api('PUT', `/api/events/${eSet.joinCode}/settings`, { headers: org(eSet.organizerCode), body: { slug: '' } });
   ok('event slug cleared via settings', dbq(`SELECT COALESCE(slug,'∅') FROM events WHERE id='${eSet.id}'`) === '∅');
   // Rescheduling: the gate is USAGE, not time (changed 2026-08-30 — an event nobody joined can be
@@ -73,8 +88,10 @@ await spec('05-timezones-limits-settings', async () => {
   // Slug validation on settings: too-short → 400, taken-by-another-event → 409.
   ok('event slug too short → 400', (await api('PUT', `/api/events/${eSet.joinCode}/settings`, { headers: org(eSet.organizerCode), body: { slug: 'a' } })).status === 400);
   const eSlugA = await createEvent({ revealMode: 'instant' });
-  await api('PUT', `/api/events/${eSlugA.joinCode}/settings`, { headers: org(eSlugA.organizerCode), body: { slug: 'taken-url-x' } });
-  ok('duplicate event slug → 409', (await api('PUT', `/api/events/${eSet.joinCode}/settings`, { headers: org(eSet.organizerCode), body: { slug: 'taken-url-x' } })).status === 409);
+  const claimed = await api('PUT', `/api/events/${eSlugA.joinCode}/settings`, { headers: org(eSlugA.organizerCode), body: { slug: takenSlug } });
+  ok('a second event claims its own slug', claimed.status === 200 && dbq(`SELECT slug FROM events WHERE id='${eSlugA.id}'`) === takenSlug,
+     `status ${claimed.status}`);
+  ok('duplicate event slug → 409', (await api('PUT', `/api/events/${eSet.joinCode}/settings`, { headers: org(eSet.organizerCode), body: { slug: takenSlug } })).status === 409);
   // The /admin response carries noFlash (so the manage toggle reflects saved state).
   await api('PUT', `/api/events/${eSet.joinCode}/settings`, { headers: org(eSet.organizerCode), body: { noFlash: true } });
   ok('admin response includes noFlash', (await api('GET', `/api/events/${eSet.joinCode}/admin`, { headers: org(eSet.organizerCode) })).json?.noFlash === true);

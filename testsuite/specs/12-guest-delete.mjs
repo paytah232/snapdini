@@ -1,4 +1,4 @@
-// Snapdini integration spec — a guest taking back their own shot inside the 60s window.
+// Snapdini integration spec — a guest taking back their own shot inside the undo window.
 //
 // The rule: delete refunds the frame, but ONLY inside the window. A long window would turn a
 // 12-shot roll into unlimited retries, which is the one thing the product cannot afford — so the
@@ -27,11 +27,18 @@ await spec('12-guest-delete', async () => {
   ok('the frame is back on their roll', takenBy(pid) === 0, `taken=${takenBy(pid)}`);
   ok('the response reports the restored count', del.json?.photosRemaining === 12, JSON.stringify(del.json));
 
+  // Read, never restated. This spec used to hardcode the window as 60s in two backdates; the day the
+  // window changed, the tests failed on behaviour that was right. /api/config publishes the real
+  // number precisely so nothing has to keep its own copy of it (the camera reads it for the same
+  // reason).
+  const WINDOW_S = (await api('GET', '/api/config')).json?.photoDeleteWindowSeconds ?? 30;
+  ok('the server publishes its undo window', WINDOW_S > 0, `${WINDOW_S}`);
+
   group('Delete is not a way around the roll');
   // Backdate a shot past the window — the same call must now be refused, and the count must NOT move.
   await upload(tok);
   const oldId = dbq(`SELECT id FROM photos WHERE participant_id='${pid}'`);
-  dbq(`UPDATE photos SET taken_at = taken_at - 120000 WHERE id='${oldId}'`);
+  dbq(`UPDATE photos SET taken_at = taken_at - ${(WINDOW_S + 300) * 1000} WHERE id='${oldId}'`);   // far past any grace
   const before = takenBy(pid);
   const late = await api('DELETE', `/api/photos/${oldId}`, { body: { sessionToken: tok } });
   ok('a shot older than the window is refused with 410', late.status === 410, `status ${late.status}`);
@@ -64,8 +71,9 @@ await spec('12-guest-delete', async () => {
   void file;
 
   group('The confirm step gets a short grace past the window');
-  // The UI arms a delete on the first tap and commits on the second. Someone who taps at 59s and
-  // confirms a few seconds later decided IN time, so the server tolerates a small grace — while
+  // The UI arms a delete on the first tap and commits on the second. Someone who taps just inside
+  // the window and confirms a few seconds later decided IN time, so the server tolerates a small
+  // grace — while
   // still refusing anything well past it, which is what keeps the roll meaningful.
   const gev = await createEvent({ revealMode: 'instant', maxPhotos: 12 });
   const gtok = (await join(gev.joinCode, 'Deliberator')).json?.sessionToken;
@@ -73,13 +81,13 @@ await spec('12-guest-delete', async () => {
 
   await upload(gtok);
   const justPast = dbq(`SELECT id FROM photos WHERE participant_id='${gpid}' ORDER BY taken_at DESC LIMIT 1`);
-  dbq(`UPDATE photos SET taken_at = taken_at - 65000 WHERE id='${justPast}'`);   // 65s: past 60, inside grace
+  dbq(`UPDATE photos SET taken_at = taken_at - ${(WINDOW_S + 5) * 1000} WHERE id='${justPast}'`);   // past the window, inside the 15s grace
   const okLate = await api('DELETE', `/api/photos/${justPast}`, { body: { sessionToken: gtok } });
   ok('a confirm a few seconds past the window still succeeds', okLate.status === 200, `status ${okLate.status}`);
 
   await upload(gtok);
   const wayPast = dbq(`SELECT id FROM photos WHERE participant_id='${gpid}' ORDER BY taken_at DESC LIMIT 1`);
-  dbq(`UPDATE photos SET taken_at = taken_at - 300000 WHERE id='${wayPast}'`);   // 5 minutes: no
+  dbq(`UPDATE photos SET taken_at = taken_at - ${(WINDOW_S + 600) * 1000} WHERE id='${wayPast}'`);   // ten minutes past: no
   const refused = await api('DELETE', `/api/photos/${wayPast}`, { body: { sessionToken: gtok } });
   ok('but well past the window is still refused', refused.status === 410, `status ${refused.status}`);
   ok('and that photo survives',

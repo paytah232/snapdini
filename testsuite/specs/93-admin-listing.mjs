@@ -6,12 +6,10 @@
 // The failure being guarded against is silent: these lists used to be fixed LIMITs with the page
 // filtering whatever arrived, so once a table outgrew the cap the extra rows simply stopped
 // existing as far as the operator was concerned — no error, no empty state, just a short list.
-import { api, dbq, group, ok, spec } from '../lib/harness.mjs';
+import { adminLogin, api, dbq, group, ok, spec } from '../lib/harness.mjs';
 
 await spec('93-admin-listing', async () => {
-  const login = process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD
-    ? await api('POST', '/api/auth/login', { body: { email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD } })
-    : { status: 0 };
+  const login = await adminLogin();
   if (login.status !== 200) { ok('admin listing skipped — no operator creds', true); return; }
 
   group('Users: the total is the whole table, not the page');

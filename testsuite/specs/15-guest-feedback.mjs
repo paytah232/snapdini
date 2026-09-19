@@ -4,7 +4,7 @@
 // collecting it, so the operator endpoint is part of the feature, not an extra. Second, feedback is
 // about the PRODUCT, so it has to outlive the event's 31-day media retention — it used to cascade
 // off participants and quietly delete itself.
-import { api, createEvent, dbq, group, join, ok, spec } from '../lib/harness.mjs';
+import { adminLogin, api, createEvent, dbq, group, join, ok, spec } from '../lib/harness.mjs';
 
 const send = (body) => api('POST', '/api/participants/feedback', { body });
 
@@ -53,9 +53,7 @@ await spec('15-guest-feedback', async () => {
   // Asserted BEFORE the admin login below, because logging in swaps this session's cookie.
   ok('guest feedback is gated to the operator',
      [401, 403].includes((await api('GET', '/api/admin/guest-feedback')).status));
-  const admLogin = process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD
-    ? await api('POST', '/api/auth/login', { body: { email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD } })
-    : { status: 0 };
+  const admLogin = await adminLogin();
   if (admLogin.status === 200) {
     const list = await api('GET', '/api/admin/guest-feedback');
     const rows = list.json?.feedback || [];
@@ -71,6 +69,12 @@ await spec('15-guest-feedback', async () => {
 
   group('Retention purges the guest but keeps the opinion');
   // The sweep deletes participants; feedback used to cascade away with them. It must now detach.
+  //
+  // Deliberately detaching a row here does NOT leak it. `guest_feedback` holds a NOT NULL
+  // `event_id` with ON DELETE CASCADE alongside the ON DELETE SET NULL on `participant_id`, so the
+  // row loses its person and keeps its event — and the harness teardown deletes the test user,
+  // which cascades the event, which takes the feedback with it. Verified by running this spec
+  // against an empty `guest_feedback` and counting after: still zero, detached rows included.
   const fid = dbq(`SELECT id FROM guest_feedback WHERE participant_id='${pid}'`);
   dbq(`DELETE FROM participants WHERE id='${pid}'`);
   ok('the feedback outlives the guest', dbq(`SELECT count(*) FROM guest_feedback WHERE id='${fid}'`) === '1');

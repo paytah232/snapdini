@@ -120,6 +120,177 @@ await spec('97b-reveal-leak', async () => {
       `${(pj.photos || []).length} photos`);
   }
 
+  // ── A guest may zip their OWN roll before the reveal, and nothing else ──
+  //
+  // This is the one route that hands a non-organizer a file before the reveal, so it is the one
+  // most worth pinning down. The zip stores its entry names uncompressed as
+  // "<Event> - <Who> - <n>.<ext>", which means another guest's NAME appearing anywhere in the bytes
+  // is proof their photo is in there — a stronger check than counting entries.
+  group('The own-roll zip hands over the guest\u2019s own photos and no one else\u2019s');
+  {
+    const ev = await createEvent({ revealMode: 'at_end', durationHours: 48 });
+    const a = await join(ev.joinCode, 'Zipper Ann');
+    const b = await join(ev.joinCode, 'Zipper Bob');
+    const tokenA = a.json?.sessionToken;
+    const tokenB = b.json?.sessionToken;
+    await shoot(tokenA);
+    await shoot(tokenB);
+
+    const dl = `/api/photos/${ev.joinCode}/download`;
+    const zipBytes = async (path) => {
+      const r = await fetch(`${BASE}${path}`);
+      const body = Buffer.from(await r.arrayBuffer()).toString('latin1');
+      return { status: r.status, body };
+    };
+
+    const mine = await zipBytes(`${dl}?sessionToken=${tokenA}`);
+    ok('a guest can zip their own roll before the reveal', mine.status === 200, `status ${mine.status}`);
+    ok('\u2026and their own photo is in it', mine.body.includes('Zipper Ann'), mine.body.slice(0, 60));
+    ok('\u2026and the other guest\u2019s is not', !mine.body.includes('Zipper Bob'));
+
+    // ids are a filter WITHIN the scope, never a way out of it: asking for the whole event, or
+    // explicitly for the other guest's photo, still yields only your own.
+    const bFile = dbq(`SELECT p.id FROM photos p
+                       JOIN participants pa ON pa.id = p.participant_id
+                       JOIN events e ON e.id = p.event_id
+                       WHERE e.join_code = '${ev.joinCode}' AND pa.name = 'Zipper Bob' LIMIT 1`).trim();
+    const grab = await zipBytes(`${dl}?sessionToken=${tokenA}&ids=${bFile}`);
+    ok('naming another guest\u2019s photo id does not widen the scope',
+      grab.status === 404 || !grab.body.includes('Zipper Bob'), `status ${grab.status}`);
+
+    // No token, and a wrong token, must be indistinguishable — a different answer for a bad token
+    // would confirm the event holds photos worth guessing at.
+    const none = await zipBytes(dl);
+    const wrong = await zipBytes(`${dl}?sessionToken=not-a-real-token`);
+    ok('a stranger gets nothing', none.status === 403, `status ${none.status}`);
+    ok('a wrong token gets nothing', wrong.status === 403, `status ${wrong.status}`);
+    ok('\u2026and is told exactly what the stranger is told', none.body === wrong.body,
+      `${none.body.slice(0, 40)} vs ${wrong.body.slice(0, 40)}`);
+
+    // The host's switch still outranks the guest's session.
+    await api('POST', `/api/events/${ev.joinCode}/allow-downloads`,
+      { body: { allowDownloads: false }, headers: org(ev.organizerCode) });
+    const off = await zipBytes(`${dl}?sessionToken=${tokenA}`);
+    ok('turning downloads off stops the own-roll zip too', off.status === 403, `status ${off.status}`);
+  }
+
+  // ── The live heart counts must obey the same visibility rule as everything else ──
+  //
+  // A security audit found this endpoint scoping by EVENT alone: it never joined photos, so it
+  // never applied the reveal or moderation rules, and a stranger holding only the join code could
+  // read back the ids of photos hidden from them. No filename or /uploads path leaked and an id is
+  // not a capability here — but ids are still something a hidden photo should not be handing out.
+  group('Heart counts do not leak the photos they are counting');
+  {
+    const ev = await createEvent({ revealMode: 'at_end', durationHours: 48 });
+    const a = await join(ev.joinCode, 'Hearty Ann');
+    const b = await join(ev.joinCode, 'Hearty Bob');
+    const tokenA = a.json?.sessionToken, tokenB = b.json?.sessionToken;
+    await shoot(tokenA);
+    await shoot(tokenB);
+
+    const own = async (token) => (await api('GET', `/api/photos/${ev.joinCode}?sessionToken=${token}`)).json?.photos ?? [];
+    const aPhoto = (await own(tokenA))[0]?.id;
+    const bPhoto = (await own(tokenB))[0]?.id;
+    ok('both guests have a shot to heart', !!aPhoto && !!bPhoto);
+
+    // Each hearts their own — the only thing either can see before the reveal.
+    for (const [tok, id] of [[tokenA, aPhoto], [tokenB, bPhoto]]) {
+      const r = await api('POST', `/api/photos/${id}/heart`, { body: { sessionToken: tok, heart: true } });
+      ok('a guest can heart their own shot before the reveal', r.status === 200, `status ${r.status}`);
+    }
+
+    const stranger = await api('GET', `/api/photos/${ev.joinCode}/hearts`);
+    const sj = stranger.json ?? {};
+    ok('a stranger is told nothing at all before the reveal',
+      Object.keys(sj.hearts ?? {}).length === 0, JSON.stringify(sj).slice(0, 120));
+
+    // And a guest sees their own, never the other guest's.
+    const asA = (await api('GET', `/api/photos/${ev.joinCode}/hearts?sessionToken=${tokenA}`)).json ?? {};
+    ok('a guest sees the count on their own shot', (asA.hearts ?? {})[aPhoto] === 1, JSON.stringify(asA).slice(0, 120));
+    ok('\u2026and not the other guest\u2019s', !(bPhoto in (asA.hearts ?? {})));
+
+    // Moderation is the other half of the rule: a rejected photo drops out of the counts.
+    const mev = await createEvent({ revealMode: 'manual', moderationEnabled: true });
+    const g = await join(mev.joinCode, 'Moderated');
+    const gtok = g.json?.sessionToken;
+    await shoot(gtok);
+    const gPhoto = dbq(`SELECT p.id FROM photos p JOIN events e ON e.id=p.event_id
+                        WHERE e.join_code='${mev.joinCode}' LIMIT 1`).trim();
+    await api('POST', `/api/events/${mev.joinCode}/reveal`, { headers: org(mev.organizerCode) });
+    await api('POST', `/api/events/${mev.joinCode}/moderate`,
+      { body: { photoIds: [gPhoto], action: 'approve' }, headers: org(mev.organizerCode) });
+    await api('POST', `/api/photos/${gPhoto}/heart`, { body: { sessionToken: gtok, heart: true } });
+    const before = (await api('GET', `/api/photos/${mev.joinCode}/hearts`)).json ?? {};
+    ok('an approved photo is counted', (before.hearts ?? {})[gPhoto] === 1, JSON.stringify(before).slice(0, 110));
+
+    await api('POST', `/api/events/${mev.joinCode}/moderate`,
+      { body: { photoIds: [gPhoto], action: 'reject' }, headers: org(mev.organizerCode) });
+    const after = (await api('GET', `/api/photos/${mev.joinCode}/hearts`)).json ?? {};
+    ok('a rejected photo stops being counted, and its id stops being handed out',
+      !(gPhoto in (after.hearts ?? {})), JSON.stringify(after).slice(0, 110));
+  }
+
+  // ── Guest comments obey the same rules, and are OFF unless asked for ──
+  group('Comments are opt-in, and cannot be read or written where the photo cannot be seen');
+  {
+    const ev = await createEvent({ revealMode: 'at_end', durationHours: 48 });
+    const a = await join(ev.joinCode, 'Chatty Ann');
+    const b = await join(ev.joinCode, 'Chatty Bob');
+    const tokenA = a.json?.sessionToken, tokenB = b.json?.sessionToken;
+    await shoot(tokenA);
+    const aPhoto = dbq(`SELECT p.id FROM photos p JOIN participants pa ON pa.id=p.participant_id
+                        WHERE pa.name='Chatty Ann' LIMIT 1`).trim();
+
+    // OFF by default. This is the whole reason comments differ from hearts.
+    ok('a new event has comments off',
+      dbq(`SELECT comments_enabled FROM events WHERE id='${ev.id}'`).trim() === 'f');
+    const refused = await api('POST', `/api/photos/${aPhoto}/comment`,
+      { body: { sessionToken: tokenA, body: 'hello' } });
+    ok('and posting is refused until the host opts in', refused.status === 403, `status ${refused.status}`);
+
+    await api('PUT', `/api/events/${ev.joinCode}/settings`,
+      { body: { commentsEnabled: true }, headers: org(ev.organizerCode) });
+    ok('the host can switch them on',
+      dbq(`SELECT comments_enabled FROM events WHERE id='${ev.id}'`).trim() === 't');
+
+    const mine = await api('POST', `/api/photos/${aPhoto}/comment`,
+      { body: { sessionToken: tokenA, body: 'my own shot' } });
+    ok('a guest can comment on a photo they can see', mine.status === 200, `status ${mine.status}`);
+
+    // Bob cannot see Ann's photo before the reveal, so he cannot comment on it or read its thread.
+    const cross = await api('POST', `/api/photos/${aPhoto}/comment`,
+      { body: { sessionToken: tokenB, body: 'peeking' } });
+    ok('another guest cannot comment on a photo hidden from them before the reveal',
+      cross.status === 404, `status ${cross.status}`);
+    const bobReads = await api('GET', `/api/photos/${ev.joinCode}/comments?ids=${aPhoto}&sessionToken=${tokenB}`);
+    ok('\u2026nor read its thread', Object.keys(bobReads.json?.comments ?? {}).length === 0,
+      JSON.stringify(bobReads.json).slice(0, 110));
+    const strangerReads = await api('GET', `/api/photos/${ev.joinCode}/comments?ids=${aPhoto}`);
+    ok('and a stranger is told nothing at all',
+      Object.keys(strangerReads.json?.comments ?? {}).length === 0,
+      JSON.stringify(strangerReads.json).slice(0, 110));
+
+    // Who may remove one.
+    const cid = mine.json?.id;
+    const bobDelete = await api('DELETE', `/api/photos/comments/${cid}`, { body: { sessionToken: tokenB } });
+    ok('a third party cannot delete somebody else\u2019s comment', bobDelete.status === 404, `status ${bobDelete.status}`);
+    const hostDelete = await api('DELETE', `/api/photos/comments/${cid}`, { headers: org(ev.organizerCode) });
+    ok('the host can delete any comment on their event', hostDelete.status === 200, `status ${hostDelete.status}`);
+    ok('and it is really gone', dbq(`SELECT count(*) FROM photo_comments WHERE id='${cid}'`).trim() === '0');
+
+    // The text is stored exactly as typed — escaping belongs to the renderer, not the column.
+    const raw = await api('POST', `/api/photos/${aPhoto}/comment`,
+      { body: { sessionToken: tokenA, body: '<b>hi</b> & bye' } });
+    ok('markup is stored verbatim, not half-sanitised on the way in',
+      raw.json?.body === '<b>hi</b> & bye', JSON.stringify(raw.json?.body));
+
+    const long = await api('POST', `/api/photos/${aPhoto}/comment`,
+      { body: { sessionToken: tokenA, body: 'x'.repeat(5000) } });
+    ok('an over-long comment is cut, not refused and not stored whole',
+      long.status === 200 && (long.json?.body?.length ?? 0) <= 300, `len ${long.json?.body?.length}`);
+  }
+
   group('An unmoderated event does not claim a photo is waiting');
   {
     const ev = await createEvent({ revealMode: 'instant' });

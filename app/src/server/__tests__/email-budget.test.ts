@@ -4,7 +4,9 @@
 // begins and ends, and when it starts shouting.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { monthWindow, budgetLevel, describeUsage, monthlyLimit, warnPercent, type MonthUsage } from '../email-budget';
+import { monthWindow, budgetLevel, describeUsage, monthlyLimit, warnPercent,
+         eventInviteCap, INVITE_FLOOR, INVITE_PASSES, ACCOUNT_DAILY_RECIPIENTS,
+         type MonthUsage } from '../email-budget';
 
 // ── The month boundary ───────────────────────────────────────────────────────
 // UTC, on purpose: the allowance resets on Mailgun's clock, and counting a Brisbane month would put
@@ -112,6 +114,44 @@ describe('how close is too close', () => {
   test('no limit configured is not an emergency', () => {
     // budgetLevel is the only thing standing between a misconfigured limit and a daily 🛑 digest.
     assert.equal(budgetLevel(9999, 0, 80), 'ok');
+  });
+});
+
+// ── The caps that are ENFORCED ───────────────────────────────────────────────
+// The numbers above are a report. These two are the bound on what somebody who has taken a host's
+// account can do with our sending domain before anyone notices, so what matters about them is that
+// they cannot be tripped by a real host and cannot be escaped by a determined one.
+
+describe('the lifetime invite cap for one event', () => {
+  test('a host may mail their whole list three times over', () => {
+    // Send the invitations, re-send to whoever did not open them, mail the late additions. Three
+    // passes is already generous; the test is here so nobody quietly makes it one.
+    assert.equal(INVITE_PASSES, 3);
+    assert.equal(eventInviteCap(200), 600);
+    assert.equal(eventInviteCap(2000), 6000, 'the biggest list the product allows must still get three passes');
+  });
+
+  test('and a small list is governed by the floor, not by a tiny multiple', () => {
+    // 3 x 4 guests = 12 is a number a real host with a small dinner could hit by fiddling.
+    assert.equal(eventInviteCap(4), INVITE_FLOOR);
+    assert.equal(eventInviteCap(0), INVITE_FLOOR, 'an empty list must not produce a cap of zero');
+    assert.ok(INVITE_FLOOR >= 100, 'the floor is low enough for a real host to notice');
+  });
+
+  test('the cap grows as the guest list does, so adding people never locks a host out', () => {
+    // Measured against the CURRENT size: invite 40, add 60 more, invite again — nowhere near it.
+    assert.ok(eventInviteCap(100) > eventInviteCap(40));
+    assert.equal(eventInviteCap(40) < 40 * 2, false, 'two full passes must fit under the cap');
+  });
+});
+
+describe('the daily cap for one account', () => {
+  test('it sits above the biggest real day and below the monthly allowance', () => {
+    // Above: the largest list the product allows is 2000 (MAX_GUESTS_PER_EVENT), invited once.
+    assert.ok(ACCOUNT_DAILY_RECIPIENTS >= 2000, 'a host with the biggest allowed list could not invite them');
+    // Below: 3000 is Mailgun's whole free month. A day that spends more than this is a number an
+    // operator should have agreed to rather than discovered.
+    assert.ok(ACCOUNT_DAILY_RECIPIENTS < monthlyLimit(), 'one account can spend a whole month in a day');
   });
 });
 

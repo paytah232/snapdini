@@ -11,7 +11,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { and, eq, or } from 'drizzle-orm';
 import { db, init } from './db';
 import { events, photos } from './schema';
-import { stripImageMetadata, backfillThumbnails, backfillPlaybackProxies } from './images';
+import { stripImageMetadata, stripImageMetadataPng, backfillThumbnails, backfillPlaybackProxies } from './images';
 import { start as startCleanup } from './cleanup';
 import { startLifecycle } from './lifecycle';
 import { startOps } from './ops-notify';
@@ -25,7 +25,7 @@ import authRoutes from './routes/auth';
 import eventsRoutes, { requireOrganizer } from './routes/events';
 import guestsRoutes, { mailgunWebhookHandler } from './routes/guests';
 import participantsRoutes from './routes/participants';
-import photosRoutes from './routes/photos';
+import photosRoutes, { DELETE_WINDOW_SECONDS } from './routes/photos';
 import facesRoutes from './routes/faces';
 import billingRoutes, { stripeWebhookHandler } from './routes/billing';
 import contactRoutes from './routes/contact';
@@ -110,16 +110,58 @@ const authLimiter = rateLimit({
   // page load, so counting it tripped "too many attempts" during normal navigation.
   skip: (req) => req.method === 'GET',
 });
+// The guest reads a whole venue performs AT ONCE. This `skip` is what makes the note above
+// ("event guests at a venue share one public IP, so join/upload/gallery are intentionally NOT
+// IP-limited hard") actually TRUE — it was an intention, never an implementation: the backstop was
+// mounted across all of /api with no exemption, and only the auth limiter ever got a skip.
+//
+// The arithmetic that matters: `trust proxy` resolves req.ip to the REAL client, which at a wedding
+// is ONE NAT address shared by every guest. Opening the gallery costs ~6 /api requests, so 600/min
+// divided by 6 is a cliff at roughly 100 guests inside one minute — and a reveal is exactly 150
+// people tapping one link at the same moment. The whole venue would have been handed
+// "Too many requests — slow down" at the precise moment the product is being judged.
+//
+// GETs only, and only the public read path — each already cheap and now edge-cacheable. Writes,
+// auth, uploads, email and Stripe keep the backstop. Volumetric DoS belongs at Cloudflare, not in a
+// 600/min per-IP counter in front of a surface whose whole design is "one link, every guest, now".
+const GUEST_READ = [
+  /^\/photos\/[^/]+$/,      // the event gallery and the guest's own roll
+  /^\/events\/[^/]+$/,      // the event a guest has just scanned into
+  /^\/participants\/me$/,   // "which roll am I?" — runs on every camera load
+  // Live heart counts, polled by every open gallery. It has TWO path segments, so it did not match
+  // the first pattern and was landing on the counted side — which quietly undid the arithmetic
+  // above: at ~1.33 polls/min per viewer, 400 guests is ~533/min of a 600/min budget before a
+  // single upload. Exactly the reveal-day outage this exemption list exists to prevent.
+  /^\/photos\/[^/]+\/hearts$/,
+];
 const apiBackstop = rateLimit({
   windowMs: 60 * 1000, limit: Number(process.env.API_RATE_LIMIT || 600),
   standardHeaders: 'draft-7', legacyHeaders: false,
   message: { error: 'Too many requests — slow down.' },
+  skip: (req) => req.method === 'GET' && GUEST_READ.some((re) => re.test(req.path)),
 });
 // Tighter limit for endpoints that send email or create Stripe sessions (abuse-prone).
 const emailLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, limit: Number(process.env.EMAIL_RATE_LIMIT || 20),
   standardHeaders: 'draft-7', legacyHeaders: false,
   message: { error: 'Too many requests — please wait a few minutes.' },
+});
+// The CSV import. The ONLY two endpoints in the product that accept a 2 MB body (see the
+// express.json mount above), and each one parses all of it: measured at 576 ms of CPU for 2 MB, and
+// 1.42 s wall for five of them at once. Under the 600/min /api backstop alone that is ~345 s of CPU
+// per minute available to one IP — a single-process Node server stops answering anyone else long
+// before that. An organizer code is all it takes to reach them.
+//
+// 30/min rather than something tight: this is a DoS bound, not a product rule, and a host correcting
+// a mapping and re-previewing four or five times in a row is ordinary use. 30 presses a minute is
+// not, and even at 30 the worst case is ~17 s of CPU per minute per IP instead of 345.
+//
+// Env-tunable like every other limiter here, and for the same reason: the integration suite's
+// import spec makes ~18 of these calls inside one run.
+const importLimiter = rateLimit({
+  windowMs: 60 * 1000, limit: Number(process.env.IMPORT_RATE_LIMIT || 30),
+  standardHeaders: 'draft-7', legacyHeaders: false,
+  message: { error: 'Too many imports — please wait a minute and try again.' },
 });
 // Client error reports: allow bursts but cap a runaway client from flooding us.
 const clientErrorLimiter = rateLimit({
@@ -134,6 +176,68 @@ const loginLimiter = rateLimit({
   message: { error: 'Too many attempts — please wait a few minutes and try again.' },
   skip: (req) => req.method === 'GET',
 });
+// Every /api response is uncacheable UNLESS it opts out. Cache-Control is currently set in exactly
+// one file (routes/photos.ts), so /api/participants/me, /api/events/mine, /api/cohosts, /api/auth/me
+// and /api/events/:code/admin all ship with none at all. That is safe only while nothing caches
+// /api — and the obvious-but-wrong fix for "my gallery cache rule isn't working" is a Cloudflare
+// "Cache Everything" rule on /api/*, which would publicly cache per-viewer replies. Cloudflare's
+// default cache key is host+path+query and IGNORES request headers, so a cached
+// GET /api/events/ABCD1234/admin — authorised by the x-organizer-code HEADER — would be served to
+// anyone with the URL and no code at all.
+//
+// Defaulting closed makes photos.ts's cacheableFor() an explicit opt-OUT, so a mis-scoped edge rule
+// cannot leak. Before the routers, so a route can still override it.
+app.use('/api', (_req, res, next) => { res.set('Cache-Control', 'private, no-store'); next(); });
+/* CSP violation reports.
+ *
+ * The page policy is Report-Only and, until this existed, reported to nowhere — so it blocked
+ * nothing AND collected nothing, which is the worst of both: a header on every response buying
+ * zero. This is the half that makes it worth having. Promote the policy to enforcing only once
+ * this has been quiet for a while on real traffic.
+ *
+ * WHAT IS DELIBERATELY NOT LOGGED. A report carries `document-uri` and `blocked-uri` in full, and
+ * on this app those URLs contain join codes, share slugs and recovery tokens — so logging a report
+ * verbatim would copy live credentials into a log file that is not treated as secret. Only the
+ * directive, the blocked ORIGIN and the document PATH are kept: enough to identify what to allow,
+ * with the query string and any token in it dropped before anything is written.
+ *
+ * Unauthenticated because browsers send it with no credentials, so it is rate limited hard and
+ * capped small: an endpoint anyone can POST to is an endpoint that will be POSTed to.
+ */
+const cspReportLimiter = rateLimit({
+  windowMs: 60 * 1000, limit: Number(process.env.CSP_REPORT_RATE_LIMIT || 60),
+  standardHeaders: false, legacyHeaders: false,
+  // A browser does not read the response, so there is nothing to say; refuse quietly rather than
+  // spend a body on it.
+  handler: (_req, res) => res.status(204).end(),
+});
+/** Origin only — drops path, query and any token living in either. */
+const originOf = (u: unknown): string => {
+  const raw = String(u ?? '').trim();
+  if (!raw || raw.startsWith('data:') || raw.startsWith('blob:')) return raw.slice(0, 16);
+  try { return new URL(raw).origin; } catch { return raw.slice(0, 40); }
+};
+app.post('/api/csp-report', cspReportLimiter,
+  express.json({ type: ['application/csp-report', 'application/reports+json', 'application/json'], limit: '16kb' }),
+  (req, res) => {
+    // Two shapes: the old `{"csp-report": {...}}` and the Reporting API's `[{ body: {...} }]`.
+    const body = req.body as Record<string, unknown> | Array<Record<string, unknown>>;
+    const reports = Array.isArray(body)
+      ? body.map((r) => (r?.body ?? r) as Record<string, unknown>)
+      : [((body?.['csp-report'] ?? body) as Record<string, unknown>)];
+    for (const r of reports.slice(0, 5)) {
+      if (!r) continue;
+      const directive = String(r.effectiveDirective ?? r['effective-directive'] ??
+                               r.violatedDirective ?? r['violated-directive'] ?? '?').slice(0, 40);
+      const blocked = originOf(r.blockedURL ?? r['blocked-uri']);
+      let docPath = '?';
+      try { docPath = new URL(String(r.documentURL ?? r['document-uri'] ?? '')).pathname.slice(0, 60); }
+      catch { /* leave it unknown rather than log a half-parsed URL */ }
+      console.log(`[csp] ${directive} blocked=${blocked} on=${docPath}`);
+    }
+    res.status(204).end();
+  });
+
 app.use('/api', apiBackstop);
 // Contact form: a real person files one enquiry, not five an hour. Only worth having now that
 // req.ip resolves to the actual visitor — before the Cloudflare/Traefik real-IP fix this bucketed
@@ -180,6 +284,39 @@ app.use('/api/billing/branding-removal', emailLimiter);
 // bucket rather than the generic 600/min backstop, which would allow that 600 times a minute.
 // POST only — DELETE on the same path is the withdrawal, and a withdrawal that gets refused is a
 // withdrawal that did not happen.
+// Posting a comment is user-generated content going onto somebody else's gallery under their own
+// name. The 600/min backstop is a DoS bound, not an abuse one — this is the tighter limit that
+// makes flooding a photo with messages tedious rather than free. Deliberately per IP and generous
+// enough that a table of guests all talking at once is unaffected: a venue shares one NAT address,
+// which is the whole reason the read path is exempted a few lines up.
+// EVERY path that writes a comment, not just the first one that existed. A limiter pointed at one
+// path while a second route does the same job elsewhere is the exact failure the /email-gallery note
+// below describes: nothing fails loudly, the new route is simply unlimited. The share-link comment
+// endpoint is the MORE exposed of the two — it is reached by a link that can be forwarded anywhere.
+const commentLimiter = rateLimit({
+  windowMs: 60 * 1000, limit: Number(process.env.COMMENT_RATE_LIMIT || 60),
+  standardHeaders: 'draft-7', legacyHeaders: false,
+  message: { error: 'Slow down a moment.' },
+  // POST only. Reading a thread is a guest read like any other and must not be counted — see the
+  // GUEST_READ note above for why counting guest reads empties a venue's budget at the reveal.
+  skip: (req) => req.method !== 'POST',
+});
+app.use('/api/photos/:id/comment', commentLimiter);
+app.use('/api/shares/:token/photos/:id/comment', commentLimiter);
+
+// Minting an IDENTITY is the thing worth limiting, not the heart that follows it. A visitor row is
+// created by an unauthenticated POST with no name and no challenge, and the one-heart-per-visitor
+// unique index is only as meaningful as the cost of becoming a new visitor — without this, that cost
+// is one HTTP request, and a heart count on a shared gallery means nothing. Tighter than the comment
+// limiter because a real person needs exactly one of these per link, ever.
+const visitorLimiter = rateLimit({
+  windowMs: 60 * 1000, limit: Number(process.env.VISITOR_RATE_LIMIT || 10),
+  standardHeaders: 'draft-7', legacyHeaders: false,
+  message: { error: 'Slow down a moment.' },
+  skip: (req) => req.method !== 'POST',
+});
+app.use('/api/shares/:token/visitor', visitorLimiter);
+app.use('/api/photos/:joinCode/visitor', visitorLimiter);
 app.use('/api/faces/enrol', rateLimit({
   windowMs: 15 * 60 * 1000, limit: Number(process.env.FACE_ENROL_RATE_LIMIT || 3),
   standardHeaders: 'draft-7', legacyHeaders: false,
@@ -212,6 +349,10 @@ app.use('/api/events/:joinCode/send-guest-link', emailLimiter);
 // Firing invites at a guest list is the same abuse surface as the gallery blast — a leaked
 // organizer code used as a spam relay — so it sits behind the same limiter.
 app.use('/api/events/:joinCode/guests/invite', emailLimiter);
+// Prefix match, so this covers BOTH /guests/import and /guests/import/preview — the same path the
+// 2 MB body limit is mounted on, deliberately, so the endpoints that may accept a big body and the
+// endpoints that are throttled for accepting one can never drift apart.
+app.use('/api/events/:joinCode/guests/import', importLimiter);
 app.use('/api/events/:joinCode/cohosts', (req: Request, res: Response, next: NextFunction) => (req.method === 'POST' ? emailLimiter(req, res, next) : next()));
 
 // Organizer-uploaded backing tracks live under /uploads but are NOT public media — they're only
@@ -242,6 +383,9 @@ app.use('/uploads', express.static(UPLOADS_DIR, { immutable: true, maxAge: '365d
 
 app.get('/api/config', (_req, res) => {
   res.json({
+    // So the client never has to keep its own copy of this in step by hand — see Camera.svelte, where
+    // it was a hardcoded 60_000 beside a comment saying the server is the authority.
+    photoDeleteWindowSeconds: DELETE_WINDOW_SECONDS,
     version: pkg.version,
     videoMaxSeconds: parseInt(process.env.VIDEO_MAX_SECONDS || '0'),
     // Absolute ceiling for an uploaded clip. The event's own videoSeconds is a PRICE tier, not a
@@ -268,7 +412,10 @@ const themeStorage = multer.diskStorage({
     fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
   },
-  filename: (_req, _file, cb) => cb(null, `theme-${uuidv4()}.jpg`),
+  // The extension follows the KIND, because one of them has to stay a PNG. Multer names the file
+  // before the body is parsed, so `kind` is read off the query string rather than a form field.
+  filename: (req, _file, cb) =>
+    cb(null, `theme-${uuidv4()}.${(req as Request).query.kind === 'logo' ? 'png' : 'jpg'}`),
 });
 const themeUpload = multer({
   storage: themeStorage,
@@ -281,9 +428,14 @@ const themeUpload = multer({
 // Auth via the shared requireOrganizer gate (org-code OR authenticated owner) — same as every
 // other organizer action. It runs before multer (it reads the org code from the header, no
 // body needed), so an unauthorized request never writes a file.
+// `?kind=` says what the file is FOR, and the only thing it changes is the encoder:
+//   logo → PNG, alpha kept (a cut-out mark on a poster is nothing without its transparency)
+//   anything else → JPEG, as every theme image always has been.
+// Both re-encode, which is what strips the EXIF — the scrub is not optional for either.
 app.post('/api/events/:joinCode/theme-image', requireOrganizer, themeUpload.single('headerImage'), async (req: Request, res: Response) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  try { await stripImageMetadata(req.file.path); }
+  const isLogo = req.query.kind === 'logo';
+  try { await (isLogo ? stripImageMetadataPng : stripImageMetadata)(req.file.path); }
   catch { fs.unlinkSync(req.file.path); return res.status(400).json({ error: 'Invalid or unsupported image file' }); }
   res.json({ url: `/uploads/${eventRelPath(req.event!.id, req.file.filename)}` });
 });
@@ -433,6 +585,28 @@ function reportBillingMode(): void {
   console.log('[billing] enabled (Stripe, webhook verified)');
 }
 
+/** Say, once at boot, whether a 'sent' on this deployment will ever become anything else.
+ *
+ *  Delivery tracking has the same shape of failure as billing above, and it is the reason this line
+ *  exists rather than being left to the guest list: with MAILGUN_WEBHOOK_SIGNING_KEY missing,
+ *  EVERYTHING STILL WORKS. Invites send, the host sees "sent", and nothing anywhere is red. The
+ *  only symptom is that no invite ever moves off 'sent' and no bounce is ever recorded, which looks
+ *  exactly like a run of good luck for as long as it takes to notice.
+ *
+ *  This project's recurring bug is an env var that never reached the container — compose passes
+ *  them explicitly, see __tests__/compose-env.test.ts — and that failure lands here silently. One
+ *  line in the log is what tells the two apart at a glance. */
+function reportDeliveryTracking(): void {
+  if (email.provider !== 'mailgun') return;   // nothing to say: no other transport can report back
+  if (!process.env.MAILGUN_WEBHOOK_SIGNING_KEY) {
+    console.warn('[mailgun] delivery tracking OFF — no MAILGUN_WEBHOOK_SIGNING_KEY. Invites still send, '
+      + 'but every one stays at "sent, delivery unknown" and no bounce or spam complaint is ever recorded. '
+      + 'The webhook endpoint answers 404 until a key is set. See docs/DELIVERY-TRACKING.md.');
+    return;
+  }
+  console.log('[mailgun] delivery tracking enabled (webhook signature verification armed)');
+}
+
 async function initWithRetry(): Promise<void> {
   const deadline = Date.now() + INIT_MAX_MS;
   let attempt = 0;
@@ -460,6 +634,15 @@ initWithRetry()
     startAnalytics();          // same write-behind shape as the counters above
     startOps();       // operator notifications (daily digest + instant alerts) — off unless OPS_NOTIFICATIONS=1
     reportBillingMode();
+    reportDeliveryTracking();
+    /* Face matching is held inert by MACHINE_LEARNING_URL being unset, and it is held there for a
+       LEGAL reason, not a technical one. The risk in that arrangement is not the code — the kill
+       switch is tested as an interlock — it is deployment: the variable IS set on devel, so one
+       copied env file turns the feature on in production silently. A line in the boot log is what
+       makes that loud instead, and it prints in both states so its absence is not the signal. */
+    console.log(process.env.MACHINE_LEARNING_URL
+      ? '[faces] FACE MATCHING IS LIVE — MACHINE_LEARNING_URL is set. This must NOT be a production boot until the privacy review is signed off (docs/PIA-face-matching.md).'
+      : '[faces] face matching inert (MACHINE_LEARNING_URL unset) — the intended state for production');
     const server = app.listen(PORT, '0.0.0.0', () => console.log(`Snapdini running on port ${PORT}`));
     // Multi-GB media uploads (e.g. a 90s 4K/8K clip) can take a long time on event Wi-Fi/mobile;
     // Node's default 5-min requestTimeout would abort them mid-transfer. Allow up to an hour.
