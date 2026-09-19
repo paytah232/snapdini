@@ -18,14 +18,30 @@ const IMAGE_QUALITY = (() => {
   const q = parseInt(process.env.IMAGE_QUALITY || '', 10);
   return Number.isFinite(q) && q >= 1 && q <= 100 ? q : 100;
 })();
-let active = 0;
-const waiters: Array<() => void> = [];
-async function withImageSlot<T>(fn: () => Promise<T>): Promise<T> {
-  if (active >= MAX_CONCURRENT) await new Promise<void>((r) => waiters.push(r));
-  active++;
-  try { return await fn(); }
-  finally { active--; waiters.shift()?.(); }
+/** A "no more than N of these at once" gate. There are three of them on this box — sharp
+ *  operations, guest video work, and slideshow renders (`slideshow.ts`) — and they were three
+ *  copies of the same eight lines, which is how the third one came to be missing entirely.
+ *
+ *  Each release wakes exactly one waiter, and the woken waiter does not re-check the limit: that is
+ *  the original behaviour and it is correct, because the slot it was woken for is the one the
+ *  releaser just gave up. `stats()` exists so a test can see a queue form. */
+export type Slot = {
+  <T>(fn: () => Promise<T>): Promise<T>;
+  stats(): { active: number; waiting: number };
+};
+export function makeSlot(limit: number): Slot {
+  let active = 0;
+  const waiters: Array<() => void> = [];
+  const slot = async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (active >= limit) await new Promise<void>((r) => waiters.push(r));
+    active++;
+    try { return await fn(); }
+    finally { active--; waiters.shift()?.(); }
+  };
+  return Object.assign(slot, { stats: () => ({ active, waiting: waiters.length }) });
 }
+
+const withImageSlot = makeSlot(MAX_CONCURRENT);
 
 // Re-encode an uploaded image in place to strip ALL embedded metadata — most importantly
 // EXIF GPS coordinates (guests' locations), plus camera serial, timestamps, thumbnails.
@@ -38,6 +54,25 @@ export async function stripImageMetadata(filePath: string): Promise<{ width?: nu
   const { data, info } = await withImageSlot(() => sharp(filePath)
     .rotate()
     .jpeg({ quality: IMAGE_QUALITY, chromaSubsampling: hi ? '4:4:4' : '4:2:0', mozjpeg: !hi })
+    .toBuffer({ resolveWithObject: true }));
+  await fs.promises.writeFile(filePath, data);
+  return { width: info.width, height: info.height };
+}
+
+/** The same scrub, but to PNG — for the one upload whose TRANSPARENCY is the point.
+ *
+ *  A poster logo is a cut-out: a monogram, a crest, a wordmark, sitting over whatever background
+ *  the host chose. Run it through the JPEG path above and sharp flattens the alpha to black, so the
+ *  host gets their mark in a black box and no explanation. This keeps the alpha channel and still
+ *  re-encodes, which is what strips the metadata — the security property is the re-encode, not the
+ *  format. `.rotate()` for the same reason as above.
+ *
+ *  Capped at 1200px on the long edge: it is furniture on a poster, not the poster. */
+export async function stripImageMetadataPng(filePath: string): Promise<{ width?: number; height?: number }> {
+  const { data, info } = await withImageSlot(() => sharp(filePath)
+    .rotate()
+    .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
+    .png({ compressionLevel: 9 })
     .toBuffer({ resolveWithObject: true }));
   await fs.promises.writeFile(filePath, data);
   return { width: info.width, height: info.height };
@@ -346,6 +381,161 @@ export async function cropClipToShape(videoPath: string, shape: string | null | 
   });
 }
 
+/**
+ * Below this, a lead is inaudible and "correcting" it would just be chasing measurement noise.
+ * One frame at 30fps is 33ms; 150ms is where a voice visibly stops matching a mouth.
+ */
+export const AUDIO_LEAD_MIN_SECS = 0.15;
+
+/**
+ * And above this it is not a wake-up, so it is not ours to correct.
+ *
+ * The fix rests on one assumption: the whole deficit is time the microphone spent waking up, so
+ * sliding the audio back by exactly that much puts it where it was recorded. That holds for a
+ * wake-up. It does NOT hold for a clip whose sound failed some other way — a mic interrupted
+ * mid-recording, a permission granted late, a track that ended early — and there the assumption is
+ * actively destructive: a 15.5s clip arrived carrying 3.9s of audio, and shifting it by the 11.5s
+ * "lead" moved the entire soundtrack to the end, turning a clip with sound in the wrong place into
+ * one with sound nowhere near its picture.
+ *
+ * Every genuine wake-up measured across four sessions came in at or under 1.0s — 0.175, 0.415,
+ * 0.571, 0.820, 0.853, 0.918, 0.970, 0.997 — against 11.5s for the broken one. 2.0s sits well clear
+ * of the real population with room for a slower device, and well below anything that has turned out
+ * to be a different fault.
+ *
+ * Past it the file is left exactly as recorded. Sound at the start that belongs further in is
+ * wrong, but it is the muxer's wrongness and it is bounded; moving it somewhere we cannot justify
+ * is ours, and it is worse. A capped clip is logged rather than silently skipped.
+ */
+export const AUDIO_LEAD_MAX_SECS = 2.0;
+
+/**
+ * Where each stream actually STOPS, from `codec_type,start_time,duration` rows.
+ *
+ * It has to be the end and not the duration, because the fix works by moving the audio's start
+ * rather than by padding it: a corrected clip still has a 1.53s audio track, it just begins at
+ * 0.997 instead of 0. Measured on duration alone that file looks exactly as broken as it did
+ * before, so a second pass would shift it again — and a backfill runs over everything, every boot.
+ * Ends are the same number before and after, which is what makes correcting twice a no-op.
+ *
+ * Returns null unless BOTH streams are readable, so a clip with no sound, or one ffprobe could not
+ * make sense of, is left alone rather than guessed at.
+ */
+export function endsFrom(probeOut: string): { v: number; a: number; aStart: number } | null {
+  let v: number | null = null, a: number | null = null, aStart = 0;
+  for (const line of probeOut.trim().split('\n')) {
+    const [kind, start, dur] = line.split(',');
+    const s = Number(start), d = Number(dur);
+    if (!Number.isFinite(s) || !Number.isFinite(d) || d <= 0) continue;
+    if (kind === 'video' && v === null) v = s + d;
+    if (kind === 'audio' && a === null) { a = s + d; aStart = s; }
+  }
+  return v !== null && a !== null ? { v, a, aStart } : null;
+}
+
+/**
+ * Has this file already had its audio placed?
+ *
+ * A clip as a browser muxes it starts BOTH tracks at zero — that is the whole fault. So a non-zero
+ * audio start means someone has already decided where the sound goes, and the only someone is us.
+ *
+ * This is the real idempotency guard, and it replaces trusting the arithmetic. The first version
+ * reasoned that a corrected file must measure as having no lead left, since shifting by exactly the
+ * gap closes it — true on paper, and true for every small offset tested. It did not survive one
+ * clip: an 11.5s shift left a residual the next pass read as a fresh 7.7s lead and corrected AGAIN,
+ * stacking to 11.542s. Reading a flag that is either set or not cannot drift the way a subtraction
+ * across two ffprobe runs can.
+ */
+export function alreadyPlaced(ends: { aStart: number } | null): boolean {
+  return !!ends && ends.aStart >= AUDIO_LEAD_MIN_SECS;
+}
+
+/**
+ * How far the sound runs AHEAD of the picture, in seconds — 0 when it doesn't, or can't be read.
+ *
+ * The microphone is the slow one. It can take up to a second to deliver its first sample, and the
+ * muxer rebases the audio track to zero regardless of when it actually started — so everything the
+ * mic recorded lands that far early, for the whole clip, with nothing in the file to say so. No
+ * packets are dropped and there is no gap: audio runs unbroken at a perfect 21.3ms apart from the
+ * first to the last. The only trace is the track ending short by exactly the distance it moved.
+ *
+ * Measured across three sessions the lead clusters at ~1s, which is a wake-up and not drift. It is
+ * NOT fixable by handing the camera fresh tracks — that was tried, and made it worse, because a
+ * just-acquired stream is precisely one with a cold microphone. See the note in toggleRecord.
+ */
+export function audioLeadFrom(ends: { v: number; a: number; aStart: number } | null): number {
+  if (!ends || alreadyPlaced(ends)) return 0;
+  const lead = ends.v - ends.a;
+  return lead >= AUDIO_LEAD_MIN_SECS && lead <= AUDIO_LEAD_MAX_SECS ? lead : 0;
+}
+
+/** True when there IS a deficit but it is too big to be a wake-up — worth saying out loud. */
+export function leadTooBig(ends: { v: number; a: number; aStart: number } | null): boolean {
+  return !!ends && !alreadyPlaced(ends) && ends.v - ends.a > AUDIO_LEAD_MAX_SECS;
+}
+
+/** `audioLeadFrom` against a real file. Best-effort: anything unreadable reports no lead. */
+async function audioLead(videoPath: string): Promise<number> {
+  const r = await run('ffprobe', ['-v', 'error', '-show_entries',
+    'stream=codec_type,start_time,duration', '-of', 'csv=p=0', videoPath], 15_000);
+  if (r.code !== 0) return 0;
+  const ends = endsFrom(r.out);
+  if (leadTooBig(ends)) {
+    console.log(`[video] ${path.basename(videoPath)}: audio is ${(ends!.v - ends!.a).toFixed(1)}s ` +
+      'short of its video — too much to be a microphone wake-up, leaving it as recorded');
+  }
+  return audioLeadFrom(ends);
+}
+
+/**
+ * Put the sound back on the picture, in the ORIGINAL, without re-encoding it.
+ *
+ * `-itsoffset` moves the audio's timestamps; `-c copy` means not one sample is decoded. It costs a
+ * file copy and takes about as long as writing the upload did, and the result is bit-identical
+ * media with a corrected clock — no generation loss on the file the guest keeps.
+ *
+ * Fixing the ORIGINAL rather than only the playback proxy matters because the original is what
+ * downloads: the gallery's save button, the whole-event zip, and the CRF-18 re-encode a shaped
+ * event makes all read this file. Correcting only the proxy would leave every one of those out of
+ * step — the copy people keep being the broken one. It also means the proxy step then finds nothing
+ * wrong and skips a full transcode it would otherwise have been forced into.
+ *
+ * Safe by construction: the replacement is built beside the original and only moves into place once
+ * it has been re-probed and agrees. Anything that fails leaves the original untouched.
+ */
+export async function fixAudioLead(videoPath: string): Promise<boolean> {
+  const lead = await audioLead(videoPath);
+  if (!lead) return false;
+
+  const tmp = videoPath + '.sync' + (path.extname(videoPath) || '.mp4');
+  const args = ['-v', 'error', '-y', '-i', videoPath, '-itsoffset', lead.toFixed(3), '-i', videoPath,
+    '-map', '0:v:0', '-map', '1:a:0', '-c', 'copy'];
+  if (/\.(mp4|m4v|mov)$/i.test(videoPath)) args.push('-movflags', '+faststart');
+  args.push(tmp);
+
+  const done = await run('ffmpeg', args, 120_000);
+  const scrap = async () => { try { await fs.promises.unlink(tmp); } catch { /* */ } };
+  if (done.code !== 0) { await scrap(); return false; }
+
+  // Re-probe before trusting it. `-map 1:a:0` on a file ffprobe misread could land a clip with no
+  // sound at all, and audioLead reports 0 for that as readily as it does for a clip already in
+  // step — so the check is that both streams are THERE and now agree, never just that the lead
+  // came back 0.
+  const r = await run('ffprobe', ['-v', 'error', '-show_entries',
+    'stream=codec_type,start_time,duration', '-of', 'csv=p=0', tmp], 15_000);
+  const ends = r.code === 0 ? endsFrom(r.out) : null;
+  // Both streams there, the sound now landing with the picture, AND the offset we asked for actually
+  // applied. That last one is not paranoia: the clip that had to be repaired by hand got its shift
+  // only partly written, and the leftover read as a fresh fault on the next pass.
+  if (!ends || Math.abs(ends.v - ends.a) >= AUDIO_LEAD_MIN_SECS ||
+      Math.abs(ends.aStart - lead) > 0.05) { await scrap(); return false; }
+
+  try { await fs.promises.rename(tmp, videoPath); }   // same directory, so atomic
+  catch { await scrap(); return false; }
+  console.log(`[video] audio was ${lead.toFixed(3)}s ahead — corrected ${path.basename(videoPath)}`);
+  return true;
+}
+
 /** `<id>.webm` → `<id>_play.mp4`. The playback copy sits beside the original. */
 export function playName(filename: string): string {
   return filename.replace(/\.[^.]+$/, '') + '_play.mp4';
@@ -353,14 +543,11 @@ export function playName(filename: string): string {
 
 // One transcode at a time. ffmpeg will happily eat every core, and a guest uploading during a
 // live event matters more than a proxy finishing quickly.
-let videoActive = 0;
-const videoWaiters: Array<() => void> = [];
-async function withVideoSlot<T>(fn: () => Promise<T>): Promise<T> {
-  if (videoActive >= 1) await new Promise<void>((r) => videoWaiters.push(r));
-  videoActive++;
-  try { return await fn(); }
-  finally { videoActive--; videoWaiters.shift()?.(); }
-}
+//
+// This slot belongs to GUEST media — crops and playback proxies, the things somebody standing at a
+// party is waiting on. Slideshow renders are gated separately (`slideshow.ts`) for exactly that
+// reason; see the note there for why they are not put in here.
+const withVideoSlot = makeSlot(1);
 
 /**
  * A playback copy every phone can actually decode.
@@ -382,9 +569,9 @@ export async function makePlaybackProxy(videoPath: string): Promise<boolean> {
   try { await fs.promises.access(out); return true; } catch { /* not built yet */ }
 
 
-  const probe = await new Promise<{ codec: string; height: number } | null>((resolve) => {
+  const probe = await new Promise<{ codec: string; height: number; vfr: boolean } | null>((resolve) => {
     const p = spawn('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
-      '-show_entries', 'stream=codec_name,height', '-of', 'csv=p=0', videoPath]);
+      '-show_entries', 'stream=codec_name,height,r_frame_rate,avg_frame_rate', '-of', 'csv=p=0', videoPath]);
     let outBuf = '';
     const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* */ } resolve(null); }, 15_000);
     p.stdout.on('data', (d) => { outBuf += String(d); });
@@ -392,12 +579,37 @@ export async function makePlaybackProxy(videoPath: string): Promise<boolean> {
     p.on('error', () => { clearTimeout(t); resolve(null); });
     p.on('close', () => {
       clearTimeout(t);
-      const [codec, h] = outBuf.trim().split(',');
-      resolve(codec ? { codec, height: Number(h) || 0 } : null);
+      const [codec, h, rRate, avgRate] = outBuf.trim().split(',');
+      // Rates arrive as "30000/1" style fractions. A file whose declared rate is more than a hair
+      // off its average is variable — and the 30000/1 case is not a hair, it is three orders of
+      // magnitude.
+      const asFps = (x?: string) => {
+        const [n, d] = String(x ?? '').split('/').map(Number);
+        return d ? n / d : Number.isFinite(n) ? n : 0;
+      };
+      const r = asFps(rRate), a = asFps(avgRate);
+      const vfr = r > 0 && a > 0 && Math.abs(r - a) / a > 0.02;
+      resolve(codec ? { codec, height: Number(h) || 0, vfr } : null);
     });
   });
   // Already the thing we would transcode to: leave it alone rather than re-encode and lose quality.
-  if (probe && /^(h264|avc1)$/i.test(probe.codec) && probe.height > 0 && probe.height <= 1920 &&
+  // EXCEPT when it is variable frame rate — a browser-recorded clip is H.264 in an MP4 and still
+  // needs the pass below, because what is wrong with it is its timestamps, not its codec. `vfr`
+  // here means "the declared rate and the real one disagree", which is the signature of a
+  // MediaRecorder file: one off a phone declared `r_frame_rate=30000/1` — thirty thousand frames a
+  // second — against an actual ~29.98.
+  //
+  // THIS IS NOT WHY SOUND GOES OUT OF STEP. It used to say so here, and that was wrong: the sound
+  // fault is the microphone waking up after the camera, and it is corrected in the ORIGINAL at
+  // ingest (fixAudioLead). The two are independent — clips arrive VFR and in sync, and in sync and
+  // CFR, in the same session on the same phone. What is left for the rate itself is that some
+  // players seek badly or misreport duration on a container claiming 30000fps, which is a thinner
+  // reason for a full re-encode than the one written here before. Worth revisiting; measure first.
+  // Sound running ahead of the picture is a reason to build a proxy all on its own — the clip can
+  // be H.264 at a sane size and perfectly constant rate and still be unwatchable.
+  const lead = await audioLead(videoPath);
+
+  if (probe && !probe.vfr && !lead && /^(h264|avc1)$/i.test(probe.codec) && probe.height > 0 && probe.height <= 1920 &&
       /\.(mp4|m4v)$/i.test(videoPath)) return true;
   if (!probe) return false;
 
@@ -405,10 +617,30 @@ export async function makePlaybackProxy(videoPath: string): Promise<boolean> {
     const tmp = out + '.tmp.mp4';
     // scale=-2 keeps the aspect and forces an even width, which H.264 requires. The cap is on the
     // LONG edge so portrait clips (the common case) come out 1080 wide, not 1080 tall.
+    // `-fps_mode cfr -r 30` and `-af aresample=async=1` are what keep the SOUND on the pictures.
+    //
+    // A clip recorded in a browser is variable frame rate and it lies about it, so `-fps_mode cfr
+    // -r 30` gives players a rate they can actually follow instead of the declared 30000/1.
+    //
+    // The audio filters are the SECOND line of defence, not the first. `aresample=async=1` holds
+    // the audio against the video's timeline as it re-encodes, and `adelay` moves it back by any
+    // lead still present. Normally there is none: the original is corrected at ingest, so by the
+    // time a proxy is built the sound is already where it belongs and `lead` is 0. These exist for
+    // the clip that slips past — a lead that appears only after the container is rewritten, or an
+    // original that could not be replaced.
+    //
+    // `aresample` alone is not enough and never was. Its job is to correct DRIFT, and audio dragged
+    // to the front of a file is not drifting — it sits at pts 0, exactly where `first_pts=0` wants
+    // it, and passes through untouched. Measured on two real clips, the proxy faithfully reproduced
+    // the fault it was supposed to be fixing (0.415s in, 0.400s out; 0.997s in, 1.027s out). That
+    // is what `adelay` is for. See `audioLeadFrom` for why the gap IS the offset.
     const p = spawn('ffmpeg', ['-v', 'error', '-y', '-i', videoPath,
       '-vf', "scale='if(gt(iw,ih),min(1920,iw),-2)':'if(gt(iw,ih),-2,min(1920,ih))'",
+      '-fps_mode', 'cfr', '-r', '30',
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-profile:v', 'high',
       '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+      '-af', lead ? `aresample=async=1:first_pts=0,adelay=${Math.round(lead * 1000)}:all=1`
+                  : 'aresample=async=1:first_pts=0',
       '-c:a', 'aac', '-b:a', '128k', tmp]);
     const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* */ } }, 10 * 60_000);
     p.stderr.on('data', () => { /* drain */ });
@@ -454,6 +686,9 @@ export async function backfillPlaybackProxies(uploadsDir: string, filenames: str
     if (!rel || rel.includes('_play')) continue;
     const abs = path.join(uploadsDir, rel);
     try { await fs.promises.access(abs); } catch { continue; }          // purged already
+    // Correct the original BEFORE the proxy looks at it: a proxy built from a shifted file
+    // faithfully reproduces the shift, and the download would stay wrong either way.
+    try { await fixAudioLead(abs); } catch { /* best effort */ }
     try { if (await makePlaybackProxy(abs)) made++; } catch { /* best effort */ }
   }
   if (made) console.log(`[video] playback copies ready for ${made} clip(s)`);

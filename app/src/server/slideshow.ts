@@ -12,8 +12,8 @@ const NCPU = Math.max(2, os.cpus().length);   // use the box's cores for filteri
 import { and, asc, desc, eq, lt } from 'drizzle-orm';
 import { all, db } from './db';
 import { slideshows } from './schema';
-import { makePlaybackProxy, playName } from './images';
-import { UPLOADS_DIR, eventDir, eventRelPath } from './paths';
+import { makePlaybackProxy, playName, makeSlot } from './images';
+import { UPLOADS_DIR, uploadDiskPath, eventDir, eventRelPath } from './paths';
 import { brandingRemovable as billingBrandingRemovable, BRANDING_REMOVAL_CENTS, billingEnabled as BILLING_ON } from './billing';
 
 const CARD_SECS = 3;   // how long the intro / outro branding cards show
@@ -346,11 +346,29 @@ function probeDuration(file: string): Promise<number> {
     });
   });
 }
+/** How far apart a clip's own video and audio durations are, in ms. Null when it has no audio. */
+export function avDriftMs(v?: number, a?: number): number | null {
+  return typeof v === 'number' && typeof a === 'number' && isFinite(v) && isFinite(a)
+    ? Math.round(Math.abs(v - a) * 1000) : null;
+}
+
+/** Above this, a listener hears the lips and the words come apart. */
+export const AV_DRIFT_WARN_MS = 150;
+
 // Probe a video's dimensions + duration (ms) for display metadata. Empty object on failure.
+//
+// Also logs the clip's A/V alignment AS RECEIVED, before anything of ours has touched it, because
+// that is the one question a sync complaint turns on: did it arrive that way, or did we do it?
+// Measured on two real uploads through the identical path — one came in 7ms apart and the other
+// 983ms apart — so the answer varies per clip and is not something to reason about from the code.
+// The crop for an H.264 source is a container-level rewrite that never re-encodes and never touches
+// audio, so a drift visible here was already in the file the phone produced.
 export function probeVideoMeta(file: string): Promise<{ width?: number; height?: number; durationMs?: number }> {
   return new Promise((resolve) => {
-    const p = spawn('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
-      '-show_entries', 'stream=width,height:format=duration', '-of', 'json', file]);
+    // Every stream, not just v:0 — the audio stream is the entire point of the check below.
+    const p = spawn('ffprobe', ['-v', 'error',
+      '-show_entries', 'stream=index,codec_type,codec_name,width,height,duration,avg_frame_rate:format=duration',
+      '-of', 'json', file]);
     let out = '';
     const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* */ } resolve({}); }, 15_000);
     p.stdout.on('data', (d) => { out += d.toString(); });
@@ -358,9 +376,31 @@ export function probeVideoMeta(file: string): Promise<{ width?: number; height?:
     p.on('close', () => {
       clearTimeout(t);
       try {
-        const j = JSON.parse(out); const s = (j.streams && j.streams[0]) || {};
+        const j = JSON.parse(out);
+        const streams: Array<Record<string, unknown>> = Array.isArray(j.streams) ? j.streams : [];
+        const v = streams.find((x) => x.codec_type === 'video') ?? {};
+        const a = streams.find((x) => x.codec_type === 'audio');
         const dur = parseFloat(j.format?.duration);
-        resolve({ width: s.width, height: s.height, durationMs: isFinite(dur) ? Math.round(dur * 1000) : undefined });
+
+        const vd = parseFloat(String(v.duration ?? ''));
+        const ad = a ? parseFloat(String(a.duration ?? '')) : NaN;
+        const drift = avDriftMs(vd, ad);
+        const name = file.split('/').pop() || file;
+        if (!a) {
+          console.log(`[video] av-sync ${name}: no audio track`);
+        } else {
+          const line = `[video] av-sync ${name}: v=${isFinite(vd) ? vd.toFixed(3) : '?'}s `
+            + `a=${isFinite(ad) ? ad.toFixed(3) : '?'}s drift=${drift ?? '?'}ms `
+            + `fps=${String(v.avg_frame_rate ?? '?')} codec=${String(v.codec_name ?? '?')}`;
+          if (drift !== null && drift > AV_DRIFT_WARN_MS) {
+            console.warn(`${line}  ** OUT OF SYNC AS UPLOADED — ${ad < vd ? 'audio is SHORTER' : 'audio is LONGER'} than the video **`);
+          } else {
+            console.log(line);
+          }
+        }
+
+        resolve({ width: v.width as number | undefined, height: v.height as number | undefined,
+                  durationMs: isFinite(dur) ? Math.round(dur * 1000) : undefined });
       } catch { resolve({}); }
     });
   });
@@ -500,6 +540,9 @@ function slideshowLabel(opts: Opts): string {
 // survive and the host picks. Serial and not parallel, deliberately — ffmpeg here already takes
 // every core and is killed on a 5-minute timeout, so two 4K encodes at once would starve each
 // other until one of them hit that timeout and died.
+//
+// This queue is PER EVENT. The same argument applies just as hard across events, and until
+// `withSlideshowSlot` (below) there was nothing enforcing it there at all.
 export function startSlideshow(eventId: string, opts: Opts): StartResult {
   const entry: Pending = { id: randomUUID().replace(/-/g, ''), opts, label: slideshowLabel(opts), queuedAt: Date.now() };
   const running = jobs.get(eventId);
@@ -549,7 +592,8 @@ function begin(eventId: string, entry: Pending): void {
 // Recent renders for an event, newest first.
 export async function listSlideshows(eventId: string) {
   try {
-    const rows = await db.select().from(slideshows).where(eq(slideshows.eventId, eventId)).orderBy(desc(slideshows.createdAt));
+    const rows = await db.select().from(slideshows).where(eq(slideshows.eventId, eventId))
+      .orderBy(desc(slideshows.createdAt), asc(slideshows.id));   // `id` last so the list is a total order
     return rows.map((s) => {
       // playUrl is the lighter copy for the in-browser preview; url stays the full-quality
       // download. Only present once the transcode has finished.
@@ -617,14 +661,51 @@ export async function purgeOldSlideshows(): Promise<number> {
   return removed;
 }
 
-async function run(eventId: string, opts: Opts, outId: string): Promise<{ url: string; resolution: string }> {
+// The one global render slot.
+//
+// `startSlideshow`'s queue is per event, so ten hosts pressing Build at the same moment used to
+// mean ten concurrent renders: ten ffmpeg graphs each asking for `-threads NCPU`, each staging 4K
+// intermediates under `UPLOADS_DIR/.ss-tmp`, on a box whose entire reason for chunking the timeline
+// is that ONE 4K run peaks in the gigabytes. Organizer-gated bounds WHO can start one, not how
+// much of the machine it takes, and nothing above this line bounded the latter.
+//
+// They deliberately do NOT share images.ts's video slot, tempting as the reuse is. That slot is
+// what a GUEST's clip waits in for its crop and its playback proxy, and a 4K render would hold it
+// for the several minutes it takes: every guest at every other event on the box would be left with
+// a clip their phone may not be able to decode at all (a Firefox/iOS WebM without its H.264 proxy
+// is not "lower quality", it is unplayable), to save an organizer a wait their panel is already
+// showing them. One slot each is the right shape: at most one render and one piece of guest media
+// in flight, and neither can starve the other.
+//
+// The WHOLE render sits inside the slot, prep included — the pre-scale loop runs sharp over every
+// still and spawns an ffmpeg per clip to normalise it, so gating only the encode would have left
+// most of the CPU cost unbounded. Waiting costs nothing that can time out: every budget and stall
+// timer in `runFfmpeg` starts after its spawn, which now happens after the wait.
+//
+// One, and not configurable: the guest-media slot next door is a hard 1 for the same reason, and a
+// knob here would be a knob on how close to OOM a host may push the box.
+//
+// Exported so the test can occupy the slot and watch a second event's render queue behind it. That
+// is the only way to state the bug as a failing assertion: without the gate, a second event's
+// render is never "waiting" — it is simply also running, and nothing in the process knows.
+export const withSlideshowSlot = makeSlot(1);
+
+function run(eventId: string, opts: Opts, outId: string): Promise<{ url: string; resolution: string }> {
+  return withSlideshowSlot(() => renderFilm(eventId, opts, outId));
+}
+
+async function renderFilm(eventId: string, opts: Opts, outId: string): Promise<{ url: string; resolution: string }> {
   const D = Math.min(8, Math.max(2, Math.round(opts.secondsPer || D_DEFAULT)));   // 2–8s/photo
   // Include video clips too when asked; otherwise photos only. Rejected/pending always excluded.
   let rows = await all<{ filename: string; is_highlighted: boolean; media_type: string; width: number | null; height: number | null }>(
     `SELECT filename, is_highlighted, media_type, width, height FROM photos
        WHERE event_id = ? AND ${await visibleStatusSql(eventId)}
          ${opts.includeVideos ? '' : "AND media_type != 'video'"}
-       ORDER BY taken_at ASC`, [eventId]);
+       -- THIS IS THE FILM'S SLOT ORDER, and for order='shuffled' it is also the INPUT ARRAY to the
+       -- seeded shuffle below, so one tie in taken_at does not swap two slides, it changes the
+       -- whole permutation. id last makes it a total order, which is what makes a render
+       -- reproducible from its seed. (No backticks in here: this is a template literal.)
+       ORDER BY taken_at ASC, id ASC`, [eventId]);
   if (opts.favouritesOnly) rows = rows.filter((r) => r.is_highlighted);
 
   const allItems: Item[] = rows
@@ -660,7 +741,7 @@ async function run(eventId: string, opts: Opts, outId: string): Promise<{ url: s
     const th = evRow?.theme ? JSON.parse(evRow.theme) : null;
     if (th?.bg) themeBg = th.bg;
     if (th?.accent) accent = th.accent;
-    if (th?.headerImage) headerImage = path.join(UPLOADS_DIR, String(th.headerImage).replace('/uploads/', ''));
+    if (th?.headerImage) headerImage = uploadDiskPath(String(th.headerImage)); // throws (→ no header image) if it escapes UPLOADS_DIR
   } catch { /* default theme */ }
   // ffmpeg pad/letterbox colour from the theme bg (#rrggbb → 0xrrggbb), falling back to black.
   const hex = themeBg.replace('#', '');
