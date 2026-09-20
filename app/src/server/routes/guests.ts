@@ -689,6 +689,23 @@ export async function mailgunWebhookHandler(req: Request, res: Response) {
   if (!ev) { rememberToken(token); return res.json({ ok: true, ignored: 'unreadable' }); }
   if (!ev.status) { rememberToken(token); return res.json({ ok: true, ignored: ev.name }); }
 
+  /* Is this event even OURS? One Mailgun account can hold several sending domains, and every one
+     of them posts to the same configured webhook URL — so events produced by a test send on the
+     sandbox domain arrive here, at production, carrying real addresses.
+     That is how the operator's own address came to be suppressed on 2026-09-19: the email sampler
+     sent 21 messages from devel over the sandbox domain, ten hard-bounced on Gmail's DMARC
+     alignment check, and production applied the bounces. Signature verification cannot catch it —
+     the events are genuinely from Mailgun, just about somebody else's mail.
+     Acknowledged rather than refused, because a 4xx would have Mailgun retrying an event that is
+     correct and simply not addressed to this deployment. Fails OPEN on a missing domain: a real
+     event with no readable message-id must still suppress a real bounce. */
+  const ours = (process.env.MAILGUN_DOMAIN || '').trim().toLowerCase();
+  if (ours && ev.sendingDomain && ev.sendingDomain !== ours) {
+    rememberToken(token);
+    console.log(`[mailgun] ignored ${ev.name} from ${ev.sendingDomain} — this deployment sends as ${ours}`);
+    return res.json({ ok: true, ignored: 'other-domain' });
+  }
+
   const address = ev.recipient ? normaliseAddress(ev.recipient) : null;
 
   try {

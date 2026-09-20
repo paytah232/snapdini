@@ -14,6 +14,9 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { normaliseEvent } from '../mailgun';
 
 // An obviously fake key. Nothing in this repository ever carries a real one — the signing key is
 // the single secret that stands between this endpoint and anyone on the internet.
@@ -428,5 +431,57 @@ describe('what happens when we cannot do the work', () => {
     assert.equal(r.code, 200);
     assert.equal(r.body.ignored, 'unreadable');
     assert.deepEqual(ops, []);
+  });
+});
+
+// ── Events that belong to a DIFFERENT deployment ────────────────────────────
+//
+// One Mailgun account can hold several sending domains, and they all post to the same configured
+// webhook URL. So a bounce produced by a test send on the sandbox domain arrives at production,
+// carrying a real person's address — and signature verification cannot catch it, because the event
+// genuinely IS from Mailgun. It is just not about this deployment's mail.
+//
+// This is written from a real incident: on 2026-09-19 the email sampler sent 21 messages from devel
+// over the sandbox domain, ten hard-bounced on Gmail's DMARC alignment check, and production applied
+// the bounces and suppressed the operator's own address. Nothing was broken; every part did its job.
+describe('a bounce from another sending domain', () => {
+  const idOn = (domain: string) => `20260919041858.89aa263905e031a1@${domain}`;
+
+  test('reads the sending domain off the message-id', () => {
+    const ev = normaliseEvent({
+      event: 'failed', severity: 'permanent', recipient: 'someone@example.com', timestamp: 1789793643.9,
+      message: { headers: { 'message-id': idOn('sandbox126bbf401ba3431b84a66ab2f3ac52d3.mailgun.org') } },
+    });
+    assert.equal(ev?.sendingDomain, 'sandbox126bbf401ba3431b84a66ab2f3ac52d3.mailgun.org');
+    assert.equal(ev?.status, 'bounced');   // it IS a hard bounce — just not ours to act on
+  });
+
+  test('takes everything after the LAST @, since a local part may contain one', () => {
+    const ev = normaliseEvent({
+      event: 'failed', severity: 'permanent', recipient: 'a@b.com', timestamp: 1789793643.9,
+      message: { headers: { 'message-id': '2026.a@b@mg.snapdini.com' } },
+    });
+    assert.equal(ev?.sendingDomain, 'mg.snapdini.com');
+  });
+
+  test('reports no domain rather than a wrong one when the id has none', () => {
+    // The guard fails OPEN on null, so a real bounce with an unreadable id still suppresses.
+    const ev = normaliseEvent({
+      event: 'failed', severity: 'permanent', recipient: 'a@b.com', timestamp: 1789793643.9,
+      message: { headers: { 'message-id': 'no-at-sign-here' } },
+    });
+    assert.equal(ev?.sendingDomain, null);
+  });
+
+  test('the handler compares it against MAILGUN_DOMAIN and acknowledges rather than refuses', () => {
+    // Acknowledged, because a 4xx would have Mailgun retrying an event that is perfectly correct
+    // and simply addressed to a different deployment.
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'guests.ts'), 'utf8');
+    const h = src.slice(src.indexOf('export async function mailgunWebhookHandler'));
+    assert.match(h, /ev\.sendingDomain && ev\.sendingDomain !== ours/);
+    assert.match(h, /ignored: 'other-domain'/);
+    assert.match(h, /rememberToken\(token\)/);
+    // Fails open: no domain on the event means it is still processed.
+    assert.match(h, /const ours = \(process\.env\.MAILGUN_DOMAIN \|\| ''\)/);
   });
 });

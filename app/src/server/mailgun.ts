@@ -140,6 +140,14 @@ export interface MailgunEvent {
   severity: 'permanent' | 'temporary' | null;
   /** Epoch MILLISECONDS, converted from Mailgun's fractional epoch seconds. */
   at: number | null;
+  /** The domain the message was SENT from, taken from the message-id's right-hand side.
+   *
+   *  A Mailgun account can hold several sending domains, and every one of them posts to the SAME
+   *  configured webhook URL. So a bounce produced by a test send on a sandbox domain arrives at
+   *  whichever deployment owns that URL — production — carrying a real person's address. That is
+   *  not hypothetical: it suppressed the operator's own address on 2026-09-19, from a run of the
+   *  email sampler against the sandbox domain. See the guard in mailgunWebhookHandler. */
+  sendingDomain: string | null;
   /** Mailgun's own event id, for logging. */
   eventId: string | null;
   /** The raw event name, so an unrecognised one can be logged rather than vanishing. */
@@ -221,6 +229,10 @@ export function normaliseEvent(eventData: unknown): MailgunEvent | null {
     status,
     inviteToken: str(vars[INVITE_VAR]),
     messageId,
+    // Everything after the LAST '@' — a message-id's local part may contain one.
+    sendingDomain: messageId && messageId.includes('@')
+      ? messageId.slice(messageId.lastIndexOf('@') + 1).toLowerCase() || null
+      : null,
     recipient: str(e.recipient),
     reason: reason ? reason.slice(0, 500) : null,
     severity,
