@@ -154,6 +154,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
+        # Without this, recreating db leaves this service holding a connection pool
+        # to a container that no longer exists - the same silent breakage documented
+        # on nginx below. Compose restarts this whenever db is RECREATED.
+        restart: true
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/config',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 30s
@@ -232,6 +236,12 @@ services:
       - -c
       - random_page_cost=1.1
     restart: unless-stopped
+    # Published on LOOPBACK ONLY - unreachable from the LAN or the internet.
+    # Stable endpoint for the DR standby's SSH-tunnelled streaming replication
+    # (laundroprox). Binding a port rather than targeting the container IP means
+    # the endpoint survives `compose up -d db` recreating the container.
+    ports:
+      - "127.0.0.1:5432:5432"
     logging: *default-logging
     environment:
       - POSTGRES_USER=snapdini
