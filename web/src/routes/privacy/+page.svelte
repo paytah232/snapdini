@@ -61,7 +61,7 @@
 
   <h2>4. Photos &amp; videos — storage &amp; deletion</h2>
   <p>Your event's photos and videos are stored only to provide the service. They are <strong>automatically deleted after your event's retention period</strong> (the default window, extendable on paid plans). After deletion we keep only a small summary record of the event (its settings and basic stats such as photo and participant counts) for your history and our records — the media itself is gone. If a guest left us feedback about the app, we keep their rating and comment, but it is <strong>detached from them at the same moment</strong> — it survives as an anonymous comment about Snapdini that is no longer linked to any guest, name or email.</p>
-  <p>You and your guests own your content. Please keep your own copies of anything important; once the retention period passes, deleted media cannot be recovered.</p>
+  <p>You and your guests own your content. Please keep your own copies of anything important; once the retention period passes, deleted media is gone from Snapdini and we cannot restore it for you. Deleted content may persist in our encrypted backups for up to 30 days before being permanently removed.</p>
 
   <h2>5. Emails &amp; how long we keep them</h2>
   <p>We keep your <strong>account email address for as long as your account exists</strong> — there is no automatic expiry, so in practice we retain it indefinitely unless you ask us to delete your account. Guest emails are kept with their event and are removed when the event's data is purged.</p>
