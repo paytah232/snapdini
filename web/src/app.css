@@ -136,6 +136,16 @@ textarea {
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html { font-size: 16px; -webkit-text-size-adjust: 100%; }
+/* The PAGE CANVAS takes the background, not just the body box.
+   app.html paints html with a hard-coded colour so the first frame is not white. That fallback has
+   a side effect: a body background only propagates to the canvas while html has none, so once html
+   is painted, body covers its own box and nothing more. Any page shorter than the viewport then
+   showed the fallback black under a themed page — most visibly on admin tabs with little content,
+   where the strip below the last card stayed black while the tall tabs looked correct.
+   The [data-theme] selector is deliberate, not redundant: app.html ships html[data-theme="light"],
+   which out-specifies a bare html rule, so a bare rule here would lose in light mode. Matching that
+   specificity and arriving later in the cascade wins in both. */
+html, html[data-theme] { background: var(--bg); }
 body {
   background: var(--bg);
   color: var(--text);
