@@ -44,7 +44,16 @@ describe('CSP reports', () => {
   test('is bounded in every direction an open endpoint can be pushed', () => {
     // Unauthenticated by necessity — browsers send it with no credentials — so the limits ARE the
     // security. A 16kb body, at most 5 reports read from one payload, and its own rate limiter.
-    assert.match(handler, /limit: '16kb'/);
+    assert.match(handler, /limit: '64kb'/);
+    // 64kb, not 16kb: the Reporting API BATCHES reports, and a batch carrying a script-sample each
+    // is nothing like one report. Measured in production the day this shipped — one Chrome sent the
+    // same oversized payload seven times in twenty minutes.
+    //
+    // And anything STILL over the cap gets 204, not 413. A 413 tells a browser to try again later,
+    // so refusing an unreadable report bought a retry storm instead of quiet. This is the assertion
+    // that matters: the cap can be tuned, the "never answer a report with a retryable error" cannot.
+    assert.match(handler, /entity\.too\.large/);
+    assert.match(handler, /entity\.too\.large.*\n?.*res\.status\(204\)\.end\(\)/);
     assert.match(handler, /reports\.slice\(0, 5\)/);
     assert.match(handler, /cspReportLimiter/);
     assert.match(SRC, /const cspReportLimiter = rateLimit\(/);

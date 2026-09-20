@@ -15,6 +15,7 @@
 // (or accept per-instance flushes, which still converge because the SQL is additive).
 import { sql } from 'drizzle-orm';
 import { db } from './db';
+import { skipWriteSweep } from './readonly';
 
 const FLUSH_MS = Number(process.env.COUNTER_FLUSH_MS || 5000);
 // Hard cap so a flood cannot grow the maps without bound; beyond this we drop rather than balloon.
@@ -69,7 +70,7 @@ export async function flushCounters(): Promise<void> {
 let timer: NodeJS.Timeout | null = null;
 export function startCounters(): void {
   if (timer) return;
-  timer = setInterval(() => { void flushCounters(); }, FLUSH_MS);
+  timer = setInterval(() => { if (!skipWriteSweep('counters')) void flushCounters(); }, FLUSH_MS);
   timer.unref?.();                            // never hold the process open for a counter
   // Flush on the way out so a normal restart does not discard the current window.
   for (const sig of ['SIGTERM', 'SIGINT'] as const) {

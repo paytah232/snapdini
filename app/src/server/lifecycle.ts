@@ -7,6 +7,7 @@ import { welcomeEmail, checkinEmail, surveyEmail, accountWelcomeEmail, activatio
 import { ensureHostReward } from './host-reward';
 import { optionalSendDecision, prefsUrlFor } from './email-prefs';
 import { guestSweep } from './guest-delivery';
+import { skipWriteSweep } from './readonly';
 
 // Customer lifecycle emails, run in-process on a timer (same shape as the retention sweep). Welcome
 // fires immediately from the Stripe webhook; check-in and survey are found by the sweep. Every send
@@ -251,8 +252,12 @@ async function sweep(): Promise<void> {
 export function startLifecycle(): void {
   if (!enabled()) { console.log('[lifecycle] disabled (set LIFECYCLE_EMAILS=1 to enable)'); return; }
   if (!email.enabled) { console.warn('[lifecycle] no email transport configured — sweep will no-op'); }
-  sweep().catch((e) => console.error('[lifecycle] sweep error:', (e as Error).message));
-  const timer = setInterval(() => sweep().catch((e) => console.error('[lifecycle] sweep error:', (e as Error).message)), SWEEP_MS);
+  if (!skipWriteSweep('lifecycle'))
+    sweep().catch((e) => console.error('[lifecycle] sweep error:', (e as Error).message));
+  const timer = setInterval(() => {
+    if (skipWriteSweep('lifecycle')) return;
+    void sweep().catch((e) => console.error('[lifecycle] sweep error:', (e as Error).message));
+  }, SWEEP_MS);
   timer.unref?.();
   console.log('[lifecycle] customer lifecycle emails ENABLED (15-min sweep)');
 }

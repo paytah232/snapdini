@@ -24,7 +24,7 @@
   // is about download behaviour, this one about whether an install prompt can exist at all.
   import { initInstall, canInstall, promptInstall, isStandalone, isIOS as isIOSInstall,
            askedAlready, markAsked } from '$lib/pwa';
-  import { getConfig } from '$lib/api';
+  import { ApiError, getConfig } from '$lib/api';
   import { applyEventTheme } from '$lib/theme';
   import { showToast, hideToast } from '$lib/toast';
   import { reportClientError } from '$lib/report';
@@ -2646,7 +2646,11 @@
         let d: { photosRemaining: number; error?: string } | null = null;
         try { d = JSON.parse(xhr.responseText); } catch { /* non-JSON */ }
         if (xhr.status >= 200 && xhr.status < 300 && d) resolve(d);
-        else reject(new Error(d?.error || `Upload failed (${xhr.status})`));
+        // ApiError, not Error: the STATUS is load-bearing now. A 503 from the read-only gate
+        // has to be told apart from a real failure, and it cannot be if the only trace of the
+        // code is inside a string. These paths use XHR rather than api(), so they have to
+        // construct it themselves — nothing upstream will do it for them.
+        else reject(new ApiError(d?.error || `Upload failed (${xhr.status})`, xhr.status));
       };
       xhr.onerror = () => reject(new Error('Network error'));
       xhr.ontimeout = () => reject(new Error('Upload timed out'));
@@ -2685,7 +2689,8 @@
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/photos/chunk');
       xhr.upload.onprogress = (e) => { if (e.lengthComputable) setProgress(e.loaded / e.total); };
-      xhr.onload = () => { (xhr.status >= 200 && xhr.status < 300) ? resolve() : reject(new Error(`Chunk ${index} failed (${xhr.status})`)); };
+      xhr.onload = () => { (xhr.status >= 200 && xhr.status < 300) ? resolve()
+        : reject(new ApiError(`Chunk ${index} failed (${xhr.status})`, xhr.status)); };
       xhr.onerror = () => reject(new Error('Network error'));
       xhr.send(form);
     });
@@ -2713,7 +2718,7 @@
       res = await complete();
     }
     const d = await res.json().catch(() => null);
-    if (!res.ok || !d) throw new Error((d && d.error) || `Upload failed (${res.status})`);
+    if (!res.ok || !d) throw new ApiError((d && d.error) || `Upload failed (${res.status})`, res.status);
     item.progress = 100; queue = queue;
     return d as { photosRemaining: number; photoId?: string };
   }
@@ -2849,6 +2854,21 @@
           ? "That's your roll — ask the host or top up below"
           : "That's your roll — no shots left");
         processQueue();
+        return;
+      }
+      /* PAUSED, not failed — the server is serving from a read-only replica while the other site
+         recovers. The banner at the top of the page already says so, in the one sentence that
+         matters ("your photos are safe, uploads are paused"), and a toast every twenty seconds
+         saying "Upload didn't go through" would argue with it — then autoRetry would restart the
+         cycle, so a guest shooting through a half-hour failover would be told their photos had
+         failed roughly a hundred times while the banner insisted they were fine.
+         So: no toast, no error state, and NOT counted against MAX_UPLOAD_RETRIES — giving up is
+         exactly wrong for a condition that ends on its own. The shot sits in the queue and goes up
+         when the database can take it, which is what the guest was promised. */
+      if (e instanceof ApiError && e.status === 503) {
+        item.status = 'pending'; item.error = undefined;
+        queue = queue; uploading = false;
+        setTimeout(() => processQueue(), 20_000);
         return;
       }
       item.retries = (item.retries || 0) + 1;

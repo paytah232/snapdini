@@ -192,6 +192,17 @@ export function getConfig(): Promise<AppConfig> {
   return _config;
 }
 
+/** getConfig, ignoring the memo.
+ *
+ *  getConfig() caches for the life of the page, which is right for everything in there that cannot
+ *  change under a running tab — except one thing that now can. `readOnly` flips when a standby is
+ *  promoted back to read-write, and a cached config would leave the recovery banner up on a site
+ *  that had already recovered. The banner polls this instead. */
+export function refreshConfig(): Promise<AppConfig> {
+  _config = api<AppConfig>('/api/config');
+  return _config;
+}
+
 export function getMe(): Promise<{ user: User | null; googleEnabled: boolean }> {
   return api('/api/auth/me');
 }

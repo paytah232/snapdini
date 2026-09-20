@@ -93,5 +93,17 @@ export async function run(sql: string, params: unknown[] = []) {
 // The baseline migration is idempotent (IF NOT EXISTS / guarded constraints), so it is a
 // safe no-op against the existing populated database and builds fresh ones from scratch.
 export async function init(): Promise<void> {
+  /* A streaming replica refuses every write, DDL included — so this is where the standby used to
+     die. `migrate()` threw PreventCommandIfReadOnly, initWithRetry correctly judged a migration
+     fault unfixable by waiting, and the container crash-looped without ever serving a page. It was
+     never a schema problem: there is simply nothing to apply. The replica's schema arrives through
+     replication, from the primary that ran these same migrations.
+     Asked directly rather than through readonly.ts, which imports THIS module — the check is one
+     query and duplicating it costs less than a cycle between the two. */
+  const row = await get<{ in_recovery: boolean }>('select pg_is_in_recovery() as in_recovery');
+  if (row?.in_recovery) {
+    console.log('[boot] database is a read-only replica — skipping migrations (the primary owns the schema)');
+    return;
+  }
   await migrate(db, { migrationsFolder: path.join(__dirname, 'drizzle') });
 }

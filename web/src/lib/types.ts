@@ -77,6 +77,10 @@ export interface AppConfig {
    *  button that fails. */
   photoDeleteWindowSeconds?: number;
   faceMatchingAvailable?: boolean;
+  /** This deployment is serving from a read-only replica: the site is up, photos are readable, and
+   *  nothing can be written until the database is promoted. Absent on older servers, so treat
+   *  undefined as false. */
+  readOnly?: boolean;
   emailEnabled: boolean;
   supportEmail: string | null;
   /** Cloudflare Turnstile public site key; null = bot check disabled. */

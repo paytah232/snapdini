@@ -6,6 +6,7 @@ import { button } from './email-theme';
 import { describeUsage, monthUsage, type MonthUsage } from './email-budget';
 import { escapeHtml } from './lib';
 import { maskAddress } from './unsubscribe';
+import { skipWriteSweep } from './readonly';
 
 // Operator (support@) notifications, separate from customer lifecycle emails. Two tiers:
 //   • Instant alerts for things that need attention now (unhappy survey, client-error spike).
@@ -236,8 +237,12 @@ async function opsSweep(): Promise<void> {
 export function startOps(): void {
   if (!enabled()) { console.log('[ops] operator notifications disabled (set OPS_NOTIFICATIONS=1 to enable)'); return; }
   if (!support()) { console.warn('[ops] OPS_NOTIFICATIONS on but SUPPORT_EMAIL unset — no digests will send'); }
-  opsSweep().catch((e) => console.error('[ops] sweep error:', (e as Error).message));
-  const timer = setInterval(() => opsSweep().catch((e) => console.error('[ops] sweep error:', (e as Error).message)), SWEEP_MS);
+  if (!skipWriteSweep('ops'))
+    opsSweep().catch((e) => console.error('[ops] sweep error:', (e as Error).message));
+  const timer = setInterval(() => {
+    if (skipWriteSweep('ops')) return;
+    void opsSweep().catch((e) => console.error('[ops] sweep error:', (e as Error).message));
+  }, SWEEP_MS);
   timer.unref?.();
   console.log('[ops] operator notifications ENABLED (daily digest + instant alerts)');
 }

@@ -24,6 +24,7 @@ import { MUSIC_DIR, probeHasAudioStream } from './slideshow';
 import authRoutes from './routes/auth';
 import eventsRoutes, { requireOrganizer } from './routes/events';
 import guestsRoutes, { mailgunWebhookHandler } from './routes/guests';
+import { startReadOnlyWatch, isReadOnly, blockedByReadOnly, READ_ONLY_BODY } from './readonly';
 import participantsRoutes from './routes/participants';
 import photosRoutes, { DELETE_WINDOW_SECONDS } from './routes/photos';
 import facesRoutes from './routes/faces';
@@ -96,6 +97,17 @@ app.use(express.json());
 // eight-hour retry ladder for traffic we simply rate-limited. The endpoint is not unprotected —
 // every request must carry a valid HMAC before it touches the database, and a forged one is
 // rejected at the top of the handler.
+/* Read-only gate. FIRST thing on /api, ahead of every route including the webhook below, because
+   on a replica there is no such thing as a write that "probably works" — Postgres refuses all of
+   them. Answering 503 + Retry-After turns a stack trace into a queue: the camera's upload queue
+   already backs off and resends, so a guest shooting through a failover keeps their photos and they
+   land when the site is writable again. Mailgun does the same with its webhook deliveries. */
+app.use('/api', (req, res, next) => {
+  if (!blockedByReadOnly(req.method, req.path)) return next();
+  res.set('Retry-After', '120');
+  return res.status(503).json(READ_ONLY_BODY);
+});
+
 app.post('/api/webhooks/mailgun', mailgunWebhookHandler);
 app.use(cookieParser());
 
@@ -218,8 +230,18 @@ const originOf = (u: unknown): string => {
   try { return new URL(raw).origin; } catch { return raw.slice(0, 40); }
 };
 app.post('/api/csp-report', cspReportLimiter,
-  express.json({ type: ['application/csp-report', 'application/reports+json', 'application/json'], limit: '16kb' }),
-  (req, res) => {
+  express.json({ type: ['application/csp-report', 'application/reports+json', 'application/json'], limit: '64kb' }),
+  // A payload over the cap threw, reached the error handler and came back 413 — which a browser
+  // treats as "try again later", so one Chrome sent the same oversized report seven times in
+  // twenty minutes and got seven 413s. Measured on production the day this shipped. 64kb because
+  // the Reporting API BATCHES: a report is small, a batch of them with a script-sample each is not,
+  // and 16kb was sized for one. Anything still over it is dropped HERE, quietly, with the 204 the
+  // rest of the endpoint gives — a report we cannot read is not worth a retry storm to refuse.
+  (err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    if (err && (err as { type?: string }).type === 'entity.too.large') return res.status(204).end();
+    return next(err);
+  },
+  (req: Request, res: Response) => {
     // Two shapes: the old `{"csp-report": {...}}` and the Reporting API's `[{ body: {...} }]`.
     const body = req.body as Record<string, unknown> | Array<Record<string, unknown>>;
     const reports = Array.isArray(body)
@@ -387,6 +409,9 @@ app.get('/api/config', (_req, res) => {
     // it was a hardcoded 60_000 beside a comment saying the server is the authority.
     photoDeleteWindowSeconds: DELETE_WINDOW_SECONDS,
     version: pkg.version,
+    // Serving from a replica: the client shows the recovery banner and stops offering to upload.
+    // Polled server-side, so this flips back on its own when the standby is promoted.
+    readOnly: isReadOnly(),
     videoMaxSeconds: parseInt(process.env.VIDEO_MAX_SECONDS || '0'),
     // Absolute ceiling for an uploaded clip. The event's own videoSeconds is a PRICE tier, not a
     // technical limit — over-length clips are kept (see photos.ts), so the client must not block on it.
@@ -517,12 +542,25 @@ app.use('/api/music', express.static(MUSIC_DIR, { immutable: true, maxAge: '7d' 
 
 // ── Error handler (must be last) ──────────────────────────────────────────────
 
+/** Aborted uploads since boot. See the note in the handler for why these are counted, not logged. */
+let abortedRequests = 0;
+
 app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
   if (res.headersSent) return next(err);
   if (err && err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'File too large' });
   if (err instanceof multer.MulterError) return res.status(400).json({ error: err.message });
   if (err && err.status) return res.status(err.status).json({ error: err.message }); // e.g. fileFilter rejections
   if (err && /only$/.test(err.message || '')) return res.status(400).json({ error: err.message });
+  /* A guest walking out of range mid-upload is not an error anybody can act on, and it is common:
+     26 of them in twelve hours across two live events, every one from a phone on mobile data. They
+     were logged at error level with a stack each, which buries the failures that DO mean something
+     — and the client resends the part anyway, so nothing is lost. Counted rather than silenced, so
+     a real change in the rate is still visible. */
+  if (err && (err.code === 'ECONNABORTED' || /request aborted/i.test(err.message || ''))) {
+    abortedRequests += 1;
+    if (abortedRequests % 50 === 0) console.log(`[upload] ${abortedRequests} requests aborted mid-body (client resends)`);
+    return res.status(499).end();   // nginx's own code for "client went away"; never reaches them
+  }
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Something went wrong' });
 });
@@ -628,6 +666,12 @@ async function initWithRetry(): Promise<void> {
 initWithRetry()
   .then(async () => {
     await ensureAdminFromEnv(); // bootstrap a site admin from ADMIN_EMAIL/ADMIN_PASSWORD (no-op if unset)
+    /* BEFORE the sweeps below, and that ordering is the whole point. Each of them runs once
+       immediately as well as on its interval, so with the watch started afterwards the mode was
+       still its default — not-read-only — at the exact moment they fired. On the standby that
+       produced three failed prunes in the boot log before the first poll had even happened.
+       Establishing the mode first also means it is known before the listener accepts a request. */
+    await startReadOnlyWatch();
     startCleanup(); // periodic retention sweep (deletes expired events + their files)
     startLifecycle(); // customer lifecycle emails (welcome/check-in/survey) — off unless LIFECYCLE_EMAILS=1
     startCounters();  // write-behind flush loop for gallery/referral counters

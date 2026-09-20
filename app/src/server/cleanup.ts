@@ -8,6 +8,7 @@ import { UPLOADS_DIR, uploadDiskPath, insideUploads, eventDir, INCOMING_DIR } fr
 import { playName, thumbName } from './images';
 import { purgeOldSlideshows } from './slideshow';
 import { pruneAnalytics } from './analytics';
+import { skipWriteSweep } from './readonly';
 
 const SWEEP_MS = 60 * 60 * 1000; // hourly
 const CLIENT_ERROR_TTL_MS = 30 * 24 * 60 * 60 * 1000; // keep diagnostic reports ~30 days
@@ -195,8 +196,9 @@ export async function sweep(): Promise<number> {
 // Start the periodic sweeper (and run once on boot).
 export function start() {
   const run = () => sweep().catch((err) => console.error('[sweeper] failed:', err.message));
-  run();
-  const timer = setInterval(run, SWEEP_MS);
+  // Guarded like the interval below: this fires on a replica too, and did.
+  if (!skipWriteSweep('cleanup')) run();
+  const timer = setInterval(() => { if (!skipWriteSweep('cleanup')) void run(); }, SWEEP_MS);
   timer.unref?.(); // don't keep the process alive just for the sweeper
   return timer;
 }

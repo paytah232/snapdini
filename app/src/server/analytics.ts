@@ -18,6 +18,7 @@ import crypto from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { db } from './db';
 import { redactPath } from '../../../shared/token-paths';
+import { skipWriteSweep } from './readonly';
 
 /** Every event the product may record. Anything else is dropped, silently and deliberately. */
 export const EVENT_NAMES = [
@@ -147,7 +148,7 @@ export async function flushAnalytics(): Promise<void> {
 let timer: NodeJS.Timeout | null = null;
 export function startAnalytics(): void {
   if (timer) return;
-  timer = setInterval(() => { void flushAnalytics(); }, FLUSH_MS);
+  timer = setInterval(() => { if (!skipWriteSweep('analytics')) void flushAnalytics(); }, FLUSH_MS);
   timer.unref?.();
   for (const sig of ['SIGTERM', 'SIGINT'] as const) {
     process.once(sig, () => { void flushAnalytics(); });
