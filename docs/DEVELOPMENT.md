@@ -1894,6 +1894,443 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
   it. That is what the nginx section of `UPGRADING.md` is for — when you change this file, say so
   there.
 
+- **Canvas transforms apply in the REVERSE of the order they are written, and a reflection
+  ANTI-COMMUTES with a rotation.** The shutter in `Camera.svelte` now turns the frame upright before
+  it encodes, because that is the last moment the information exists: with the phone's rotation lock
+  on, turning the handset turns the camera and leaves the page where it was, so the scene is written
+  into the file lying on its side — and a canvas capture carries no EXIF, so there is nothing a
+  viewer could honour afterwards. The angle is `-glyphRotation()`, the quantity the HUD glyphs
+  already trust, negated because the picture turns WITH the phone; it is zero whenever auto-rotate
+  has already turned the layout, which is the case that must not be turned twice. The trap is the
+  front camera. The mirror was written *after* the rotation with a confident comment explaining why
+  that was correct — the mechanics in it were right and the conclusion was wrong, because a mirror
+  does not commute with a rotation, it anti-commutes: `R(t)·mirror` equals `mirror·R(-t)`. Mirroring
+  in frame space and then turning sends the picture the opposite way round the clock, so every
+  sideways selfie came out a half turn from where the rear camera lands on the same angle. The
+  mirror is therefore written FIRST, so that it is applied LAST, in output space. Only the quarter
+  turns were affected, which is every turn a phone actually reports. Two smaller things in the same
+  block: the canvas width and height SWAP on a quarter turn (every shape on offer is square today,
+  so it is a no-op — and the first non-square one would otherwise crop to a box of the wrong
+  proportions), and `captureRotation.test.ts` pins both the minus sign and the order, because
+  losing either breaks nothing visible at the shutter and lands every corrected photo wrong.
+
+- **`-display_rotation` REPLACES the display matrix rather than adding to it, and its sign is the
+  opposite of ours.** A clip cannot be straightened at the shutter — MediaRecorder writes whatever
+  the camera hands it, and putting a canvas in that path means a second encoder on a phone already
+  struggling with the first — so the correction happens server-side, losslessly, by writing a header
+  value with `-c copy`. `rotateClipTo()` in `app/src/server/images.ts` owns it, and everything in it
+  was measured against real files rather than read off the documentation:
+  - The sign flips exactly once, here. The project's convention is CLOCKWISE-positive end to end
+    (sharp's `.rotate(n)` already is, so the still path needs no translation); `-display_rotation`
+    documents itself as counter-clockwise, and ffprobe reports the matrix the same way. Measured:
+    `-display_rotation -90` on a clip with red down its left edge plays with red on top and probes
+    back as `rotation=-90`.
+  - It replaces. Applying `-display_rotation -90` twice leaves the matrix at -90, not -180 — which
+    is why the source is PROBED first and the total is written. A clip already carrying a phone's
+    own rotation (iOS writes -90 routinely) would otherwise have it silently discarded, and the
+    correction would look like it had made things worse.
+  - The result is probed back and compared in ONE window. `probeClip` normalises into `[0, 360)` and
+    `normalizeTurn` into `(-180, 180]`; compare across the two and 270 reads as a mismatch against
+    -90, so every successful rotation is thrown away. A container that did not keep the matrix (not
+    every muxer has an equivalent header) returns false, and false means "nothing was published" —
+    the caller keeps the original rather than leaving a file that looks written and plays exactly as
+    wrong as it did before.
+
+- **Rotating a stored photo RENAMES it, and that is the whole caching strategy.** `/uploads` is
+  served `immutable, max-age=365d` on the promise that a uuid filename addresses one set of bytes
+  for ever, and everything downstream has taken that promise — a browser will not so much as
+  revalidate an immutable response, and the edge is caching these too. So rewriting the bytes under
+  the same name fixes the photo for nobody except someone with an empty cache: the host presses
+  rotate, sees nothing change, and presses it again. A `?v=2` query would beat the browser, but it
+  would have to be appended by every place that builds a media URL (the gallery, the share payload,
+  the host's review feed) and the one that got missed would serve stale bytes for a year. A new name
+  needs none of that, because `photos.filename` is the single place the name lives and every derived
+  name is computed from it. What that costs, all of it load-bearing:
+  - **The old names are deleted PAIRED, not listed.** Each old name goes only once the file that
+    REPLACED it is on the disk. The unpaired delete this replaced is how one failed sibling became
+    permanent data loss: it removed the old `_crop.mp4` whether or not a new one existed, and
+    nothing in the product ever rebuilds one. Litter is recoverable; the only copy of a file is not.
+  - **A clip's siblings are all-or-nothing.** Best-effort reads perfectly well until you follow it
+    to the bottom of the handler where the old names are removed regardless. Giving up costs the
+    host a retry and leaves every file as it was.
+  - **The guarded UPDATE carries the filename we started from** (`WHERE id = ? AND filename = ?`),
+    so two rotations racing cannot both claim the same source — the loser bins its own output and
+    answers 409. The same guard is why `DELETE /api/photos/:id` now RETURNS the filename and unlinks
+    *that* rather than the name it read a few lines earlier: a rotation committing in between would
+    otherwise leave the rotated file behind as an orphan.
+  - **A clip whose derived copies are still being built answers 409, not a wait and not a rebuild.**
+    See the next entry.
+  - The reply carries the new urls, the swapped dimensions and `shotSideways` as a REAL boolean (the
+    gallery row omits that field when false, so a client merging a refetch has nothing to overwrite
+    a stale `true` with). Both callers merge it rather than refetching — the row they hold now names
+    a file that 404s, which is a broken tile rather than a stale one. The gallery additionally
+    bypasses its own shared cache for a window afterwards, through one `skipCache` flag read by
+    every load: it was wired on the reload after the press and not on the poll or the paging, so
+    changing the sort inside that window went back to the cache and was handed rows naming a file
+    the rotation had already unlinked.
+
+- **An upload keeps growing files for MINUTES after the guest has been told "done", so anything that
+  moves its base name has to ask first.** The crop, the poster cut from it, the playback proxy and
+  the full-resolution `_dl` re-encode are all `void` promises queued behind one global video slot.
+  A rename landing in the middle of that leaves the still-running job writing `<oldbase>_crop.mp4`
+  under a name no row points at, while the base the row now carries has no crop, no download copy
+  and nothing that will ever build them — the guest's chosen shape silently reverts to full frame,
+  for good, with no error anywhere. So the jobs declare themselves (`whileDeriving`) and the mover
+  asks (`isDeriving`), and the rotate route answers **409** rather than waiting on an ffmpeg queue
+  or starting a second copy of the pipeline that is racing the first for the same output names.
+  Three things about that register are deliberate: it COUNTS rather than flags (one upload starts
+  two independent chains and it is the last to finish that decides when the name is safe), it is
+  keyed on the resolved path of the ORIGINAL (the one name every derived file is computed from), and
+  it lives IN PROCESS — a restart that forgets it has already killed the work it described, so there
+  is nothing to expire and nothing to reconcile. The honest limit is that two app containers against
+  one uploads volume would not see each other's work; the deployment is a single app process, and a
+  shared marker would need a table, a lease and an expiry to answer a question only ever asked about
+  work this process started.
+  - **`derivedNames()` is the ONE list of everything derived from an upload, and the original is
+    deliberately not in it.** There were two hand-kept lists — the delete route's and the rotate
+    route's — and when they disagree the failure is silent: an orphaned `_dl.mp4` nobody sees, or a
+    gallery still serving a crop cut from the pre-rotation clip. The thumbnails of the derived clips
+    are in it and are not over-caution: `backfillThumbnails` walks the event folder on every boot
+    and posters anything that is a video with no sibling `_thumb`, so `<id>_play_thumb.webp` is a
+    real file the delete route's old list did not know about. Add a derived file anywhere in
+    `images.ts` and it belongs in that list the same day.
+  - **The capture turn is applied LAST, after every other derivation.** The crop, its poster and the
+    proxy are each cut from the original and each carries a display matrix of its own; a rotated
+    original beside an unrotated playback copy is worse than leaving the lot alone, because the
+    gallery would then play one orientation and download the other. It is registered with
+    `whileDeriving` synchronously at the call, not inside the promise — the register must never fall
+    to zero between the copies finishing and this starting, or the rotate route sees a settled clip
+    and renames a base that is about to be rewritten. It is not awaited and its failure is not the
+    upload's: when it fails, `capture_rotation` stays NULL against a non-zero `capture_turn`, which
+    is exactly the state the badge exists to show, so the clip surfaces in review and a host finishes
+    the job by hand.
+
+- **The "shot sideways" mark was derived from `capture_orientation`, which cannot answer the
+  question it was being asked.** That column says 'landscape' for two situations that share nothing
+  but the word: auto-rotate on, where the page turned with the phone and the pixels are fine; and
+  rotation locked, where the page did not move and the pixels are on their side. The mark fired on
+  both, so it pointed at correctly-captured shots — it was reported against a clip that had come out
+  perfectly — and a to-do list that points at work nobody needs to do is one nobody works through.
+  It now keys on `capture_turn` (measured, 0069) AND on `capture_rotation` being zero (what has
+  since been baked in, 0067): measurably turned, and not yet dealt with. Consequences worth knowing:
+  - **`capture_orientation` stays and is no longer read by this derivation.** It is the historical
+    record of how the phone was held, and the only thing that can still find the pre-existing
+    sideways shots by hand.
+  - **Neither new column is backfilled, so the mark went quiet across the whole of production at
+    once** — including the handful of genuinely sideways photos it had ever fired on. That was the
+    owner's call, and it buys the rule one honest meaning: the alternative was a grandfather clause
+    falling back to `capture_orientation` for old rows, which would have kept those badged at the
+    price of reinstating the false positive for every landscape row uploaded since, and of leaving
+    two rules in the product for one question.
+  - **0 and NULL are different facts, and there are two validators because of it.** `readQuarter`
+    guards a rotate REQUEST and refuses 0 (it is not a turn, and honouring it would rewrite the file
+    and evict every cached copy to achieve nothing). `readTurn` guards a MEASUREMENT, where 0 — the
+    phone was square with the page — is the commonest real answer and the thing that tells the badge
+    a landscape shot needs no mark. `readTurn` also checks for the blank string, because `Number('')`
+    is 0 and 0 is a value it ACCEPTS: a field appended empty would otherwise read back as a
+    measurement rather than as no measurement. The same distinction survives on the wire only
+    because the client appends it with `!== undefined` rather than a truthiness test — dropped as
+    falsy, a measured zero arrived as NULL on the path most photos take.
+  - **`captureRotation` is never written for a clip at insert, whatever the wire says.** The camera
+    can only bake a rotation into pixels it drew itself, and it draws only stills; a video arriving
+    with it set is a client claiming work it cannot have done, and believing it would take the mark
+    off a clip that is still on its side.
+  - **The mark is now opt-in per surface** (`showSideways` on `PhotoCard`), and only the review
+    screen turns it on. It answers a question only the host asks; a guest cannot act on it, did not
+    ask, and can simply turn the photo if they want to.
+  - One more trap from the same work, pinned by `captureRotation.test.ts`: `enqueue()` spreads its
+    `extra` argument straight onto the queue item, so a key that is not also a `QueueItem` field
+    type-checks at the call site, is stored under a name nothing reads, and is dropped. `rotation`
+    against `captureRotation` did exactly that — it compiled, it built, it uploaded, and the
+    rotation never left the phone.
+
+- **`takenAt` is when the upload LANDED, and redefining it was not on the table.** It is what the
+  guest's 30-second delete window and their roll's ordering have always been measured against, so
+  quietly moving it would shorten somebody's window to undo a photo that took a while to go up.
+  `captured_at` (0070) is the honest answer to a different question, recorded beside it — and it had
+  to exist, because "was this taken during the event?" was unanswerable: a shot taken inside the
+  window and uploaded a minute after it closed looked identical to one taken afterwards, and was
+  refused. Six were, at one hen do, eighteen minutes past the end, by a single phone draining its
+  queue over a bad connection. The rule that replaced it lives in two small pure functions in
+  `routes/photos.ts` so it can be tested at the boundaries:
+  - **A client clock is advisory, never evidence.** `capturedAtFor()` honours a claim only when it
+    is plausible — a real number, not more than five minutes into the future (phones drift, and a
+    handset two minutes fast must not have its shots read as "taken after the end"), and not before
+    the event began. Anything else falls back to the server's own clock, which is what this did
+    before the field existed.
+  - **Both halves of `lateUploadAllowed()` are the point.** Taken inside the window, because whether
+    a photograph belongs to an event is settled by when the shutter went and not by whether the
+    network cooperated before a deadline; AND still inside the grace, because without that the event
+    never actually closes and a phone found in a drawer next year could post into a stranger's
+    gallery. The grace is 24 hours and it is a grace period for the NETWORK rather than for the
+    event — a phone that goes flat at a wedding and is charged overnight is the same story as the
+    hen do with a longer gap. A shot taken AFTER the end is still refused immediately, exactly as it
+    always was.
+
+- **A camera that goes on working after the event has ended is worse than one that says so.**
+  `isExpired` was read once, on the way in, with a comment saying mid-session expiry is left alone
+  on purpose because nobody should be yanked out of the camera while they are using it. That
+  reasoning still stands; the mistake was concluding that therefore nothing should happen. What
+  happened instead was that the shutter went on taking photographs and every one of them failed to
+  upload with an error the guest could do nothing about. Now the camera re-checks the event on a
+  slow tick, and when it has ended (or been locked) the shutter closes and says why — and that is
+  all it does. Nothing navigates, the gallery and the roll and the queue stay reachable, and a
+  RECORDING IN PROGRESS IS NEVER CUT OFF: only *starting* a new clip is refused, because stopping
+  one mid-take destroys it. Three details that are easy to get wrong:
+  - **The check only ever CLOSES the shutter, never reopens it.** A host extending an event
+    mid-party is a happy path a reload covers; turning the shutter back on under somebody's thumb is
+    its own kind of yanking.
+  - **The clock is only assigned inside the countdown window.** Every assignment re-renders a screen
+    with live video on it, and a phone at a party has better things to do sixty times a minute.
+  - **It warns first.** A countdown over the last five minutes is the only part of this a guest can
+    act on: it is the difference between "get one more of everyone" and finding out afterwards that
+    the shutter had quietly stopped counting. The notice sits in the flow ABOVE the control bar
+    rather than floating over the picture, and it is a standing notice rather than a toast, because
+    a guest who looks up thirty seconds later still has to be told why the button stopped working.
+
+- **iOS grants DeviceOrientation only from inside a user gesture, and remembering the guest took the
+  gesture away.** Tilt permission was requested on the Join tap. Once the app started restoring a
+  guest's session, a returning guest landed straight on the camera and that tap never happened — so
+  on iOS their tilt was dead for the rest of the event. It showed in the data: one guest's shots
+  recorded 'portrait' and 'landscape' early on and nothing but NULL from the moment they came back.
+  That used to cost only the upright HUD glyphs; now that the shutter turns the photo with the
+  phone it costs the correction itself. So the camera catches its own first `pointerdown` instead,
+  once, and only when the hardware has told us nothing at all — a phone already reporting is never
+  prompted and nobody who answered at Join is asked twice.
+
+- **The read-only lock on somebody else's event is ACCIDENT PREVENTION, NOT ACCESS CONTROL.** Say it
+  in that order, because everything else about it follows. A site admin can open any customer's
+  event and drive it exactly as the host would, and the manager is pixel-for-pixel the screen a host
+  sees of their own event while half its controls save on the change event — one stray tap during
+  somebody's reception turns moderation on, downloads off, or face matching on for guests who never
+  agreed to it, with no confirm and no undo. So the page renders read-only until the operator
+  presses **Take control**, behind one confirm. All of it runs in the browser, the server authorises
+  the same account for the same writes with or without it, and devtools gets past the lot in four
+  seconds: `$lib/adminGuard.ts` carries the long version, and a bypass is a UX bug rather than a
+  hole. The boundary is `requireAdmin`/`requireOrganizer` on the server. What is worth keeping:
+  - **Ownership is three states, not a boolean.** `unknown` is a real answer — an older API, a
+    failed fetch and a reply still in flight all arrive the same way — and `isGuarded` is written
+    `!== 'yours'` so an unanswered check holds the page read-only until it is answered. Write down
+    both mistakes and the direction is obvious: guarding your own event costs one press of Take
+    control, and not guarding a customer's costs a changed setting on a live wedding.
+  - **`youManage` is on the PUBLIC event payload and not on the admin one.** The manager gets it for
+    free (it already fetches the public event for its organizer-code wall); the review screen has no
+    wall to ride along on and asks for it itself, best-effort, fired before the admin payload is
+    awaited so the guard settles as early as it can.
+  - **`sessionStorage`, keyed by join code.** Taking control has to survive the things that happen
+    while you actually work — a reload, the 30-second refresh, opening review and coming back — or
+    the prompt becomes noise and gets clicked through on reflex. It must NOT survive the tab:
+    `localStorage` would mean an operator who unlocked a customer's event in March is still unlocked
+    in it in July, on a screen that looks like their own. The key is also what makes the manager and
+    the review screen ONE decision rather than two, with nothing passed between the routes.
+  - **Every refusal is said out loud.** A press that does nothing is indistinguishable from a broken
+    page. Controls are `disabled` as well, so the toast path should be unreachable from a mouse — it
+    is there for a keyboard press on a control that was live when focus landed, for a handler
+    reached through a child component's own event, and for the next control somebody forgets to
+    gate. Two shapes are special: a `Toggle` is bound to its own checkbox and has already moved on
+    screen by the time the handler runs, so the switch is put BACK before the refusal; and
+    `deleteComment` THROWS rather than toasting, because its callers read a clean return as "the
+    server removed it" and strike the line out of a list.
+  - **Lock the door where a room auto-saves.** The poster designer, the setup wizard and the image
+    editor all write as you go, so there is no version of them that is safe to open read-only; the
+    entry points refuse instead, which also means nothing had to be plumbed through five modal
+    components. The opposite call was made for `SlideshowPanel`, which was withdrawn entirely behind
+    `{#if locked}` and took the LIST of existing renders — a read, and usually the thing the
+    operator was asked about — away with it. It has its own `readOnly` now.
+  - **Shared components carry the guard themselves, because a route can only gate what it can
+    reach.** `GuestList` shadows its own `dispatch` so that six mutations (and the seventh somebody
+    adds) cannot leave the component; `ShareModal` refuses inside `save()` rather than relying on
+    the one caller that happened to be guarded; `PhotoCard` takes `readOnly` so double-tap-to-
+    favourite is dead BEFORE the star blooms — the write was already refused, but the card had
+    drawn itself favourited by the time the refusal landed, which reads as "it worked, and then it
+    un-worked". `adminLock.test.ts`, `reviewLock.test.ts` and `componentLock.test.ts` sweep the
+    markup for coverage, which is the thing that will actually break here: somebody adds a control
+    next spring, wires it to something destructive, and nothing in a diff or a screenshot says it is
+    the one thing still reachable while the bar says READ-ONLY.
+
+- **The operator's action log records ONE thing — a site admin acting on an event they neither own
+  nor co-host — and it has no revert, deliberately.** `app/src/server/admin-actions.ts` is the only
+  writer; 0068 is the design. It is wired PER ROUTE — a write with no `recordAdminAction()` call
+  beside it is simply not in the log, and the covered set is the `action` verbs in `routes/events.ts`
+  and `routes/photos.ts` (settings, gallery-link, theme, reveal, lock, event delete, highlight,
+  moderate, caption, rotate, photo delete, comment delete, cohost delete, participant delete and
+  card). Add a destructive route and it is not covered until somebody adds the call. The filter is
+  the feature: a log that also collected routine work would be mostly routine work, and the entry
+  that mattered would be on page forty. The rest:
+  - **There is no revert endpoint and there must not be one.** Undoing an old entry means merging it
+    against everything the host has done since, on settings nobody is watching, and a merge that
+    guesses wrong is worse than the original mistake. The before-value IS the remedy — the operator
+    reads it and puts it back through the same control the host uses, which is the path that already
+    carries the confirms and the validation. That is why the UI renders it selectable and copyable.
+  - **`recordAdminAction()` can never fail the thing it is logging.** A customer's settings save may
+    not 500 because an audit row would not insert; every path is inside one catch, the failure goes
+    to the console, and the returned promise never rejects.
+  - **Call it AFTER the write, except for deletions.** The entry has to name the event, and after
+    `DELETE FROM events` there is nothing left to read. A log line for a delete that then failed is
+    a false line a person reads; the reverse is a customer's event gone with nothing to say who did
+    it.
+  - **`changedOnly()` considers only the keys present in `after`.** That is what makes the call
+    sites one line: `before` is free to be the whole event row — which every settings handler has to
+    hand — and `after` is the patch that was just written, so a field added to a settings save
+    starts being logged the day it is added rather than the day somebody remembers there are two
+    places to edit. An empty diff writes NO ROW, which is what keeps a form re-save out of the log.
+    It is also why `PUT /settings` hoists its patch object out of the `.set()` call, and why the
+    guest-permission switches are covered for free (each one PUTs that route with a single key).
+  - **Two handlers read before they write** (`/highlights` and `/moderate`), because `UPDATE …
+    RETURNING` can only hand back the value just set. For moderation that is the point of the
+    feature: a rejected photo is restorable by hand, but only by somebody who knows which of the
+    batch were pending and which were already approved before an operator swept the queue.
+  - **Who and which-event are DENORMALISED and there is no foreign key on `event_id`.** A join to
+    `users` tells the truth until an operator account is renamed or removed, at which point the log
+    says a deleted id did something to a customer's wedding. And `event.delete` is one of the
+    recorded actions, so a cascade would erase the entry for the most destructive thing an operator
+    can do at the exact moment it was written. The read endpoint LEFT JOINs events purely so the UI
+    can tell a live event from a deleted one.
+  - **The whole listing sorts `at DESC, id DESC`.** `at` is milliseconds and an operator flipping
+    three switches in one second gives Postgres a tie it may break differently per query — under
+    LIMIT/OFFSET that means consecutive pages overlap, showing one row twice and another never. The
+    same defect, and the same fix, as the user and survey listings.
+  - **The web side reads every field through a list of candidate names** (`normalizeAdminAction` in
+    `web/src/lib/events.ts`) and nothing throws on a missing one. This is the screen somebody opens
+    when something has already gone wrong; a log that renders four of its six columns is useful, one
+    that white-screens because a field was renamed is not.
+
+- **A demo event's purge instant is its EXPIRY, and `purgeAtFor` must not be asked about one.**
+  `purgeAtFor` leans long on purpose, because for a real event every wrong answer costs somebody
+  their photos. A demo is created with `purgeAt == expiresAt` so it cleans itself up about three
+  hours after somebody pokes at it — which is the entire reason an unowned, fully-entitled event is
+  allowed to sit on the public site. Handing a demo to `purgeAtFor` therefore pushed its purge out
+  by the full retention window, so ANY settings save (including one the demo's own guided setup
+  makes) quietly promoted a throwaway into a month-long event, and they accumulated, because nothing
+  else ever shortens a purge. `purgeAtForEvent()` in `app/src/server/lib.ts` is that caller's
+  question and is kept out of `purgeAtFor` itself, which takes two numbers and knows nothing about
+  owners or names. A real event is untouched: rescheduling still moves the purge, and a paid
+  retention extension is still honoured. `isDemoEvent` needs BOTH no owner and the demo's exact
+  name, so the tests import `DEMO_NAME` rather than retyping it — a fixture with a plausible-looking
+  name is classed as a real event and asserts nothing.
+
+- **A `body` background only reaches the page canvas while `html` has none.** `app.html` paints
+  `html` with a hard-coded colour so the first frame is not white, and the side effect is that
+  `body` then covers its own box and nothing more — so any page shorter than the viewport showed the
+  fallback black under a themed page, most visibly on admin tabs with little content. The fix is one
+  rule, and its selector is not redundant: `html, html[data-theme] { background: var(--bg); }`.
+  `app.html` ships `html[data-theme="light"]`, which out-specifies a bare `html` rule, so a bare
+  rule loses in light mode; matching the specificity and arriving later in the cascade wins in both.
+
+- **A preview by CSS transform never changes a layout box, which is the cheap part and the bug.** A
+  landscape photo stood on its end is as tall as it used to be wide, so it hangs out of a box sized
+  for the other orientation — and because a transform also creates a stacking context, the overflow
+  paints OVER the action row beneath it rather than behind it (the host's report was that the photo
+  "appears above the rest of the page"). `web/src/lib/rotatePreview.ts` shrinks a quarter-turned
+  picture by the short side over the long one, which puts it back inside the box it started in with
+  no measurement of the container, no resize listener and no second layout pass; a 3:2 shot previews
+  at two thirds, which is the right trade for something on screen for a few seconds on the way to
+  Save. Measured off the ELEMENT's own box, not `photo.width`/`height` — those are optional, and a
+  clip carrying a display matrix reports the dimensions it was STORED at, not the ones it draws.
+  Both containers also `overflow: hidden`, because the scale depends on a measurement and a
+  measurement taken before the media has loaded reads zero: the worst case should be a briefly
+  cropped preview rather than a photo painted over the buttons. It lived inside `Lightbox.svelte`
+  until the review screen grew the same control and the same bug.
+
+- **A control that grows when you press it moves the thing you were about to press next.**
+  `RotateControl.svelte` began as three buttons — ↻ Rotate on its own, with Save and Cancel
+  appearing beside it the moment a turn was pending — so one press ADDED two controls to the row and
+  pushed Download, Share and Reject somewhere else at the exact moment the host was reaching for
+  one. It is now ONE slot, sized by the wider of its two faces, swapping what is inside it: at rest
+  `[↺][↻ Rotate]`, pending `[↺][↻][✓][✕]`, same footprint. Both faces stay in the layout — that is
+  the mechanism — hidden with `visibility` rather than `display: none`, because collapsing is the
+  bug; and the hidden one is taken out of the tab order and the accessibility tree in the markup as
+  well, so a stylesheet that failed to arrive leaves an inert control rather than an invisible
+  tabbable one. Which face shows is derived from `pending` and nothing else: there is no "is the
+  control open" state to get stuck open on a photograph the host has paged away from, and with
+  nothing pending there is no Save to press, so a full circle can never be posted. The same family
+  of rule as the armed bin in the poster designer, and the reason turn-LEFT is offered at rest
+  rather than only once something is pending: anticlockwise was three presses of ↻, and a left
+  arrow that appears only after you have gone the wrong way would still be three.
+
+- **`svh`, not `dvh`, for anything a picture is sized against.** `dvh` tracks the DYNAMIC viewport,
+  which on a phone means it changes as the browser's own chrome slides away: scroll a few pixels,
+  the URL bar collapses, every `dvh` gets bigger and the media box grows with it — so a portrait
+  shot that started short of the screen edges suddenly reaches them. That is why it was only ever
+  reported on phones. `svh` is the SMALL viewport, the size with the chrome showing, which is a
+  fixed number for the life of the page: slightly less room at the top of a scroll, and the picture
+  never moves. `lvh` is the other stable choice and the wrong one — it assumes the chrome is gone,
+  so the action row below starts life pushed off the bottom of the screen. Inside a `position:
+  fixed; inset: 0` overlay, percentages are better still: 100% IS the viewport and does not move
+  under a collapsing URL bar.
+
+- **`1fr` is `minmax(auto, 1fr)`, so `min-width: 0` on a grid item is not a tidying-up.** It
+  overrides the track's automatic minimum and tells it that it may shrink to nothing — while the
+  controls inside it (`flex-shrink: 0`, `white-space: nowrap`) refuse to shrink with it, and with
+  `justify-content: flex-end` a right-hand group that outgrows its box overflows LEFTWARD. That is
+  how a row of buttons came to be printed over a centred event name. Grid tracks never overlap; the
+  content spilling out of one of them does. With the automatic minimum restored the algorithm is
+  right at every width without a breakpoint (css-grid-1 §12.7: an `fr` track whose base size exceeds
+  its equal share is taken out of the flex distribution and keeps that base size), so the controls
+  always get the room they need and the name ellipsises into what is left. Note the direct
+  contradiction with `SiteNav`, where both sides DO carry `min-width: 0` — there the children can
+  shrink, and without it a `nowrap` row ran past the viewport. The rule is not "always" or "never":
+  it is whether the thing inside the track can give way.
+
+- **Client-error reports group on a SERVER-COMPUTED fingerprint, and never on the stack.** Fifty
+  production rows were eleven distinct problems: twelve consecutive lines of one camera permission
+  failure, eight of the next, and the six upload failures that may have cost somebody their photos
+  below the fold. A queue that takes that long to scroll is one nobody scrolls, which is the only
+  failure mode a diagnostic screen really has. `fingerprintOf()` in `routes/clienterror.ts` keys on
+  `context|normalised message`, and the parts are worth reading before changing:
+  - **Not the stack.** Minified frame names change with every build, so stack-keyed groups split in
+    half at each deploy — precisely when the operator is asking whether the thing is still
+    happening.
+  - **Each normalisation step is there because a real message needed it** — whitespace (Safari and
+    Chrome wrap a browser's own error text in different places), uuids, and runs of THREE OR MORE
+    digits only — byte counts, durations, timestamps and request ids, which are one defect wearing
+    fifty faces, while a short number is more often part of what makes two failures different. Case
+    is deliberately not normalised, and neither is anything inside parentheses.
+  - **Stored at insert, not computed at query time.** The rule for "the same error" is not equality,
+    so it belongs in TypeScript where it has unit tests against real production strings rather than
+    in a `regexp_replace` nobody can run in isolation; and a stored key means sharpening the rule
+    later re-groups NEW reports and leaves history where the operator last saw it.
+  - **Never accepted from the client.** A client that could choose its own fingerprint could merge
+    its reports into somebody else's group, or split one defect into a thousand groups and push
+    everything else off the screen — on a public unauthenticated endpoint that is a denial of the
+    only diagnostic view there is.
+  - **`COALESCE(fingerprint, 'id:' || id)` in the read is a guard, not a fallback.** `GROUP BY`
+    collapses NULLs TOGETHER, so a path that forgot the column would not produce ungrouped rows — it
+    would produce one enormous group containing every unrelated error in the system.
+  - **The occurrence sample is window-functioned PER GROUP.** A flat "newest 300 overall" is not the
+    same fetch: one noisy group fills the budget and every other group opens on nothing.
+  - **Resolving a group sends what it means instead of toggling.** A group is routinely mixed —
+    resolved last week, recurred this morning — so there is no single value to negate; toggling off
+    the representative row flips the whole group to whatever the newest report happened not to be,
+    and eleven of twelve reopen. The route still takes an ID because a fingerprint can contain any
+    character a browser's error text can and has no business in a path segment.
+  - **A group reopens by itself.** `handled` is derived as "nothing in it is still open", so a new
+    report puts a resolved group back at the top with nobody having to notice.
+  - **The guest is stored as an ID and the name is JOINED at read time.** Deleting a guest — a
+    retention purge, or an erasure request — takes their name off this screen with it, because this
+    is the only place it comes from. The client never sends an identity at all: it sends the session
+    token it already carries in a header and the server exchanges it, because a bearer credential
+    must not come to rest in a diagnostic log a human reads. Two version columns rather than one,
+    because an installed PWA can sit on a cached bundle for days and a disagreement between the
+    server's deployed version and the tab's build id is itself the finding.
+
+- **One site-admin link and one site-admin bar, for the reason there is one `DownloadIcon`.** Svelte
+  scopes CSS to the file that declares it, so a look that is needed on a second surface can only get
+  there by being copied — and a copied look drifts. The way back to the console existed twice and
+  did not match: a red pill on the event manager and a plain ghost button on the dashboard, one
+  click apart. The red bar was declared in the console's own stylesheet, so the manager and the
+  review screen would each have needed forty lines of colour kept in step by hand — for the one
+  element in the product whose whole job is to be instantly recognisable, where "nearly the right
+  red" reads as decoration rather than as a warning. `SiteAdminLink.svelte` and `AdminBanner.svelte`
+  are those two. Two lessons from extracting the bar: what a caller needs to vary becomes a PROP
+  (`sticky`, `top`, `flush`, `bind:height`) rather than a `:global` rule reaching in from outside —
+  a `:global` rule is scoped to nothing, so it reaches every copy of the bar in the app, which is
+  the drift the component was extracted to prevent; and a default that is really an assumption
+  should be written down as one (`top` defaulted to the site nav's height, which is wrong on the one
+  route that has no site nav, and that route had to wrap the bar in a sticky `<div>` of its own to
+  get it to the top — a fiddly thing to work out from scratch, since a `position: sticky` child can
+  only travel inside its parent's box).
+
 ## Releasing (maintainers)
 
 **Before deploying, presence-test the target `.env`.** `__tests__/compose-env.test.ts` asserts that

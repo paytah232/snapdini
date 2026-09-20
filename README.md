@@ -39,7 +39,10 @@ open-source, and self-hostable.**
   think before they press the shutter, which is the whole reason disposable cameras are back.
 - **A real camera in the browser.** Tap-to-focus, flash, lens picker, photo shapes, and optional
   video clips. Photos are saved on the device first and uploaded one at a time, so a bad venue wifi
-  queues rather than loses.
+  queues rather than loses — and a queue still draining after the event has ended is still accepted,
+  because a photo belongs to the event it was taken at. A phone turned sideways with rotation lock
+  on writes the picture on its side, so the shutter straightens it as it takes it; clips are turned
+  server-side without re-encoding them, and anything older can be rotated by hand.
 - **A reveal you choose.** Instantly as photos land, when the event ends (after a delay or at an
   exact moment you pick), or manually when you press the button. Optional moderation holds every
   photo until you approve it.

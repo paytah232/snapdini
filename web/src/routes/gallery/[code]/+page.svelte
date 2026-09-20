@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
-  import { getEvent, getGalleryPhotos, getMe, setHeart, getHearts, type Photo, type PublicEvent } from '$lib/events';
+  import { getEvent, getGalleryPhotos, getMe, setHeart, getHearts,
+           type Photo, type PhotoRotation, type PublicEvent } from '$lib/events';
   import { getSession } from '$lib/session';
   import FaceFinder from '$lib/components/FaceFinder.svelte';
   import GuestFeedback from '$lib/components/GuestFeedback.svelte';
@@ -39,6 +40,8 @@
 
   let revealed = false;
   let revealMode = '';
+  /** The host is the only one who can open this. See awaitingHost on the event payload. */
+  let awaitingHost = false;
   let revealAt: number | null = null;
   // "Just revealed" = within 48h of the gallery unlocking. That window is the reveal moment for an
   // at_end/manual event, when guests come back and see everything at once.
@@ -66,6 +69,14 @@
   // offered only to someone holding a participant session for THIS event (same localStorage key
   // the camera writes); a stranger with the link gets nothing to enrol into.
   let guestToken = '';
+  /** Which participant this viewer is, when they are one.
+   *
+   *  The gallery payload cannot tell us: it is cached PUBLICLY (see gallery-cache.test.ts), so the
+   *  server strips `isOwn` from every row rather than let one guest's view of the album be served
+   *  to the next person who asks. Every row does carry its participantId though, and getMe below
+   *  is an authenticated call this page already makes — so ownership is decided here instead of
+   *  asking for a per-viewer copy of a response that exists to be shared. */
+  let myParticipantId = '';
   // Feedback is offered here too. This is where a guest arrives after the event ends, which is a
   // better moment to ask than mid-party — and because the control needs a participant session, a
   // stranger who was sent the gallery link is never asked at all.
@@ -84,7 +95,15 @@
   // "the most loved of the first hundred", which is a different answer at every scroll position and
   // never the real one. The only client-side narrowing left is the face filter, which genuinely is
   // about this viewer.
-  $: shownPhotos = meOnly ? photos.filter((p) => facePhotoIds.has(p.id)) : photos;
+  $: visiblePhotos = meOnly ? photos.filter((p) => facePhotoIds.has(p.id)) : photos;
+  /* `isOwn` filled in from the identity above, for the one control that needs it: a guest may
+     rotate their own sideways shot and nobody else's. A new array only while there is an identity
+     to apply, so the common case — a stranger with the link — hands the grid the very same objects
+     it had before and re-renders nothing. The server is still the authority; this decides what to
+     OFFER, not what is allowed. */
+  $: shownPhotos = myParticipantId
+    ? visiblePhotos.map((p) => (p.participantId === myParticipantId && !p.isOwn ? { ...p, isOwn: true } : p))
+    : visiblePhotos;
 
   // Changing the sort starts the list again, in the server's new order.
   let sortLoaded: PhotoSort = 'newest';
@@ -99,9 +118,47 @@
   const HEART_FRESH_MS = 35_000;   // the 30s gallery TTL, plus a little for clock skew
   $: heartsDirty = heartsChangedAt > 0 && now - heartsChangedAt < HEART_FRESH_MS;
 
+  /* When this viewer last straightened a photo. The same window, reusing the same constant —
+     35s is a property of the shared ANSWER, not of what happened to be changed in it.
+     Sharper stakes here than for a heart, which is why the poll is covered and not just the
+     reload that follows the press: a rotation RENAMES the stored file and unlinks the old one, so
+     a cached gallery answer from before it does not show a stale picture, it points at a filename
+     that no longer exists — a broken tile until the cache expires. Every load inside the window
+     asks for the uncached copy. */
+  let rotatedAt = 0;
+  $: rotateDirty = rotatedAt > 0 && now - rotatedAt < HEART_FRESH_MS;
+
+  /* ONE flag, read by EVERY load, because the bug was one load being forgotten.
+     `loadPhotos` asked for an uncached copy after a rotation and the other two did not, so
+     changing the sort or scrolling a page in during that window went back to the shared cache and
+     was handed rows naming a file the rotation had already unlinked — broken tiles, from a
+     feature that had "fixed" exactly this on the one path somebody thought of. There is no path
+     where the cache should be trusted for one of these and not the other, so there is no longer a
+     choice to make at the call site. */
+  $: skipCache = heartsDirty || rotateDirty;
+
+  /** Fold a rotation's reply into the row it belongs to.
+   *
+   *  A MERGE, not a refetch. The reply carries everything that changed — the new names, the
+   *  swapped dimensions, and `shotSideways` as a real boolean — so the tile is right on this tick
+   *  rather than after a round trip that the shared cache could answer with the pre-rotation row.
+   *  It is also the only way to take the ↻ "shot sideways" mark off a card without a reload: the
+   *  gallery row omits that field entirely when it is false, so there is nothing in a refetch to
+   *  overwrite a stale `true` with. See PhotoRotation.
+   *
+   *  `photos` and not `shownPhotos`: this page owns the former and derives the latter. */
+  function applyRotation(r: PhotoRotation) {
+    rotatedAt = Date.now();
+    now = rotatedAt;               // `now` ticks once a second; don't wait for it to catch up
+    photos = photos.map((p) => (p.id === r.id
+      ? { ...p, url: r.url, thumbUrl: r.thumbUrl, playUrl: r.playUrl,
+          width: r.width, height: r.height, shotSideways: r.shotSideways }
+      : p));
+  }
+
   async function reloadForSort() {
     try {
-      const data = await getGalleryPhotos(code, highlightsOnly, null, sort, heartsDirty);
+      const data = await getGalleryPhotos(code, highlightsOnly, null, sort, skipCache);
       photos = data.photos ?? [];
       nextCursor = data.nextCursor ?? null;
       selectAllEvent = false;      // a different order is a different "everything"
@@ -129,9 +186,10 @@
   }
 
   async function loadPhotos() {
-    const data = await getGalleryPhotos(code, highlightsOnly);
+    const data = await getGalleryPhotos(code, highlightsOnly, null, undefined, skipCache);
     revealed = data.revealed;
     revealMode = data.revealMode ?? '';
+    awaitingHost = data.awaitingHost === true;
     revealAt = data.revealAt ?? null;
     photoCount = data.photoCount ?? 0;
     hasHighlights = data.hasHighlights ?? false;
@@ -166,7 +224,7 @@
     if (!nextCursor || loadingMore) return;
     loadingMore = true;
     try {
-      const data = await getGalleryPhotos(code, highlightsOnly, nextCursor, sort, heartsDirty);
+      const data = await getGalleryPhotos(code, highlightsOnly, nextCursor, sort, skipCache);
       const seen = new Set(photos.map((p) => p.id));
       // Deduplicated on arrival. The cursor cannot produce an overlap on its own, but a photo
       // uploaded while somebody is mid-scroll can arrive on two different pages, and a key
@@ -360,10 +418,11 @@
       if (guestToken) {
         try {
           const me = await getMe(guestToken);
+          myParticipantId = me.participant?.id ?? '';
           faceMatching = !!me.faceMatching;
           faceEnrolled = !!me.faceEnrolled;
           feedbackDone = !!me.feedbackGiven;
-        } catch { guestToken = ''; }   // stale session — just don't offer it
+        } catch { guestToken = ''; myParticipantId = ''; }   // stale session — just don't offer it
       }
       retrying = false; retryWait = 1000; error = '';
       loading = false;
@@ -789,7 +848,14 @@
   {:else if !revealed}
     <div class="reveal-wall">
       <span class="lock" aria-hidden="true">🔒</span>
-      <p class="msg">{modeText(revealMode)}</p>
+      <p class="msg">{awaitingHost ? 'The host hasn\u2019t revealed the photos yet' : modeText(revealMode)}</p>
+      <!-- Only where asking would actually change something. On a timed reveal the countdown below
+           is the whole answer. It also covers the case this was written for: an INSTANT event whose
+           photos had been hidden used to read "Refresh to see photos" — advice that can never work,
+           offered to somebody refreshing an empty page at a wedding. -->
+      {#if awaitingHost}
+        <p class="ask-host">Ask the host to reveal the photos now!</p>
+      {/if}
       {#if revealMode === 'at_end' && revealAt}
         <!-- At zero the page is already asking the server (after a short pad for clock skew), so
              say so. A counter frozen at 00:00:00 with nothing happening is precisely what made
@@ -904,7 +970,12 @@
 
 {#if lbOpen}
   <!-- Only when the host has allowed downloads: this is everyone's album, not the guest's own roll. -->
+  <!-- rotateMode 'own': a guest may straighten a shot of their own that the phone stored sideways,
+       and nothing else in this album. A stranger holding the link has no session to do it with and
+       is offered nothing. The host's own surface is the review screen, which does not use this
+       component. -->
   <Lightbox photos={shownPhotos} index={lbIndex} allowSave={allowDownloads}
+            rotateMode={guestToken ? 'own' : 'none'}
             commentsOn={canComment} {code} sessionToken={guestToken}
             {visitorToken}
             ensureVisitor={guestToken ? null : ensureVisitor}
@@ -915,6 +986,7 @@
             on:heart={(e) => { const p = shownPhotos[lbIndex]; if (p) void toggleHeart(p, e.detail); }}
             on:photochange={(e) => (lbIndex = e.detail)}
             on:saved={(e) => (saved = markSaved(code, [e.detail]))}
+            on:rotated={(e) => applyRotation(e.detail.result)}
             on:commented={(e) => bumpComments(e.detail.id, e.detail.delta)}
             on:close={() => (lbOpen = false)} />
 {/if}
@@ -998,6 +1070,7 @@
   }
   .reveal-wall .lock { font-size: 3rem; }
   .reveal-wall .msg { font-size: 1.15rem; font-weight: 700; max-width: 28ch; }
+  .ask-host { margin: 6px 0 0; font-weight: 700; color: var(--accent); }
   .reveal-wall .count { color: var(--text-muted); font-size: .9rem; }
   .countdown {
     font-family: var(--font-mono); font-size: clamp(1.6rem, 8vw, 2.6rem); font-weight: 800;

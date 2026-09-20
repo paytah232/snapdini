@@ -13,8 +13,9 @@ import { thumbName } from '../images';
 import { faceMatchingAvailable } from '../faces';
 import * as email from '../email';
 import * as auth from '../auth';
+import { recordAdminAction } from '../admin-actions';
 import * as cleanup from '../cleanup';
-import { DEMO_NAME, RESCHEDULE_WINDOW_MS, RETENTION_DAYS, baseUrl, isDemoEvent, isRevealed, purgeAtFor } from '../lib';
+import { DEMO_NAME, RESCHEDULE_WINDOW_MS, RETENTION_DAYS, baseUrl, isDemoEvent, isRevealed, purgeAtFor, purgeAtForEvent } from '../lib';
 import { normaliseAddress } from '../delivery';
 import { referrerFromCookie, isSelfReferral } from '../referrals';
 import { startSlideshow, slideshowInfo, toggleSlideshowFavourite, deleteSlideshow, slideshowFile, streamSlideshow1080 } from '../slideshow';
@@ -646,9 +647,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
   // their own dashboard. Identity is the whole point: being signed in as somebody ELSE must not
   // light this up, and it does not — the check is against THIS event's owner.
   const viewer = await auth.currentUser(req);
-  const youManage = !!viewer && (
-    (!!event.ownerUserId && viewer.id === event.ownerUserId) || await isAcceptedCohost(event.id, viewer.id)
-  );
+  const youManage = await auth.youManage(event, viewer?.id);
   res.json({
     // No organizer code travels with this — it does not need to. The host link it enables is just
     // /admin/<code>, which the server authorises off the session cookie.
@@ -710,6 +709,16 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
     rescheduleUntil: (event.originalStartsAt ?? event.startsAt) + RESCHEDULE_WINDOW_MS,
     isLocked:       !!event.isLocked,
     isRevealed:     isRevealed(event),
+    /* Is the HOST the only thing standing between the guest and the photos?
+     *
+     *  True when the host must act: a manual event, or any event whose photos have been explicitly
+     *  hidden. False for a timed reveal, where the answer is to wait and the page already shows a
+     *  countdown — sending somebody to badger the host about a clock is worse than saying nothing.
+     *
+     *  Deliberately a derived boolean and not `revealHidden` itself. A guest needs to know whether
+     *  asking would help; whether the host actively hid the photos or simply has not revealed them
+     *  yet is the host's business, and that distinction stays in the manager. */
+    awaitingHost:   !isRevealed(event) && (!!event.revealHidden || event.revealMode === 'manual'),
     allowDownloads: !!event.allowDownloads,
     noFlash:        !!event.noFlash,
     theme:          event.theme ? JSON.parse(event.theme) : null,
@@ -782,12 +791,10 @@ router.get('/:joinCode/qr', async (req: Request, res: Response) => {
 
 // ── requireOrganizer middleware ───────────────────────────────────────────────
 
-// Is this user an ACCEPTED co-host of the event? (Co-hosts manage by identity like the owner.)
-async function isAcceptedCohost(eventId: string, userId: string): Promise<boolean> {
-  const [r] = await db.select({ id: eventCohosts.id }).from(eventCohosts)
-    .where(and(eq(eventCohosts.eventId, eventId), eq(eventCohosts.userId, userId), eq(eventCohosts.status, 'accepted')));
-  return !!r;
-}
+// isAcceptedCohost / youManage now live in ../auth, beside requireAuth and requireAdmin. They were
+// moved rather than copied: admin-actions.ts became a third caller of the same rule (it records
+// what a site admin does to an event they do NOT manage), and an authorisation test with three
+// copies is one where two get fixed and the third quietly does not.
 
 export async function requireOrganizer(req: Request, res: Response, next: NextFunction): Promise<void> {
   const event = await eventByIdentifier(String(req.params.joinCode));
@@ -804,7 +811,7 @@ export async function requireOrganizer(req: Request, res: Response, next: NextFu
   }
 
   // Accepted co-hosts manage the event by identity, exactly like the owner (no organizer code).
-  if (user && await isAcceptedCohost(event.id, user.id)) {
+  if (user && await auth.isAcceptedCohost(event.id, user.id)) {
     req.event = event;
     req.organizerVia = 'cohost';
     return next();
@@ -924,6 +931,14 @@ router.get('/:joinCode/admin', requireOrganizer, async (req: Request, res: Respo
     rescheduleUntil: (ev.originalStartsAt ?? ev.startsAt) + RESCHEDULE_WINDOW_MS,
     isLocked:       !!ev.isLocked,
     isRevealed:     isRevealed(ev),
+    // WHY they are not revealed, not merely that they are not.
+    //
+    // `isRevealed` collapses several causes into one false — waiting for a delay, waiting for the
+    // host, and the explicit "Hide photos" override, which beats all of them. The manager could not
+    // tell them apart, so an instant event with the override on still told its host "Instant —
+    // photos visible as taken" while every guest saw an empty gallery. Host-only: a guest has no
+    // business knowing whether photos exist and are hidden or simply do not exist yet.
+    revealHidden:   !!ev.revealHidden,
     revealedAt:     ev.revealedAt,
     allowDownloads: !!ev.allowDownloads,
     // Host-only settings: these must never appear on the public event GET, which guests read.
@@ -1017,10 +1032,25 @@ router.post('/:joinCode/highlights', requireOrganizer, async (req: Request, res:
   //
   // `.returning()` rather than the driver's rowCount, for the reason routes/participants.ts gives:
   // it is the portable answer across drivers, and it cannot read `undefined` as zero.
+  // Read before writing, because the audit log wants the value about to be overwritten and an
+  // UPDATE ... RETURNING can only ever hand back the new one. It is one extra index lookup on ids
+  // we are updating anyway, at host rates — a few dozen presses an event, against a guest upload
+  // path that runs thousands of times. The alternative, asking admin-actions.ts "will this be
+  // recorded?" before paying for the read, puts a second copy of that rule at every call site.
+  const was = await db.select({ id: photos.id, isHighlighted: photos.isHighlighted, rating: photos.rating })
+    .from(photos).where(and(inArray(photos.id, photoIds), eq(photos.eventId, req.event!.id)));
   const starred = await db.update(photos)
     .set({ isHighlighted: !!highlight, rating: highlight ? 5 : 0 })
     .where(and(inArray(photos.id, photoIds), eq(photos.eventId, req.event!.id)))
     .returning({ id: photos.id });
+  // Keyed by PHOTO ID rather than by field name — the set-of-targets half of the before/after
+  // contract (see 0068_admin_actions.sql). The ids come from `was`, i.e. the rows that actually
+  // exist in this event, so a host input list full of stale ids does not pad the log.
+  await recordAdminAction(req, {
+    event: req.event!, action: 'photo.highlight', targetType: 'photo', targetId: null,
+    before: Object.fromEntries(was.map((p) => [p.id, { isHighlighted: !!p.isHighlighted, rating: p.rating }])),
+    after:  Object.fromEntries(was.map((p) => [p.id, { isHighlighted: !!highlight, rating: highlight ? 5 : 0 }])),
+  });
   res.json({ success: true, highlightCount: starred.length, highlight: !!highlight });
 });
 
@@ -1394,6 +1424,12 @@ router.patch('/:joinCode/gallery-link', requireOrganizer, async (req: Request, r
   // Switching one off HIDES what is there rather than deleting it: turn it back on and the hearts
   // and words come back, instead of everybody having to start again.
   await db.update(events).set(patch).where(eq(events.id, req.event!.id));
+  await recordAdminAction(req, {
+    event: req.event!, action: 'event.gallery_link', targetType: 'event', targetId: req.event!.id,
+    before: { galleryHeartsEnabled: !!req.event!.galleryHeartsEnabled,
+              galleryCommentsEnabled: !!req.event!.galleryCommentsEnabled },
+    after: patch,
+  });
   const [row] = await db.select({
     h: events.galleryHeartsEnabled, c: events.galleryCommentsEnabled,
   }).from(events).where(eq(events.id, req.event!.id));
@@ -1496,7 +1532,14 @@ router.put('/:joinCode/theme', requireOrganizer, async (req: Request, res: Respo
 
   const sanitized = sanitizeTheme(theme as Record<string, unknown>);
 
-  await db.update(events).set({ theme: JSON.stringify(sanitized) }).where(eq(events.id, req.event!.id));
+  const stored = JSON.stringify(sanitized);
+  await db.update(events).set({ theme: stored }).where(eq(events.id, req.event!.id));
+  // The STORED strings, not the parsed objects: what the log shows is then exactly what would have
+  // to go back into the column to undo this, with no re-serialisation in between to disagree about.
+  await recordAdminAction(req, {
+    event: req.event!, action: 'event.theme', targetType: 'event', targetId: req.event!.id,
+    before: { theme: req.event!.theme }, after: { theme: stored },
+  });
   res.json({ success: true, theme: sanitized });
 });
 
@@ -1505,6 +1548,10 @@ router.put('/:joinCode/theme', requireOrganizer, async (req: Request, res: Respo
 router.post('/:joinCode/allow-downloads', requireOrganizer, async (req: Request, res: Response) => {
   const allow = (req.body as { allowDownloads?: boolean }).allowDownloads !== false;
   await db.update(events).set({ allowDownloads: allow }).where(eq(events.id, req.event!.id));
+  await recordAdminAction(req, {
+    event: req.event!, action: 'event.settings', targetType: 'event', targetId: req.event!.id,
+    before: { allowDownloads: !!req.event!.allowDownloads }, after: { allowDownloads: allow },
+  });
   res.json({ success: true, allowDownloads: allow });
 });
 
@@ -1896,7 +1943,9 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
   const rMode    = (ratingMode === 'favourite' || ratingMode === 'stars') ? ratingMode : (ev.ratingMode || 'favourite');
   // Use the event's OWN retention window (a paid extension may exceed the global default) so a
   // settings save doesn't silently shorten retention the organizer paid to extend.
-  const purgeAt  = purgeAtFor(expiresAt, ev.retentionDays);
+  // A demo is the exception and must not have its purge pushed out by a save — see
+  // purgeAtForEvent, which carries the reasoning and the test.
+  const purgeAt  = purgeAtForEvent(ev, expiresAt);
 
   // The custom reveal instant. Three cases, and the middle one is the one that has to be right:
   //   · the key is absent — an older client, or a save that only touched the name, must not clear a
@@ -2006,7 +2055,11 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
   const eventTypeGiven = gBody.eventType !== undefined;
   const newEventType = nextEventType(gBody.eventType, ev.eventType);
 
-  await db.update(events).set({
+  // Hoisted out of the .set() call so the audit log can be handed THE PATCH ITSELF rather than a
+  // hand-copied list of field names beside it. changedOnly() compares only the keys present here
+  // against the row as it was, which means a field added to this object starts being logged the day
+  // it is added — not the day somebody remembers there are two places to add it.
+  const patch = {
     ...clearedPurgedAt,
     name: newName, blurb: newBlurb, startsAt, expiresAt, revealMode: mode,
     revealDelayHours: revealDelay, revealAt, moderationEnabled: moderation, allowDownloads: allowDl,
@@ -2023,7 +2076,17 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
     ...(typeof gBody.guestMailReminder === 'boolean' ? { guestMailReminder: gBody.guestMailReminder } : {}),
     ...(typeof gBody.guestMailLive     === 'boolean' ? { guestMailLive:     gBody.guestMailLive }     : {}),
     ...(eventTypeGiven ? { eventType: newEventType } : {}),
-  }).where(eq(events.id, ev.id));
+  };
+  await db.update(events).set(patch).where(eq(events.id, ev.id));
+
+  // `ev` is the whole pre-save row and `patch` is what was just written, so this records exactly
+  // what moved and nothing else. It is also how the guest-permission switches get covered: they
+  // are not their own endpoint — each one PUTs this route with a single key (see setGuestFlag in
+  // the host's admin page), so a one-switch toggle produces a one-field entry here for free.
+  await recordAdminAction(req, {
+    event: ev, action: 'event.settings', targetType: 'event', targetId: ev.id,
+    before: ev, after: patch,
+  });
 
   res.json({
     success: true, name: newName, startsAt, expiresAt, revealMode: mode,
@@ -2116,9 +2179,20 @@ router.post('/:joinCode/moderate', requireOrganizer, async (req: Request, res: R
   // guest's photo and oblivion is the host coming back to the queue. `count: photoIds.length`
   // answered {"success":true,"count":2} to an approve of two ids that do not exist, having written
   // nothing at all. Report what the UPDATE actually moved.
+  // The same read-before-write as /highlights, and here it is the point of the whole feature. A
+  // rejected photo is restorable by hand — but only by somebody who knows which of the batch were
+  // 'pending' and which were already 'approved' before an operator swept the queue. RETURNING
+  // cannot say: it hands back the status we just set, which is the same for every row.
+  const was = await db.select({ id: photos.id, status: photos.status })
+    .from(photos).where(and(inArray(photos.id, photoIds), eq(photos.eventId, req.event!.id)));
   const moved = await db.update(photos).set({ status })
     .where(and(inArray(photos.id, photoIds), eq(photos.eventId, req.event!.id)))
     .returning({ id: photos.id });
+  await recordAdminAction(req, {
+    event: req.event!, action: 'photo.moderate', targetType: 'photo', targetId: null,
+    before: Object.fromEntries(was.map((p) => [p.id, p.status])),
+    after:  Object.fromEntries(was.map((p) => [p.id, status])),
+  });
   res.json({ success: true, action, status, count: moved.length });
 });
 
@@ -2126,7 +2200,17 @@ router.post('/:joinCode/moderate', requireOrganizer, async (req: Request, res: R
 
 router.post('/:joinCode/reveal', requireOrganizer, async (req: Request, res: Response) => {
   // Reveal now + clear any hide override.
-  await db.update(events).set({ revealedAt: Date.now(), revealHidden: false }).where(eq(events.id, req.event!.id));
+  const ev = req.event!;
+  const at = Date.now();
+  await db.update(events).set({ revealedAt: at, revealHidden: false }).where(eq(events.id, ev.id));
+  // BOTH columns, not a derived isRevealed(): putting this back by hand means restoring the pair,
+  // and an operator who revealed an at_end event early has to be able to see that revealedAt was
+  // null — otherwise the restore leaves the gallery open on a schedule that has not arrived.
+  await recordAdminAction(req, {
+    event: ev, action: 'event.reveal', targetType: 'event', targetId: ev.id,
+    before: { revealedAt: ev.revealedAt, revealHidden: !!ev.revealHidden },
+    after:  { revealedAt: at, revealHidden: false },
+  });
   res.json({ success: true });
 });
 
@@ -2134,7 +2218,13 @@ router.post('/:joinCode/reveal', requireOrganizer, async (req: Request, res: Res
 
 router.post('/:joinCode/unreveal', requireOrganizer, async (req: Request, res: Response) => {
   // Hide override (wins even over an ended at_end event) + clear any early-reveal timestamp.
-  await db.update(events).set({ revealedAt: null, revealHidden: true }).where(eq(events.id, req.event!.id));
+  const ev = req.event!;
+  await db.update(events).set({ revealedAt: null, revealHidden: true }).where(eq(events.id, ev.id));
+  await recordAdminAction(req, {
+    event: ev, action: 'event.reveal', targetType: 'event', targetId: ev.id,
+    before: { revealedAt: ev.revealedAt, revealHidden: !!ev.revealHidden },
+    after:  { revealedAt: null, revealHidden: true },
+  });
   res.json({ success: true });
 });
 
@@ -2143,6 +2233,13 @@ router.post('/:joinCode/unreveal', requireOrganizer, async (req: Request, res: R
 router.post('/:joinCode/lock', requireOrganizer, async (req: Request, res: Response) => {
   const newLocked = !req.event!.isLocked;
   await db.update(events).set({ isLocked: newLocked }).where(eq(events.id, req.event!.id));
+  // A lock is the one toggle a guest feels immediately — the camera stops taking shots — so an
+  // operator who flips it mid-event needs it in the log even though the value is trivially
+  // inferable from the current state.
+  await recordAdminAction(req, {
+    event: req.event!, action: 'event.lock', targetType: 'event', targetId: req.event!.id,
+    before: { isLocked: !!req.event!.isLocked }, after: { isLocked: newLocked },
+  });
   res.json({ success: true, isLocked: newLocked });
 });
 
@@ -2157,6 +2254,20 @@ router.delete('/:joinCode', requireOrganizer, async (req: Request, res: Response
     if (!user || user.id !== ev.ownerUserId)
       return res.status(403).json({ error: 'Only the event owner can delete this event' });
   }
+  // RECORDED BEFORE THE DELETE, and this is the one call site where the order is load-bearing: the
+  // entry has to name the event, and once the row is gone there is nothing left to name it from.
+  // The trade is a log line for a deletion that then failed, against a customer's event gone with
+  // nothing at all to say who did it. (In practice an operator can only reach this on an UNOWNED
+  // event — the guard above reserves an owned one for its creator — so this mostly covers demos
+  // today and the day that guard changes.)
+  await recordAdminAction(req, {
+    event: ev, action: 'event.delete', targetType: 'event', targetId: ev.id,
+    before: { name: ev.name, joinCode: ev.joinCode, slug: ev.slug, startsAt: ev.startsAt,
+              expiresAt: ev.expiresAt, ownerUserId: ev.ownerUserId, amountPaidCents: ev.amountPaidCents },
+    // Nothing to restore to, and no pretending otherwise. This half of the log exists to say WHAT
+    // was destroyed, because after the cascade nothing else in the product can.
+    after: null,
+  });
   await cleanup.deleteEventFiles(ev.id);            // remove photos + theme files from disk
   await db.delete(events).where(eq(events.id, ev.id)); // cascade clears participant/photo/cohost rows
   res.json({ success: true });
@@ -2234,7 +2345,16 @@ router.post('/:joinCode/cohosts', requireOrganizer, async (req: Request, res: Re
 
 router.delete('/:joinCode/cohosts/:id', requireOrganizer, async (req: Request, res: Response) => {
   const ev = req.event!;
+  // Read first, only so the log can say WHO was removed. A bare id in an audit entry is no use to
+  // the person putting it back — they would have to re-invite an address they cannot recover.
+  // `before` is null when nothing matched, and a null-to-null entry is not written at all.
+  const [gone] = await db.select({ email: eventCohosts.email, status: eventCohosts.status })
+    .from(eventCohosts).where(and(eq(eventCohosts.id, String(req.params.id)), eq(eventCohosts.eventId, ev.id)));
   await db.delete(eventCohosts).where(and(eq(eventCohosts.id, String(req.params.id)), eq(eventCohosts.eventId, ev.id)));
+  await recordAdminAction(req, {
+    event: ev, action: 'cohost.delete', targetType: 'cohost', targetId: String(req.params.id),
+    before: gone ? { email: gone.email, status: gone.status } : null, after: null,
+  });
   res.json({ ok: true });
 });
 
@@ -2248,6 +2368,15 @@ router.delete('/:joinCode/participants/:id', requireOrganizer, async (req: Reque
   const rows = await db.select({ filename: photos.filename }).from(photos).where(eq(photos.participantId, p.id));
   for (const r of rows) cleanup.unlinkUpload(r.filename);   // remove files; rows cascade on delete
   await db.delete(participants).where(eq(participants.id, p.id));
+  await recordAdminAction(req, {
+    event: ev, action: 'participant.delete', targetType: 'participant', targetId: p.id,
+    // The photo count is not decoration. The files are unlinked a few lines above and the rows
+    // cascade with the guest, so this number is the only surviving measure of how much of somebody
+    // else's event just went — there is nothing left to count afterwards.
+    before: { name: p.name, email: p.email, photosTaken: p.photosTaken, joinedAt: p.joinedAt,
+              photosDeleted: rows.length },
+    after: null,
+  });
   res.json({ ok: true, removedPhotos: rows.length });
 });
 
@@ -2279,6 +2408,13 @@ router.put('/:joinCode/participants/:id/card', requireOrganizer, async (req: Req
   // appears while the source is 'pending', so a host correcting someone must close that question
   // too — otherwise the app would ask them to choose a card the host had just chosen for them.
   await db.update(participants).set({ challengeSet: want, challengeSetSource: 'self' }).where(eq(participants.id, p.id));
+  // challengeSetSource travels with the card because the two are one decision here (see above),
+  // and restoring only the card would leave the guest's "which card are you?" prompt suppressed.
+  await recordAdminAction(req, {
+    event: ev, action: 'participant.card', targetType: 'participant', targetId: p.id,
+    before: { challengeSet: p.challengeSet, challengeSetSource: p.challengeSetSource },
+    after:  { challengeSet: want, challengeSetSource: 'self' },
+  });
   const set = sets.find((x) => x.key === want)!;
   res.json({ ok: true, challengeSet: want, label: set.label, tricks: set.items.length });
 });

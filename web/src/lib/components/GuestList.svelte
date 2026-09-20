@@ -37,15 +37,34 @@
 
   export let data: GuestListPayload;
   export let busy = false;
+  /** Shown, not writable. Set by the event manager when a SITE ADMIN is inside an event they do not
+   *  own — accident prevention, never access control; $lib/adminGuard has the long version.
+   *
+   *  This card is six separate mutations and one of them (Remove) is a single press, so the guard
+   *  is put where they all pass rather than on each button: `dispatch` below is shadowed, and a
+   *  write that does not leave this component cannot happen. The buttons are marked up as refused
+   *  as well, because the press should be stopped before it is answered — the shadow is what
+   *  catches the seventh mutation somebody adds next year. */
+  export let readOnly = false;
 
-  const dispatch = createEventDispatcher<{
+  type GuestWrites = {
     add: { name: string; email: string; notes: string };
     update: { id: string; name: string; email: string; notes: string };
     remove: { id: string };
     preview: { text: string; mapping?: GuestField[] };
     import: { text: string; mapping: GuestField[] };
     send: { guestIds?: string[] };
-  }>();
+  };
+  const READ_ONLY_WHY = 'Read-only — take control in the red bar to change this event’s guest list.';
+  const emit = createEventDispatcher<GuestWrites>();
+  /** THE choke point. Every event this component raises is a write on the host's event — there is
+   *  no read-only event in the map above — so refusing here refuses all of them, including any
+   *  added later, with no per-call-site discipline required. Answered out loud rather than
+   *  swallowed, for the reason blockedPress() exists. */
+  function dispatch<K extends keyof GuestWrites>(type: K, detail: GuestWrites[K]): void {
+    if (readOnly) { blockedPress(READ_ONLY_WHY); return; }
+    emit(type, detail);
+  }
 
   /** The parent owns the preview, because it owns the request. Null = the import panel is closed
    *  or waiting. */
@@ -314,14 +333,14 @@
     {/if}
   </div>
   <div class="acts">
-    <button class="btn ghost sm" on:click={openAdd}>+ Add guest</button>
-    <button class="btn ghost sm" class:on={importOpen}
+    <button class="btn ghost sm" on:click={openAdd} disabled={readOnly}>+ Add guest</button>
+    <button class="btn ghost sm" class:on={importOpen} disabled={readOnly}
             on:click={() => { importOpen = !importOpen; addOpen = false; }}>Import</button>
     {#if data.emailEnabled}
       <!-- aria-disabled, NOT disabled. See blockedPress(): the press still lands and still says
            what is missing, and where there is somewhere that would fix it, it goes there. -->
       <button class="btn primary sm" aria-disabled={busy || !mailable.length || undefined}
-              on:click={sendAll}>
+              disabled={readOnly} on:click={sendAll}>
         {busy ? '…' : `Send invites${mailable.length ? ` (${Math.min(mailable.length, PER_SEND)})` : ''}`}
       </button>
     {/if}
@@ -403,7 +422,7 @@
     <div class="row-acts">
       <!-- aria-disabled, NOT disabled — see blockedPress(). The press lands on an empty address box
            and is answered in the server's own words. -->
-      <button class="btn primary sm" on:click={submitForm}
+      <button class="btn primary sm" on:click={submitForm} disabled={readOnly}
               aria-disabled={busy || !form.email.trim() || undefined}>
         {editing ? 'Save' : 'Add to list'}</button>
       <button class="btn ghost sm" on:click={() => { addOpen = false; editing = null; }}>Cancel</button>
@@ -420,9 +439,11 @@
       <!-- Pasting straight out of a spreadsheet gives tab-separated text, which the parser handles.
            That is why there is no .xlsx upload: the way people actually move a list already works. -->
       <button class="btn ghost sm" aria-disabled={busy || !importText.trim() || undefined}
-              on:click={doPreview}>{busy ? '…' : 'Preview'}</button>
-      <label class="btn ghost sm file">
-        Choose a CSV<input type="file" accept=".csv,.tsv,.txt,text/csv,text/plain" on:change={pickFile} />
+              disabled={readOnly} on:click={doPreview}>{busy ? '…' : 'Preview'}</button>
+      <!-- The disabled input is what refuses: a <label> whose control is disabled activates nothing,
+           so the file picker never opens. -->
+      <label class="btn ghost sm file" class:ctl-locked={readOnly}>
+        Choose a CSV<input type="file" accept=".csv,.tsv,.txt,text/csv,text/plain" disabled={readOnly} on:change={pickFile} />
       </label>
     </div>
     <!-- The formats, in words. A tab cannot be SHOWN in a placeholder — it collapses or renders
@@ -457,7 +478,7 @@
         {#each preview.headers as h, i}
           <label class="mapcol">
             <span class="colname">{h}</span>
-            <select value={preview.mapping[i]} on:change={(e) => remap(i, e.currentTarget.value)}>
+            <select value={preview.mapping[i]} disabled={readOnly} on:change={(e) => remap(i, e.currentTarget.value)}>
               {#each FIELDS as f}<option value={f}>{f === 'ignore' ? "don't import" : f}</option>{/each}
             </select>
           </label>
@@ -517,7 +538,7 @@
       <!-- Shown even when there is nothing to import, and aria-disabled rather than disabled, so
            the press lands and commitImport() says what is in the way. -->
       <div class="row-acts">
-        <button class="btn primary sm"
+        <button class="btn primary sm" disabled={readOnly}
                 aria-disabled={busy || !!preview.fatal || !preview.counts.add || undefined}
                 on:click={commitImport}>
           Import{preview.counts.add ? ` ${preview.counts.add} guest${preview.counts.add === 1 ? '' : 's'}` : ''}
@@ -581,13 +602,13 @@
 
           <div class="row-acts">
             {#if data.emailEnabled && !g.suppressed}
-              <button class="btn ghost sm" aria-disabled={busy || undefined}
+              <button class="btn ghost sm" aria-disabled={busy || undefined} disabled={readOnly}
                       on:click={() => sendOne(g.id)}>
                 {g.lastInvite ? 'Resend' : 'Invite'}
               </button>
             {/if}
-            <button class="btn ghost sm" on:click={() => openEdit(g)}>Edit</button>
-            <button class="btn ghost sm" on:click={() => dispatch('remove', { id: g.id })}>Remove</button>
+            <button class="btn ghost sm" on:click={() => openEdit(g)} disabled={readOnly}>Edit</button>
+            <button class="btn ghost sm" on:click={() => dispatch('remove', { id: g.id })} disabled={readOnly}>Remove</button>
           </div>
         </div>
       </details>
@@ -682,6 +703,10 @@
   .file { position: relative; overflow: hidden;
     -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; }
   .file input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  /* Says what the disabled input already does. The input is stretched over the whole label, so its
+     own not-allowed cursor is what the pointer actually lands on — this is only the greying, so a
+     refused control looks like every other refused control on the page. */
+  .file.ctl-locked { opacity: .55; }
 
   .map { display: flex; gap: 8px; flex-wrap: wrap; }
   .mapcol { display: flex; flex-direction: column; gap: 3px; min-width: 130px; flex: 1; }

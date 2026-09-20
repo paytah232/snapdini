@@ -24,6 +24,23 @@
    *  does not depend on it, because a host who copied the link into a message left no record here. */
   export let sentCount = 0;
 
+  /** Shown, not writable. Set by the surfaces that can hand this dialog to a SITE ADMIN standing in
+   *  an event they do not own — accident prevention, never access control. The server authorises
+   *  the same account for the same write either way and the actor is a trusted admin;
+   *  $lib/adminGuard has the long version.
+   *
+   *  It was already safe, and that is the problem it fixes. The one function on the review screen
+   *  that can put this dialog on screen refuses when the page is locked, so the dialog was simply
+   *  unreachable — safety that lives in the CALLER, which lasts exactly until the second caller.
+   *  There are two callers already, and `save()` below rewrites the link's name, its public URL
+   *  and whether strangers holding it can heart and comment on somebody's wedding photographs. The
+   *  guard belongs next to the write.
+   *
+   *  Copy link, Share… and View stay live throughout: they hand over a link that already exists,
+   *  which is a read, and an operator is usually in here to answer "what is their gallery link?". */
+  export let readOnly = false;
+  const READ_ONLY_WHY = 'Read-only — press “Take control” in the red bar to change this link.';
+
   /** Reactions belong to the LINK, not the event: one event can have a family gallery that wants
    *  comments and a client gallery that must not. Both start off — a link can be forwarded anywhere,
    *  so the audience is not knowable and opening a gallery up is a decision, not an inheritance. */
@@ -122,6 +139,11 @@
 
   function revert() { label = savedLabel; slug = savedSlug; hearts = savedHearts; comments = savedComments; }
   async function save() {
+    // Said out loud rather than swallowed: a press that does nothing is indistinguishable from a
+    // broken page. The button is also `disabled`, so from a mouse this is unreachable — it is here
+    // for a keyboard press on a control that was live when focus landed, and for whatever else
+    // ends up calling save() later.
+    if (readOnly) { showToast(READ_ONLY_WHY, true); return; }
     saving = true;
     try {
       const r = await updateShare(code, orgCode, share.id, {
@@ -143,14 +165,21 @@
   <div class="sheet" tabindex="-1" use:modalFocus>
     <div class="head"><span>📤 Share</span><button class="x" on:click={() => dispatch('close')} aria-label="Close">✕</button></div>
 
+    <!-- Before the fields, not under the dead Save button. Somebody should know the box will not
+         take a new name BEFORE they have typed one into it; on a phone the button is often below
+         the fold while the field they are typing in is not. -->
+    {#if readOnly}
+      <p class="ro-note">Read-only — this is someone else's event. Press “Take control” in the red
+        bar to rename this link or change what people holding it can do.</p>
+    {/if}
     <p class="sum">Sharing <b>{kindText(share.kind, share.count)}</b>. Anyone with the link can view — no account needed.{#if excludesRejected}{' '}<b>Rejected photos are never included.</b>{/if}</p>
 
     <label class="fld"><span>Name</span>
-      <input bind:value={label} maxlength="80" placeholder="e.g. Sam &amp; Riley's wedding" />
+      <input bind:value={label} maxlength="80" placeholder="e.g. Sam &amp; Riley's wedding" disabled={readOnly} />
       <span class="sub-hint">Shows when the link is previewed — in messages, chat, socials.</span>
     </label>
     <div class="fld"><span>Custom link <small>(optional)</small></span>
-      <div class="urlrow"><span class="origin">/s/</span><input class="slug" bind:value={slug} on:input={(e) => onSlugInput(e.currentTarget.value)} placeholder="leave blank for the default" /></div>
+      <div class="urlrow"><span class="origin">/s/</span><input class="slug" bind:value={slug} on:input={(e) => onSlugInput(e.currentTarget.value)} placeholder="leave blank for the default" disabled={readOnly} /></div>
       {#if slugFeedback}<p class="slug-msg {slugFeedback.cls}">{slugFeedback.text}</p>{/if}
       {#if breaksOldLink}
         <p class="break-note">
@@ -165,7 +194,7 @@
         </p>
       {/if}
       <div class="slug-row">
-        <button class="mini" type="button" on:click={() => { slug = slugify(label); onSlugInput(slug); }}>↩ Use the name</button>
+        <button class="mini" type="button" disabled={readOnly} on:click={() => { slug = slugify(label); onSlugInput(slug); }}>↩ Use the name</button>
         {#if slug && cleanSlug !== slug.trim()}<span class="sub-hint">→ will save as <b>{cleanSlug || '(default)'}</b></span>{/if}
       </div>
     </div>
@@ -183,7 +212,7 @@
           <label class="t-label" for="sh-hearts">Hearts</label>
           <div class="t-sub">Double-tap a photo to love it. Counts include your guests' own hearts.</div>
         </div>
-        <Toggle id="sh-hearts" bind:checked={hearts} />
+        <Toggle id="sh-hearts" bind:checked={hearts} disabled={readOnly} />
       </div>
       <div class="toggle-row">
         <div>
@@ -193,13 +222,13 @@
           <div class="t-sub">Leave words under a photo. You can delete any of them from
             <b>Review → Captions &amp; comments</b>.</div>
         </div>
-        <Toggle id="sh-comments" bind:checked={comments} />
+        <Toggle id="sh-comments" bind:checked={comments} disabled={readOnly} />
       </div>
       {#if comments && !savedComments}
         <p class="react-s warn">A link can be forwarded anywhere, so think about who might end up holding it.</p>
       {/if}
     </div>
-    <button class="btn sm" class:primary={dirty} class:ghost={!dirty} on:click={save} disabled={saving || !dirty}>
+    <button class="btn sm" class:primary={dirty} class:ghost={!dirty} on:click={save} disabled={saving || !dirty || readOnly}>
       {saving ? 'Saving…' : dirty ? 'Save changes' : '✓ Saved'}
     </button>
     {#if dirty && !saving}<button class="btn ghost sm" on:click={revert}>↩ Undo</button>{/if}
@@ -233,6 +262,14 @@
   .head { display: flex; align-items: center; justify-content: space-between; font-weight: 800; margin-bottom: 12px; }
   .x { background: none; border: none; color: var(--text-muted); font-size: 1.1rem; cursor: pointer; }
   .sum { font-size: 0.86rem; color: var(--text-muted); margin: 0 0 16px; line-height: 1.5; }
+  /* Deliberately NOT the red of AdminBanner. That red means "you are operating as the platform",
+     and it is said once per screen by one component; a second thing wearing it inside a dialog
+     dilutes the only element in the product whose job is to be instantly recognisable. This is a
+     note about a form, so it looks like one. */
+  .ro-note { margin: 0 0 14px; padding: 8px 10px; border-radius: var(--radius-sm);
+    background: var(--surface-2); border: 1px solid var(--border);
+    font-size: 0.76rem; line-height: 1.45; color: var(--text-muted); }
+  .fld input:disabled, .mini:disabled { opacity: 0.55; cursor: default; }
   .fld { display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 10px; }
   .fld > span { display: block; margin-bottom: 4px; }
   .fld input { width: 100%; padding: 9px 11px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font: inherit; font-size: 0.9rem; box-sizing: border-box; }

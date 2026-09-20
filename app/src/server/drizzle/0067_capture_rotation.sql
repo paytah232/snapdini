@@ -1,0 +1,29 @@
+-- Rotation ALREADY APPLIED to the stored pixels, in degrees CLOCKWISE.
+--
+-- Not a request and not a hint to a renderer: a record of work that has been done. 0042 gave us
+-- capture_orientation, which is the only witness to a phone held sideways behind a rotation lock —
+-- and it is enough to BADGE such a photo while being no help whatever in FIXING one, because
+-- 'landscape' does not say which way round. Thirteen production photos sit exactly there, and no
+-- amount of reading the file will ever say; only the person who was standing there knows. So the
+-- correction is a manual, per-photo action (POST /api/photos/:id/rotate) and this column is what
+-- remembers that it happened.
+--
+-- Why a SECOND column at all, when the fix rewrites the pixels: because capture_orientation is not
+-- rewritten with them, and must not be. It is the historical truth of how the shot was taken and
+-- stays 'landscape' for ever. Without this column the gallery would go on marking a photo "shot
+-- sideways" long after somebody put it right — and the mark, whose entire job is to point at the
+-- photos that still need attention, would be pointing at the ones already dealt with.
+--
+--   NULL               nobody has touched this row. Every row predating the column, and every
+--                      upload since.
+--   0 / 90 / -90 / 180 the accumulated total, normalised into (-180, 180]. Positive is clockwise.
+--
+-- NULLABLE rather than DEFAULT 0, and not backfilled, for the same reason 0042 is not: "never
+-- touched" and "touched, and the total happens to be back at zero" are different facts, and the
+-- second one is reachable in two taps (180 twice). Both read as "no rotation currently applied",
+-- which is why the one reader — shotSideways() in routes/photos.ts — coalesces the NULL rather
+-- than distinguishing it. Keeping them apart costs nothing here and cannot be recovered later.
+--
+-- No index. The only query that reads this column already holds the row by primary key, and the
+-- badge is decided in the application from a column it has already selected.
+ALTER TABLE photos ADD COLUMN IF NOT EXISTS capture_rotation integer;

@@ -14,7 +14,7 @@
 // is unrecoverable.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { purgeAtFor, RETENTION_DAYS } from '../lib';
+import { DEMO_NAME, purgeAtFor, purgeAtForEvent, RETENTION_DAYS } from '../lib';
 
 const DAY = 86_400_000;
 const END = Date.UTC(2026, 9, 24, 14, 0);
@@ -62,5 +62,48 @@ describe('when an event’s photos are destroyed', () => {
     for (const days of [undefined, null, 0, 1, 7, 31, 366, -5, NaN]) {
       assert.ok(purgeAtFor(END, days as number) > END);
     }
+  });
+});
+
+describe('purgeAtForEvent — a save must not promote a demo into a month-long event', () => {
+  // DEMO_NAME imported, never retyped: isDemoEvent matches on the exact string, so a fixture with a
+  // plausible-looking name would be classed as a REAL event and these tests would pass while
+  // asserting nothing about demos at all.
+  const DEMO = { ownerUserId: null, name: DEMO_NAME, retentionDays: null };
+  const REAL = { ownerUserId: 'u_1', name: "Priya and Tom", retentionDays: null };
+
+  test('a demo purges at its expiry, not a retention window later', () => {
+    // The bug: any settings save recomputed this with purgeAtFor, which leans long by design, so a
+    // three-hour throwaway became a month-long event. Demos then accumulated, because nothing in
+    // the product ever shortens a purge back down.
+    assert.equal(purgeAtForEvent(DEMO, END), END);
+  });
+
+  test('a demo that is rescheduled keeps purging at its (new) expiry', () => {
+    assert.equal(purgeAtForEvent(DEMO, END + 2 * DAY), END + 2 * DAY);
+  });
+
+  test('a real event is untouched — still expiry plus the retention window', () => {
+    // The half that matters most: the fix must not shorten anybody's retention. This is the
+    // behaviour every real event had before and must still have.
+    assert.equal(purgeAtForEvent(REAL, END), purgeAtFor(END, null));
+    assert.equal(purgeAtForEvent(REAL, END), END + RETENTION_DAYS * DAY);
+  });
+
+  test('a real event that RESCHEDULES moves its purge with the new date', () => {
+    assert.equal(purgeAtForEvent(REAL, END + 5 * DAY), END + 5 * DAY + RETENTION_DAYS * DAY);
+  });
+
+  test('a paid retention extension is still honoured', () => {
+    const paid = { ...REAL, retentionDays: 90 };
+    assert.equal(purgeAtForEvent(paid, END), END + 90 * DAY);
+    assert.ok(purgeAtForEvent(paid, END) > purgeAtForEvent(REAL, END), 'longer than the default');
+  });
+
+  test('an unowned event that is NOT the demo is a real event', () => {
+    // isDemoEvent needs BOTH no owner and the demo's name. An ordinary un-owned event getting the
+    // demo's three-hour life would destroy a stranger's photos the same afternoon.
+    const orphan = { ownerUserId: null, name: 'Sarah and Mike', retentionDays: null };
+    assert.equal(purgeAtForEvent(orphan, END), END + RETENTION_DAYS * DAY);
   });
 });

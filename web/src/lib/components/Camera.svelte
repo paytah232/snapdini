@@ -11,7 +11,7 @@
   import { saveMany, isIOS, savePhotoByUrl, type SaveManyProgress } from '$lib/saveImage';
   import { savedSet, markSaved } from '$lib/saved';
   import StarIcon from '$lib/components/StarIcon.svelte';
-  import { watchTilt, glyphRotation, captureOrientation, requestTiltPermission } from '$lib/deviceTilt';
+  import { watchTilt, glyphRotation, captureOrientation, requestTiltPermission, tiltKnown } from '$lib/deviceTilt';
   import { goto, replaceState } from '$app/navigation';
   // Aliased: this component already has a `track` for the MediaStreamTrack.
   import { track as trackEvent } from '$lib/analytics';
@@ -93,6 +93,75 @@
   let askedHost = false;
   let buying = false;
   $: outOfShots = photosRemaining <= 0 && screen === 'camera';
+
+  /* THE EVENT ENDING WHILE SOMEBODY IS STILL HOLDING THE CAMERA.
+   *
+   *  `isExpired` was read exactly once, on the way in, and the comment at the redirect below says
+   *  mid-session expiry is left alone on purpose because nobody should be yanked out of the camera
+   *  while they are using it. That reasoning still stands and nothing here yanks anybody — what was
+   *  wrong was concluding that therefore NOTHING should happen.
+   *
+   *  What happened instead: the camera went on working, the shutter went on taking photographs, and
+   *  every one of them failed to upload with an error the guest could do nothing about. Not being
+   *  interrupted is small comfort when the thing you are still allowed to do no longer works.
+   *
+   *  So the shutter closes and says why, and that is ALL it does. The camera keeps running, the
+   *  gallery, the roll and the queue stay reachable, and nothing navigates for them — a guest who
+   *  came here to look at what they shot should still be able to. A recording in progress is never
+   *  cut off, because stopping it mid-clip would destroy the take.
+   *
+   *  And it warns FIRST. A countdown over the last few minutes is the only part of this a guest can
+   *  actually act on: it is the difference between "get one more of everyone" and finding out
+   *  afterwards that the shutter had quietly stopped counting. */
+  const COUNTDOWN_MS = 5 * 60_000;
+  let eventEnded = false;
+  let nowMs = Date.now();
+  let endWatch: ReturnType<typeof setInterval> | undefined;
+
+  $: msLeft = ev?.expiresAt ? ev.expiresAt - nowMs : Number.POSITIVE_INFINITY;
+  $: endingSoon = screen === 'camera' && !eventEnded && msLeft > 0 && msLeft <= COUNTDOWN_MS;
+  $: countdown = endingSoon
+    ? `${Math.floor(msLeft / 60_000)}:${String(Math.floor((msLeft % 60_000) / 1000)).padStart(2, '0')}`
+    : '';
+  /** Said in two places — the notice and the refused press — so they cannot drift apart. */
+  $: endedNote = ev?.isLocked ? 'The host has locked this event' : 'This event has ended';
+
+  /** Start (or restart) the end-of-event watch.
+   *
+   *  A function rather than an inline setInterval because it has to be startable TWICE. It used to
+   *  be created once on the way into the camera and cleared whenever the tab was hidden — and never
+   *  put back. Lock the phone, take a call, or switch apps once, which is ordinary behaviour at a
+   *  party, and for the rest of that session there was no countdown, no shutter close and no poll:
+   *  the guest went back to taking photographs that would all fail to upload, which is the exact
+   *  fault this was written to prevent.
+   *
+   *  Idempotent, because visibilitychange can fire more than once and two of these would double the
+   *  poll rate and the re-render rate for no benefit. */
+  let ticks = 0;
+  function startEndWatch() {
+    if (endWatch || typeof window === 'undefined') return;
+    endWatch = setInterval(() => {
+      const left = (ev?.expiresAt ?? 0) - Date.now();
+      // Assigned only inside the countdown window: every assignment re-renders a screen with live
+      // video on it, and a phone at a party has better things to do sixty times a minute.
+      if (left <= COUNTDOWN_MS + 1000) nowMs = Date.now();
+      if (++ticks % 60 === 0) void checkStillOpen();
+    }, 1000);
+  }
+  function stopEndWatch() {
+    if (endWatch) { clearInterval(endWatch); endWatch = undefined; }
+  }
+
+  async function checkStillOpen() {
+    if (screen !== 'camera' || eventEnded) return;
+    try {
+      const fresh = await getEvent(identifier);
+      // Only ever used to CLOSE the shutter, never to reopen it. A host extending an event mid-party
+      // is a happy path a reload covers, and turning the shutter back on under somebody's thumb is
+      // its own kind of yanking.
+      if (fresh.isExpired || fresh.isLocked) { ev = fresh; eventEnded = true; }
+    } catch { /* offline, or the event is gone; the queue keeps trying either way */ }
+  }
   /** The "ask the host / buy more" card, when it is on screen. Where a press on the spent
    *  shutter sends the guest. */
   let oosPanelEl: HTMLDivElement | undefined;
@@ -264,7 +333,7 @@
   let videoShapeToldOnce = false;   // said once per visit, not once per tap
 
   // upload queue
-  interface QueueItem { id: string; blob: Blob; mediaType: 'photo' | 'video'; source: 'capture' | 'upload'; ext: string; status: 'pending' | 'uploading' | 'done' | 'error'; error?: string; progress?: number; size: number; durationSecs?: number; w?: number; h?: number; retries?: number; uploadId?: string; challengeId?: string; doneChunks?: number[]; captureOrientation?: 'portrait' | 'landscape'; captureShape?: string; }
+  interface QueueItem { id: string; blob: Blob; mediaType: 'photo' | 'video'; source: 'capture' | 'upload'; ext: string; status: 'pending' | 'uploading' | 'done' | 'error'; error?: string; progress?: number; size: number; durationSecs?: number; w?: number; h?: number; retries?: number; uploadId?: string; challengeId?: string; doneChunks?: number[]; captureOrientation?: 'portrait' | 'landscape'; captureShape?: string; captureRotation?: number; captureTurn?: number; capturedAt?: number; }
   const MAX_UPLOAD_RETRIES = 5;   // auto-retry a failing upload this many times (with backoff) before asking the user
   // ── Photo missions ─────────────────────────────────────────────────────────
   //
@@ -484,6 +553,23 @@
   // optimisation, and the rule that this screen is their own roll is not something to leave resting
   // on a query parameter.
   $: shownPhotos = galleryPhotos.filter((p) => p.isOwn);
+
+  /** Fold a rotation's reply into the row it belongs to.
+   *
+   *  A MERGE rather than a refetch, and not only to save a round trip: rotating RENAMES the stored
+   *  file, so the row we are holding now points at a name the server returns 404 for. Left alone
+   *  that is a broken thumbnail in the guest's own roll, not a stale one. The reply carries every
+   *  name that changed plus the swapped dimensions, so the tile is correct on this tick.
+   *
+   *  `galleryPhotos` and not `shownPhotos`: this component owns the former and derives the latter,
+   *  and writing to a derivation would be overwritten by the next assignment to its source. */
+  function applyRotation(r: { id: string; url: string; thumbUrl: string; playUrl?: string;
+                              width?: number; height?: number; shotSideways: boolean }) {
+    galleryPhotos = galleryPhotos.map((p) => (p.id === r.id
+      ? { ...p, url: r.url, thumbUrl: r.thumbUrl, playUrl: r.playUrl,
+          width: r.width, height: r.height, shotSideways: r.shotSideways }
+      : p));
+  }
   let revealMsg = '';
   let lbOpen = false;
   let lbIndex = 0;
@@ -692,6 +778,27 @@
   let glyphRot = 0;
   let stopTilt: (() => void) | null = null;
   function readTilt() { glyphRot = glyphRotation(); }
+
+  /** The second place tilt permission is asked for, and the reason is a regression we caused.
+   *
+   *  iOS only grants DeviceOrientation from inside a user gesture, so it is requested on the Join
+   *  tap. Once the app started REMEMBERING the guest, that tap stopped happening: a returning guest
+   *  lands straight on the camera with a restored session, so on iOS their tilt was dead for the
+   *  whole event. It showed up in the data — one guest's shots recorded 'portrait' and 'landscape'
+   *  early on, then nothing but NULL from the moment they came back.
+   *
+   *  That used to cost only the upright glyphs. Now that the shutter turns the photo with the phone
+   *  it costs the correction itself, which is the difference between a straight photo and a sideways
+   *  one the guest cannot see going wrong. So: catch the first gesture on the camera instead.
+   *
+   *  One shot, and only when the hardware has told us nothing at all, so a phone already reporting
+   *  is never prompted and nobody who answered at Join is asked twice. */
+  let tiltAsked = false;
+  async function ensureTilt() {
+    if (tiltAsked || tiltKnown() || screen !== 'camera') return;
+    tiltAsked = true;
+    if (await requestTiltPermission()) { stopTilt?.(); stopTilt = watchTilt(readTilt); }
+  }
   // Both notices are absolutely positioned at the same spot, so exactly one may be up. Landscape
   // wins: it explains what the guest is looking at right now.
   $: landscapeNote = isLandscape && !landscapeDismissed;
@@ -938,8 +1045,10 @@
     if (document.hidden) {
       if (recording) toggleRecord();   // saves the clip; iOS would otherwise corrupt it
       if (screen === 'camera') stopCamera();
+      stopEndWatch();
     } else {
-      resumeIfDead();   // liveness, not merely "is there a stream object"
+      resumeIfDead();   // and the watch comes back with it — see startEndWatch
+      if (screen === 'camera') startEndWatch();   // liveness, not merely "is there a stream object"
 
       // Returning to the app is exactly when a host's edit has most likely happened behind you.
       if (screen === 'camera') void refreshMissions();
@@ -972,6 +1081,7 @@
     if (typeof navigator !== 'undefined') navigator.mediaDevices?.removeEventListener?.('devicechange', refreshCameras);
     if (typeof window !== 'undefined') { window.removeEventListener('online', autoRetry); window.removeEventListener('pagehide', stopCamera); window.removeEventListener('pageshow', onPageShow); }
     if (retryTimer) clearInterval(retryTimer);
+    stopEndWatch();   // a 1 Hz interval polling getEvent() outlives the component otherwise
     nativeWake?.();   // a pending 'they came back' listener outlives the component otherwise
     stopCamera();
   });
@@ -1079,6 +1189,7 @@
     if (typeof window !== 'undefined') {
       window.addEventListener('online', autoRetry);
       retryTimer = setInterval(autoRetry, 15000);
+      startEndWatch();
     }
   }
   $: if (ev && typeof localStorage !== 'undefined') { try { localStorage.setItem('savedev_' + ev.joinCode, saveToDevice ? '1' : '0'); } catch { /* ignore */ } }
@@ -1427,7 +1538,7 @@
             // from the OS" — and on Android those are different screens to go and fix.
             void diagnoseMic().then(() =>
               reportClientError(`camera: microphone unavailable for video (${name || 'unknown'}; permission=${micState})`,
-                                'camera-denied', ev?.joinCode));
+                                'camera-denied', ev?.joinCode, { error: err2 }));
             return;
           } catch (err3) {
             // Keep THIS error to judge by. It is the only attempt that did not ask for a microphone,
@@ -1457,8 +1568,12 @@
           : "Couldn't start the camera.";
         // Genuine faults stay 'camera'; a declined permission gets its own context so it does not sit
         // in the operator's open-issues digest looking like a bug.
+        // `judged` is passed as well as summarised: the summary is what groups these together in
+        // the console, the object is what makes one of them fixable. The production rows that read
+        // "camera: TypeError Type error" were this call site, with the stack thrown away.
         reportClientError(`camera: ${judged instanceof Error ? judged.name + ' ' + judged.message : 'failed'}`,
-          denied ? 'camera-denied' : 'camera', ev?.joinCode);
+          denied ? 'camera-denied' : 'camera', ev?.joinCode,
+          { error: judged });
         if (denied && !permissionReported) { permissionReported = true; trackEvent('camera_permission_denied', undefined, ev?.joinCode); }
         // The camera did not come back, so the last known torch answer is no longer about anything.
         // stopCamera() deliberately leaves it alone (see the note there) precisely so a re-acquire
@@ -2211,6 +2326,7 @@
     // The two states the BUTTON advertises are answered out loud; the rest stay silent, because
     // they are either transient (a double tap mid-capture) or already on screen (cameraError is
     // rendered as a panel).
+    if (eventEnded) { showToast(endedNote, true); return; }
     if (photosRemaining <= 0) { announceNoShots(); return; }
     if (capturing || cameraError || !stream || !videoEl || !videoEl.videoWidth) return;
     capturing = true;
@@ -2226,18 +2342,62 @@
       if (useFill) { fillActive = true; await new Promise((r) => setTimeout(r, 320)); }
       const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
       const { sx, sy, sw, sh } = cropRect(vw, vh, aspectValue(aspect));
+      // Turn the shot the right way up BEFORE it is encoded, because this is the last moment the
+      // information exists.
+      //
+      // With the page orientation locked, turning the phone turns the camera with it while the
+      // layout stays put, so the scene arrives rotated inside the frame. The guest cannot see this
+      // happening: the viewfinder is rotated by the same hand that rotated the sensor, so the two
+      // cancel and the preview looks perfectly upright. The file is not. And a canvas capture
+      // carries no EXIF, so there is no orientation tag for a viewer to honour later — every
+      // reader of that file, for ever, sees a sideways photo with nothing to suggest otherwise.
+      //
+      // glyphRotation() is exactly the right quantity and is already trusted for the HUD: it is the
+      // phone's rotation RELATIVE to the page, so it is zero whenever the layout has already
+      // followed the device. That case matters — with auto-rotate on, the browser hands us upright
+      // frames, and turning them again would tip a good photo over. Negated because it is expressed
+      // as the counter-rotation glyphs need; the picture turns WITH the phone, not against it.
+      const rot = -glyphRotation();
+      const turned = rot === 90 || rot === -90;   // a HALF turn keeps the axes; only a quarter swaps them
       const canvas = document.createElement('canvas');
-      canvas.width = Math.round(sw); canvas.height = Math.round(sh);
+      // A quarter turn swaps the axes. Every shape on offer is square today so this is a no-op, but
+      // the shape is the guest's choice and the first non-square one would otherwise crop to a box
+      // of the wrong proportions.
+      canvas.width = Math.round(turned ? sh : sw);
+      canvas.height = Math.round(turned ? sw : sh);
       const ctx = canvas.getContext('2d')!;
       if (brightness !== 1) ctx.filter = `brightness(${brightness})`;
-      if (facing === 'user') { ctx.translate(canvas.width, 0); ctx.scale(-1, 1); }
-      ctx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+      // Canvas transforms apply to the draw in the REVERSE of the order written, so what is written
+      // last happens first. The mirror therefore has to be written FIRST to be applied LAST, in
+      // output space, and that is load-bearing rather than tidy.
+      //
+      // I had these the other way round, with a comment confidently explaining why. The mechanics in
+      // it were right and the conclusion was wrong: a reflection does not commute with a rotation,
+      // it ANTI-commutes — R(t)·mirror equals mirror·R(-t). So mirroring in frame space and then
+      // turning sends the picture the opposite way round the clock, and the front camera came out a
+      // half turn from where the back camera lands with the very same `rot`.
+      //
+      // Worked through, for a frame with red down its left edge and rot = +90:
+      //    rear camera      R(90)·F              -> red on top          correct
+      //    selfie, wanted   mirror(R(90)·F)      -> red on top, flipped correct
+      //    selfie, as was   R(90)·mirror(F)      -> red on the BOTTOM   upside down
+      // Only the quarter turns were affected, which is every turn a phone actually reports.
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      if (facing === 'user') ctx.scale(-1, 1);
+      // `rot !== 0`, not `turned`. `turned` answers a DIFFERENT question — do the axes swap — and
+      // reusing it here meant a half turn was recorded as applied and never actually applied: the
+      // row claimed a correction the pixels had not had, which switches the badge off and leaves an
+      // upside-down photo with nothing to say so. Unreachable while glyphRotation() returns only
+      // 0 or ±90, but the server's readTurn() already accepts 180 in case a client grows one, so
+      // the two halves were waiting to disagree.
+      if (rot !== 0) ctx.rotate((rot * Math.PI) / 180);
+      ctx.drawImage(videoEl, sx, sy, sw, sh, -sw / 2, -sh / 2, sw, sh);
       fillActive = false;
       shutterBlink();   // the frame is grabbed: this is the moment the photo exists
       // Maximum quality — capture at native resolution with JPEG quality 1.0 (no perceptible
       // compression). We don't downscale; big files are fine per product direction.
       const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/jpeg', 1.0));
-      if (blob) enqueue(blob, 'photo', 'jpg', 'capture', { w: canvas.width, h: canvas.height });
+      if (blob) enqueue(blob, 'photo', 'jpg', 'capture', { w: canvas.width, h: canvas.height, captureRotation: rot, captureTurn: rot });
     } finally {
       // Keyed on the lamp, not on our intent: if the guest disarmed the flash mid-shot, `useFlash`
       // is already false and the lamp would have been left burning.
@@ -2250,7 +2410,17 @@
   // still flushing would queue two starts and the second would fight the first.
   let startPending = false;
 
+  /** The phone's turn relative to the page when recording began — what the SERVER must still
+   *  apply, as opposed to captureRotation, which is what the client has already baked in. Keeping
+   *  the two apart matters: conflating them would mark a clip as corrected while its pixels are
+   *  still sideways. */
+  let recTurn = 0;
+
   async function toggleRecord() {
+    // `!recording` is the point: a clip already rolling must still be STOPPABLE after the event
+    // closes, or the guest is left holding a recording with no way to end it and the take is lost.
+    // Only STARTING a new one is refused.
+    if (eventEnded && !recording) { showToast(endedNote, true); return; }
     // aria-disabled on the button, so this is reached while the camera is broken. Say so rather
     // than swallowing the press — the error panel may be scrolled out of view.
     if (cameraError) { showToast(cameraError, true); return; }
@@ -2304,13 +2474,29 @@
     // beside that, and 128k is where stereo music starts to audibly smear.
     const recOpts: MediaRecorderOptions = { videoBitsPerSecond: recBitrate, audioBitsPerSecond: 192_000 };
       if (mime) recOpts.mimeType = mime;
+      // Which way up the phone was when the guest FRAMED this, measured here rather than at the
+      // stop below.
+      //
+      // A photo is straightened in the canvas on the way out; a clip cannot be. MediaRecorder writes
+      // whatever the camera hands it, and putting a canvas in the path would mean a second encoder
+      // running on a phone that is already struggling with the first. So the pixels arrive turned,
+      // exactly as photos used to, and the correction has to happen server-side — losslessly, by
+      // writing a display matrix, which costs a remux and no quality.
+      //
+      // The server cannot work the angle out for itself: the frame is square and carries no EXIF, so
+      // a turned clip is indistinguishable from an upright one. This measurement is the only record
+      // that the phone was sideways, and it does not survive the recording.
+      //
+      // Taken at START because that is when the shot was composed. A guest who lowers the phone as
+      // they stop would otherwise have the last half-second decide which way up the whole clip goes.
+      recTurn = -glyphRotation();
       mediaRecorder = new MediaRecorder(stream, recOpts);
       mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
       mediaRecorder.onstop = () => {
         const secs = recSecs;
         const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || 'video/webm' });
         const ext = (mediaRecorder?.mimeType || '').includes('mp4') ? 'mp4' : 'webm';
-        enqueue(blob, 'video', ext, 'capture', { durationSecs: secs });
+        enqueue(blob, 'video', ext, 'capture', { durationSecs: secs, captureTurn: recTurn });
       };
       mediaRecorder.start();
       if (flashArmed && torchSupported && !ev?.noFlash) setTorch(true);   // continuous light for the clip
@@ -2437,7 +2623,7 @@
     if (r === 'accepted') showToast('Snapdini added to your home screen');
   }
 
-  function enqueue(blob: Blob, mediaType: 'photo' | 'video', ext: string, source: 'capture' | 'upload' = 'capture', extra?: { durationSecs?: number; w?: number; h?: number }) {
+  function enqueue(blob: Blob, mediaType: 'photo' | 'video', ext: string, source: 'capture' | 'upload' = 'capture', extra?: { durationSecs?: number; w?: number; h?: number; captureRotation?: number; captureTurn?: number }) {
     // Read at the moment of the shot and carried on the item, never read again at upload time: a
     // queued capture can sit in IndexedDB across a reload and go up hours later, by which point the
     // phone's current orientation says nothing about how this was framed. 'unknown' is not sent —
@@ -2452,12 +2638,29 @@
     // arm the next mission while this one is still going up.
     const challengeId = armed ?? undefined;
     const id = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+    // The turn we ALREADY applied to the pixels, so the server can tell a photo that was shot
+    // sideways and fixed from one that was shot sideways and left that way. Without it the
+    // "shot sideways" mark would fire on the photos we had just straightened.
+    // WHEN it was taken, which is a different question from when it reaches us.
+    //
+    // The server stamps takenAt at UPLOAD, so a shot taken inside the event and uploaded a minute
+    // after it closed was indistinguishable from one taken afterwards — and was refused. That is the
+    // wrong answer to the wrong question: whether a photo belongs to an event is settled by when the
+    // guest pressed the shutter, not by whether the network cooperated before a deadline. Six were
+    // refused at one hen do, eighteen minutes past the end, by a single phone draining its queue.
+    //
+    // Advisory, not evidence — a client clock can be wrong or lied to — so the server clamps it.
     queue = [...queue, { id, blob, mediaType, source, ext, status: 'pending', size: blob.size, challengeId,
                          captureOrientation: shotAs === 'unknown' ? undefined : shotAs,
-                         captureShape: shotShape, ...extra }];
+                         captureShape: shotShape, capturedAt: Date.now(), ...extra }];
     trackEvent('photo_captured', { kind: mediaType, source }, ev?.joinCode);
     // Persist to IndexedDB immediately so the capture survives an outage / reload / closed tab.
-    if (sessionToken && ev) putCapture({ id, joinCode: ev.joinCode, sessionToken, blob, mediaType, source, ext, createdAt: Date.now() }).catch(() => {});
+    if (sessionToken && ev) putCapture({ id, joinCode: ev.joinCode, sessionToken, blob, mediaType, source, ext,
+        createdAt: Date.now(),
+        // Everything the shutter measured goes to disk with the blob. Left out, a reload silently
+        // undoes both the late-upload grace and the rotation correction — see StoredCapture.
+        capturedAt: Date.now(), captureTurn: extra?.captureTurn, captureRotation: extra?.captureRotation,
+        captureOrientation: shotAs === 'unknown' ? undefined : shotAs, captureShape: shotShape }).catch(() => {});
     if (saveToDevice) saveToDeviceCopy(blob, ext);
     // Celebrate NOW, not when the upload lands. By this line the shot is in the queue and on its way
     // into IndexedDB, so the trick really is pulled off — the guest is holding a finished thing.
@@ -2602,8 +2805,14 @@
       // Pull each capture's chunk-resume state so a big upload continues where it left off.
       const restored = await Promise.all(fresh.map(async (s) => {
         const p = await getProgress(s.id).catch(() => null);
+        // Carried back out, or the restore is the thing that breaks the feature. `createdAt` is the
+        // fallback for rows stored before capturedAt existed: it is written at the same instant, so
+        // it is the same number, and an older row is better served by it than by nothing.
         return { id: s.id, blob: s.blob, mediaType: s.mediaType, source: s.source ?? 'capture', ext: s.ext, status: 'pending' as const, size: s.blob?.size ?? 0,
-          uploadId: p?.uploadId, doneChunks: p?.doneChunks };
+          uploadId: p?.uploadId, doneChunks: p?.doneChunks,
+          capturedAt: s.capturedAt ?? s.createdAt, captureTurn: s.captureTurn,
+          captureRotation: s.captureRotation, captureOrientation: s.captureOrientation,
+          captureShape: s.captureShape };
       }));
       if (restored.length) {
         queue = [...restored, ...queue];
@@ -2639,6 +2848,13 @@
       if (item.challengeId) form.append('challengeId', item.challengeId);
       if (item.captureOrientation) form.append('captureOrientation', item.captureOrientation);
       if (item.captureShape) form.append('captureShape', item.captureShape);
+      if (item.captureRotation) form.append('captureRotation', String(item.captureRotation));
+      // !== undefined, not truthiness: a measured turn of ZERO is a real reading — the phone was
+      // square with the page — and is the thing that tells the badge a correctly-framed landscape
+      // shot needs no mark. Dropped as falsy, it arrived as NULL ("never measured") on the path
+      // most photos take, quietly collapsing the very distinction 0069 exists to record.
+      if (item.captureTurn !== undefined) form.append('captureTurn', String(item.captureTurn));
+      if (item.capturedAt) form.append('capturedAt', String(item.capturedAt));
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/photos');
       xhr.upload.onprogress = (e) => { if (e.lengthComputable) { item.progress = Math.round((e.loaded / e.total) * 100); queue = queue; } };
@@ -2709,7 +2925,7 @@
     }
     const complete = () => fetch('/api/photos/complete', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
-      body: JSON.stringify({ sessionToken, uploadId, total, ext: item.ext, mediaType: item.mediaType, source: item.source, challengeId: item.challengeId, captureOrientation: item.captureOrientation, captureShape: item.captureShape }),
+      body: JSON.stringify({ sessionToken, uploadId, total, ext: item.ext, mediaType: item.mediaType, source: item.source, challengeId: item.challengeId, captureOrientation: item.captureOrientation, captureShape: item.captureShape, captureRotation: item.captureRotation, captureTurn: item.captureTurn, capturedAt: item.capturedAt }),
     });
     let res = await complete();
     if (res.status === 409) {   // server missing some parts → resend them, then retry complete
@@ -2872,7 +3088,21 @@
         return;
       }
       item.retries = (item.retries || 0) + 1;
-      reportClientError(errMsg, 'upload', ev?.joinCode);
+      // The error OBJECT, not a sentence made out of it, and what happened next.
+      //
+      // The console used to show rows reading "TypeError Type error" with nothing else — a bug
+      // report with the bug removed. The frames are the whole value, and only the thrower has them.
+      //
+      // The outcome matters as much: an upload that failed and then went up on the next attempt
+      // looks identical, in a log, to one that never did. That distinction is the difference
+      // between "flaky network, no harm done" and "a guest lost a photograph", and it was the exact
+      // question that could not be answered about the six refused at a hen do.
+      //
+      // Deliberately NOT called 'lost' when the retries run out: the capture is still in the queue
+      // and still in IndexedDB, and the guest can send it by hand. Saying lost would be a stronger
+      // claim than the code can make.
+      reportClientError(errMsg, 'upload', ev?.joinCode,
+        { error: e, outcome: item.retries <= MAX_UPLOAD_RETRIES ? 'retrying' : 'gave-up' as const });
       if (item.retries <= MAX_UPLOAD_RETRIES) {
         // Auto-retry with a short backoff — the guest doesn't need to reopen the queue.
         item.status = 'pending'; item.error = undefined;
@@ -3095,7 +3325,7 @@
 
 <!-- A tap anywhere else backs out of an armed delete. The bin itself stops propagation, so
      this only ever sees taps that are NOT the confirm button. -->
-<svelte:window on:click={() => (confirmingDeleteId = null)} />
+<svelte:window on:click={() => (confirmingDeleteId = null)} on:pointerdown={ensureTilt} />
 
 {#if fatal}
   <div class="center"><div class="msg"><span class="big">😕</span><h2>{fatal}</h2><a class="btn ghost" href="/">← Home</a></div></div>
@@ -3697,11 +3927,19 @@
       </div>
     {/if}
 
+    <!-- Above the controls, where the thumb already is. Fixed rather than a toast that fades: this
+         is a standing condition, and a guest who looks up thirty seconds later must still be told
+         why the button stopped working. -->
+    {#if eventEnded}
+      <div class="endnote" role="status">{endedNote}{#if pendingCount} — {pendingCount} still uploading{/if}</div>
+    {:else if endingSoon}
+      <div class="endnote soon" role="status" aria-live="polite">Event ends in {countdown}</div>
+    {/if}
     <div class="bottombar">
       <button class="round" on:click={openGallery} title="Gallery" aria-label="Gallery{pendingCount ? ` (${pendingCount} uploading)` : ''}">🖼️{#if pendingCount}<span class="badge" class:error={hasUploadError}>{pendingCount}</span>{/if}</button>
       {#if videoMode}
         <button class="shutter video" class:recording on:click={toggleRecord}
-                aria-disabled={!!cameraError || undefined}
+                aria-disabled={(eventEnded && !recording) || !!cameraError || undefined}
                 aria-label={recording ? 'Stop recording' : 'Record'}><span class="core"></span></button>
       {:else}
         <!-- aria-disabled, NOT disabled. See announceNoShots(): a disabled button absorbs the
@@ -3709,7 +3947,7 @@
              press more than any other. Same muted look, same announcement to a screen reader, and
              the press is answered. -->
         <button class="shutter photo" on:click={capturePhoto}
-                aria-disabled={photosRemaining <= 0 || !!cameraError || undefined}
+                aria-disabled={eventEnded || photosRemaining <= 0 || !!cameraError || undefined}
                 aria-label="Take photo"><span class="core"></span></button>
       {/if}
       <!-- Hidden, not just disabled, while recording: the stream cannot be swapped mid-clip, so a
@@ -4052,10 +4290,12 @@
                     on:pick={(e) => (e.detail === 'zip' ? chooseZip() : chooseFiles())}
                     on:close={() => (choosing = null)} />
   {/if}
-  {#if lbOpen}<Lightbox photos={shownPhotos} index={lbIndex} captionMode="own"
+  {#if lbOpen}<Lightbox photos={shownPhotos} index={lbIndex} captionMode="own" rotateMode="own"
+              {sessionToken}
               on:saved={(e) => { if (ev) saved = markSaved(ev.joinCode, [e.detail]); }}
                         allowSave={allowDownloads}
                         on:caption={(e) => openCaption(e.detail)}
+                        on:rotated={(e) => applyRotation(e.detail.result)}
                         on:photochange={hideToast}
                         on:close={() => { hideToast(); lbOpen = false; }} />{/if}
   {#if captionFor}
@@ -4088,7 +4328,7 @@
   {/if}
 {/if}
 
-{#if showFeedback}<FeedbackModal context="Camera ({ev?.joinCode ?? ''})" on:close={() => (showFeedback = false)} />{/if}
+{#if showFeedback}<FeedbackModal context="Camera ({ev?.joinCode ?? ''})" eventCode={ev?.joinCode ?? ''} on:close={() => (showFeedback = false)} />{/if}
 
 <!-- Upload queue — shared across the camera and gallery screens; opened on demand. -->
 {#if drawerOpen}
@@ -4228,6 +4468,12 @@
   .cam-loading { position: absolute; inset: 0; z-index: 3; display: flex; align-items: center; justify-content: center; background: #000; }
   .cam-spinner { width: 38px; height: 38px; border: 3px solid rgba(255,255,255,0.25); border-top-color: #fff; border-radius: 50%; animation: camspin 0.8s linear infinite; }
   @keyframes camspin { to { transform: rotate(360deg); } }
+  /* Sits in the flow above the control bar rather than floating over the picture: it must not cover
+     the thing the guest is trying to frame in the last minutes they have to frame it. */
+  .endnote { margin: 0 auto 8px; padding: 6px 14px; border-radius: 999px; font-size: 0.82rem;
+    font-weight: 700; text-align: center; width: fit-content; max-width: 92%;
+    background: rgba(0,0,0,.62); color: #fff; backdrop-filter: blur(6px); }
+  .endnote.soon { background: var(--accent-fill, #f5c518); color: var(--accent-ink, #111); }
   .cam-error .big { font-size: 48px; }
   .cam-error p { max-width: 30ch; line-height: 1.4; }
   .cam-error .btn { width: auto; min-width: 150px; }

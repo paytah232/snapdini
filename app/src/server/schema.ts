@@ -340,6 +340,24 @@ export const photos = pgTable('photos', {
   // 'portrait' | 'landscape' | 'unknown' — how the phone was HELD, which the pixels cannot say when
   // rotation lock keeps a sideways shot in a portrait-shaped frame. See 0042_capture_orientation.sql.
   captureOrientation: text('capture_orientation'),
+  // Degrees CLOCKWISE already baked into the stored pixels by a manual correction — 0, 90, -90 or
+  // 180, normalised into (-180, 180]. NULL means nobody has touched the file, which is every row
+  // until somebody presses rotate. Deliberately NOT the same fact as captureOrientation above:
+  // that one records how the phone was HELD and never changes, this one records what we have since
+  // done about it. See 0067_capture_rotation.sql.
+  captureRotation: integer('capture_rotation'),
+  // Degrees CLOCKWISE the phone was TURNED relative to the page when the shot was framed — 0, 90,
+  // -90 or 180, or NULL for a row nobody measured. A MEASUREMENT, where captureRotation above is a
+  // record of work already done: for a photo the two agree (the camera turns its own canvas before
+  // it encodes), and for a clip this one is the work still OUTSTANDING, because MediaRecorder takes
+  // whatever the camera hands it and a second encoder on the phone is not an option. The upload
+  // path applies it to the stored clip as a display matrix and then sets captureRotation to say so.
+  //
+  // This, and not captureOrientation, is what the "shot sideways" badge reads: 'landscape' means
+  // both "the page turned too, the photo is fine" and "the page did not turn, the photo is on its
+  // side", and the badge fired on both. See 0069_capture_turn.sql.
+  captureTurn: integer('capture_turn'),
+  capturedAt: ms('captured_at'),
   // The shape the guest CHOSE ('1:1', '4:5', 'full'…). Only meaningful for clips, where asking the
   // camera for a shape frequently does not get you one. See 0043_capture_shape.sql.
   captureShape: text('capture_shape'),
@@ -490,6 +508,7 @@ export const contactMessages = pgTable('contact_messages', {
   message: text('message').notNull(),
   kind: text('kind').notNull().default('contact'), // 'contact' | 'bug' | 'feedback' | 'suggestion'
   imageFilename: text('image_filename'),           // optional screenshot (relative to UPLOADS_DIR, under feedback/)
+  eventCode: text('event_code'),                   // the event it came from, when there is one (NULL on the marketing form)
   emailed: boolean('emailed').notNull().default(false), // was the support email delivered?
   handled: boolean('handled').notNull().default(false), // admin marked as dealt-with
   createdAt: ms('created_at').notNull(),
@@ -497,6 +516,12 @@ export const contactMessages = pgTable('contact_messages', {
 
 // Client-side diagnostic/error reports (e.g. a failed upload) — TECHNICAL data only, no photos
 // or personal content. Surfaced in site-admin so we can actually see guest-side failures.
+//
+// ONE ROW PER OCCURRENCE, still — the grouping the admin screen shows is an aggregate over
+// `fingerprint` computed at read time, not a counter kept here. See 0071 for why that way round:
+// keeping a per-group tally as well would be a second source of truth that a retention purge
+// immediately makes wrong, and the operator's "which guest, when, on what" needs the occurrences
+// anyway.
 export const clientErrors = pgTable('client_errors', {
   id: text('id').primaryKey(),
   message: text('message').notNull(),
@@ -506,6 +531,22 @@ export const clientErrors = pgTable('client_errors', {
   url: text('url'),               // page path
   handled: boolean('handled').notNull().default(false),
   createdAt: ms('created_at').notNull(),
+  // Which reports are the SAME problem. Server-computed at insert by fingerprintOf(); never sent
+  // by the client, which would let one misbehaving phone merge or split everyone else's groups.
+  fingerprint: text('fingerprint'),
+  stack: text('stack'),
+  // The guest, by id alone. Their name is joined in for the admin view and never copied here —
+  // 0071 has the reasoning, and it is the reason this column is not `participantName`.
+  participantId: text('participant_id'),
+  appVersion: text('app_version'),    // what was deployed (server-stamped)
+  clientBuild: text('client_build'),  // what the tab was actually running (an installed PWA lags)
+  displayMode: text('display_mode'),  // 'standalone' | 'browser'
+  viewport: text('viewport'),         // CSS px, "390x844"
+  connection: text('connection'),     // effectiveType bucket only — '4g' / '3g' / 'slow-2g'
+  // 'recovered' | 'lost' | 'retrying' | 'gave-up' | NULL. NULL is "nobody said", NOT "no harm
+  // done". 'gave-up' is not 'lost': automatic delivery stopped, but the capture is still in the
+  // queue and in IndexedDB and the guest can send it by hand. See ReportOutcome in web report.ts.
+  outcome: text('outcome'),
 });
 
 // Inferred row types — use these to type query results across the backend.
@@ -702,3 +743,49 @@ export const processedStripeEvents = pgTable('processed_stripe_events', {
   type: text('type').notNull(),                // e.g. 'checkout.session.completed', for reading later
   processedAt: ms('processed_at').notNull(),
 });
+
+/** What the SITE OPERATOR changed on somebody else's event. See 0068_admin_actions.sql for the
+ *  whole design; three things are worth knowing from here.
+ *
+ *  The admin and event columns are DENORMALISED on purpose. A join to `users` tells the truth
+ *  today and stops the moment an operator account is renamed or removed, at which point the log
+ *  says a deleted id did something to a customer's wedding.
+ *
+ *  There is NO foreign key on `eventId`, which is why it is a bare text column rather than a
+ *  reference: deleting an event is one of the actions recorded here, so a cascade would erase the
+ *  entry for the most destructive thing an operator can do at the exact moment it was written.
+ *  siteEvents makes the same call for the same shape of reason.
+ *
+ *  `before` / `after` are jsonb objects WITH THE SAME KEYS, holding only what changed — field
+ *  names for a single object, target ids when one action covered a set. One representation rather
+ *  than a column per feature; see changedOnly() in admin-actions.ts, which is the only writer. */
+export const adminActions = pgTable('admin_actions', {
+  // bigserial, unlike almost everything else here: nothing outside the database ever names a row,
+  // and a monotonic id is the unique tiebreak that keeps "newest first" from reshuffling between
+  // pages of the listing. Same reasoning as siteEvents.
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  at: ms('at').notNull(),
+  adminUserId: text('admin_user_id').notNull(),
+  adminEmail: text('admin_email').notNull(),
+  adminName: text('admin_name'),
+  eventId: text('event_id').notNull(),
+  eventName: text('event_name').notNull(),
+  eventJoinCode: text('event_join_code').notNull(),
+  action: text('action').notNull(),
+  targetType: text('target_type').notNull(),
+  targetId: text('target_id'),
+  // `_value` because `before` and `after` are SQL keywords. Unreserved ones, so Postgres would in
+  // fact accept them bare — but every hand-written query in routes/admin.ts would need quoting to
+  // stay legible, and a column name that has to be quoted is a column name somebody eventually
+  // forgets to quote.
+  before: jsonb('before_value'),
+  after: jsonb('after_value'),
+}, (t) => ({
+  // The two reads that will ever happen: "everything recently" and "everything for this event".
+  // DESC in the index, because both are read newest-first and an index scanned backwards is fine
+  // but a sort of a growing audit table is not.
+  recentIdx: index('admin_actions_at_idx').on(sql`${t.at} DESC`, sql`${t.id} DESC`),
+  eventIdx: index('admin_actions_event_idx').on(t.eventId, sql`${t.at} DESC`, sql`${t.id} DESC`),
+}));
+
+export type AdminAction = typeof adminActions.$inferSelect;

@@ -1,5 +1,6 @@
 <script lang="ts">
   import SiteNav from '$lib/components/SiteNav.svelte';
+  import SiteAdminLink from '$lib/components/SiteAdminLink.svelte';
   import { onMount, tick } from 'svelte';
   import { goto, replaceState } from '$app/navigation';
   import { page } from '$app/stores';
@@ -166,7 +167,7 @@
 <SiteNav>
   <div class="who-row">
     {#if who}<span class="who">{who}</span>{/if}
-    {#if isAdmin}<a class="btn ghost" href="/siteadmin">🎩 Admin</a>{/if}
+    {#if isAdmin}<SiteAdminLink />{/if}
     <button class="btn ghost" on:click={logout}>Sign out</button>
   </div>
 </SiteNav>
@@ -243,8 +244,21 @@
 </div>
 
 <style>
-  .who-row { display: flex; align-items: center; gap: 14px; }
-  .who { color: var(--text-muted); font-size: 0.85rem; }
+  .who-row { display: flex; align-items: center; gap: 14px; min-width: 0; }
+  /* Truncates rather than wraps. SiteNav's bar is a FIXED 62px, so a long address wrapping to
+     a second line does not make the bar taller — it makes the contents overflow it, top and
+     bottom. That is what made the buttons look like they were touching the edges. */
+  .who { color: var(--text-muted); font-size: 0.85rem;
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  @media (max-width: 460px) {
+    /* Three controls plus an address do not fit a phone. The address goes — it is on the
+       account page, and it is the only one of the four that is not a thing you press — and
+       the buttons take the same reduced metrics the event manager's header already uses, so
+       the two bars still match one click apart. */
+    .who { display: none; }
+    .who-row { gap: 8px; }
+    .btn { padding: 7px 11px; font-size: 0.8rem; }
+  }
 
   .btn { display: inline-block; font-weight: 700; border-radius: var(--radius-sm); padding: 10px 18px; font-size: 0.9rem;
     border: 1px solid transparent; cursor: pointer; text-decoration: none; font-family: inherit; }

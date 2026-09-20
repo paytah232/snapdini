@@ -94,3 +94,28 @@ export function purgeAtFor(expiresAt: number, retentionDays?: number | null): nu
   const days = Number.isFinite(d) && d > 0 ? d : RETENTION_DAYS;
   return expiresAt + days * 86_400_000;
 }
+
+/** The purge instant for a WHOLE EVENT, which is not always purgeAtFor's answer.
+ *
+ *  A demo is created with purgeAt == expiresAt so it cleans itself up about three hours after
+ *  somebody pokes at it. That short life is the entire reason an unowned, fully-entitled event is
+ *  allowed to sit on the public site at all.
+ *
+ *  purgeAtFor's job is the opposite: it leans LONG on purpose, because for a real event every wrong
+ *  answer costs somebody their photos. Handing it a demo therefore pushed the purge out by the full
+ *  retention window, so ANY settings save — including one the demo's own guided setup makes —
+ *  quietly promoted a throwaway into a month-long event. They then accumulated, because nothing
+ *  else ever shortens a purge.
+ *
+ *  Kept out of purgeAtFor itself: that takes two numbers and knows nothing about owners or names,
+ *  and teaching it would mean threading a whole event through a pure calculation to serve one
+ *  caller. This is that caller's question, so it gets its own name.
+ *
+ *  A real event is untouched — same expiry, same retention, same answer — so rescheduling still
+ *  moves the purge with the new date, and a paid retention extension is still honoured. */
+export function purgeAtForEvent(
+  ev: { ownerUserId: string | null; name: string; retentionDays?: number | null },
+  expiresAt: number,
+): number {
+  return isDemoEvent(ev) ? expiresAt : purgeAtFor(expiresAt, ev.retentionDays);
+}

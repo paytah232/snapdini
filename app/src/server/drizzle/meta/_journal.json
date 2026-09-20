@@ -470,6 +470,48 @@
       "when": 1789659606882,
       "tag": "0066_index_hygiene",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1789909042286,
+      "tag": "0067_capture_rotation",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1789915521593,
+      "tag": "0068_admin_actions",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1789916611653,
+      "tag": "0069_capture_turn",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "7",
+      "when": 1789916671653,
+      "tag": "0070_captured_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1789918962742,
+      "tag": "0071_client_error_detail",
+      "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1789919022742,
+      "tag": "0072_contact_event_code",
+      "breakpoints": true
     }
   ]
 }

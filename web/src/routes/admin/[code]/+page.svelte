@@ -21,6 +21,11 @@
            type GuestDelivery, type GuestSendScope } from '$lib/guestDelivery';
   import type { AppOptions, BillingConfig } from '$lib/types';
   import UpgradePanel from '$lib/components/UpgradePanel.svelte';
+  import SiteAdminLink from '$lib/components/SiteAdminLink.svelte';
+  import AdminBanner from '$lib/components/AdminBanner.svelte';
+  import AdminActionLog from '$lib/components/AdminActionLog.svelte';
+  import { ownershipOf, isGuarded, isLocked, readTookControl, writeTookControl,
+           TAKE_CONTROL_CONFIRM, LOCKED_REFUSAL } from '$lib/adminGuard';
   import SiteNav from '$lib/components/SiteNav.svelte';
   import { readView, writeView } from '$lib/rememberedView';
   import HelpTip from '$lib/components/HelpTip.svelte';
@@ -95,6 +100,66 @@
    *  Carries no secret — the join flow already makes an event's name and existence public. */
   let wallEvent: Awaited<ReturnType<typeof getEvent>> | null = null;
   let viewerIsAdmin = false;    // site admin drilled in via support-override → offer "back to site admin"
+
+  // ── A site admin standing in somebody else's event ─────────────────────────
+  //
+  // ACCIDENT PREVENTION, NOT ACCESS CONTROL. The operator is a trusted site admin and the server
+  // accepts every one of these writes from him with or without what follows; $lib/adminGuard says
+  // so at length and nothing here should be mistaken for a boundary. The problem it solves is that
+  // this screen is IDENTICAL whether he is in his own event or in a customer's wedding, and the
+  // guest switches, downloads and face matching all save on the change event — so a stray tap
+  // changes a live event with no confirm and no undo. You cannot accidentally autosave what you
+  // cannot click.
+  //
+  // `youManage` is the signal, and it is NOT on the admin payload — GET /:code/admin never returns
+  // it. It is on the PUBLIC event, which this page already fetches unconditionally for the
+  // organizer-code wall (`wallEvent`), so the guard rides along on a request that was happening
+  // anyway rather than adding one.
+  $: ownership = ownershipOf(wallEvent?.youManage);
+  $: adminGuarded = isGuarded(viewerIsAdmin, ownership);
+  /** Kept in the session, per tab per event, so it survives a reload and the 30-second refresh but
+   *  not the day. Read at init rather than in onMount so the first paint is already right — a
+   *  manager that renders live and then greys out is a manager somebody has already clicked. */
+  let tookControl = readTookControl(code);
+  $: locked = isLocked(viewerIsAdmin, ownership, tookControl);
+  /** The red bar's rendered height, bound out of AdminBanner. Feeds `--admin-bar-h`, which is what
+   *  lets the section bar pin underneath it rather than behind it. */
+  let adminBarH = 0;
+  /** Open by default: the log exists to be read BEFORE anything is touched, and one that starts
+   *  collapsed is one that gets opened after the fact. Collapsible because on a long support
+   *  session it is a list you have already read. */
+  let adminLogOpen = true;
+
+  function takeControl() {
+    if (!adminGuarded || tookControl) return;
+    // A confirm, because this is the one moment the operator should have to notice. Everything
+    // after it is ordinary editing, and re-asking per control is how a prompt becomes something you
+    // dismiss without reading.
+    if (!confirm(TAKE_CONTROL_CONFIRM)) return;
+    tookControl = true;
+    writeTookControl(code, true);
+    // Deliberately NOT tracked through analytics(). `EventName` is a closed union of PRODUCT events
+    // and this is an operations one — the record that matters is the server's action log, which is
+    // written by the writes themselves and cannot be dropped by an ad blocker.
+  }
+  function releaseControl() {
+    tookControl = false;
+    writeTookControl(code, false);
+  }
+  /** The refusal, said out loud.
+   *
+   *  Every writing control on this page is also `disabled`, so this should be unreachable from a
+   *  mouse — it is here for the paths a disabled attribute does not cover: a keyboard Enter on a
+   *  control that was enabled when focus landed, a handler reached from a component's own event,
+   *  and the next control somebody adds and forgets to gate. Returning true means "stop".
+   *
+   *  It toasts rather than returning silently for the reason GuestList's blockedPress exists: a
+   *  press that does nothing is indistinguishable from a broken page. */
+  function refuseWhenLocked(): boolean {
+    if (!locked) return false;
+    showToast(LOCKED_REFUSAL, true);
+    return true;
+  }
 
   let ev: AdminEvent | null = null;
   let missionsOpen = false;
@@ -183,6 +248,15 @@
   let posterAsk = false;
   const posterAskKey = () => `snap_poster_ask_${code}`;
   function maybeOfferPoster() {
+    // Never offered to a site admin inside a customer's event: it is an unprompted modal whose
+    // primary button opens an editor that auto-saves, which is the exact accident this page is
+    // being guarded against. `locked` and not `adminGuarded`, so an operator who has deliberately
+    // taken control still gets it.
+    //
+    // Computed here rather than read off the reactive `locked`: this is the one check on the page
+    // that is not driven by a press, it runs from inside boot, and a reactive statement that has
+    // not been flushed yet would answer for the state boot STARTED in.
+    if (isLocked(viewerIsAdmin, ownershipOf(wallEvent?.youManage), tookControl)) return;
     // Never on top of the post-create celebration — that modal already owns the screen, and two
     // dialogs stacked on the first second of a new event is a worse welcome than none.
     if (welcome || ev?.posterConfig) return;
@@ -200,6 +274,7 @@
   }
   function answerPosterAsk(run: boolean) {
     posterAsk = false;
+    if (run && refuseWhenLocked()) return;
     try { localStorage.setItem(posterAskKey(), '1'); } catch { /* it will ask once more; harmless */ }
     if (run) { track('poster_opened', undefined, code); wizardOpen = true; }
   }
@@ -215,6 +290,11 @@
    *  goes straight back to it, because "Manage poster" must not throw away their work to show them
    *  a menu. Starting over is offered from inside the designer instead. */
   function openPoster() {
+    // The designer AUTO-SAVES, so there is no version of it that is safe to open read-only. The
+    // lock is on the door rather than inside the room: nothing has to be plumbed through
+    // PosterModal, PosterWizard, MissionsModal, PaletteModal or EventImageEditor, and none of them
+    // can be reached while the page is locked.
+    if (refuseWhenLocked()) return;
     track('poster_opened', undefined, code);
     posterSeed = null;
     if (ev?.posterConfig) { posterOpen = true; return; }
@@ -241,6 +321,7 @@
    *  seedAfterMissions() — an untouched gallery preset is saved nowhere but `posterSeed`. */
   let posterMissionsPersisted = false;
   function editMissionsFromPoster(e: CustomEvent<{ persisted: boolean }>) {
+    if (refuseWhenLocked()) return;
     posterOpen = false;
     posterAfterMissions = true;
     posterMissionsPersisted = !!e.detail?.persisted;
@@ -261,6 +342,7 @@
   }
 
   function restylePoster() {
+    if (refuseWhenLocked()) return;
     track('poster_restyle', undefined, code);
     posterOpen = false;
     posterSeed = null;
@@ -268,6 +350,9 @@
     void loadEvent();
   }
   async function pickPreset(p: { key: string; cfg: Record<string, unknown>; theme: EventTheme; themePreset?: string }) {
+    // Writes the event's THEME as well as opening the designer — the single biggest visible change
+    // a stray press on this page can make to a live event.
+    if (refuseWhenLocked()) { wizardOpen = false; return; }
     track('poster_preset_picked', { preset: p.key }, code);
     wizardOpen = false;
     posterSeed = p.cfg;
@@ -420,6 +505,7 @@
    *  where a partial failure used to read as full success. A send that reached nobody is a refusal
    *  and is shown as one: a host told "sent!" who then hears from nobody assumes we lost the mail. */
   async function sendGuestsNow() {
+    if (refuseWhenLocked()) return;
     if (guestSendBusy || !ev) return;
     const what = savedSendScope === 'favourites' ? 'your favourites' : 'the whole gallery';
     if (!confirm(`Email ${what} to every guest who asked for their photos?`)) return;
@@ -537,8 +623,20 @@
   $: joinUrl = ev ? `${location.origin}${ev.slug ? `/e/${ev.slug}` : `/join/${code}`}` : '';
   $: galleryUrl = ev ? `${location.origin}/gallery/${ev.slug || code}` : '';
   $: shotsLeft = ev ? Math.max(0, ev.maxPhotos * (ev.participantCount || 0) - (ev.photoCount || 0)) : 0;
+  /** The reveal setting in the words the host chose it by, for the override notice. Named rather
+   *  than described ("your reveal setting") so there is no doubt which switch is being overruled. */
+  $: revealModeLabel = ev
+    ? ev.revealMode === 'at_end' ? 'reveal when the event ends'
+      : ev.revealMode === 'manual' ? 'reveal manually'
+      : 'instant'
+    : '';
+
   $: revealSublabel = ev
-    ? ev.isRevealed
+    ? ev.revealHidden
+      // Checked BEFORE the mode, because the override beats the mode. Reading the mode first is what
+      // produced "Instant — photos visible as taken" on an event whose guests could see nothing.
+      ? 'Hidden by you — guests see an empty gallery'
+      : ev.isRevealed
       ? 'Photos are visible to participants'
       : ev.revealMode === 'at_end'
         ? (ev.revealAt ? `Auto-reveals ${revealMomentLabel(ev.revealAt, ev.timezone)}` : 'Auto-reveals when event ends')
@@ -880,10 +978,113 @@
   }
 
   // ── Controls ───────────────────────────────────────────────────────────────
+  /* HIDING TAKES THREE DELIBERATE ACTS. Revealing takes one.
+   *
+   *  The asymmetry is the point. Revealing is what a host came here to do and what their guests are
+   *  waiting for; hiding takes a live gallery away from everyone at once, and it used to happen on a
+   *  single tap with no confirmation of any kind — a host did exactly that mid-wedding and spent the
+   *  evening thinking the product was broken.
+   *
+   *  So: arm ("Sure?"), then a dialog that names the consequence, and only then the write. The armed
+   *  state disarms itself after a few seconds, because a button left sitting on "Sure?" is a trap
+   *  for the next person who glances at the screen — the same reasoning as the review page's reject.
+   */
+  /* Taking the host TO the fix, not merely near it.
+   *
+   *  Switching the section alone leaves them at the top of a card they have to read through, on a
+   *  screen where "Reveal photos" is one row among several that all look alike. Somebody who has
+   *  just been told their gallery is dark should not then have to go hunting; the pill is only worth
+   *  having if pressing it ends with the control under their eyes.
+   *
+   *  Three steps, and the order matters: switch the section, WAIT for it to render (the row does not
+   *  exist until then, so scrolling first scrolls to nothing), then scroll and mark it.
+   *
+   *  The mark is time-limited rather than sticky. It answers "which line did it mean?" and then gets
+   *  out of the way — a highlight that stays becomes part of the furniture and stops being read. */
+  let revealRowEl: HTMLElement | undefined;
+  let revealFlash = false;
+  let revealFlashTimer: ReturnType<typeof setTimeout> | undefined;
+
+  async function goToReveal() {
+    section = 'controls';
+    await tick();
+    revealRowEl?.scrollIntoView({
+      // Smooth unless the reader has asked for less movement, in which case jumping straight there
+      // is the same answer delivered without the motion.
+      behavior: typeof matchMedia === 'function'
+        && matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+      block: 'center',
+    });
+    revealFlash = true;
+    if (revealFlashTimer) clearTimeout(revealFlashTimer);
+    revealFlashTimer = setTimeout(() => (revealFlash = false), 2800);
+  }
+
+  /* ONE arming mechanism, shared by every button that takes something away from guests mid-event.
+   *
+   *  Two of them now, hiding the photos and locking the event, and a third copy of this state is
+   *  where the two behaviours would start to drift apart. Only one can be armed at a time, which is
+   *  also the honest model: arming a second is a decision to abandon the first.
+   */
+  type Armable = 'hide' | 'lock';
+  let armedAction: Armable | null = null;
+  let armedTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function disarmAll() {
+    armedAction = null;
+    if (armedTimer) { clearTimeout(armedTimer); armedTimer = undefined; }
+  }
+
+  /** Arm on the first press, run on the second. Returns true when the caller should go ahead.
+   *
+   *  Disarms itself after five seconds, because a button left sitting on "Sure?" is a trap for the
+   *  next person who glances at the screen. */
+  function armOrRun(kind: Armable): boolean {
+    if (armedAction !== kind) {
+      armedAction = kind;
+      if (armedTimer) clearTimeout(armedTimer);
+      armedTimer = setTimeout(disarmAll, 5000);
+      return false;
+    }
+    disarmAll();
+    return true;
+  }
+
+  function requestReveal() {
+    if (refuseWhenLocked()) return;
+    if (!ev || actionBusy) return;
+    // Revealing is NOT armed. Making the safe direction as hard as the dangerous one teaches people
+    // to click through both without reading, which is how the dangerous one gets clicked.
+    if (!ev.isRevealed) { void doReveal(); return; }
+    if (armOrRun('hide')) void doReveal();
+  }
+
+  function requestLock() {
+    if (refuseWhenLocked()) return;
+    if (!ev || actionBusy) return;
+    // Unlocking gives capability back, so it goes straight through. Locking stops every guest
+    // taking photos at once, which is the same shape of harm as hiding, and gets the same two steps.
+    if (ev.isLocked) { void doLock(); return; }
+    if (armOrRun('lock')) void doLock();
+  }
+
   async function doReveal() {
+    if (refuseWhenLocked()) return;
     if (!ev || actionBusy) return;
     const isRevealed = ev.isRevealed;
-    if (!isRevealed && !confirm('Reveal all photos to participants now?')) return;
+    // BOTH directions ask, and hiding asks harder — it used to ask only when revealing.
+    //
+    // That was backwards. Revealing is the expected, awaited thing; hiding takes a live gallery
+    // away from every guest at once, and it fired on a single press with no confirmation at all and
+    // only a toast afterwards. A host did exactly that mid-wedding and spent the evening believing
+    // the gallery was broken, because nothing on this screen said otherwise.
+    //
+    // The wording names the consequence rather than the setting: "Hide photos?" restates the button,
+    // and the thing worth knowing is that the guests lose the gallery until it is turned back on.
+    const ask = isRevealed
+      ? 'Hide all photos from guests?\n\nThe gallery will look empty to everyone until you reveal them again. Nothing is deleted.'
+      : 'Reveal all photos to participants now?';
+    if (!confirm(ask)) return;
     actionBusy = true;
     try {
       await setReveal(code, orgCode, !isRevealed);
@@ -922,6 +1123,10 @@
 
     const checked = input.checked;
 
+    // Put the switch back before refusing: a Toggle is bound to its own checkbox, so by the time
+    // this handler runs the thing has already moved on screen even though nothing was saved.
+    if (locked) { input.checked = !checked; showToast(LOCKED_REFUSAL, true); return; }
+
     try {
 
       const r = await fetch(`/api/events/${code}/settings`, {
@@ -958,6 +1163,8 @@
     // line never ran either. A failed save left the switch showing ON and said nothing at all.
     const input = e.currentTarget as HTMLInputElement;
     const checked = input.checked;
+    // As in setGuestFlag: revert the visible switch first, then say why.
+    if (locked) { input.checked = !checked; showToast(LOCKED_REFUSAL, true); return; }
     try {
       await setAllowDownloads(code, orgCode, checked);
       showToast(checked ? 'Downloads enabled' : 'Downloads disabled');
@@ -969,9 +1176,13 @@
   }
 
   async function doLock() {
+    if (refuseWhenLocked()) return;
     if (!ev || actionBusy) return;
     const locking = !ev.isLocked;
-    if (locking && !confirm("Lock this event? Participants won't be able to take new photos.")) return;
+    // Same shape as the hide dialog: what it DOES to the guests, and what it does not do to their
+    // photos. A host locking mid-event is usually trying to stop new shots rather than to hide the
+    // ones already taken, and it is worth saying that those are safe.
+    if (locking && !confirm('Lock this event?\n\nGuests will not be able to take any more photos. Everything already taken stays exactly where it is, and the gallery is unaffected.')) return;
     actionBusy = true;
     try {
       await toggleLock(code, orgCode);
@@ -985,6 +1196,7 @@
   }
 
   async function doDelete() {
+    if (refuseWhenLocked()) return;
     if (!confirm('Delete this event and ALL photos permanently?\n\nThis cannot be undone.')) return;
     if (!confirm('Last chance — are you absolutely sure?')) return;
     try {
@@ -1017,6 +1229,7 @@
   $: canOfferReschedule = !!ev && ev.canReschedule === true && Date.now() >= ev.startsAt;
 
   async function doReschedule() {
+    if (refuseWhenLocked()) return;
     if (reschedBusy || !ev) return;
     if (!rDate) { showToast('Pick a new date first', true); return; }
     reschedBusy = true;
@@ -1047,6 +1260,7 @@
   let refundBusy = false;
   let refundDone = false;
   async function requestRefund() {
+    if (refuseWhenLocked()) return;
     if (refundBusy) return;
     refundBusy = true;
     try {
@@ -1077,6 +1291,7 @@
 
   // ── Settings ─────────────────────────────────────────────────────────────
   function toggleAspect(value: string) {
+    if (refuseWhenLocked()) return;
     if (value !== '1:1' && !canAllShapes) {
       // Say why. Silently ignoring the click is what made this feel broken: the box appeared to
       // tick, the save succeeded, and the shape was gone on reload with nothing explaining it.
@@ -1104,6 +1319,7 @@
         || framePackOwned);
 
   async function saveSettingsForm() {
+    if (refuseWhenLocked()) return;
     if (sWantsCustomReveal && sActualRevealAt === null) {
       showToast('Pick the date and time for the reveal', true);
       return;
@@ -1182,6 +1398,12 @@
 
   // ── Co-hosts ─────────────────────────────────────────────────────────────────
   let cohostData: CohostList | null = null;
+  /** Whose event this is, for the site-admin banner — "you are in someone else's event" is a
+   *  warning; "you are in Sarah's event" is information. Taken from the co-host card, which is the
+   *  only thing on this page that knows the owner at all (the admin payload carries no owner) and
+   *  which is loaded anyway. Empty when that request has not landed, and the banner says less
+   *  rather than guessing. */
+  $: ownerName = cohostData?.owner ? (cohostData.owner.name || cohostData.owner.email) : '';
   // Collapsed by default: see the note on .part-head. Not persisted — a host who opened it once was
   // looking for one guest, not changing how the page works from then on.
   let partsOpen = false;
@@ -1202,6 +1424,7 @@
     try { cohostData = await listCohosts(code, orgCode); } catch { /* leave as-is */ }
   }
   async function addCohost() {
+    if (refuseWhenLocked()) return;
     const em = cohostEmail.trim();
     if (!em) return;
     cohostBusy = true;
@@ -1215,6 +1438,7 @@
     } finally { cohostBusy = false; }
   }
   async function dropCohost(id: string) {
+    if (refuseWhenLocked()) return;
     try { await removeCohost(code, orgCode, id); await loadCohosts(); showSuccess('Co-host removed'); }
     catch (e) { showToast(e instanceof Error ? e.message : 'Could not remove', true); }
   }
@@ -1236,6 +1460,9 @@
   /** Every guest mutation, wrapped once: busy flag, the server's own error words, and the fresh
    *  list on the way out. */
   async function guestAction<T extends GuestListPayload>(run: () => Promise<T>, onOk?: (r: T) => void) {
+    // Every guest-list mutation is funnelled through here by design (see the note above), which
+    // makes it the one place the lock has to hold for all six of them.
+    if (refuseWhenLocked()) return;
     guestBusy = true;
     try {
       const r = await run();
@@ -1261,6 +1488,9 @@
   }
 
   async function onGuestPreview(e: CustomEvent<{ text: string; mapping?: GuestField[] }>) {
+    // A preview writes nothing, but it is the first half of an import and letting it run would put
+    // a "Import 40 guests" button in front of a locked page.
+    if (refuseWhenLocked()) return;
     guestBusy = true;
     importText = e.detail.text;
     try {
@@ -1322,6 +1552,7 @@
   let galleryComments = false;
   let galleryLinkBusy = false;
   async function applyGalleryLink() {
+    if (refuseWhenLocked()) return;
     galleryLinkBusy = true;
     try {
       await saveGalleryLink(code, orgCode, { galleryHeartsEnabled: galleryHearts, galleryCommentsEnabled: galleryComments });
@@ -1334,6 +1565,7 @@
   async function loadShares() { try { sharesList = (await listShares(code, orgCode)).shares; } catch { /* leave */ } }
   async function copyShare(url: string) { try { await navigator.clipboard.writeText(url); showToast('Link copied'); } catch { showToast(url, false); } }
   async function dropShare(sh: ShareLink) {
+    if (refuseWhenLocked()) return;
     // Asked, because it cannot be undone and it takes more with it than the URL. A link that was
     // open to reactions owns the people who reacted through it — their name lives on the link, not
     // on the event — so deleting the link deletes their hearts and words too. Better said here than
@@ -1351,6 +1583,9 @@
   // Which row is mid-save, so its select cannot be spun twice before the first answer lands.
   let cardBusy: string | null = null;
   async function moveCard(p: { id: string; name: string }, set: string) {
+    // Reloads the event on the way out, which puts the <select> back where it was — so refusing
+    // here also undoes the option the browser has already shown as chosen.
+    if (locked) { showToast(LOCKED_REFUSAL, true); void loadEvent(); return; }
     cardBusy = p.id;
     try {
       const r = await setParticipantCard(code, orgCode, p.id, set);
@@ -1363,6 +1598,7 @@
   }
 
   async function removeParticipant(p: { id: string; name: string; photosTaken: number }) {
+    if (refuseWhenLocked()) return;
     const n = p.photosTaken || 0;
     const warn = n > 0
       ? `Remove ${p.name}? This also permanently deletes their ${n} photo${n === 1 ? '' : 's'} — this can't be undone.`
@@ -1428,6 +1664,7 @@
   // while one of them worked.
   let sendingFrom: string | null | undefined = undefined;
   async function sendLink(emails: string[], shareId: string | null) {
+    if (refuseWhenLocked()) return;
     sendingFrom = shareId;
     try {
       const r = await emailLink(code, orgCode, emails, shareId);
@@ -1455,6 +1692,7 @@
    *  an empty `selectedPreset` is what has always meant "these colours are the host's own", so the
    *  custom swatch lights up and none of the named ones do, with no new state to keep in step. */
   async function onPaletteApply(e: CustomEvent<CustomPalette>) {
+    if (refuseWhenLocked()) { paletteOpen = false; return; }
     theme = { ...theme, ...e.detail };
     selectedPreset = '';
     syncColorInputs();
@@ -1470,6 +1708,7 @@
   $: hasCustomPalette = !selectedPreset && !!theme.bg;
 
   async function applyPreset(key: string) {
+    if (refuseWhenLocked()) return;
     const preset = THEME_PRESETS[key];
     theme = { ...theme, ...preset };
     selectedPreset = key;
@@ -1483,6 +1722,7 @@
   }
 
   function onHeaderFile(e: Event) {
+    if (refuseWhenLocked()) return;
     const input = e.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     input.value = '';                 // allow re-picking the same file
@@ -1493,10 +1733,14 @@
   function onHeaderDrop(e: DragEvent) {
     e.preventDefault();
     headerDragOver = false;
+    // A drop is not a click, so `disabled` on the label cannot stop it — a dragged file would open
+    // the cropper and the cropper's Confirm uploads.
+    if (refuseWhenLocked()) return;
     const file = e.dataTransfer?.files?.[0];
     if (file && file.type.startsWith('image/')) editorFile = file;   // drag-drop opens the same editor
   }
   async function onImageConfirm(e: CustomEvent<{ blob: Blob; crop: string }>) {
+    if (refuseWhenLocked()) { editorFile = null; editorSrc = ''; return; }
     pendingHeaderBlob = e.detail.blob;
     imageCrop = e.detail.crop;
     // A fresh pick carries its original up with it; a reframe already has one stored and must not
@@ -1511,12 +1755,14 @@
 
   /** Open the editor on the ORIGINAL, parked where the last crop was taken. */
   function repositionImage() {
+    if (refuseWhenLocked()) return;
     if (!imageOriginalUrl) return;
     editorFile = null;
     editorSrc = imageOriginalUrl;
   }
 
   async function clearHeaderImage() {
+    if (refuseWhenLocked()) return;
     pendingHeaderBlob = null;
     pendingOriginal = null;
     headerImageUrl = null;
@@ -1541,6 +1787,9 @@
 
   // Uploads any pending image, then saves the current palette. Called on every change.
   async function persistTheme() {
+    // The backstop for the theme card. Every entry point above refuses on its own; this is what
+    // catches the next one somebody adds.
+    if (refuseWhenLocked()) return;
     savingTheme = true;
     try {
       // The original goes up FIRST and only when there is a new one: if this throws, the event is
@@ -1588,7 +1837,7 @@
      sending the logo there too spends both routes out of here on the same destination and leaves no
      way back to the site. -->
 <SiteNav admin>
-  {#if viewerIsAdmin}<a class="nav-link site-admin" href="/siteadmin" title="Back to the platform console" aria-label="Site admin">🎩<span class="nav-label"> Site admin</span></a>{/if}
+  {#if viewerIsAdmin}<SiteAdminLink />{/if}
   {#if viewerLoggedIn}<a class="nav-link" href="/dashboard">← My events</a>{/if}
 </SiteNav>
 
@@ -1657,13 +1906,58 @@
   </div>
 {:else if ev}
   <!-- ── Dashboard ── -->
-  <div class="wrap">
+  <!-- `--admin-bar-h` is the red bar's measured height, and it exists so the section bar below can
+       pin directly under it instead of behind it. Only set when the bar is actually there, so a
+       host's page is byte-for-byte what it always was. -->
+  <div class="wrap" style={adminGuarded ? `--admin-bar-h:${adminBarH}px` : ''}>
+    {#if adminGuarded}
+      <!-- The whole point of this bar.
+           The console is not where the mistake happens — it has its own layout and nobody is ever
+           confused about being in it. THIS screen is the danger: it is pixel-for-pixel the page a
+           host sees of their own event, and several of its switches save the instant they move. So
+           the bar is sticky, because a warning that scrolls away is a warning you stop seeing about
+           four seconds after you arrive. -->
+      <AdminBanner sticky bind:height={adminBarH}>
+        <span>🎩 SITE ADMIN</span>
+        {#if ownership === 'theirs'}
+          <span class="ab-who">{ownerName ? `${ownerName}’s event` : 'someone else’s event'} — not yours</span>
+        {:else}
+          <!-- Honest about not knowing yet, rather than accusing the operator of being in a
+               customer's event when the ownership check has not come back. The page is held
+               read-only either way; see $lib/adminGuard for why that is the safe direction. -->
+          <span class="ab-who">checking whose event this is…</span>
+        {/if}
+        <span class="ab-chip" class:live={!locked}>{locked ? 'READ-ONLY' : 'EDITING'}</span>
+        <svelte:fragment slot="actions">
+          {#if locked}
+            <button class="ab-btn strong" on:click={takeControl}>Take control</button>
+          {:else}
+            <button class="ab-btn" on:click={releaseControl}>Hand it back</button>
+          {/if}
+          <!-- A second way to the console, on top of the pill in the nav. Not an oversight: this is
+               the bar that just told you where you are, and the useful next move for somebody who
+               has realised they are in the wrong event is one press away from the sentence that
+               told them so. -->
+          <a class="exit" href="/siteadmin">← Console</a>
+        </svelte:fragment>
+      </AdminBanner>
+    {/if}
     <!-- Event header -->
     <div class="ev-head">
       <div>
         <h1>{ev.name}</h1>
         <div class="ev-sub">
           {#if statusBadge}<span class="badge {statusBadge.cls}">{statusBadge.label}</span>{/if}
+          <!-- Beside the status, because "Live" on its own is a half-truth while the gallery is
+               dark, and this is the one place a host looks to know how their event is doing.
+               A link rather than a label: the fix is two sections away and the point of saying it
+               here is to reach it. -->
+          {#if ev.revealHidden}
+            <button class="badge b-hidden" on:click={goToReveal}
+                    title="You hid the photos. Guests see an empty gallery until you reveal them again — nothing is deleted.">
+              🙈 Photos hidden
+            </button>
+          {/if}
           {#if ev.expiresAt}
             <span class="muted">{isExpired ? 'Ended ' : 'Ends '}{new Date(ev.expiresAt).toLocaleString()}</span>
           {/if}
@@ -1683,6 +1977,23 @@
       <div class="stat"><b>{ev.maxPhotos}</b><span>Max per Person</span></div>
     </div>
 
+    {#if adminGuarded}
+      <!-- What a site admin has already changed HERE, above everything else and open by default —
+           the question "did I do this?" is the one worth answering BEFORE touching anything, and a
+           log you have to go looking for gets read after the damage rather than before it.
+           Not `sec-hide`d: it belongs to the whole page, not to one section. -->
+      <div class="card admin-log-card">
+        <button class="part-head" aria-expanded={adminLogOpen} on:click={() => (adminLogOpen = !adminLogOpen)}>
+          <span class="chev" class:open={adminLogOpen}>›</span>
+          <span class="card-title part-title">Admin changes to this event</span>
+          <span class="part-hint">{adminLogOpen ? 'hide' : 'show'}</span>
+        </button>
+        {#if adminLogOpen}
+          <AdminActionLog eventId={ev.id} showEvent={false} limit={10} />
+        {/if}
+      </div>
+    {/if}
+
     {#if section === null}
       <!-- One tap per destination, and every tile says what is inside it rather than only naming
            itself: "Controls" alone does not tell a host where the reveal switch lives. -->
@@ -1697,7 +2008,7 @@
           <span class="hub-t">Share &amp; invite</span>
           <span class="hub-d">QR code, join link, co-hosts</span>
         </button>
-        <button class="hub-tile" on:click={openPoster} disabled={!qrCode}>
+        <button class="hub-tile" on:click={openPoster} disabled={!qrCode || locked}>
           <span class="hub-i" aria-hidden="true">🎩</span>
           <span class="hub-t">Poster</span>
           <span class="hub-d">{ev?.posterConfig ? 'Open your saved design' : 'Design the poster guests scan'}</span>
@@ -1789,7 +2100,7 @@
         <button class="btn primary sm full invite-go" on:click={shareInvite}>📤 Share invite</button>
       <!-- "Create" is wrong once one exists — the button reopens a saved design, it does not start
            a new one, and the label was the only thing telling you whether you had saved anything. -->
-      <button class="btn primary sm full" on:click={openPoster} disabled={!qrCode}>
+      <button class="btn primary sm full" on:click={openPoster} disabled={!qrCode || locked}>
         {ev?.posterConfig ? '🎩 Manage poster' : '🎩 Create poster'}
       </button>
       <!-- "Start again from a design…" used to sit here as a second button. It now lives INSIDE the
@@ -1813,6 +2124,7 @@
         <GuestList
           data={guestData}
           busy={guestBusy}
+          readOnly={locked}
           bind:preview={importPreview}
           bind:importText
           on:add={onGuestAdd}
@@ -1829,13 +2141,27 @@
     <div class="card" class:sec-hide={section !== 'controls'}>
       <div class="card-title">Controls</div>
 
-      <div class="toggle-row">
+      <div class="toggle-row" class:flash={revealFlash} bind:this={revealRowEl}>
         <div>
           <div class="t-label">Reveal photos</div>
           <div class="t-sub">{revealSublabel}</div>
         </div>
-        <button class="btn primary sm" on:click={doReveal} disabled={actionBusy}>{ev.isRevealed ? 'Hide photos' : 'Reveal all now'}</button>
+        <button class="btn primary sm" class:armed={armedAction === 'hide'} on:click|stopPropagation={requestReveal}
+                disabled={actionBusy || locked}>{ev.isRevealed ? (armedAction === 'hide' ? 'Sure?' : 'Hide photos') : 'Reveal all now'}</button>
       </div>
+      <!-- Said in full, in the one place the host can act on it.
+           The sub-label above is one line inside a row and easy to read past; this is the sentence
+           that answers the question a hidden host actually has, which is not "are they hidden" but
+           "why isn't my reveal setting working, and what do I press". An instant event with this
+           override on will never reveal on its own, and nothing previously said so anywhere. -->
+      {#if ev.revealHidden}
+        <div class="reveal-override" role="status">
+          <strong>Event settings overridden.</strong>
+          This event's reveal setting ({revealModeLabel}) is not being applied. Photos stay hidden
+          from guests until you press <strong>Reveal all now</strong> above. Nothing is deleted, and
+          guests keep taking photos as normal.
+        </div>
+      {/if}
       <div class="divider"></div>
 
       <div class="toggle-row">
@@ -1843,7 +2169,7 @@
           <label class="t-label" for="c-downloads">Allow downloads</label>
           <div class="t-sub">Participants can download photos</div>
         </div>
-        <Toggle id="c-downloads" checked={ev.allowDownloads !== false} on:change={onAllowDownloads} />
+        <Toggle id="c-downloads" checked={ev.allowDownloads !== false} on:change={onAllowDownloads} disabled={locked} />
       </div>
       <div class="divider"></div>
 
@@ -1852,7 +2178,7 @@
             <label class="t-label" for="c-buy-shots">Guests can buy more shots</label>
             <div class="t-sub">A guest who runs out can top up their own roll for A$3. You're not charged.</div>
           </div>
-          <Toggle id="c-buy-shots" checked={guestBuyOn}
+          <Toggle id="c-buy-shots" checked={guestBuyOn} disabled={locked}
                   on:change={(e) => setGuestFlag('guestMayBuyShots', e)} />
         </div>
         <div class="divider"></div>
@@ -1881,7 +2207,7 @@
               </details>
             </div>
           </div>
-          <Toggle id="c-ask-shots" checked={guestAskOn}
+          <Toggle id="c-ask-shots" checked={guestAskOn} disabled={locked}
                   on:change={(e) => setGuestFlag('guestMayRequest', e)} />
         </div>
         <div class="divider"></div>
@@ -1895,7 +2221,7 @@
               recognised, and their face data is deleted the moment they withdraw. Off unless you turn it on.
             </div>
           </div>
-          <Toggle id="c-face" checked={faceOn} on:change={(e) => setGuestFlag('faceMatchingEnabled', e)} />
+          <Toggle id="c-face" checked={faceOn} disabled={locked} on:change={(e) => setGuestFlag('faceMatchingEnabled', e)} />
         </div>
         <div class="divider"></div>
         {/if}
@@ -1905,7 +2231,8 @@
           <div class="t-label">Lock event</div>
           <div class="t-sub">Prevent new photos and joins</div>
         </div>
-        <button class="btn ghost sm" on:click={doLock} disabled={actionBusy}>{ev.isLocked ? 'Unlock' : 'Lock'}</button>
+        <button class="btn ghost sm" class:armed={armedAction === 'lock'} on:click|stopPropagation={requestLock}
+                disabled={actionBusy || locked}>{ev.isLocked ? 'Unlock' : (armedAction === 'lock' ? 'Sure?' : 'Lock')}</button>
       </div>
       <div class="divider"></div>
 
@@ -1918,18 +2245,18 @@
               No guests joined{#if ev.rescheduleUntil}{' '}— move it any time before {new Date(ev.rescheduleUntil).toLocaleDateString()}{/if}
             </div>
           </div>
-          {#if !showResched}<button class="btn sm" on:click={() => { showResched = true; }}>Reschedule</button>{/if}
+          {#if !showResched}<button class="btn sm" on:click={() => { showResched = true; }} disabled={locked}>Reschedule</button>{/if}
         </div>
         {#if showResched}
           <div class="refund-box">
             <p class="refund-hint">Everything you paid for carries over.</p>
             <div class="row2">
-              <div class="field"><label for="r-date">New start date</label><input id="r-date" type="date" bind:value={rDate} min={reschedMinDate} max={reschedMaxDate} /></div>
-              <div class="field"><label for="r-time">New start time</label><TimeField id="r-time" bind:value={rTime} /></div>
+              <div class="field"><label for="r-date">New start date</label><input id="r-date" type="date" bind:value={rDate} min={reschedMinDate} max={reschedMaxDate} disabled={locked} /></div>
+              <div class="field"><label for="r-time">New start time</label><TimeField id="r-time" bind:value={rTime} disabled={locked} /></div>
             </div>
             <div class="refund-actions">
               <button class="btn ghost sm" on:click={() => (showResched = false)} disabled={reschedBusy}>Never mind</button>
-              <button class="btn sm" on:click={doReschedule} disabled={reschedBusy}>{reschedBusy ? 'Moving…' : 'Move event'}</button>
+              <button class="btn sm" on:click={doReschedule} disabled={reschedBusy || locked}>{reschedBusy ? 'Moving…' : 'Move event'}</button>
             </div>
           </div>
         {/if}
@@ -1943,7 +2270,7 @@
             <div class="t-label">Cancel event &amp; request a refund</div>
             <div class="t-sub">Plans changed? Cancel before the event starts for a full refund</div>
           </div>
-          {#if !showRefund}<button class="btn ghost sm" on:click={() => (showRefund = true)}>Request refund</button>{/if}
+          {#if !showRefund}<button class="btn ghost sm" on:click={() => (showRefund = true)} disabled={locked}>Request refund</button>{/if}
         </div>
         {#if showRefund}
           <div class="refund-box">
@@ -1951,10 +2278,10 @@
               <p class="refund-ok">✓ Request sent — we'll be in touch by email shortly.</p>
             {:else}
               <p class="refund-hint">Tell us briefly why (optional). If your event hasn't started yet, you're eligible for a full refund.</p>
-              <textarea bind:value={refundReason} rows="3" placeholder="e.g. our plans changed / booked by mistake"></textarea>
+              <textarea bind:value={refundReason} rows="3" placeholder="e.g. our plans changed / booked by mistake" disabled={locked}></textarea>
               <div class="refund-actions">
                 <button class="btn ghost sm" on:click={() => (showRefund = false)} disabled={refundBusy}>Never mind</button>
-                <button class="btn danger sm" on:click={requestRefund} disabled={refundBusy}>{refundBusy ? 'Sending…' : 'Send refund request'}</button>
+                <button class="btn danger sm" on:click={requestRefund} disabled={refundBusy || locked}>{refundBusy ? 'Sending…' : 'Send refund request'}</button>
                 <Turnstile bind:token={refundToken} bind:this={refundTurnstile} action="contact" />
               </div>
             {/if}
@@ -1967,7 +2294,7 @@
             <div class="t-label">Delete event</div>
             <div class="t-sub">Permanently remove all data</div>
           </div>
-          <button class="btn danger sm" on:click={doDelete}>Delete</button>
+          <button class="btn danger sm" on:click={doDelete} disabled={locked}>Delete</button>
         </div>
       {:else}
         <!-- Free event: nothing to refund — cancelling simply removes it. -->
@@ -1976,7 +2303,7 @@
             <div class="t-label">Cancel event</div>
             <div class="t-sub">Permanently remove this event and all its photos</div>
           </div>
-          <button class="btn danger sm" on:click={doDelete}>Cancel event</button>
+          <button class="btn danger sm" on:click={doDelete} disabled={locked}>Cancel event</button>
         </div>
       {/if}
     </div>
@@ -1996,24 +2323,28 @@
            screen-share — for no gain: the wizard resolves it from localStorage, which this browser
            already has (saveAdminCode). Handed over on the click instead, in the fragment, where it
            never touches the server or an access log. -->
-      <button class="btn ghost sm rerun" on:click={() => goto(`/app?edit=${code}#${encodeURIComponent(orgCode)}`)}>
+      <!-- Locked too: it leaves for the setup wizard, which is a full editor for this same event
+           and has no guardrail of its own. A door out of a read-only page into a writable copy of
+           it is the same accident with an extra click in front of it. -->
+      <button class="btn ghost sm rerun" disabled={locked}
+              on:click={() => goto(`/app?edit=${code}#${encodeURIComponent(orgCode)}`)}>
         ↺ Walk me through the setup again
       </button>
       <p class="hint rerun-why">The same questions with their explanations, your answers already
         filled in. Guest numbers and event length change in the Upgrade card, not there.</p>
       <div class="field">
         <label for="s-name">Event name</label>
-        <input id="s-name" type="text" maxlength="80" bind:value={sName} />
+        <input id="s-name" type="text" maxlength="80" bind:value={sName} disabled={locked} />
       </div>
       <div class="field">
         <label for="s-blurb">Welcome blurb <span class="hint">(shown under the title on the join screen)</span></label>
-        <textarea id="s-blurb" maxlength="280" rows="2" bind:value={sBlurb}></textarea>
+        <textarea id="s-blurb" maxlength="280" rows="2" bind:value={sBlurb} disabled={locked}></textarea>
       </div>
       <div class="field-row">
-        <div class="field"><label for="s-date">Start date</label><input id="s-date" type="date" bind:value={sDate} max={reschedMaxDate} disabled={startFieldsLocked} /></div>
+        <div class="field"><label for="s-date">Start date</label><input id="s-date" type="date" bind:value={sDate} max={reschedMaxDate} disabled={startFieldsLocked || locked} /></div>
         <!-- The same 15-minute grid the reveal uses. An event ends at start + duration and a reveal
              is checked on that tick, so minutes finer than it were never actually honoured. -->
-        <div class="field"><label for="s-time">Start time</label><TimeField id="s-time" bind:value={sTime} disabled={startFieldsLocked} /></div>
+        <div class="field"><label for="s-time">Start time</label><TimeField id="s-time" bind:value={sTime} disabled={startFieldsLocked || locked} /></div>
       </div>
       {#if startFieldsLocked}
         <p class="hint" style="margin:-4px 0 10px">
@@ -2022,14 +2353,14 @@
       {/if}
       <div class="field">
         <label for="s-tz">Timezone <span class="muted">(type to search)</span></label>
-        <input id="s-tz" list="tz-datalist" autocomplete="off" placeholder="e.g. Australia/Brisbane" bind:value={sTimezone} />
+        <input id="s-tz" list="tz-datalist" autocomplete="off" placeholder="e.g. Australia/Brisbane" bind:value={sTimezone} disabled={locked} />
         <datalist id="tz-datalist">
           {#each timezones as z}<option value={z}></option>{/each}
         </datalist>
       </div>
       <div class="field">
         <label for="s-slug">Custom URL <span class="hint">(optional — your event's /e/ link)</span></label>
-        <input id="s-slug" type="text" maxlength="50" placeholder="e.g. lisas-birthday (blank = default link)" bind:value={sSlug} on:input={onEventSlugInput} />
+        <input id="s-slug" type="text" maxlength="50" placeholder="e.g. lisas-birthday (blank = default link)" bind:value={sSlug} on:input={onEventSlugInput} disabled={locked} />
       </div>
       <div class="field">
         <!-- svelte-ignore a11y-label-has-associated-control -->
@@ -2037,10 +2368,12 @@
         <div class="aspect-options">
           {#each options?.aspectRatios ?? [] as a}
             <label class="aspect-opt" class:locked={a.value !== '1:1' && !canAllShapes}>
-              <!-- Not `disabled`: a disabled input swallows the click, so the guest of an
-                   unentitled event got no tick AND no reason. It stays clickable and refuses out
-                   loud instead. click fires before change, so preventDefault stops both. -->
-              <input type="checkbox" checked={sAspects.has(a.value)}
+              <!-- Not `disabled` for the ENTITLEMENT case: a disabled input swallows the click, so
+                   the guest of an unentitled event got no tick AND no reason. It stays clickable and
+                   refuses out loud instead. click fires before change, so preventDefault stops both.
+                   The site-admin lock IS `disabled`, and deliberately so — that one is not an upsell
+                   the host should be able to press through, it is a control that must not move. -->
+              <input type="checkbox" checked={sAspects.has(a.value)} disabled={locked}
                      aria-disabled={a.value !== '1:1' && !canAllShapes}
                      on:click={(e) => { if (a.value !== '1:1' && !canAllShapes) { e.preventDefault(); toggleAspect(a.value); } }}
                      on:change={() => toggleAspect(a.value)} />
@@ -2055,7 +2388,7 @@
       <div class="field-row">
         <div class="field">
           <label for="s-reveal">Reveal mode</label>
-          <select id="s-reveal" bind:value={sReveal}>
+          <select id="s-reveal" bind:value={sReveal} disabled={locked}>
             {#each options?.revealModes ?? [] as m}<option value={m.value}>{m.label}</option>{/each}
           </select>
         </div>
@@ -2063,7 +2396,7 @@
       {#if sReveal === 'at_end'}
         <div class="field">
           <label for="s-delay">Reveal delay after the event ends</label>
-          <select id="s-delay" bind:value={sDelay} on:change={onSDelayChange}>
+          <select id="s-delay" bind:value={sDelay} on:change={onSDelayChange} disabled={locked}>
             {#each options?.revealDelays ?? [] as d}<option value={d.value}>{d.label}</option>{/each}
             <option value={REVEAL_CUSTOM}>Pick an exact date &amp; time…</option>
           </select>
@@ -2072,12 +2405,12 @@
           <div class="field-row reveal-custom">
             <div class="field">
               <label for="s-reveal-date">Reveal date</label>
-              <input id="s-reveal-date" type="date" bind:value={sRevealDate} />
+              <input id="s-reveal-date" type="date" bind:value={sRevealDate} disabled={locked} />
             </div>
             <div class="field">
               <label for="s-reveal-time">Reveal time</label>
               <!-- Stepped by the tick so a phone's wheel only offers moments that can be honoured. -->
-              <TimeField id="s-reveal-time" bind:value={sRevealTime} snap="up" />
+              <TimeField id="s-reveal-time" bind:value={sRevealTime} snap="up" disabled={locked} />
             </div>
           </div>
           <p class="hint reveal-note">
@@ -2107,14 +2440,14 @@
               : ''}
           </div>
         </div>
-        <Toggle id="s-moderation" bind:checked={sModeration} />
+        <Toggle id="s-moderation" bind:checked={sModeration} disabled={locked} />
       </div>
       <div class="toggle-row">
         <div>
           <label class="t-label" for="s-no-flash">No flash</label>
           <div class="t-sub">Disable the camera flash for guests (handy in dark venues to avoid harsh shots)</div>
         </div>
-        <Toggle id="s-no-flash" bind:checked={sNoFlash} />
+        <Toggle id="s-no-flash" bind:checked={sNoFlash} disabled={locked} />
       </div>
       <div class="toggle-row">
         <div>
@@ -2124,7 +2457,7 @@
           <div class="t-sub">Let guests heart each other's photos, and see how many hearts each one has.
             Turning this off hides them — no hearts are deleted, and they reappear if you turn it back on.</div>
         </div>
-        <Toggle id="s-hearts" bind:checked={sHearts} />
+        <Toggle id="s-hearts" bind:checked={sHearts} disabled={locked} />
       </div>
       <div class="toggle-row">
         <div>
@@ -2134,7 +2467,7 @@
           <div class="t-sub">Let guests leave a short message on each other's photos. Off by default.
             You can delete any comment; a guest can delete their own.</div>
         </div>
-        <Toggle id="s-comments" bind:checked={sComments} />
+        <Toggle id="s-comments" bind:checked={sComments} disabled={locked} />
       </div>
       <div class="divider gd-div"></div>
 
@@ -2143,7 +2476,7 @@
            of the settings above rather than as a control of its own. -->
       <div class="field">
         <label for="s-guest-delivery">How should your guests get the photos?</label>
-        <select id="s-guest-delivery" bind:value={sGuestDelivery} on:change={onSGuestDeliveryChange}>
+        <select id="s-guest-delivery" bind:value={sGuestDelivery} on:change={onSGuestDeliveryChange} disabled={locked}>
           {#each GUEST_DELIVERY_OPTIONS as o}<option value={o.value}>{o.label}</option>{/each}
         </select>
         <p class="hint gd-desc">{sGuestDeliveryDesc}</p>
@@ -2154,7 +2487,7 @@
              host chose ARE the answer, and asking twice lets the two disagree. -->
         <div class="field">
           <label for="s-guest-scope">Which photos do they get?</label>
-          <select id="s-guest-scope" bind:value={sGuestSendScope}>
+          <select id="s-guest-scope" bind:value={sGuestSendScope} disabled={locked}>
             <option value="all">Everything</option>
             <option value="favourites">Just my favourites</option>
           </select>
@@ -2165,13 +2498,13 @@
         <div class="field-row reveal-custom">
           <div class="field">
             <label for="s-guest-send-date">Send date</label>
-            <input id="s-guest-send-date" type="date" bind:value={sGuestSendDate} />
+            <input id="s-guest-send-date" type="date" bind:value={sGuestSendDate} disabled={locked} />
           </div>
           <div class="field">
             <label for="s-guest-send-time">Send time</label>
             <!-- The same 15-minute grid as the reveal — a send is checked on that tick, so finer
                  minutes are precision we could not honour. -->
-            <TimeField id="s-guest-send-time" bind:value={sGuestSendTime} snap="up" />
+            <TimeField id="s-guest-send-time" bind:value={sGuestSendTime} snap="up" disabled={locked} />
           </div>
         </div>
         <p class="hint reveal-note">
@@ -2201,7 +2534,7 @@
               release moment is fixed yet, so right now it would be the thank-you on its own.{/if}
           </div>
         </div>
-        <Toggle id="s-mail-thanks" bind:checked={sGuestMailThanks} />
+        <Toggle id="s-mail-thanks" bind:checked={sGuestMailThanks} disabled={locked} />
       </div>
 
       {#if sGuestReminderOffered}
@@ -2210,7 +2543,7 @@
             <label class="t-label" for="s-mail-reminder">Remind them the day before</label>
             <div class="t-sub">Goes out 24 hours before the gallery opens — {sGuestReminderLabel}.</div>
           </div>
-          <Toggle id="s-mail-reminder" bind:checked={sGuestMailReminder} />
+          <Toggle id="s-mail-reminder" bind:checked={sGuestMailReminder} disabled={locked} />
         </div>
       {:else}
         <!-- Said, not silently missing: a switch that is simply absent reads as a bug to a host who
@@ -2229,7 +2562,7 @@
             {/if}
           </div>
         </div>
-        <Toggle id="s-mail-live" bind:checked={sGuestMailLive} />
+        <Toggle id="s-mail-live" bind:checked={sGuestMailLive} disabled={locked} />
       </div>
 
       <div class="gd-now">
@@ -2248,7 +2581,7 @@
         </div>
         <!-- ghost, not primary: Save settings is this card's primary action, and two filled
              buttons would leave the one that emails every guest competing with it. -->
-        <button class="btn ghost sm full gd-send" on:click={sendGuestsNow} disabled={guestSendBusy || !ev.emailEnabled}>
+        <button class="btn ghost sm full gd-send" on:click={sendGuestsNow} disabled={guestSendBusy || !ev.emailEnabled || locked}>
           {guestSendBusy ? 'Sending…' : guestsAlreadySent ? '📨 Send it again now' : '📨 Send the gallery link to guests now'}
         </button>
         <p class="hint gd-foot">
@@ -2264,7 +2597,7 @@
         {/if}
       </div>
 
-      <button class="btn primary mt" on:click={saveSettingsForm} disabled={savingSettings}>
+      <button class="btn primary mt" on:click={saveSettingsForm} disabled={savingSettings || locked}>
         {savingSettings ? 'Saving…' : 'Save settings'}
       </button>
     </div>
@@ -2282,7 +2615,7 @@
               <div class="preset-col-h">{col.label}</div>
               <div class="presets">
                 {#each col.keys as key}
-                  <button class="preset" class:selected={selectedPreset === key} title={THEME_PRESET_LABELS[key] ?? key} on:click={() => applyPreset(key)}
+                  <button class="preset" class:selected={selectedPreset === key} disabled={locked} title={THEME_PRESET_LABELS[key] ?? key} on:click={() => applyPreset(key)}
                     style="background:{THEME_PRESETS[key].bg};border-color:{selectedPreset === key ? 'var(--accent)' : THEME_PRESETS[key].accent}">
                     <span style="color:{THEME_PRESETS[key].text}">{THEME_PRESET_LABELS[key] ?? key}</span>
                     {#if selectedPreset === key}<span class="preset-check">✓</span>{/if}
@@ -2306,7 +2639,7 @@
                Two states. IDLE — no custom colours — is an invitation: dashed edge, muted label, a
                + where the tick goes. IN USE paints the event's actual colours like every other
                swatch in the row and carries the same tick, because it IS the selected palette. -->
-          <button class="preset custom-chip" class:selected={hasCustomPalette} class:idle={!hasCustomPalette}
+          <button class="preset custom-chip" class:selected={hasCustomPalette} class:idle={!hasCustomPalette} disabled={locked}
             title={hasCustomPalette ? 'Your own colours — open to edit them' : 'Build a palette from a colour of your own'}
             on:click={() => (paletteOpen = true)}
             style={hasCustomPalette ? `background:${theme.bg};border-color:${theme.accent || 'var(--accent)'}` : ''}>
@@ -2321,15 +2654,19 @@
         <label for="t-header">Event image <span class="hint">(behind the join screen, and your poster if you want it)</span></label>
         <div class="row gap center">
           <!-- svelte-ignore a11y-no-static-element-interactions -->
-          <label class="upload-btn grow" class:drag={headerDragOver}
+          <!-- The file input carries `disabled`, and the LABEL follows it: a click on a <label>
+               whose control is disabled activates nothing, so the picker cannot open. The class is
+               only there to say so on screen — the refusal is the disabled input, not the styling.
+               A drop is a separate path and is stopped in onHeaderDrop. -->
+          <label class="upload-btn grow" class:drag={headerDragOver} class:ctl-locked={locked}
             on:dragover|preventDefault={() => (headerDragOver = true)}
             on:dragleave={() => (headerDragOver = false)}
             on:drop={onHeaderDrop}>
             {headerDragOver ? '⤓ Drop image to upload' : headerPreview ? '🖼️ Change image…' : '🖼️ Upload or drag an image…'}
-            <input id="t-header" type="file" accept="image/*" on:change={onHeaderFile} hidden />
+            <input id="t-header" type="file" accept="image/*" on:change={onHeaderFile} disabled={locked} hidden />
           </label>
-          {#if canReposition}<button class="btn ghost sm" on:click={repositionImage}>Reposition…</button>{/if}
-          {#if headerPreview}<button class="btn ghost sm" on:click={clearHeaderImage}>Clear</button>{/if}
+          {#if canReposition}<button class="btn ghost sm" on:click={repositionImage} disabled={locked}>Reposition…</button>{/if}
+          {#if headerPreview}<button class="btn ghost sm" on:click={clearHeaderImage} disabled={locked}>Clear</button>{/if}
         </div>
         {#if headerPreview}
           <img class="header-thumb" src={headerPreview} alt="Event preview" />
@@ -2398,7 +2735,7 @@
           {/if}
         </div>
       </details>
-      <button class="btn primary" on:click={() => (missionsOpen = true)}>
+      <button class="btn primary" on:click={() => (missionsOpen = true)} disabled={locked}>
         {ev.challengeSets?.length ? 'Edit the trick list' : 'Set up a trick list'}
       </button>
     </div>
@@ -2485,13 +2822,17 @@
       <!-- Not one of the rows below it: those are links the host made and can delete, this one
            simply always exists. Dashed and tagged so it never reads as a created share. -->
       <div class="standing">
+        <!-- `canEmail` carries the lock. Emailing a link is a write as far as a customer's guests
+             are concerned: it puts a message in their inbox and it cannot be taken back. Withdrawing
+             the control is exactly how this row already handles "email is off on this event", so
+             there is nothing new to teach it. -->
         <ShareLinkRow
           url={galleryUrl}
           title="🖼️ Gallery-only link"
           subtitle={`Send it after the event to people who just want to see the photos${
             galleryHearts || galleryComments ? ' — they can react without joining' : ''}`}
           shareId={null}
-          canEmail={!!ev.emailEnabled}
+          canEmail={!!ev.emailEnabled && !locked}
           {sends}
           busy={sendingFrom === null}
           on:copy={(e) => copy(e.detail.url, 'Gallery link copied!')}
@@ -2508,7 +2849,7 @@
             </span>
           </svelte:fragment>
           <svelte:fragment slot="extra">
-            <button class="btn ghost sm" on:click={() => (galleryLinkEdit = true)}>Edit</button>
+            <button class="btn ghost sm" on:click={() => (galleryLinkEdit = true)} disabled={locked}>Edit</button>
           </svelte:fragment>
         </ShareLinkRow>
       </div>
@@ -2527,7 +2868,7 @@
               title={s.label}
               subtitle={`${shareKindText(s.kind, s.count)} · /s/${s.slug || s.id}`}
               shareId={s.id}
-              canEmail={!!ev.emailEnabled}
+              canEmail={!!ev.emailEnabled && !locked}
               {sends}
               busy={sendingFrom === s.id}
               on:copy={(e) => copyShare(e.detail.url)}
@@ -2543,8 +2884,8 @@
                 </span>
               </svelte:fragment>
               <svelte:fragment slot="extra">
-                <button class="btn ghost sm" on:click={() => (editShare = s)}>Edit</button>
-                <button class="btn ghost sm" on:click={() => dropShare(s)} aria-label="Delete share">Delete</button>
+                <button class="btn ghost sm" on:click={() => (editShare = s)} disabled={locked}>Edit</button>
+                <button class="btn ghost sm" on:click={() => dropShare(s)} aria-label="Delete share" disabled={locked}>Delete</button>
               </svelte:fragment>
             </ShareLinkRow>
           {/each}
@@ -2561,15 +2902,15 @@
            than below a list you have to scroll past. -->
       <div class="card-head">
         <div class="card-title">Co-hosts</div>
-        <button class="btn ghost sm" class:on={cohostOpen} aria-expanded={cohostOpen}
+        <button class="btn ghost sm" class:on={cohostOpen} aria-expanded={cohostOpen} disabled={locked}
                 on:click={() => (cohostOpen = !cohostOpen)}>✉️ Invite</button>
       </div>
       <p class="hint" style="margin:0 0 12px">Invite people to help manage this event — they get the same access as you. They can add or remove other co-hosts, but the event owner can never be removed.</p>
       {#if cohostOpen}
         <div class="cohost-add">
           <!-- svelte-ignore a11y-autofocus -->
-          <input type="email" autofocus placeholder="co-host@email.com" bind:value={cohostEmail} on:keydown={(e) => e.key === 'Enter' && addCohost()} />
-          <button class="btn primary sm" on:click={addCohost} disabled={cohostBusy || !cohostEmail.trim()}>{cohostBusy ? 'Inviting…' : 'Invite'}</button>
+          <input type="email" autofocus placeholder="co-host@email.com" bind:value={cohostEmail} disabled={locked} on:keydown={(e) => e.key === 'Enter' && addCohost()} />
+          <button class="btn primary sm" on:click={addCohost} disabled={cohostBusy || !cohostEmail.trim() || locked}>{cohostBusy ? 'Inviting…' : 'Invite'}</button>
         </div>
       {/if}
       <div class="cohost-list">
@@ -2585,7 +2926,7 @@
             <div class="cohost-acts">
               {#if !c.accepted && c.inviteUrl}<button class="btn ghost sm" on:click={() => copy(c.inviteUrl ?? '', 'Invite link copied')} title="Copy the accept link to share directly">🔗 Copy link</button>{/if}
               <span class="cohost-tag" class:pending={!c.accepted}>{c.accepted ? 'Co-host' : 'Pending'}</span>
-              <button class="btn ghost sm" on:click={() => dropCohost(c.id)} aria-label="Remove co-host">Remove</button>
+              <button class="btn ghost sm" on:click={() => dropCohost(c.id)} aria-label="Remove co-host" disabled={locked}>Remove</button>
             </div>
           </div>
         {/each}
@@ -2708,14 +3049,14 @@
               {#if cards.length > 1}
                 <label class="p-card">
                   <span class="p-card-l">Card</span>
-                  <select aria-label="Trick card for {p.name}" disabled={cardBusy === p.id}
+                  <select aria-label="Trick card for {p.name}" disabled={cardBusy === p.id || locked}
                           value={p.challengeSet ?? cards[0].key}
                           on:change={(e) => moveCard(p, e.currentTarget.value)}>
                     {#each cards as c (c.key)}<option value={c.key}>{c.label}</option>{/each}
                   </select>
                 </label>
               {/if}
-              <button class="btn ghost sm p-del" on:click={() => removeParticipant(p)} title="Remove this participant">Remove</button>
+              <button class="btn ghost sm p-del" on:click={() => removeParticipant(p)} title="Remove this participant" disabled={locked}>Remove</button>
             </div>
           {/each}
           {#if !partShown.length}
@@ -2753,7 +3094,18 @@
          A marker rather than an id on the panel itself, because the panel renders nothing at all
          when there is nothing left to sell — and an anchor that disappears is an anchor that lands
          the host somewhere else without saying so. -->
-    {#if section === 'upgrade' && billing && ev}
+    {#if section === 'upgrade' && locked}
+      <!-- The upgrade panel is not disabled here, it is WITHDRAWN. Its buttons start a Stripe
+           checkout against the customer's event, and `blocked` — the one switch it has — says "save
+           your settings first", which would be a lie and the wrong instruction. A panel that cannot
+           explain itself correctly is better not drawn. -->
+      <div class="card">
+        <div class="card-title">{SECTION_META.upgrade.icon} {SECTION_META.upgrade.title}</div>
+        <p class="muted small" style="margin:0">Hidden while this event is read-only — upgrading
+          starts a payment against the owner's account. Take control in the bar above if you really
+          mean to buy something on their behalf.</p>
+      </div>
+    {:else if section === 'upgrade' && billing && ev}
       <!-- Remount the panel when the SAVED entitlement changes (e.g. after Save settings) so its
            baseline + quote recompute and reflect what was just added (frame shapes, etc.). -->
       {#key `${ev.guestCap}|${ev.maxPhotos}|${ev.videoSeconds}|${ev.retentionDays}|${ev.amountPaidCents}|${(ev.aspectRatios ?? []).join(',')}|${ev.expiresAt - ev.startsAt}`}
@@ -2798,7 +3150,7 @@
           <div class="t-sub">Anyone with the link can love a photo. They are never asked for a name —
             nothing shows who hearted what.</div>
         </div>
-        <Toggle id="gl-hearts" bind:checked={galleryHearts} />
+        <Toggle id="gl-hearts" bind:checked={galleryHearts} disabled={locked} />
       </div>
       <div class="toggle-row">
         <div>
@@ -2806,11 +3158,11 @@
           <div class="t-sub">They give a name the first time they write. You can delete any of them
             from <b>Review → Captions &amp; comments</b>.</div>
         </div>
-        <Toggle id="gl-comments" bind:checked={galleryComments} />
+        <Toggle id="gl-comments" bind:checked={galleryComments} disabled={locked} />
       </div>
       <p class="hint" style="margin:12px 0 0">Separate from <b>Guest hearts</b> and <b>Guest comments</b>
         in Event settings — those are for people who joined and are shooting.</p>
-      <button class="btn primary" style="margin-top:14px" on:click={applyGalleryLink} disabled={galleryLinkBusy}>
+      <button class="btn primary" style="margin-top:14px" on:click={applyGalleryLink} disabled={galleryLinkBusy || locked}>
         {galleryLinkBusy ? 'Saving…' : 'Save'}
       </button>
     </div>
@@ -2818,7 +3170,11 @@
 {/if}
 
 {#if editShare}
-  <ShareModal {code} {orgCode} share={editShare}
+  <!-- `readOnly` as well as the disabled Edit button that opens it. Two callers put this dialog on
+       screen now, and a guard that lives in whichever caller happens to exist today is a guard that
+       is one new call site away from being gone. It is refused inside the dialog, where the write
+       is. -->
+  <ShareModal {code} {orgCode} share={editShare} readOnly={locked}
     sentCount={sends.filter((x) => x.shareId === editShare?.id && x.ok).length}
     on:changed={loadShares} on:close={() => (editShare = null)} />
 {/if}
@@ -2841,7 +3197,7 @@
   />
 {/if}
 
-<svelte:window on:keydown={onWindowKey} />
+<svelte:window on:keydown={onWindowKey} on:click={disarmAll} />
 
 {#if posterAsk && ev}
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
@@ -2946,7 +3302,7 @@
 {#if !booting}
   <button class="fb-fab" type="button" on:click={() => (showFeedback = true)}>💬 Feedback</button>
 {/if}
-{#if showFeedback}<FeedbackModal context={`Manage (${$page.params.code})`} on:close={() => (showFeedback = false)} />{/if}
+{#if showFeedback}<FeedbackModal context={`Manage (${$page.params.code})`} eventCode={$page.params.code} on:close={() => (showFeedback = false)} />{/if}
 
 <style>
   /* On a phone this does not float at all.
@@ -2979,9 +3335,8 @@
   .fb-fab:hover { color: var(--text); border-color: var(--accent); }
 
   @media (max-width: 460px) {
-    /* The mark stays — it is a red pill and unmistakable — and the words go. "My events" keeps its
-       words, because it is the one people actually press. */
-    .nav-link.site-admin .nav-label { display: none; }
+    /* "My events" keeps its words: it is the one people actually press. (The site-admin pill
+       drops its own label at this width — see SiteAdminLink.) */
     .nav-link { padding: 7px 11px; font-size: 0.8rem; }
     .topnav { gap: 8px; padding: 0 12px; }
   }
@@ -2995,10 +3350,16 @@
     white-space: nowrap; padding: 10px 18px; border-radius: var(--radius-sm);
     border: 1px solid var(--border); background: transparent; }
   .nav-link:hover { border-color: var(--accent); }
-  /* The red pill keeps its fill; it gets a matching border so it sits at the same size as its
-     neighbour rather than 2px shorter. */
-  .nav-link.site-admin { background: #7a1f2b; color: #fff; border-color: #7a1f2b; }
-  .nav-link.site-admin:hover { background: #93202f; border-color: #93202f; }
+  /* Reads as a warning rather than a status: the other badges describe where the event is in its
+     life, this one describes something the host did and can undo. Same shape so it sits with them.
+
+     The brand accent, and deliberately NOT the site-admin red. That red means "you are operating an
+     event that is not yours" and lives in exactly one component on purpose — a test enforces there
+     is only one of it. Borrowing it here would put an operator-mode colour in front of an ordinary
+     host, which says something untrue about what they are looking at. */
+  .badge.b-hidden { background: var(--accent-fill); color: var(--accent-ink, #111); border: 0;
+    cursor: pointer; font: inherit; font-size: inherit; font-weight: inherit; line-height: inherit; }
+  .badge.b-hidden:hover { background: var(--accent-dark); color: #fff; }
   .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 120;
     display: flex; align-items: center; justify-content: center; padding: 16px; }
   .welcome-card { width: 100%; max-width: 420px; max-height: 90dvh; overflow-y: auto; text-align: center; }
@@ -3099,7 +3460,11 @@
     font-size: 0.68rem; font-weight: 700; background: var(--accent-fill); color: var(--accent-ink, #111); }
   /* Full-bleed within .wrap (which pads 16px each side), so the bar reads as a bar rather than a
      floating strip with the page showing through beside it. */
-  .sec-bar { position: sticky; top: var(--nav-h, 62px); z-index: 20; display: flex; align-items: center; gap: 10px;
+  /* `--admin-bar-h` is 0px for everybody except a site admin inside somebody else's event, where it
+     is the red bar's MEASURED height (AdminBanner binds it out; it wraps to two rows on a phone and
+     at long customer names, so a constant would be wrong at exactly the widths that matter). The
+     two bars then pin flush against each other and no page content shows between them. */
+  .sec-bar { position: sticky; top: calc(var(--nav-h, 62px) + var(--admin-bar-h, 0px)); z-index: 20; display: flex; align-items: center; gap: 10px;
     margin: 0 -16px; padding: 10px 16px;
     background: var(--bg); border-bottom: 1px solid var(--border); }
   .sec-back { display: inline-flex; align-items: center; gap: 6px; flex: none;
@@ -3194,6 +3559,30 @@
   .sheet .x:hover { color: var(--text); }
   .sheet .btn.primary { width: 100%; }
   .hint { font-size: 0.78rem; color: var(--text-muted); }
+  /* Outline and a tint rather than a colour change on the row itself: the row contains a primary
+     button whose own colour carries meaning, and washing the whole thing in accent would fight it.
+     Padded and pulled back by the same amount so marking the row does not move it — a highlight
+     that shifts the layout under a thumb already reaching for the button is its own small bug. */
+  .toggle-row.flash {
+    outline: 2px solid var(--accent); outline-offset: 4px; border-radius: var(--radius-sm, 8px);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    animation: revealflash 2.8s ease-out both;
+  }
+  @keyframes revealflash { 0%, 62% { opacity: 1; } 100% { opacity: 1; outline-color: transparent;
+    background: transparent; } }
+  /* The mark still lands, it simply does not fade — a reader who asked for less movement still needs
+     to know which line was meant. */
+  @media (prefers-reduced-motion: reduce) { .toggle-row.flash { animation: none; } }
+  /* The armed state has to LOOK different, not just say something different — a host who is mid-tap
+     is reading the shape of the button, not its label. */
+  .btn.armed { background: var(--danger); color: #fff; }
+  /* Louder than a .hint and quieter than an error: nothing is broken and nothing is lost, but the
+     host has switched off a setting they probably think is still running. The accent rail is the
+     same device the refund snapshot uses in the support email, for the same reason — it marks a
+     block as "read this one". */
+  .reveal-override { margin: 10px 0 0; padding: 10px 12px; border-radius: 0 8px 8px 0;
+    border-left: 3px solid var(--accent); background: var(--surface-2);
+    font-size: 0.82rem; line-height: 1.5; color: var(--text); }
   /* Had no rule at all, so it inherited full-strength --text and shouted next to every other piece
      of supporting copy on the page. It is an aside under the primary action, and should read like
      one — same size and weight as .hint, with the link carrying the emphasis instead. */
@@ -3452,6 +3841,14 @@
     background: var(--surface-2); color: var(--text); font-size: 0.85rem; font-weight: 600; text-align: center; }
   .upload-btn:hover { border-color: var(--accent); }
   .upload-btn.drag { border-color: var(--accent); border-style: solid; background: color-mix(in srgb, var(--accent) 14%, var(--surface-2)); }
+  /* The REFUSAL is `disabled` on the file input this label wraps — a label whose control is disabled
+     activates nothing, so the picker never opens. This only says so, matching the greying the
+     disabled input/select/textarea rule above gives every other locked control on the page. */
+  .upload-btn.ctl-locked { opacity: .55; cursor: not-allowed; border-color: var(--border); }
+  .upload-btn.ctl-locked:hover { border-color: var(--border); }
+  /* The admin log sits above every section rather than inside one, so it gets the plain card and
+     the page's own disclosure header — nothing of its own to keep in step. */
+  .admin-log-card { padding-bottom: 14px; }
   /* event-image preview — portrait, like the join background (no more thin bar) */
   .header-thumb { display: block; width: 150px; aspect-ratio: 3/4; object-fit: cover;
     border-radius: var(--radius-sm); margin-top: 10px; box-shadow: 0 4px 14px rgba(0,0,0,.3); }

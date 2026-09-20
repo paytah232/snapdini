@@ -3,7 +3,7 @@ import path from 'path';
 import { and, eq, isNotNull, lt, count } from 'drizzle-orm';
 import { db } from './db';
 import { RESCHEDULE_WINDOW_MS, RESCHEDULE_RETENTION_GRACE_MS } from './lib';
-import { events, photos, participants, clientErrors, slideshows, shares, emailTokens, sessions } from './schema';
+import { events, photos, participants, clientErrors, slideshows, shares, emailTokens, sessions, adminActions } from './schema';
 import { UPLOADS_DIR, uploadDiskPath, insideUploads, eventDir, INCOMING_DIR } from './paths';
 import { playName, thumbName } from './images';
 import { purgeOldSlideshows } from './slideshow';
@@ -109,6 +109,20 @@ export async function sweep(): Promise<number> {
     await db.delete(photos).where(eq(photos.eventId, e.id));
     await db.delete(participants).where(eq(participants.eventId, e.id)); // clears guest PII
     await db.delete(shares).where(eq(shares.eventId, e.id));             // dead links; frees their /s/ slugs
+    // The admin action log goes WITH the event's data, in the same sweep that clears guest PII.
+    //
+    // It holds copies of the very things the line above is deleting: a removed guest's name and
+    // email, a deleted comment's text, a caption. Left behind it would quietly outlive every
+    // promise made about them — the privacy policy says deleted content is gone, and `client_errors`
+    // goes to the trouble of storing only a participant ID so that erasing a guest erases it there
+    // too. A table that keeps the same facts for ever is a contradiction of both.
+    //
+    // Deleting rather than redacting, because the log is an OPERATIONAL record and not an audit
+    // trail: its whole job is "I changed something by accident, what was it before?", and there is
+    // nothing left to restore once the photos, the guests and the shares are gone. Keeping a
+    // hollowed-out row would preserve the shape of a record while destroying the part that made it
+    // useful. What survives is what survives for everything else here — the event's summary row.
+    await db.delete(adminActions).where(eq(adminActions.eventId, e.id));
 
     await db.update(events).set({
       purgeAt: null,

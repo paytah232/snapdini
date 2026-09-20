@@ -1,0 +1,11 @@
+-- When the guest actually pressed the shutter, as reported by their phone.
+--
+-- takenAt has always been stamped at UPLOAD, which made "was this taken during the event?"
+-- unanswerable: a photo shot inside the window and uploaded a minute after it closed looked
+-- identical to one shot afterwards, and was refused. Six were, at one hen do, eighteen minutes past
+-- the end, by a single phone draining its queue over a bad connection.
+--
+-- Nullable and never backfilled: a client too old to measure it has not got a wrong answer, it has
+-- no answer, and those are different. Advisory rather than authoritative — a client clock can be
+-- wrong or deliberately set — so the value is clamped before it is trusted or stored.
+ALTER TABLE photos ADD COLUMN IF NOT EXISTS captured_at bigint;

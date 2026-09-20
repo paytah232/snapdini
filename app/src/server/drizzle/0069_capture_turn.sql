@@ -1,0 +1,56 @@
+-- How far the phone was TURNED relative to the page when the shot was framed, in degrees CLOCKWISE.
+--
+-- A measurement, and only a measurement. 0067 stores what has been DONE to the pixels; this stores
+-- what was OBSERVED at the shutter, and the two are deliberately different columns because for a
+-- clip they are different numbers — the whole reason this one exists.
+--
+-- WHY capture_orientation (0042) COULD NOT DO THIS JOB. It reports landscape for two situations
+-- that have nothing in common except the word:
+--
+--   auto-rotate ON   the page turned with the phone, the camera track turned with it, and the
+--                    scene is in the file the right way up. Nothing is wrong with this photo.
+--   rotation LOCKED  the page did not move. The scene is in the file lying on its side.
+--
+-- Both are landscape, so the "shot sideways" badge derived from it fired on correctly-captured
+-- landscape shots — reported by the owner against a clip that had come out the right way up, which
+-- is the worst possible version of the fault: a to-do list that points at work already done, or
+-- never needed, is one nobody works through. The badge now reads THIS column instead
+-- (shotSideways() in routes/photos.ts), and capture_orientation has dropped out of it entirely.
+-- The column stays: it is the historical record of how the phone was held, several hundred rows
+-- carry it, and it is still the one thing that can be queried to find the pre-existing sideways
+-- shots by hand.
+--
+-- WHAT THE SERVER DOES WITH IT, which is the other half and the reason it is not just a flag:
+--
+--   a PHOTO is already straightened when it arrives. The camera page rotates its canvas by this
+--   same number before it encodes, so the pixels are upright and capture_rotation carries the
+--   correction. turn and rotation agree, and the server must NOT touch the file again.
+--
+--   a CLIP cannot be. MediaRecorder writes whatever the camera hands it, and putting a canvas in
+--   that path means a second encoder on a phone already struggling with the first. So the clip
+--   arrives turned, capture_rotation arrives empty, and this column is the outstanding work: the
+--   upload path applies it as a display matrix (-display_rotation with -c copy, no re-encode) once
+--   the derived copies are built, and then writes the turn into capture_rotation to say so.
+--
+-- Conflating the two would mark a clip as corrected while its pixels were still sideways.
+--
+--   NULL               nobody measured. Every row predating this column, and any upload from a
+--                      client too old to send it.
+--   0                  measured, and the phone was square with the page. NOT the same fact as
+--                      NULL, and kept apart for the reason 0042 and 0067 keep theirs apart: both
+--                      read as "no turn" today and only one of them still says "nobody told us"
+--                      tomorrow. Nothing can recover the distinction once it is thrown away.
+--   90 / -90 / 180     turned. Positive is clockwise, as the guest sees the picture — the same
+--                      convention as capture_rotation and as the rotate button, end to end.
+--
+-- NOT BACKFILLED, and the consequence is accepted rather than overlooked: with this column NULL on
+-- every existing row, the badge goes quiet across the whole of production, including the thirteen
+-- genuinely sideways photos that are the only rows it has ever fired on. That was the owner's call
+-- — he will straighten them as the site admin or leave them — and it is what buys the rule its one
+-- honest meaning. A grandfather clause reading capture_orientation for old rows would have kept
+-- those thirteen badged at the price of putting the original false-positive back for every
+-- landscape row uploaded since, and of leaving two rules in the product for one question.
+--
+-- No index, for the reason 0067 has none: the only reader holds the row already, and the badge is
+-- decided in the application from columns the query has selected anyway.
+ALTER TABLE photos ADD COLUMN IF NOT EXISTS capture_turn integer;

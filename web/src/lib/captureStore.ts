@@ -21,6 +21,24 @@ export interface StoredCapture {
   source?: 'capture' | 'upload';
   ext: string;
   createdAt: number;
+  /* WHAT THE SHUTTER MEASURED, carried across a reload.
+   *
+   *  These were not persisted at first, and the omission quietly cancelled the feature they belong
+   *  to. A reloaded tab rebuilt the queue item without them, so the upload sent no capture time, the
+   *  server fell back to its own clock, and a photo taken inside the event was refused for arriving
+   *  late — which is precisely and only the case the 24-hour grace exists to serve. A grace that
+   *  survives a day cannot be reached by a queue that does not survive a reload.
+   *
+   *  The rotation fields go the same way for the same reason: a restored clip that lost its turn is
+   *  never corrected server-side and never badged, so it stays sideways with nothing to say so.
+   *
+   *  All optional: rows written before this existed simply have no answer, which is different from
+   *  an answer of zero. */
+  capturedAt?: number;
+  captureTurn?: number;
+  captureRotation?: number;
+  captureOrientation?: 'portrait' | 'landscape';
+  captureShape?: string;
 }
 
 // Resume state for a chunked upload: the server-side upload id and which chunk indices already landed.

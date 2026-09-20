@@ -14,16 +14,18 @@ import { matchNewPhoto } from './faces';
 import { missionsFor } from './participants';
 import { events, participants, photos, photoHearts, photoComments, commentHearts, shareVisitors } from '../schema';
 import { stripImageMetadata, makeThumbnail, makeVideoPoster, makePlaybackProxy, fixAudioLead, thumbName, playName,
-         cropClipToShape, cropName, dlName, shapeRatio } from '../images';
+         cropClipToShape, cropName, dlName, shapeRatio, derivedNames, normalizeTurn, rotateImageTo,
+         rotateClipTo, whileDeriving, isDeriving } from '../images';
 import { probeVideoMeta } from '../slideshow';
 import { isRevealed } from '../lib';
 import { scheduledRevealAt, galleryCacheSeconds, galleryCacheControl } from '../../../../shared/reveal';
 import { eventByIdentifier } from './events';
+import { recordAdminAction } from '../admin-actions';
 import { billingEnabled } from '../billing';
 
 const router = Router();
 
-import { UPLOADS_DIR, INCOMING_DIR, eventDir, eventRelPath } from '../paths';
+import { UPLOADS_DIR, INCOMING_DIR, eventDir, eventRelPath, uploadDiskPath } from '../paths';
 const MAX_PHOTO_MB   = parseInt(process.env.MAX_FILE_SIZE_MB || '64'); // headroom for an 8K still at max quality (q100/4:4:4)
 const MAX_VIDEO_MB   = parseInt(process.env.MAX_VIDEO_SIZE_MB || '8192'); // plans for 90s 8K clips (multi-GB)
 const VIDEO_MAX_SECS = parseInt(process.env.VIDEO_MAX_SECONDS || '0');
@@ -117,6 +119,14 @@ type PhotoRowInput = {
   // Optional because the older, narrower selects never asked for it. Absent reads the same as
   // 'unknown', which is the correct answer for a row nobody recorded it on.
   captureOrientation?: string | null;
+  // The correction somebody has already applied, in degrees clockwise. Optional for the same reason
+  // the line above is: the narrower selects never asked for it, and absent reads as "untouched",
+  // which is the right answer for a row nobody has rotated.
+  captureRotation?: number | null;
+  // What was MEASURED at the shutter, as against what has since been APPLIED. Optional like the two
+  // above, and the badge below is derived from it — so a select that feeds photoRow and forgets it
+  // does not break, it silently stops badging. Every such select therefore asks for it.
+  captureTurn?: number | null;
   captureShape?: string | null;
 };
 
@@ -179,6 +189,12 @@ const onDisk = (name: string): boolean => {
   return dirNames(path.dirname(abs)).has(path.basename(abs));
 };
 
+/** The fields the crop/play/download ladder actually reads. Named because three functions share
+ *  it and one of them (downloadFile) had already written it out by hand — and because taking the
+ *  whole joined gallery row instead meant they could not be called with a photo that is not a
+ *  gallery row, which the rotate reply is. */
+type MediaRow = { filename: string; mediaType?: string | null; captureShape?: string | null };
+
 /** Did this row ask for a shape the camera may not have given it? */
 const wantsCrop = (p: { mediaType?: string | null; captureShape?: string | null }): boolean =>
   p.mediaType === 'video' && !!p.captureShape && p.captureShape !== 'full';
@@ -186,7 +202,7 @@ const wantsCrop = (p: { mediaType?: string | null; captureShape?: string | null 
 /** The cropped sibling's name, but only once the file is really there. Existence IS the flag: the
  *  crop runs after the upload response and can fail, so a column saying "cropped" could point at a
  *  file that was never written. */
-function cropped(p: PhotoRowInput): string | null {
+function cropped(p: MediaRow): string | null {
   if (!wantsCrop(p)) return null;
   const name = cropName(p.filename);
   return onDisk(name) ? name : null;
@@ -208,7 +224,7 @@ function cropped(p: PhotoRowInput): string | null {
  *
  *  Null means "nothing better than `url`", which is right for an MP4 that needed no crop at all.
  */
-export function playFile(p: PhotoRowInput): string | null {
+export function playFile(p: MediaRow): string | null {
   if (p.mediaType !== 'video') return null;
   if (wantsCrop(p)) {
     const dl = dlName(p.filename);
@@ -230,12 +246,45 @@ export function playFile(p: PhotoRowInput): string | null {
  *    _crop.mp4 — right shape, surplus hidden in the bitstream (or, for a WebM, already a true crop)
  *    original  — no crop was wanted, or none succeeded
  */
-export function downloadFile(p: { filename: string; mediaType?: string | null; captureShape?: string | null }): string {
+export function downloadFile(p: MediaRow): string {
   if (!wantsCrop(p)) return p.filename;
   const dl = dlName(p.filename);
   if (onDisk(dl)) return dl;
   const crop = cropName(p.filename);
   return onDisk(crop) ? crop : p.filename;
+}
+
+/** Should the gallery mark this one "shot sideways"?
+ *
+ *  The mark is a TO-DO list, not a fact about the photograph: it points at the shots that are lying
+ *  on their side and still need somebody to say which way up they go. Two halves, and both have to
+ *  be true — the phone was measurably turned relative to the page, and nothing has yet put it back.
+ *
+ *  capture_orientation USED TO BE THE FIRST HALF, AND IT IS NOT FIT FOR IT. It answers 'landscape'
+ *  for two situations that share nothing but the word: auto-rotate on, where the page turned with
+ *  the phone and the scene is in the file the right way up, and rotation locked, where the page did
+ *  not move and the scene is in the file on its side. The badge fired on both, so it fired on
+ *  correctly-captured landscape shots — reported against a clip that had come out perfectly. A
+ *  to-do list that points at work nobody needs to do is one nobody works through, which is a fair
+ *  description of how thirteen photos came to sit there for months. captureTurn tells the two
+ *  apart, because it is the turn relative to the PAGE rather than the grip in the abstract, so
+ *  capture_orientation is out of this derivation entirely. The column stays — it is the historical
+ *  record of how the phone was held, and the only thing that can still find those thirteen by hand.
+ *
+ *  THE SECOND HALF is capture_rotation: whatever has been baked into the pixels since, by the
+ *  camera at the shutter, by the server on a clip, or by somebody pressing rotate. Non-zero means
+ *  dealt with. A row rotated 180 twice comes back to 0 and starts badging again, which is correct —
+ *  it is sideways once more, and the badge's job is to say so.
+ *
+ *  A NULL TURN DOES NOT BADGE, and that is a decision with a visible consequence: every row in
+ *  production predates this column, so the mark goes quiet everywhere at once, the thirteen
+ *  included. Deliberate. The alternative on offer was a grandfather clause falling back to
+ *  capture_orientation for old rows, which would have kept those thirteen at the price of
+ *  reinstating the original false positive for every landscape row uploaded since, and of leaving
+ *  two rules in the product for one question. The owner's call was to lose the thirteen from the
+ *  badge and straighten them as the site admin. One rule, one meaning, no dead branch. */
+export function shotSideways(p: { captureTurn?: number | null; captureRotation?: number | null }): boolean {
+  return !!p.captureTurn && (p.captureRotation ?? 0) === 0;
 }
 
 /** One photo, as a viewer sees it.
@@ -345,10 +394,10 @@ export function photoRow(p: PhotoRowInput, myParticipantId: string | null, capti
     width:           p.width ?? undefined,
     height:          p.height ?? undefined,
     durationMs:      p.durationMs ?? undefined,
-    // Only ever sent when it is 'landscape'. The gallery's single use is a "shot sideways" mark,
-    // and 'portrait'/null/unknown all mean "say nothing" — shipping those would put three values on
-    // the wire to distinguish states no reader distinguishes.
-    shotSideways:    p.captureOrientation === 'landscape' ? true : undefined,
+    // Only ever sent when it is TRUE. The gallery's single use is a "shot sideways" mark, and
+    // 'portrait'/null/unknown/already-corrected all mean "say nothing" — shipping those would put
+    // several values on the wire to distinguish states no reader distinguishes. See shotSideways().
+    shotSideways:    shotSideways(p) ? true : undefined,
     isOwn:           myParticipantId ? p.participantId === myParticipantId : undefined,
     ...(hearts ? { hearts: hearts.counts.get(p.id) ?? 0 } : {}),
     ...(hearts?.viewer ? { hearted: hearts.mine.has(p.id) } : {}),
@@ -381,8 +430,54 @@ async function participantForUpload(sessionToken: string): Promise<UploadPartici
   return p ?? null;
 }
 
+/** How long after an event closes an upload may still arrive for a shot taken INSIDE it.
+ *
+ *  Generous on purpose, and it is not a grace period for the event — the event really is over. It
+ *  is a grace period for the NETWORK. The phone that produced the refusals this exists for was at a
+ *  hen do on a crowded connection, still draining its queue eighteen minutes after the end; a phone
+ *  that goes flat at a wedding and is charged overnight is the same story with a longer gap. The
+ *  photograph was taken during the event either way, and whether it counts should not depend on
+ *  signal strength. */
+const LATE_UPLOAD_GRACE_MS = 24 * 60 * 60_000;
+
+/** How far ahead of us a phone's clock may be and still be believed. Phones drift, and a handset a
+ *  minute or two fast must not have its shots read as "taken after the end". */
+const CLOCK_SKEW_MS = 5 * 60_000;
+
+/** What the client SAYS the shutter went at, reduced to something safe to reason about.
+ *
+ *  Never trusted as given. A client clock is advisory: it can be wrong by hours, and it can be set
+ *  deliberately by someone who would like their photo in an event that has closed. So a claim is
+ *  only honoured when it is plausible — a real number, not in the future beyond ordinary drift, and
+ *  not before the event began. Anything else falls back to the server's own clock, which is the
+ *  behaviour this had before the field existed. */
+export function capturedAtFor(raw: unknown, p: { startsAt: number | null }, now: number): number {
+  const claimed = Number(raw);
+  if (!Number.isFinite(claimed) || claimed <= 0) return now;
+  if (claimed > now + CLOCK_SKEW_MS) return now;
+  if (p.startsAt && claimed < p.startsAt) return now;
+  return claimed;
+}
+
+/** May a shot that arrives AFTER the event closed still be accepted?
+ *
+ *  Two conditions, and both halves are the point.
+ *
+ *  Taken inside the window — because whether a photograph belongs to an event is settled by when
+ *  the shutter went, not by whether the network cooperated before a deadline. Without this, a queue
+ *  draining slowly loses real photographs from the party, which is what happened.
+ *
+ *  And still inside the grace — because without it the event never actually closes, and a phone
+ *  found in a drawer next year could post into a stranger's gallery.
+ *
+ *  Its own function, rather than two lines inside the gate, so the rule can be tested at the
+ *  boundaries where it is easy to get wrong by one skew or one window. */
+export function lateUploadAllowed(expiresAt: number, capturedAt: number, now: number): boolean {
+  return capturedAt <= expiresAt + CLOCK_SKEW_MS && now <= expiresAt + LATE_UPLOAD_GRACE_MS;
+}
+
 // Returns {status,error} to reject the upload, or null if it's allowed right now.
-function gateUpload(p: UploadParticipant, isVideo: boolean): { status: number; error: string } | null {
+function gateUpload(p: UploadParticipant, isVideo: boolean, capturedAt?: number): { status: number; error: string } | null {
   // Self-host (billing off) is the FULL app — that is the pitch, and the licence. An unset
   // VIDEO_MAX_SECONDS therefore means "no per-event limit", NOT "video disabled": the old reading
   // silently refused every video upload on a fresh self-hosted install with no error a self-hoster
@@ -397,7 +492,15 @@ function gateUpload(p: UploadParticipant, isVideo: boolean): { status: number; e
   const now = Date.now();
   if (p.startsAt && now < p.startsAt)     return { status: 403, error: "Event hasn't started yet" };
   if (p.isLocked)                         return { status: 403, error: 'Event is locked' };
-  if (now > p.expiresAt)                  return { status: 410, error: 'Event has ended' };
+  // Whether a photograph belongs to an event is settled by when the shutter went, not by whether
+  // the network cooperated before a deadline. So: a shot taken INSIDE the window is still accepted
+  // for a while afterwards, and a shot taken AFTER it is refused immediately, as it always was.
+  //
+  // Both halves matter. Without the first, a queue draining slowly loses real photographs from the
+  // party. Without the second, the event never actually closes.
+  if (now > p.expiresAt && !lateUploadAllowed(p.expiresAt, capturedAt ?? now, now)) {
+    return { status: 410, error: 'Event has ended' };
+  }
   if (!hasShotsLeft(p))                   return { status: 403, error: 'No shots remaining' };
   return null;
 }
@@ -411,6 +514,36 @@ function gateUpload(p: UploadParticipant, isVideo: boolean): { status: number; e
  *  list rather than written through. */
 function readOrientation(raw: unknown): string | null {
   return raw === 'portrait' || raw === 'landscape' ? raw : null;
+}
+
+/** How far the phone was TURNED relative to the page, as an untrusted field. Degrees clockwise.
+ *
+ *  A SEPARATE VALIDATOR FROM readQuarter, which is the one thing about it worth reading twice.
+ *  readQuarter guards a rotate REQUEST and refuses 0 on purpose, because 0 is not a turn and
+ *  honouring it would rewrite a file and invalidate every cached copy of it to achieve nothing.
+ *  This one guards a MEASUREMENT, and 0 is the most common answer there is: the phone was square
+ *  with the page. Refusing it here would throw away the only thing that distinguishes a client that
+ *  measured and found nothing from a client too old to measure at all — which is precisely the
+ *  distinction the badge now rests on, since a landscape shot with turn 0 is a correct photo and a
+ *  landscape shot with turn NULL is a row we know nothing about.
+ *
+ *  180 is accepted and is very nearly unreachable: the tilt watcher settles on 0, 90 or -90 (see
+ *  deviceTilt.ts on the client). It costs nothing to honour and the alternative is a value the
+ *  server silently drops if the client ever grows one.
+ *
+ *  Anything else — 270, 45, a word, an object — is NULL and not 0, for the reason capture_rotation
+ *  does the same with the same class of input: "nobody said" and "measured, and it was nothing" are
+ *  different claims, they read the same today, and only one of them can still be told apart later. */
+export function readTurn(raw: unknown): number | null {
+  // The blank is checked because Number('') is 0, and 0 is a value this validator ACCEPTS — so a
+  // field the client appended empty, or a form that sent the key with nothing after it, would read
+  // back as a measurement of "the phone was square with the page" rather than as no measurement at
+  // all. That is the one mistake the whole 0-versus-NULL distinction exists to avoid, arriving
+  // through the front door. readQuarter is not exposed to it only because it refuses 0 outright.
+  const n = typeof raw === 'number' ? raw
+    : typeof raw === 'string' && raw.trim() !== '' ? Number(raw.trim())
+    : NaN;
+  return n === 0 || n === 90 || n === -90 || n === 180 ? n : null;
 }
 
 /** The frame shapes an event may ask for, read off its stored JSON. Unreadable or empty reads as
@@ -462,7 +595,8 @@ export function readShape(raw: unknown, allowed: string[]): string | null {
 
 async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo: boolean,
                               source: 'capture' | 'upload' = 'capture', challengeRaw?: unknown,
-                              orientationRaw?: unknown, shapeRaw?: unknown) {
+                              orientationRaw?: unknown, shapeRaw?: unknown, rotationRaw?: unknown,
+                              turnRaw?: unknown, capturedAtRaw?: unknown) {
   const destDir = eventDir(p.eventId);
   fs.mkdirSync(destDir, { recursive: true });
   const baseName = path.basename(stagedPath);                       // <uuid>.ext
@@ -470,6 +604,14 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
   fs.renameSync(stagedPath, finalPath);
   const storedName = eventRelPath(p.eventId, baseName);             // "<eventId>/<uuid>.ext"
   const sizeBytes = fs.statSync(finalPath).size;
+
+  // How far the phone was turned relative to the page when this was framed. Read here rather than
+  // at the insert because for a clip it is not only stored, it is WORK: see the correction
+  // scheduled at the bottom of this function.
+  const turn = readTurn(turnRaw);
+  // Every background job started under this upload's base name. Collected so the capture-turn
+  // correction can be the last thing to touch the clip — again, see the bottom of this function.
+  const derivations: Promise<unknown>[] = [];
 
   let dims: { width?: number; height?: number; durationMs?: number } = {};
   if (!isVideo) {
@@ -488,10 +630,19 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     // from the file as it arrived would simply carry the fault into the copy meant to be free of
     // it. Correcting first also usually means no proxy is needed at all — an in-step H.264 clip
     // takes the early-out instead of a full transcode.
-    void fixAudioLead(finalPath)
+    //
+    // WRAPPED IN whileDeriving, like the crop chain below. Everything this kicks off writes files
+    // under `finalPath`'s base name for minutes afterwards, and POST /:id/rotate moves that base
+    // name — so the rotate route has to be able to ask whether this is still running. Nothing else
+    // reads the register; see the note on it in images.ts for what happens when a rename lands in
+    // the middle of one of these.
+    //
+    // COLLECTED, not discarded, because a clip with a capture turn has one more pass coming and it
+    // has to be the last one. Pushing the promise is the only change; nothing waits on it here.
+    derivations.push(whileDeriving(finalPath, () => fixAudioLead(finalPath)
       .catch(() => false)
       .then(() => makePlaybackProxy(finalPath))
-      .catch(() => false);
+      .catch(() => false)));
     // Enforce the event's video length limit server-side (defense-in-depth): the in-browser recorder
     // auto-stops at the limit, but a native-camera clip could be any length. Only when we can read a
     // real duration; +3s tolerance for container rounding.
@@ -581,11 +732,46 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     if (!row) return null;
     await tx.insert(photos).values({
       id: photoId, eventId: p.eventId, participantId: p.id, filename: storedName,
-      mediaType: isVideo ? 'video' : 'photo', takenAt: Date.now(), status,
+      // takenAt stays the arrival time. It is what the delete window and the roll's ordering have
+      // always been measured against, and quietly redefining it would shorten a guest's window to
+      // undo a photo that took a while to upload. capturedAt is the honest answer to a DIFFERENT
+      // question, recorded beside it rather than on top of it.
+      mediaType: isVideo ? 'video' : 'photo', takenAt: Date.now(),
+      capturedAt: capturedAtFor(capturedAtRaw, p, Date.now()), status,
       challengeId,
       sizeBytes, width: dims.width ?? null, height: dims.height ?? null, durationMs: dims.durationMs ?? null,
       source,
       captureOrientation: readOrientation(orientationRaw),
+      // What the SHUTTER already put right, in the same degrees-clockwise the rotate button
+      // accumulates: the camera turns its canvas by the phone's own glyph rotation before it
+      // encodes, so the pixels arriving here are upright and it tells us by how much.
+      //
+      // This field was posted by both upload paths and read by neither, which is worse than not
+      // sending it. A photo the shutter had already straightened stored capture_orientation
+      // 'landscape' with nothing against it, so shotSideways() said yes — the badge pointing at
+      // precisely the photos that do NOT need attention, and inviting a host to rotate a picture
+      // that was already the right way up. That is the fault capture_rotation exists to prevent.
+      //
+      // Read through readQuarter, the same validator the rotate route applies to the same wire
+      // value: a turn is a turn whoever applied it, and a field a client could forge is not a
+      // number to write through. So anything that is not one of the three real turns — 0, 270,
+      // absent, nonsense — becomes NULL and NOT 0, because "nobody said" and "turned, and the
+      // total is zero" are different claims. readOrientation treats an unrecognised grip exactly
+      // that way for exactly that reason; both read as "no correction applied" today, and only
+      // one of them can still be told apart later.
+      //
+      // NEVER FOR A CLIP, whatever the wire says. The camera can only bake a rotation into pixels
+      // it drew itself, and it draws only stills — a clip is whatever MediaRecorder handed over.
+      // So a video arriving with captureRotation set is a client claiming work it cannot have done,
+      // and believing it would take the "shot sideways" badge off a clip that is still on its side.
+      // The turn below is what a clip carries instead, and the correction that follows is what
+      // eventually writes this column for one.
+      captureRotation: isVideo ? null : readQuarter(rotationRaw),
+      // What was MEASURED, as against what was applied — and for a clip, the work outstanding.
+      // Same wire, same untrusted client, its own validator: readTurn keeps 0 (the phone was square
+      // with the page, which is a real answer and the common one) where readQuarter above throws it
+      // away. See readTurn for why the two cannot be the same function.
+      captureTurn: turn,
       captureShape: shape,
     });
     return row;
@@ -605,11 +791,49 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
   // whether the crop is still running, or failed, or was never needed.
   if (isVideo) {
     if (shape && shape !== 'full') {
-      void cropClipToShape(path.join(destDir, baseName), shape)
+      derivations.push(whileDeriving(finalPath, () => cropClipToShape(finalPath, shape)
         // The poster is cut from the original, so it shows the uncropped frame. Re-cut it from the
         // cropped file so the grid thumbnail matches the clip it opens.
         .then((ok) => { if (ok) return makeVideoPoster(path.join(destDir, cropName(baseName))); })
-        .catch(() => { /* the original still plays */ });
+        .catch(() => { /* the original still plays */ })));
+    }
+    // ── The turn the phone was given, applied to the clip ─────────────────────────────────────
+    //
+    // A PHOTO NEVER GETS HERE, and that is the whole reason captureTurn and captureRotation are two
+    // columns. The camera draws stills to a canvas and rotates the canvas before it encodes, so a
+    // photo's pixels are already upright and its captureRotation says by how much; turning one here
+    // would be a second rotation nobody asked for. A clip cannot be given that treatment — putting
+    // a canvas between the camera and MediaRecorder means a second encoder on a phone already
+    // struggling with the first — so it arrives turned, and this is where that is put right.
+    //
+    // LAST, AFTER EVERY OTHER DERIVATION, which is what `derivations` above is collected for. The
+    // crop, its poster and the playback proxy are all cut from the original, and each carries a
+    // display matrix of its own; a rotated original beside an unrotated playback copy is worse than
+    // leaving the lot alone, because the gallery would then play one orientation and download the
+    // other. Waiting also means the siblings exist to be turned rather than being built moments
+    // later from a file that has moved under them.
+    //
+    // (`_dl.mp4` is the one that does not appear in `derivations`: cropClipToShape starts it
+    // unawaited and it outlives the promise collected here. It is correct either way, and only
+    // because ffmpeg work is serialised through one slot — run first, it is a sibling on disk and
+    // is turned with the rest; run after, it is re-encoded FROM the corrected original and comes
+    // out upright on its own. There is no interleaving where it is read half-turned.)
+    //
+    // Registered with whileDeriving at this line, synchronously, rather than inside the promise:
+    // the register must never fall to zero between the copies finishing and this starting, or
+    // POST /:id/rotate would see a clip that looks settled and rename a base this is about to
+    // rewrite — the exact race that route's 409 exists to prevent.
+    //
+    // NOT AWAITED, AND ITS FAILURE IS NOT THE UPLOAD'S. The guest was answered long before this
+    // runs; a clip that cannot be turned is a clip the right way round in every respect except
+    // which way up, and losing it to a cosmetic correction would be far the worse outcome. When it
+    // fails, capture_rotation stays NULL against a non-zero capture_turn — which is exactly the
+    // state the "shot sideways" badge exists to show, so the clip surfaces in the host's review
+    // screen and the rotate button finishes the job by hand.
+    if (turn) {
+      void whileDeriving(finalPath, () => Promise.allSettled(derivations)
+        .then(() => turnClipUpright(photoId, storedName, turn, dims)))
+        .catch((e) => console.warn(`[video] capture turn failed for ${storedName}:`, (e as Error).message));
     }
   }
   // Every photo is STORED 'pending' on purpose: visibility is decided at read time against the
@@ -630,6 +854,107 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
   };
 }
 
+/** Put an uploaded clip the right way up, in place, once its derived copies are finished.
+ *
+ *  ONLY EVER CALLED FOR A VIDEO, and only with a non-zero measured turn — finalizeUpload decides
+ *  both. See the note where it is scheduled for why a photo must never reach this.
+ *
+ *  A REMUX, NOT A ROTATION. rotateClipTo writes a display matrix with `-c copy` and does not decode
+ *  a frame (images.ts has the direction, measured against real files, and the reason the matrix is
+ *  probed and REPLACED rather than added). That is a header value and a stream copy: seconds, no
+ *  generation of loss, and the same trick fixAudioLead uses.
+ *
+ *  IN PLACE, UNDER THE SAME NAMES — which is the opposite of what POST /:id/rotate does, so it is
+ *  worth saying why the two differ. That route renames because /uploads is served immutable for a
+ *  year: it corrects a photo that has been in a gallery for hours or days, and every browser and
+ *  every edge cache already holding the old bytes would keep them. This runs in the minutes after
+ *  the upload, inside the same window in which fixAudioLead already rewrites the original under its
+ *  own name for exactly the same reason — the file is still settling, and a rename here would mean
+ *  a second copy of that route's guarded-move-and-paired-delete protocol, which is a thing this
+ *  module has already been bitten by owning twice (see derivedNames). If bytes do escape to a cache
+ *  before this lands, the rotate button remains the way to fix that one photo, renaming as it goes.
+ *
+ *  ALL OR NOTHING. Every file is turned into a temporary beside itself and NOTHING is moved into
+ *  place until all of them are done. A half-applied turn — a corrected original next to an
+ *  untouched playback proxy — plays one way up and downloads the other, which is worse than the
+ *  sideways clip we started with and is not a state anything downstream can detect or repair.
+ *
+ *  Resolves either way; the caller treats failure as "leave it to the badge and the button". */
+async function turnClipUpright(photoId: string, rel: string, turn: number,
+                               dims: { width?: number; height?: number }): Promise<void> {
+  // The original and every clip the pipeline derives from it — the crop the guest chose, the
+  // playback proxy, the proxy of the crop, and the full-resolution download copy. derivedNames is
+  // the ONE list (see images.ts): a copy missing from it is a copy left sideways, and the failure
+  // is silent. The thumbnails in that list are re-cut below rather than turned, because a poster is
+  // a fresh ffmpeg still and ffmpeg honours the matrix when it cuts one.
+  // EXCLUDE the stills, rather than allow-list the video containers.
+  //
+  // This was an allow-list of mp4/m4v/mov, written to skip the .webp posters that derivedNames()
+  // also returns. It did that — and it also dropped the ORIGINAL whenever the original was .webm,
+  // which is what MediaRecorder produces wherever there is no MP4 encoder: Firefox on Android,
+  // Samsung Internet, older Chrome.
+  //
+  // The consequence was the exact state this function's contract says must never exist. The derived
+  // _play.mp4 is built for a webm unconditionally, so the list was never empty and the "nothing to
+  // do" escape never fired: playback came out upright, the original stayed sideways, the poster was
+  // re-cut from the untouched original, and capture_rotation was recorded as done — which switches
+  // the "shot sideways" badge OFF. Half-corrected, undetectable, and with the one signal that would
+  // have surfaced it deliberately silenced. Downloads handed back the sideways file for ever.
+  //
+  // Inverted, any container we can store is turned and only the stills are skipped. WebM does carry
+  // a display matrix — measured, not assumed — so there was never a reason to leave it out.
+  const names = [rel, ...derivedNames(rel)].filter((n) => !/\.(webp|jpe?g|png|gif)$/i.test(n));
+  const staged: { tmp: string; final: string }[] = [];
+  const scrap = () => {
+    for (const s of staged) { try { fs.unlinkSync(uploadDiskPath(s.tmp)); } catch { /* */ } }
+  };
+
+  for (const name of names) {
+    // Most of these will not exist. A clip with no chosen shape has no crop and no download copy,
+    // and one that was already H.264 and in step needs no proxy — absent is the normal case, not a
+    // fault, exactly as it is for the rotate route and the delete route.
+    try { fs.accessSync(uploadDiskPath(name)); } catch { continue; }
+    const tmp = `${name}.turn${path.extname(name)}`;
+    if (!await rotateClipTo(uploadDiskPath(name), uploadDiskPath(tmp), turn)) { scrap(); return; }
+    staged.push({ tmp, final: name });
+  }
+  // The original itself has gone — the guest deleted the clip while we were queued behind ffmpeg.
+  // Nothing to correct and nothing to record.
+  if (!staged.length) return;
+
+  // Only now, and same-directory so each is atomic. Everything above this line can still walk away
+  // leaving the upload exactly as it was.
+  try { for (const s of staged) fs.renameSync(uploadDiskPath(s.tmp), uploadDiskPath(s.final)); }
+  catch { scrap(); return; }
+
+  // Posters are cut with ffmpeg, which auto-rotates, so re-cutting is all it takes for the grid
+  // thumbnail to match the clip it opens. The original's, and the crop's when there is one — the
+  // gallery picks between them (photoRow's thumbUrl).
+  await makeVideoPoster(uploadDiskPath(rel)).catch(() => false);
+  const crop = cropName(rel);
+  try {
+    fs.accessSync(uploadDiskPath(crop));
+    await makeVideoPoster(uploadDiskPath(crop)).catch(() => false);
+  } catch { /* no crop to poster */ }
+
+  // WHAT IS NOW BAKED IN, so nothing does it twice. capture_rotation is the record of work done on
+  // the pixels whoever did it, and from here that includes us: the badge reads it, and the rotate
+  // button accumulates on top of it, so a host straightening this clip further gets the total and
+  // not a fresh start.
+  //
+  // The stored width/height are the CODED dimensions off ffprobe, which a metadata turn does not
+  // change — but the gallery lays out with the DISPLAYED shape, and that is what just turned. So
+  // the pair swaps for a quarter and is left alone for a half, exactly as the rotate route does it.
+  const swap = turn % 180 !== 0 && typeof dims.width === 'number' && typeof dims.height === 'number';
+  // The WHERE carries the name we started from, which is the same guard the rotate route uses: a
+  // row that has been deleted, or moved out from under us, must not have a correction written back
+  // onto whatever now lives at that id.
+  const [moved] = await db.update(photos)
+    .set({ captureRotation: turn, ...(swap ? { width: dims.height, height: dims.width } : {}) })
+    .where(and(eq(photos.id, photoId), eq(photos.filename, rel)))
+    .returning({ id: photos.id });
+  if (moved) console.log(`[video] turned ${path.basename(rel)} ${turn}\u00b0 clockwise (${staged.length} file(s))`);
+}
 // ── POST /api/photos — single-shot upload (photos + videos under the chunk threshold) ──────────
 
 // ── DELETE /api/photos/:id — a guest takes back their own shot, inside the window ─────────────
@@ -678,19 +1003,27 @@ router.delete('/:id', async (req: Request, res: Response) => {
   // The DELETE returns rows, and the decrement only happens when it actually removed one: a
   // double-tapped delete (two requests, one photo) must not give the frame back twice.
   const gaveBack = await db.transaction(async (tx) => {
-    const [gone] = await tx.delete(photos).where(eq(photos.id, photo.id)).returning({ id: photos.id });
+    // RETURNING the filename, not just the id, and the rest of this route uses THAT name rather
+    // than the one read a few lines above. The two can differ: POST /:id/rotate writes the
+    // corrected photo under a fresh uuid and moves the row onto it, so a rotation committing
+    // between our read and this DELETE would leave us unlinking the pre-rotation names — already
+    // gone — and leaving the rotated file behind as an orphan nothing references, until the
+    // event's purge eventually collects it. The row the DELETE actually removed is the only
+    // authority on what is on the disk.
+    const [gone] = await tx.delete(photos).where(eq(photos.id, photo.id)).returning({ id: photos.id, filename: photos.filename });
     if (!gone) return null;
     const [row] = await tx.update(participants)
       .set({ photosTaken: sql`greatest(${participants.photosTaken} - 1, 0)` })
       .where(eq(participants.id, me.id))
       .returning({ photosTaken: participants.photosTaken, extraPhotos: participants.extraPhotos });
-    return row ?? null;
+    return row ? { ...row, filename: gone.filename } : null;
   });
   // Another request got there first. Same answer as "never existed" — see above.
   if (!gaveBack) return res.status(404).json({ error: 'Photo not found' });
-  const cropFile = cropName(photo.filename);
-  for (const f of [photo.filename, photo.filename.replace(/\.[^.]+$/, '_thumb.webp'), playName(photo.filename),
-                   cropFile, thumbName(cropFile), playName(cropFile), dlName(photo.filename)]) {
+  // The original plus every copy made from it. The list used to be written out here; it now lives
+  // in images.ts beside the functions that name those copies, because the rotate route has to
+  // account for exactly the same set and two hand-kept lists is how one of them ends up short.
+  for (const f of [gaveBack.filename, ...derivedNames(gaveBack.filename)]) {
     try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch { /* already gone is fine */ }
   }
 
@@ -700,6 +1033,16 @@ router.delete('/:id', async (req: Request, res: Response) => {
   // back the authoritative list so the camera's trick list cannot sit on a tick the server has
   // already dropped. Costs one small query on an action a guest takes at most a handful of times.
   const { challengesDone } = await missionsFor(me.eventChallenges, me.challengeSet, me.id);
+
+  // Wired even though this route is GUEST-only — it needs a session token, and the host surfaces
+  // reject rather than delete. It costs a signed-out guest nothing (no session cookie, so
+  // admin-actions.ts resolves nobody without a query), and it covers the one way an operator can
+  // reach it: joining a customer's event as a guest and then removing a shot from inside it.
+  await recordAdminAction(req, {
+    event: me.eventId, action: 'photo.delete', targetType: 'photo', targetId: photo.id,
+    before: { filename: gaveBack.filename, participantId: photo.participantId, takenAt: photo.takenAt },
+    after: null,
+  });
 
   res.json({ success: true, photosRemaining: remainingFor({ ...me, extraPhotos: gaveBack.extraPhotos, photosTaken: gaveBack.photosTaken }), challengesDone });
 });
@@ -739,7 +1082,10 @@ router.put('/:id/caption', async (req: Request, res: Response) => {
   const organizerCode = String(req.get('x-organizer-code') || req.body?.organizerCode || '');
 
   const [photo] = await db
-    .select({ id: photos.id, eventId: photos.eventId, participantId: photos.participantId })
+    // `caption` is selected for the audit log and nothing else — an entry saying a caption changed,
+    // without saying what it said, is not something anybody can act on. Same row, no extra query.
+    .select({ id: photos.id, eventId: photos.eventId, participantId: photos.participantId,
+              caption: photos.caption })
     .from(photos).where(eq(photos.id, photoId));
   // 404, never 401/403, for anything the caller is not entitled to touch — including a photo that
   // simply does not exist. Same reasoning as DELETE /:id above: whether a given photo id exists,
@@ -772,11 +1118,305 @@ router.put('/:id/caption', async (req: Request, res: Response) => {
       .where(eq(events.id, photo.eventId));
     if (event && organizerCode === event.organizerCode) {
       await db.update(photos).set({ caption }).where(eq(photos.id, photo.id));
+      await recordAdminAction(req, {
+        event: photo.eventId, action: 'photo.caption', targetType: 'photo', targetId: photo.id,
+        before: { caption: photo.caption }, after: { caption },
+      });
       return res.json({ success: true, id: photo.id, caption });
     }
   }
 
   return res.status(404).json({ error: 'Photo not found' });
+});
+
+// ── POST /api/photos/:id/rotate — put a sideways shot the right way up ────────────────────────
+//
+// THE FAULT THIS ANSWERS. The camera draws to a square canvas and posts the pixels, so a stored
+// photo has no EXIF at all — no orientation tag, nothing a viewer could honour. With the phone's
+// rotation lock on, turning it sideways moves nothing: the page stays portrait, the camera track
+// stays portrait, and the scene is written into the file lying on its side. capture_orientation
+// (0042) is the only witness to that, and it says 'landscape' without saying WHICH WAY, so there
+// is nothing to correct automatically. Thirteen production photos are in exactly that state.
+//
+// WHICH IS WHY THIS IS A BUTTON. The information needed to fix one of these does not exist in the
+// file, in the database, or in anything we could compute; it exists in the memory of whoever was
+// standing there. So we ask them, and record what they said (capture_rotation), which is what
+// stops the "shot sideways" mark pointing at photos already dealt with — see shotSideways().
+//
+// THE FILE IS RENAMED, AND THAT IS THE WHOLE CACHING STRATEGY. /uploads is served
+// `immutable, max-age=365d` (index.ts) on the promise that a uuid filename addresses one set of
+// bytes for ever. Everything downstream has taken that promise: browsers will not even revalidate
+// an immutable response, and Cloudflare is caching these at the edge. So rewriting the bytes under
+// the same name fixes the photo for precisely nobody except someone with an empty cache — the host
+// would press rotate, see nothing change, and press it again. A `?v=2` query would beat the
+// browser, but it would have to be appended by EVERY place that builds a media URL (the gallery,
+// the share payload in routes/shares.ts, the host's review feed in routes/events.ts), and the one
+// that got missed would go on serving the stale bytes for a year with nothing to show for it.
+// A new name needs none of that: `photos.filename` is the single place the name lives, every
+// derived name is computed from it (thumbName/cropName/playName/dlName), and every consumer reads
+// the column at request time. Checked before choosing it — shares, the face matcher (photo_faces
+// keys on photo_id, never a path), the event and share zips, the host feed and the purge sweeps
+// all resolve the name from the row, so none of them needs to know this happened. The old name
+// stops existing, so anything that did somehow hold one fails visibly rather than quietly serving
+// the wrong picture.
+//
+// WHO MAY DO IT. The guest who took the shot, or the event's organizer — the same two, resolved
+// the same way, as the caption route above. Rotating is the same class of act: a correction to an
+// existing photo, not a claim on anybody's roll.
+
+/** The turn, as an untrusted field. Degrees CLOCKWISE, and only the three that are a turn: a
+ *  quarter each way and a half.
+ *
+ *  270 is deliberately NOT quietly folded into -90. The wire contract is a named turn chosen by a
+ *  person pressing a button, and a client sending 270 has a bug worth seeing rather than a value
+ *  worth guessing at. 0 is refused for the same reason — it is not a rotation, and honouring it
+ *  would rewrite the file, change its name and invalidate every cached copy to achieve nothing. */
+export function readQuarter(raw: unknown): number | null {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw.trim()) : NaN;
+  return n === 90 || n === -90 || n === 180 ? n : null;
+}
+
+/** May this caller turn this photo? Pure, so the rule is a thing a test can fail on rather than
+ *  something a reviewer has to spot inside a handler.
+ *
+ *  `organizerCodeMatches` is the organizer-CODE capability only — the same limitation the caption
+ *  route documents: requireOrganizer resolves its event from a `:joinCode` param and there is no
+ *  such param on a photo-id route, so the owner-by-identity and co-host paths are not available
+ *  here. The host's Review screen always holds the code, which is the surface that matters.
+ *
+ *  A guest at the same event who did not take the shot is a stranger to it, and gets exactly what a
+ *  stranger gets. */
+export function mayRotate(a: { photoOwnerId: string; askerParticipantId: string | null; organizerCodeMatches: boolean }): boolean {
+  if (a.organizerCodeMatches) return true;
+  return a.askerParticipantId !== null && a.askerParticipantId === a.photoOwnerId;
+}
+
+router.post('/:id/rotate', async (req: Request, res: Response) => {
+  const photoId = String(req.params.id);
+  const sessionToken = String(req.body?.sessionToken || '');
+  // Header first, body as the fallback — the same shape as the caption route, and it keeps the
+  // long-lived secret out of access logs whenever the client can send a header.
+  const organizerCode = String(req.get('x-organizer-code') || req.body?.organizerCode || '');
+
+  const [photo] = await db
+    .select({ id: photos.id, eventId: photos.eventId, participantId: photos.participantId,
+              filename: photos.filename, mediaType: photos.mediaType,
+              width: photos.width, height: photos.height,
+              captureOrientation: photos.captureOrientation, captureRotation: photos.captureRotation,
+              captureTurn: photos.captureTurn,
+              captureShape: photos.captureShape })
+    .from(photos).where(eq(photos.id, photoId));
+  // 404, never 401/403, for anything the caller is not entitled to touch — including a photo that
+  // simply does not exist. Same reasoning as DELETE and the caption route: whether a given photo id
+  // exists, and whose roll it is in, is not a stranger's business.
+  if (!photo) return res.status(404).json({ error: 'Photo not found' });
+
+  const [me] = sessionToken
+    ? await db.select({ id: participants.id }).from(participants)
+        .where(and(eq(participants.sessionToken, sessionToken), eq(participants.eventId, photo.eventId)))
+    : [];
+  // Resolved from the PHOTO's event, so an organizer code for some other event is just a stranger.
+  const [event] = organizerCode
+    ? await db.select({ organizerCode: events.organizerCode }).from(events).where(eq(events.id, photo.eventId))
+    : [];
+  if (!mayRotate({ photoOwnerId: photo.participantId, askerParticipantId: me?.id ?? null,
+                   organizerCodeMatches: !!event && !!organizerCode && organizerCode === event.organizerCode })) {
+    return res.status(404).json({ error: 'Photo not found' });
+  }
+
+  // Validated AFTER the authorisation, deliberately: a 400 is then only ever reachable by somebody
+  // entitled to be here, so the two statuses cannot be used to tell an existing photo from an
+  // absent one.
+  const quarter = readQuarter(req.body?.quarter);
+  if (quarter === null) return res.status(400).json({ error: 'quarter must be 90, -90 or 180' });
+
+  const oldRel = photo.filename;
+  const isVideo = photo.mediaType === 'video';
+
+  // ONE ANSWER FOR "THIS PHOTO IS NOT YOURS TO MOVE RIGHT NOW". Written once because it is given
+  // from three places — the guarded UPDATE at the bottom, and the two ways the source can vanish
+  // under us before we ever get there.
+  const CONFLICT = 'That photo was being changed by someone else — try again';
+  /** Has the file we read off the row gone while we were working on it? Another rotation
+   *  committing first unlinks it (see the bottom of this handler), and so does a guest's delete.
+   *  Asked of the DISK rather than inferred from the failure, because the two things that fail here
+   *  fail differently — sharp throws, rotateClipTo returns false — and neither reliably carries an
+   *  ENOENT for a caller to match on. */
+  const sourceGone = () => { try { fs.accessSync(uploadDiskPath(oldRel)); return false; } catch { return true; } };
+
+  // A CLIP WHOSE COPIES ARE STILL BEING BUILT IS NOT READY TO BE RENAMED.
+  //
+  // finalizeUpload answers the guest and THEN builds the crop, its poster, the playback proxy and
+  // the full-resolution `_dl` re-encode — none of it awaited, all of it queued behind one global
+  // video slot, so the window is minutes rather than seconds. A rotation inside that window turns
+  // whichever siblings happen to exist at that instant, moves the row to the new base and clears
+  // the old one; the job then finishes and writes `<oldbase>_crop.mp4` under a name nothing
+  // references, while the base the row now carries has no crop and no download copy and nothing
+  // that will ever build them. The guest's chosen shape reverts to full frame permanently, and no
+  // error is raised anywhere.
+  //
+  // REFUSING IS THE WHOLE FIX, and it is deliberately the dumbest of the three ways out. Rebuilding
+  // the missing copies afterwards means starting the same expensive pipeline again while the first
+  // one is still in it, racing it for the same video slot and for the same output names. Making the
+  // request WAIT means holding a connection open for however long an ffmpeg queue is. Refusing
+  // costs one retry of a button that a host presses seconds apart anyway, it cannot lose a file,
+  // and it needs no marker of its own beyond the one the upload path already sets.
+  //
+  // 409 and not 423: this is temporary and retrying is the correct response, which is exactly what
+  // the client does with the conflict the guarded UPDATE returns.
+  if (isDeriving(uploadDiskPath(oldRel))) {
+    return res.status(409).json({ error: 'That clip is still being prepared — give it a moment and try again' });
+  }
+  // Same folder, same extension, new uuid. `uploadDiskPath` rather than a bare join for every
+  // filesystem call below, because it is the one helper that resolves and re-checks containment —
+  // these names come from our own column, but a path helper that is only correct for trusted input
+  // is a trap for whoever adds the next caller.
+  const dir = path.posix.dirname(oldRel);
+  const newBase = `${uuidv4()}${path.extname(oldRel)}`;
+  const newRel = dir === '.' ? newBase : `${dir}/${newBase}`;
+  const written: string[] = [];
+  const binWritten = () => { for (const f of written) { try { fs.unlinkSync(uploadDiskPath(f)); } catch { /* */ } } };
+
+  let width = photo.width, height = photo.height;
+  try {
+    if (!isVideo) {
+      const dims = await rotateImageTo(uploadDiskPath(oldRel), uploadDiskPath(newRel), quarter);
+      written.push(newRel);
+      await makeThumbnail(uploadDiskPath(newRel));
+      written.push(thumbName(newRel));
+      // sharp read the result back, so these are measured rather than swapped arithmetically.
+      width = dims.width ?? null;
+      height = dims.height ?? null;
+    } else {
+      // Metadata only, `-c copy`, not one frame decoded — see rotateClipTo. A re-encode would cost
+      // minutes in the single video slot and hand the guest back a visibly worse copy of their own
+      // clip, to fix something that is a header value.
+      if (!await rotateClipTo(uploadDiskPath(oldRel), uploadDiskPath(newRel), quarter)) {
+        if (sourceGone()) return res.status(409).json({ error: CONFLICT });
+        return res.status(500).json({ error: 'That clip could not be rotated' });
+      }
+      written.push(newRel);
+      // The crop/proxy/download copies each carry their OWN display matrix, so each is turned by
+      // the same quarter into the matching name under the new base. The two lists are the same
+      // transforms in the same order by construction (derivedNames), which is why they pair by
+      // index.
+      //
+      // ALL OR NOTHING. This was best-effort — "a sibling that fails to rotate is simply not
+      // published, and the ladder in playFile/downloadFile falls back to the original" — which
+      // reads perfectly well until you follow it to the bottom of this handler, where the OLD names
+      // are deleted whether or not anything replaced them. A crop that failed to turn was deleted
+      // and never rebuilt, so the shape the guest chose was gone for good and the clip quietly went
+      // back to full frame. There is no ladder back from that. Giving up here instead costs the
+      // host a retry and leaves every file exactly as it was.
+      const from = derivedNames(oldRel), to = derivedNames(newRel);
+      for (let i = 0; i < from.length; i++) {
+        if (!/\.(mp4|m4v|mov)$/i.test(from[i])) continue;      // the thumbs are re-cut below, not moved
+        try { fs.accessSync(uploadDiskPath(from[i])); } catch { continue; }
+        if (await rotateClipTo(uploadDiskPath(from[i]), uploadDiskPath(to[i]), quarter)) { written.push(to[i]); continue; }
+        binWritten();
+        if (sourceGone()) return res.status(409).json({ error: CONFLICT });
+        return res.status(500).json({ error: 'That clip could not be rotated' });
+      }
+      // Posters are cut with ffmpeg, which auto-rotates, so re-cutting them is all it takes for the
+      // grid to match the clip it opens. Both the original's and (when there is one) the crop's —
+      // the gallery picks between them, see photoRow's thumbUrl.
+      await makeVideoPoster(uploadDiskPath(newRel)).catch(() => false);
+      written.push(thumbName(newRel));
+      const newCrop = cropName(newRel);
+      try {
+        fs.accessSync(uploadDiskPath(newCrop));
+        await makeVideoPoster(uploadDiskPath(newCrop)).catch(() => false);
+        written.push(thumbName(newCrop));
+      } catch { /* no crop to poster */ }
+      // A clip's stored width/height are the CODED dimensions off ffprobe, which a metadata
+      // rotation does not change — but what the gallery lays out with is the DISPLAYED shape, and
+      // that is what just turned. So the pair is swapped for a quarter turn and left alone for a
+      // half, exactly as it is for a still.
+      if (quarter % 180 !== 0) { width = photo.height; height = photo.width; }
+    }
+  } catch (e) {
+    binWritten();
+    // Two rotations racing. The winner unlinked our source between the row read at the top of this
+    // handler and sharp opening it, so sharp throws "Input file is missing" and the express error
+    // handler would report a 500 — an internal fault, for something that is only a conflict, and
+    // the very conflict the guarded UPDATE below was written to answer with a 409. Same answer,
+    // reached earlier; the loser's own output is already binned above.
+    if (sourceGone()) return res.status(409).json({ error: CONFLICT });
+    throw e;
+  }
+
+  // Degrees clockwise now baked in, folded back into (-180, 180]: 90 then 90 is 180, 180 then 180
+  // is 0 (and 0 badges again, because the photo really is sideways again).
+  const total = normalizeTurn((photo.captureRotation ?? 0) + quarter);
+
+  // The WHERE carries the filename we started from, so two rotates racing each other cannot both
+  // claim the same source: the second one finds the row already moved, throws its own output away
+  // and says so. Without it the loser would overwrite the winner's row with a name derived from a
+  // file that no longer exists, and the photo would 404 for everybody.
+  const [moved] = await db.update(photos)
+    .set({ filename: newRel, width, height, captureRotation: total })
+    .where(and(eq(photos.id, photo.id), eq(photos.filename, oldRel)))
+    .returning({ id: photos.id });
+  if (!moved) {
+    binWritten();
+    return res.status(409).json({ error: CONFLICT });
+  }
+
+  // Only now: the row no longer points here, so nothing can be reading these. Best-effort, as
+  // everywhere else — a file already gone is a fine outcome, and a file that will not unlink is an
+  // orphan the event's purge collects (it removes the whole event folder) rather than a reason to
+  // fail a correction that has succeeded.
+  //
+  // PAIRED, NOT LISTED: each old name goes only once the file that REPLACED it is on the disk. The
+  // two lists are the same pure transform over two bases, so index i under the old base is index i
+  // under the new one — pinned in photo-rotate.test.ts, because that is the property this loop
+  // rests on. The unpaired delete this replaces is how a single failed sibling became permanent
+  // data loss: it removed the old `_crop.mp4` whether or not a new one existed, and nothing in the
+  // product ever rebuilds one. Litter is recoverable; the only copy of a file is not.
+  const olds = [oldRel, ...derivedNames(oldRel)];
+  const news = [newRel, ...derivedNames(newRel)];
+  for (let i = 0; i < olds.length; i++) {
+    try { fs.accessSync(uploadDiskPath(news[i])); } catch { continue; }   // nothing replaced it — keep it
+    try { fs.unlinkSync(uploadDiskPath(olds[i])); } catch { /* already gone is fine */ }
+  }
+
+  // The filename travels with the quarter, and it has to. A rotation REPLACES the file under a
+  // fresh uuid and the loop above has just unlinked the old one, so the name the row used to carry
+  // now exists nowhere else at all — an audit entry recording only "turned 90°" would be describing
+  // a file nobody can name. Written after the cleanup rather than before it because only here is
+  // the action actually finished: everything above this line can still answer 409 and leave the
+  // photo exactly as it was.
+  //
+  // `photo.eventId` rather than an event row: this route is addressed by photo id and never loads
+  // one, and admin-actions.ts fetches it only on the rare request that turns out to be loggable.
+  await recordAdminAction(req, {
+    event: photo.eventId, action: 'photo.rotate', targetType: 'photo', targetId: photo.id,
+    before: { filename: oldRel, captureRotation: photo.captureRotation, width: photo.width, height: photo.height },
+    after:  { filename: newRel, captureRotation: total, width, height },
+  });
+
+  // Everything the client needs to show the corrected photo without a refetch — and the new URLs
+  // ARE the cache-bust, which is the point of the rename.
+  //
+  // The url/playUrl ladder reads the directory through the 2s listing cache in `onDisk`, which was
+  // populated before these files existed, so for a moment after a video rotation it can answer with
+  // the original rather than the crop. That is the documented fallback ("until it lands, serve the
+  // original"), it is correct to play, and it settles by itself on the next poll.
+  const after = { ...photo, filename: newRel, width, height, captureRotation: total };
+  res.json({
+    success: true,
+    id: photo.id,
+    url: `/uploads/${downloadFile(after)}`,
+    thumbUrl: `/uploads/${thumbName(cropped(after) ?? newRel)}`,
+    ...(playFile(after) ? { playUrl: `/uploads/${playFile(after)}` } : {}),
+    width: width ?? undefined,
+    height: height ?? undefined,
+    captureRotation: total,
+    // Sent as a real boolean here, unlike the gallery row, because this reply exists to UPDATE a
+    // card that is already on screen: `undefined` would leave a client merging the response unable
+    // to tell "no longer sideways" from "no opinion", and the mark would stay up until a reload.
+    shotSideways: shotSideways(after),
+  });
 });
 
 // ── THE VISIBILITY RULE, in one place ─────────────────────────────────────────
@@ -1117,6 +1757,10 @@ router.delete('/comments/:id', async (req: Request, res: Response) => {
   const [row] = await db.select({
     id: photoComments.id, eventId: photoComments.eventId,
     participantId: photoComments.participantId, visitorId: photoComments.visitorId,
+    // For the audit log. Deleting a guest's words is the most visible thing on this surface and
+    // the least recoverable: the row is gone outright, so if the log does not carry the text,
+    // nothing anywhere does.
+    photoId: photoComments.photoId, body: photoComments.body,
   }).from(photoComments).where(eq(photoComments.id, String(req.params.id)));
   // 404 for "not yours" as well as "not there": a distinct 403 would confirm a comment id exists.
   if (!row) return res.status(404).json({ error: 'Comment not found' });
@@ -1131,6 +1775,16 @@ router.delete('/comments/:id', async (req: Request, res: Response) => {
   if (!isOrganizer && !mine) return res.status(404).json({ error: 'Comment not found' });
 
   await db.delete(photoComments).where(eq(photoComments.id, row.id));
+  // `ev` is the full event row this route already loaded, so nothing extra is read. Recorded
+  // whichever door the caller came through, rather than only the organizer-code one: the gate is
+  // "a site admin on an event they do not manage", and that is admin-actions.ts's question to
+  // answer, not a condition to re-derive here.
+  await recordAdminAction(req, {
+    event: ev, action: 'comment.delete', targetType: 'comment', targetId: row.id,
+    before: { photoId: row.photoId, body: row.body,
+              participantId: row.participantId, visitorId: row.visitorId },
+    after: null,
+  });
   res.json({ success: true });
 });
 
@@ -1337,11 +1991,11 @@ router.post('/', upload.single('photo'), async (req: Request, res: Response) => 
 
   const participant = await participantForUpload(sessionToken);
   if (!participant) { fs.unlinkSync(req.file.path); return res.status(403).json({ error: 'Invalid session' }); }
-  const gate = gateUpload(participant, isVideo);
+  const gate = gateUpload(participant, isVideo, capturedAtFor(req.body?.capturedAt, participant, Date.now()));
   if (gate) { fs.unlinkSync(req.file.path); return res.status(gate.status).json({ error: gate.error }); }
 
   try {
-    return res.json(await finalizeUpload(participant, req.file.path, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId, req.body?.captureOrientation, req.body?.captureShape));
+    return res.json(await finalizeUpload(participant, req.file.path, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId, req.body?.captureOrientation, req.body?.captureShape, req.body?.captureRotation, req.body?.captureTurn, req.body?.capturedAt));
   } catch (e) {
     // A `status` on the error means finalizeUpload raised it FOR the guest ("Video is too long —
     // this server accepts clips up to 30s"), so its message is the message and must survive. An
@@ -1423,7 +2077,7 @@ router.post('/complete', async (req: Request, res: Response) => {
   const dir = uploadPartsDir(uploadId);
   const wipe = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* */ } };
 
-  const gate = gateUpload(participant, isVideo);
+  const gate = gateUpload(participant, isVideo, capturedAtFor(req.body?.capturedAt, participant, Date.now()));
   if (gate) { wipe(); return res.status(gate.status).json({ error: gate.error }); }
 
   // All parts present + within the size cap?
@@ -1443,7 +2097,7 @@ router.post('/complete', async (req: Request, res: Response) => {
   wipe();   // parts no longer needed
 
   try {
-    return res.json(await finalizeUpload(participant, staged, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId, req.body?.captureOrientation, req.body?.captureShape));
+    return res.json(await finalizeUpload(participant, staged, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId, req.body?.captureOrientation, req.body?.captureShape, req.body?.captureRotation, req.body?.captureTurn, req.body?.capturedAt));
   } catch (e) {
     // A `status` on the error means finalizeUpload raised it FOR the guest ("Video is too long —
     // this server accepts clips up to 30s"), so its message is the message and must survive. An
@@ -1652,6 +2306,8 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
         height:          photos.height,
         durationMs:      photos.durationMs,
         captureOrientation: photos.captureOrientation,
+        captureRotation: photos.captureRotation,
+        captureTurn: photos.captureTurn,
         captureShape: photos.captureShape,
         status:          photos.status,
         participantName: participants.name,
@@ -1695,7 +2351,12 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
       // "not yet" served after the reveal fired is the one failure this whole rule exists to
       // prevent. A manual reveal gets seconds; a reveal minutes away gets the full minute.
       cacheableFor(res, galleryCacheSeconds({ revealed: false, revealAt, revealMode: event.revealMode, now: Date.now() }));
-      return res.json({ revealed: false, photoCount, revealMode: event.revealMode, revealAt });
+      // `awaitingHost` and not `revealHidden`: a guest needs to know whether asking would change
+      // anything, not whether the host actively hid the photos or simply has not revealed them yet.
+      // False for a timed reveal — the countdown is the whole answer there, and sending somebody to
+      // badger the host about a clock is worse than saying nothing.
+      return res.json({ revealed: false, photoCount, revealMode: event.revealMode, revealAt,
+        awaitingHost: !!event.revealHidden || event.revealMode === 'manual' });
     }
     // ── Sorting by hearts, ACROSS THE WHOLE EVENT ──────────────────────────────
     //
@@ -1743,6 +2404,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
                p.participant_id AS "participantId", p.challenge_id AS "challengeId", p.caption,
                p.media_type AS "mediaType", p.size_bytes AS "sizeBytes", p.width, p.height,
                p.duration_ms AS "durationMs", p.capture_orientation AS "captureOrientation",
+               p.capture_rotation AS "captureRotation", p.capture_turn AS "captureTurn",
                p.capture_shape AS "captureShape", pa.name AS "participantName",
                COALESCE(h.n, 0)::int AS hearts
         FROM photos p
@@ -1796,6 +2458,8 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
             height: row.height == null ? null : Number(row.height),
             durationMs: row.durationMs == null ? null : Number(row.durationMs),
             captureOrientation: row.captureOrientation == null ? null : String(row.captureOrientation),
+            captureRotation: row.captureRotation == null ? null : Number(row.captureRotation),
+            captureTurn: row.captureTurn == null ? null : Number(row.captureTurn),
             captureShape: row.captureShape == null ? null : String(row.captureShape),
           };
           return photoRow(p, null, capsH, hrtH, cmtH);
@@ -1818,6 +2482,8 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
         height:          photos.height,
         durationMs:      photos.durationMs,
         captureOrientation: photos.captureOrientation,
+        captureRotation: photos.captureRotation,
+        captureTurn: photos.captureTurn,
         captureShape: photos.captureShape,
         participantName: participants.name,
       })
@@ -1950,6 +2616,8 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
         height:          photos.height,
         durationMs:      photos.durationMs,
         captureOrientation: photos.captureOrientation,
+        captureRotation: photos.captureRotation,
+        captureTurn: photos.captureTurn,
         captureShape: photos.captureShape,
         status:          photos.status,
         participantName: participants.name,
@@ -1971,6 +2639,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
       ? await heartsFor(event.id, ownRows.map((r) => r.id), participant.id)
       : undefined;
     return res.json({ revealed: false, photoCount, revealMode: event.revealMode,
+      awaitingHost: !!event.revealHidden || event.revealMode === 'manual',
       revealAt: scheduledRevealAt(event),
       // Already own-only, whether or not ?own was asked for. othersCount is 0 rather than the real
       // number on purpose: before the reveal there is nothing of anyone else's this guest may see,
@@ -1994,6 +2663,8 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
       height:          photos.height,
       durationMs:      photos.durationMs,
       captureOrientation: photos.captureOrientation,
+      captureRotation: photos.captureRotation,
+      captureTurn: photos.captureTurn,
       captureShape: photos.captureShape,
       participantName: participants.name,
     })

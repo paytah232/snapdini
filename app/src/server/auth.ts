@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { eq, and } from 'drizzle-orm';
 import type { Request, Response, NextFunction, CookieOptions } from 'express';
 import { db } from './db';
-import { users, sessions, emailTokens, type User } from './schema';
+import { users, sessions, emailTokens, eventCohosts, type User } from './schema';
 
 export const SESSION_COOKIE = 'sid';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -147,6 +147,37 @@ export async function requireAdmin(req: Request, res: Response, next: NextFuncti
   if (!user.isAdmin) { res.status(403).json({ error: 'Admins only' }); return; }
   req.user = user;
   next();
+}
+
+// ── Does this person MANAGE this event? ───────────────────────────────────────
+//
+// Owner, or ACCEPTED co-host — by identity, never by holding the organizer code. The rule lived
+// inline in routes/events.ts in two places (requireOrganizer's first two doors, and the
+// `youManage` flag the public event GET hands the camera) and a third caller now needs it:
+// admin-actions.ts records what a site admin does to an event they do NOT manage, so it has to
+// ask the same question the gate asks. Three copies of an authorisation rule is how two of them
+// get fixed and the third does not, so it lives here beside the other "who is this, and what may
+// they do" helpers.
+
+/** Is this user an ACCEPTED co-host of the event? (Co-hosts manage by identity like the owner.) */
+export async function isAcceptedCohost(eventId: string, userId: string): Promise<boolean> {
+  const [r] = await db.select({ id: eventCohosts.id }).from(eventCohosts)
+    .where(and(eq(eventCohosts.eventId, eventId), eq(eventCohosts.userId, userId), eq(eventCohosts.status, 'accepted')));
+  return !!r;
+}
+
+/** Owner or accepted co-host.
+ *
+ *  Takes only the two fields it reads rather than a whole `Event`, so a caller holding a narrow
+ *  select can ask without fetching the row again — admin-actions.ts selects four columns and no
+ *  more. The owner test short-circuits, so the common answer costs no query at all. */
+export async function youManage(
+  event: { id: string; ownerUserId: string | null },
+  userId: string | null | undefined,
+): Promise<boolean> {
+  if (!userId) return false;
+  if (event.ownerUserId && event.ownerUserId === userId) return true;
+  return isAcceptedCohost(event.id, userId);
 }
 
 // Bootstrap a site admin from ADMIN_EMAIL/ADMIN_PASSWORD on boot. Self-host default is

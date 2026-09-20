@@ -229,6 +229,83 @@ export function dlName(filename: string): string {
   return filename.replace(/\.[^.]+$/, '') + '_dl.mp4';
 }
 
+/** Every file DERIVED from one upload, by name. The original is deliberately NOT in the list:
+ *  callers that want it already have it, and keeping it out means no caller can delete the original
+ *  while meaning to clear only the copies.
+ *
+ *  One list because there were two. The delete route and the rotate route must each account for
+ *  every sibling, and the failure when they disagree is silent — an orphaned `_dl.mp4` nobody ever
+ *  sees, or a gallery still serving a crop cut from the pre-rotation clip. Add a derived file
+ *  anywhere in this module and it belongs here on the same day.
+ *
+ *  Names only. Most will not exist for most rows (a photo has exactly one, an MP4 that needed no
+ *  crop has two), and every caller already treats a missing sibling as the normal case. */
+export function derivedNames(filename: string): string[] {
+  // Every MP4 this pipeline can produce from one upload. `playName(cropName(…))` is the proxy built
+  // from the crop rather than from the original — see playFile()'s ladder in routes/photos.ts.
+  const clips = [playName(filename), cropName(filename), playName(cropName(filename)), dlName(filename)];
+  // A thumbnail for EACH of them, and that is not over-caution. `backfillThumbnails` walks the
+  // event folder on every boot and posters anything that is a video and has no sibling `_thumb`,
+  // which includes the derived clips — so `<id>_play_thumb.webp` and friends are real files sitting
+  // on the volume. The delete route's hand-written list did not know that, and every deleted clip
+  // left one behind; it was found when a rotation renamed the base and an orphan stayed put.
+  // Nothing READS them (photoRow's thumbUrl is the original's or the crop's), so they are pure
+  // litter — but litter that only the code which made it can name.
+  return [thumbName(filename), ...clips, ...clips.map(thumbName)];
+}
+
+// ── Which uploads still have derived copies coming ───────────────────────────
+//
+// Every file derivedNames() lists is built AFTER the guest has been answered: the crop, the poster
+// cut from it, the playback proxy and the full-resolution `_dl` re-encode are all `void` promises
+// queued behind one global video slot, so a 30-second clip can still be growing siblings minutes
+// after the upload said "done".
+//
+// Nothing needed to know that until something wanted to MOVE the base name. POST /:id/rotate
+// renames an upload and every copy made from it (routes/photos.ts), and a rename landing in the
+// middle of this leaves the still-running job writing `<oldbase>_crop.mp4` under a name no row
+// points at — while the base the row now carries has no crop, no download copy, and nothing that
+// will ever build them. The guest's chosen shape silently reverts to full frame, for good, and
+// not one line of that is an error anybody sees.
+//
+// So the jobs declare themselves and the mover asks. COUNTED rather than a flag because one upload
+// starts two independent chains (audio-lead → proxy, and crop → poster → download copy) and it is
+// the last one to finish that decides when the name is safe to move.
+//
+// Keyed on the resolved path of the ORIGINAL, which is the one name every derived file is computed
+// from — so a caller holding any of them can ask about the set by naming the file it came from.
+//
+// IN-PROCESS, DELIBERATELY. The promises this tracks live in this process and nowhere else, so a
+// restart that forgets the register has already killed the work the register described: there is
+// nothing to expire and nothing to reconcile on boot. The honest limit of that is that it only
+// covers one process — run two app containers against one uploads volume and a rotation arriving
+// at the other one would not see this, which is the race exactly as it was. The deployment is a
+// single app process (see the compose stack), and a shared marker would need a table, a lease and
+// an expiry to answer a question that is only ever asked about work THIS process started.
+const deriving = new Map<string, number>();
+
+/** Count `job` as outstanding work against `originalPath` until it settles.
+ *
+ *  try/finally, so a job that throws or is rejected releases the name too — a failed transcode that
+ *  wedged its upload shut for the life of the process would be a worse bug than the race this
+ *  closes. */
+export async function whileDeriving<T>(originalPath: string, job: () => Promise<T>): Promise<T> {
+  const key = path.resolve(originalPath);
+  deriving.set(key, (deriving.get(key) ?? 0) + 1);
+  try {
+    return await job();
+  } finally {
+    const left = (deriving.get(key) ?? 1) - 1;
+    if (left > 0) deriving.set(key, left);
+    else deriving.delete(key);
+  }
+}
+
+/** Is anything still being written under this upload's base name? */
+export function isDeriving(originalPath: string): boolean {
+  return deriving.has(path.resolve(originalPath));
+}
+
 /** Parse "4:5" into a ratio. Null for 'full', blank, or anything unrecognised — all of which mean
  *  "leave it alone". */
 export function shapeRatio(shape: string | null | undefined): { w: number; h: number } | null {
@@ -370,8 +447,12 @@ export async function cropClipToShape(videoPath: string, shape: string | null | 
       // this point, and this is the expensive pass. Until it lands, a download gets the lossless
       // crop — right shape, surplus hidden rather than gone — which is the same thing the gallery
       // is showing and never a wrong-looking file.
-      void cropByReencode(videoPath, want,
-        { outName: dlName(path.basename(videoPath)), crf: 18, capLongEdge: false })
+      // Registered with whileDeriving, because this one OUTLIVES the promise the caller is
+      // awaiting: cropClipToShape resolves as soon as the lossless crop is in place, and without
+      // this the base name would read as finished while the most expensive copy of the lot was
+      // still being written into it.
+      void whileDeriving(videoPath, () => cropByReencode(videoPath, want,
+        { outName: dlName(path.basename(videoPath)), crf: 18, capLongEdge: false }))
         .catch(() => false);
       return true;
     } catch {
@@ -652,6 +733,107 @@ export async function makePlaybackProxy(videoPath: string): Promise<boolean> {
       catch { resolve(false); }
     });
   }));
+}
+
+// ── Turning a shot the right way up ──────────────────────────────────────────
+//
+// The shot this exists for has NO EXIF at all: the camera page draws to a canvas and posts the
+// pixels, and ingest re-encodes whatever is left out of the file (stripImageMetadata). So there is
+// no orientation tag to correct and nothing a viewer could honour — the scene is simply lying on
+// its side in the pixels, and putting it upright means moving the pixels.
+//
+// Which direction is 'up' is NOT derivable. capture_orientation (0042) records only that the phone
+// was held sideways, never which way; the answer lives with the person who took the photo. So both
+// functions here take a signed quarter from a human and do exactly that, once.
+//
+// ONE CONVENTION, END TO END: positive is CLOCKWISE, as the guest sees the picture. sharp's
+// `.rotate(n)` is already clockwise-positive, so the still path needs no translation. ffmpeg's
+// `-display_rotation` is the opposite sign (it documents itself as counter-clockwise), which is
+// the single place a sign flips — and it flips in `rotateClipTo` and nowhere else. Both were
+// checked against real files rather than read off the documentation: a frame with red on the LEFT
+// comes back with red on TOP through either path.
+
+/** Fold any number of degrees into the (-180, 180] window the column stores.
+ *
+ *  Shared with the route that accumulates the total, so "90 then 90 is 180" and "180 then 180 is
+ *  0" are decided in one place. The window matters: 270 and -90 are the same turn, and storing
+ *  both spellings would make every later comparison ("has this been corrected?") answer twice. */
+export function normalizeTurn(deg: number): number {
+  const wrapped = ((Math.round(deg) % 360) + 360) % 360;   // [0, 360)
+  return wrapped > 180 ? wrapped - 360 : wrapped;          // (-180, 180]
+}
+
+/** Turn a stored still and write the result to `destPath`.
+ *
+ *  A NEW FILE, never in place. /uploads is served `immutable, max-age=365d` (index.ts) on the
+ *  promise that a uuid filename addresses one set of bytes for ever, so rewriting a file under its
+ *  own name changes nothing for anybody whose browser, or Cloudflare, already has it. The caller
+ *  renames the row; this function only ever writes somewhere new.
+ *
+ *  Encoded exactly as ingest encodes an upload — same IMAGE_QUALITY, same chroma decision — so a
+ *  corrected photo is not quietly a different quality from its neighbours, and inside the same slot
+ *  so a host working through an album cannot outrun the uploads it shares a box with.
+ *
+ *  No bare `.rotate()` first. That one auto-orients from EXIF, and the stored original has had
+ *  every scrap of metadata re-encoded out of it at ingest — there is nothing left to honour, and
+ *  calling both would be two rotations where the guest asked for one. */
+export async function rotateImageTo(srcPath: string, destPath: string, clockwise: number): Promise<{ width?: number; height?: number }> {
+  const hi = IMAGE_QUALITY >= 90;
+  const { data, info } = await withImageSlot(() => sharp(srcPath)
+    .rotate(clockwise)
+    .jpeg({ quality: IMAGE_QUALITY, chromaSubsampling: hi ? '4:4:4' : '4:2:0', mozjpeg: !hi })
+    .toBuffer({ resolveWithObject: true }));
+  await fs.promises.writeFile(destPath, data);
+  return { width: info.width, height: info.height };
+}
+
+/** Turn a clip WITHOUT decoding a single frame, writing the result to `destPath`.
+ *
+ *  A video carries a display matrix, so "rotate" is a header value and `-c copy` is all it takes —
+ *  the same trick, and the same reasoning, as the audio-sync fix above: the file a guest downloads
+ *  must not lose a generation of quality to a correction. A re-encode would cost minutes of CPU in
+ *  the one video slot and give a visibly worse clip back.
+ *
+ *  THE SIGN. `-display_rotation` is documented as degrees COUNTER-clockwise, and ffprobe reports
+ *  the matrix in the same convention — measured here: `-display_rotation -90` on a clip with red on
+ *  the left produced a clip that plays with red on top, i.e. a quarter turn clockwise, and probes
+ *  back as `rotation=-90`. So the existing value minus our clockwise quarter is the new one.
+ *
+ *  IT REPLACES, IT DOES NOT ADD. Also measured: applying `-display_rotation -90` twice leaves the
+ *  matrix at -90, not -180. That is why the source is probed first and the TOTAL is written, rather
+ *  than the delta — a clip already carrying a phone's own rotation (iOS writes -90 routinely) would
+ *  otherwise have it silently discarded, and the correction would look like it made things worse.
+ *
+ *  VERIFIED, NOT ASSUMED, in the house style of every other ffmpeg path in this file: WebM has no
+ *  equivalent header in every muxer, and a container that quietly drops the matrix would leave a
+ *  file that looks written and plays exactly as wrong as before. False means "nothing was
+ *  published", and the caller must keep the original.
+ */
+export async function rotateClipTo(srcPath: string, destPath: string, clockwise: number): Promise<boolean> {
+  const info = await probeClip(srcPath);
+  if (!info) return false;
+  const want = normalizeTurn(info.rotation - clockwise);
+  const tmp = destPath + '.rot' + (path.extname(destPath) || '.mp4');
+  const args = ['-v', 'error', '-y', '-display_rotation', String(want), '-i', srcPath, '-c', 'copy'];
+  if (/\.(mp4|m4v|mov)$/i.test(destPath)) args.push('-movflags', '+faststart');
+  args.push(tmp);
+
+  return withVideoSlot(async () => {
+    const scrap = async () => { try { await fs.promises.unlink(tmp); } catch { /* */ } };
+    const done = await run('ffmpeg', args, 120_000);
+    if (done.code !== 0) { await scrap(); return false; }
+    // probeClip normalises into [0, 360); `want` is in (-180, 180]. Compare in one window or 270
+    // and -90 read as a mismatch and every successful rotation is thrown away.
+    const after = await probeClip(tmp);
+    if (!after || normalizeTurn(after.rotation) !== want) {
+      console.warn(`[rotate] ${path.basename(srcPath)}: container kept rotation=${after ? after.rotation : '?'} `
+        + `when ${want} was asked for — leaving the clip as it was`);
+      await scrap();
+      return false;
+    }
+    try { await fs.promises.rename(tmp, destPath); return true; }
+    catch { await scrap(); return false; }
+  });
 }
 
 // Generate a missing thumbnail for one original if it doesn't already have a sibling _thumb.webp.

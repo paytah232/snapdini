@@ -4,14 +4,15 @@
   import { replaceState, pushState } from '$app/navigation';
   import { goto } from '$app/navigation';
   import {
-    getAdmin, getPhotosByOrganizer, ratePhoto, moderate, createShare, mediaMeta,
+    getAdmin, getEvent, getPhotosByOrganizer, ratePhoto, moderate, createShare, mediaMeta,
     savePhotoCaption, CAPTION_MAX, clampCaption, captionLength, captionRemaining,
     type Photo, type AdminEvent, type ShareKind, getHearts,
-    getWords, deleteComment, type HostWord } from '$lib/events';
+    getWords, deleteComment, type HostWord,
+    rotatePhoto, normalizeTurn, type PhotoRotation } from '$lib/events';
   import { applyEventTheme } from '$lib/theme';
   import Loading from '$lib/components/Loading.svelte';
   import { getAdminCode, saveAdminCode } from '$lib/session';
-  import { api } from '$lib/api';
+  import { api, getMe, writeFailed } from '$lib/api';
   import { firePurchase, purchaseTracked } from '$lib/adtracking';
   import { showToast, showSuccess } from '$lib/toast';
   import { tileAspect } from '$lib/ui';
@@ -21,14 +22,24 @@
   import { sortPhotos, type PhotoSort } from '$lib/photoSort';
   import PhotoCard from '$lib/components/PhotoCard.svelte';
   import DownloadIcon from '$lib/components/DownloadIcon.svelte';
+  import RotateControl from '$lib/components/RotateControl.svelte';
+  import { fitScaleFor, previewTransform } from '$lib/rotatePreview';
   import ShareScope from '$lib/components/ShareScope.svelte';
   import SlideshowPanel from '$lib/components/SlideshowPanel.svelte';
   import ShareModal from '$lib/components/ShareModal.svelte';
+  import AdminBanner from '$lib/components/AdminBanner.svelte';
+  import { ownershipOf, isGuarded, isLocked, readTookControl, writeTookControl,
+           TAKE_CONTROL_CONFIRM, LOCKED_REFUSAL } from '$lib/adminGuard';
 
   // The share popup — opened after creating any share (filter or selection).
   let shareModal: { id: string; kind: ShareKind; label: string; slug: string | null; url: string; count: number | null;
                     heartsEnabled?: boolean; commentsEnabled?: boolean } | null = null;
   async function openShare(kind: ShareKind, photoIds?: string[]) {
+    // The one door every share goes through — the header chooser, the selection bar and the
+    // single view all arrive here. Gating it rather than the three call sites is what makes a
+    // fourth one safe by default; it is also what keeps ShareModal (which can rename a link and
+    // flip hearts/comments on it) out of reach entirely, without touching that component.
+    if (refuseWhenLocked()) return;
     busy = true;
     try {
       const r = await createShare(code, orgCode, kind, photoIds);
@@ -48,6 +59,73 @@
   let booting = true;
   let ev: AdminEvent | null = null;
   let photos: Photo[] = [];
+
+  // ── A site admin standing in somebody else's event ─────────────────────────
+  //
+  // ACCIDENT PREVENTION, NOT ACCESS CONTROL. The operator is a trusted site admin; the server
+  // takes every one of these writes from him with or without a line of what follows, and devtools
+  // gets round all of it in four seconds. $lib/adminGuard argues the whole case. Treat a bypass
+  // here as a UX bug and never as a hole — the boundary is requireAdmin/requireOrganizer on the
+  // server.
+  //
+  // The manager was guarded first because it is the screen that LOOKS like a host's own. This one
+  // is worth guarding for the opposite reason: almost nothing on it is a setting, and almost
+  // everything on it is irreversible and immediate. Reject bins a guest's photograph. Remove takes
+  // down something a person wrote. A turn rewrites the stored file and renames it. A share hands
+  // out a working link to a customer's wedding. The two armed controls ("Sure?") guard against a
+  // slip of the finger, not against being in the wrong event — they arm just as willingly on a
+  // stranger's photos as on your own.
+  //
+  // `youManage` is the signal and the ADMIN payload does not carry it — GET /:code/admin never
+  // returns it. It is on the PUBLIC event. The manager gets that for free because it already
+  // fetches the public event for its organizer-code wall; this route has no wall to ride along on,
+  // so it asks for it itself. One extra GET, fired beside the ones boot was making anyway.
+  let viewerIsAdmin = false;
+  let pubEvent: Awaited<ReturnType<typeof getEvent>> | null = null;
+  $: ownership = ownershipOf(pubEvent?.youManage);
+  $: adminGuarded = isGuarded(viewerIsAdmin, ownership);
+  /** Keyed by JOIN CODE — which is what makes the manager and this page ONE decision rather than
+   *  two. An operator who pressed "Take control" on /admin/<code> and then opened Review lands
+   *  here already unlocked, and "Hand it back" on either screen hands it back on both: same key,
+   *  same tab's sessionStorage. Nothing is passed between the routes to achieve that and nothing
+   *  should be — it falls out of the key, and a second mechanism would be a second thing to get
+   *  out of step.
+   *
+   *  Read at init rather than in onMount so the first paint is already right. A screen that
+   *  renders live and then greys out is a screen somebody has already pressed. */
+  let tookControl = readTookControl(code);
+  $: locked = isLocked(viewerIsAdmin, ownership, tookControl);
+  /** The bar's measured height, bound out of AdminBanner. The header below is `position: sticky;
+   *  top: 0`; without this the two pin to the same line and the bar covers the event name. */
+  let adminBarH = 0;
+
+  function takeControl() {
+    if (!adminGuarded || tookControl) return;
+    // One confirm, at the one moment worth noticing. Everything after it is ordinary work, and
+    // re-asking per control is how a prompt becomes something dismissed on reflex.
+    if (!confirm(TAKE_CONTROL_CONFIRM)) return;
+    tookControl = true;
+    writeTookControl(code, true);
+  }
+  function releaseControl() {
+    tookControl = false;
+    writeTookControl(code, false);
+  }
+  /** The refusal, said out loud. Returns true for "stop".
+   *
+   *  Every writing control below is ALSO `disabled`, so from a mouse this ought to be unreachable.
+   *  It is here for the paths a disabled attribute does not cover: a keyboard press on a control
+   *  that was live when focus landed, an event dispatched by a child component (PhotoCard's
+   *  double-tap-to-favourite is exactly that — it never touches a button on this page), and the
+   *  next control somebody adds and forgets to gate.
+   *
+   *  It toasts rather than returning quietly, for the reason the whole codebase gives: a press
+   *  that does nothing is indistinguishable from a broken page. */
+  function refuseWhenLocked(): boolean {
+    if (!locked) return false;
+    showToast(LOCKED_REFUSAL, true);
+    return true;
+  }
 
   type ViewMode = 'cards' | 'single' | 'slideshow' | 'words';
   // ?view=slideshow lets the post-event email drop the host straight on the slideshow panel instead
@@ -81,6 +159,13 @@
   onMount(async () => {
     orgCode = resolveOrgCode();
     if (!orgCode) { goto('/admin/' + code); return; }
+    // Both best-effort, both fired BEFORE the admin payload is awaited so the guard settles as
+    // early as it can, and neither allowed to hold the page. A dropped reply leaves `ownership`
+    // at 'unknown', which isGuarded deliberately treats as READ-ONLY: the cost of being wrong
+    // that way is one press of "Take control", and the cost of being wrong the other way is a
+    // rejected photo on a live wedding.
+    void getMe().then((me) => { viewerIsAdmin = !!me.user?.isAdmin; }).catch(() => { /* anon organizer */ });
+    void getEvent(code).then((e0) => { pubEvent = e0; }).catch(() => { /* stays 'unknown' → locked */ });
     try {
       ev = await getAdmin(code, orgCode);
       // Cache the code, then strip it from the address bar so the secret doesn't linger in the URL.
@@ -220,6 +305,108 @@
 
   $: if (filtered.length && singleIndex > filtered.length - 1) singleIndex = filtered.length - 1;
   $: current = filtered[singleIndex] ?? null;
+
+  /* ── Rotating a photo that was shot sideways ────────────────────────────────
+   *
+   *  Single view only, and on purpose: a turn is judged by eye against the whole picture, which is
+   *  the one thing a grid of thumbnails does not give you. It is also the host's only route to the
+   *  backlog — a photo taken before the shutter started correcting for a turned phone records only
+   *  THAT it was sideways, never which way, so no amount of server cleverness can straighten it.
+   *  Someone has to look.
+   *
+   *  Turn, look, then commit — not a request per tap. Four taps come back to zero and send nothing.
+   *
+   *  Keyed on the photo's ID rather than tracked inside prev()/next(), because those are not the
+   *  only way the subject changes: this page reloads its rows on a timer, so `current` can become a
+   *  different photograph with nothing here being called. Keyed, a half-finished turn cannot land
+   *  on the wrong file — it is simply forgotten. */
+  let turnPhotoId = '';
+  let pendingTurn = 0;
+  let rotating = false;
+  $: pendingFor = current && turnPhotoId === current.id ? pendingTurn : 0;
+
+  /* Keeping the turned picture INSIDE the box it was given.
+   *
+   *  A transform never changes a layout box, so a landscape shot stood on its end is taller than
+   *  `.big` is allowed to be and hangs out of `.stage` — and because a transform also creates a
+   *  stacking context, the overflow painted over the action row underneath rather than behind it.
+   *  The host's report was that the photo "appears above the rest of the page", which is exactly
+   *  what that is. The lightbox had already solved it; the arithmetic is shared now, in
+   *  rotatePreview.ts, rather than written a second time here.
+   *
+   *  TWO measurements, because there are two boxes: the one in the page and the one in the
+   *  full-screen overlay, which is a different shape. Each measures its own element. */
+  let bigImgEl: HTMLImageElement | undefined;
+  let bigVideoEl: HTMLVideoElement | undefined;
+  let bigFit = 1;
+  function measureBig() {
+    const el: HTMLElement | undefined = current?.mediaType === 'video' ? bigVideoEl : bigImgEl;
+    bigFit = fitScaleFor(el?.offsetWidth ?? 0, el?.offsetHeight ?? 0);
+  }
+  let fsImgEl: HTMLImageElement | undefined;
+  let fsVideoEl: HTMLVideoElement | undefined;
+  let fsFit = 1;
+  function measureFs() {
+    const el: HTMLElement | undefined = current?.mediaType === 'video' ? fsVideoEl : fsImgEl;
+    fsFit = fitScaleFor(el?.offsetWidth ?? 0, el?.offsetHeight ?? 0);
+  }
+  $: bigTransform = previewTransform(pendingFor, bigFit);
+  /* The overlay shows the SAME photograph, so it shows the same pending turn. It used to show the
+   *  original while a turn was waiting to be saved, which is the one place a host would go to
+   *  check the turn was right — and it answered with the picture they were trying to correct. */
+  $: fsTransform = previewTransform(pendingFor, fsFit);
+
+  function turnBy(q: number) {
+    // The turn itself sends nothing — but it is the only thing that puts Save on screen, and a
+    // rotate REWRITES and renames the stored file. Refusing the first tap means the control
+    // never reaches the state where the dangerous press exists. cancelTurn is left alone: it
+    // can only ever un-stage, and a lock on the way back out is a trap.
+    if (refuseWhenLocked()) return;
+    if (!current) return;
+    if (turnPhotoId !== current.id) { turnPhotoId = current.id; pendingTurn = 0; }
+    // Measured at the tap. Both elements are laid out by now (or absent, which measures as 1 and
+    // is corrected by their own `load`), and a transform never changes a layout box — so this
+    // answers the same thing however many turns the picture has already been given.
+    measureBig(); measureFs();
+    pendingTurn = normalizeTurn(pendingTurn + q);
+  }
+  function cancelTurn() { turnPhotoId = ''; pendingTurn = 0; }
+
+  async function saveTurn() {
+    // Reachable with a turn already staged from before the lock landed — `ownership` starts
+    // 'unknown' and settles a moment later, so "nothing can be pending" is not true on the
+    // first tick.
+    if (refuseWhenLocked()) return;
+    if (!current || !pendingFor) return;
+    // Captured now, not read from `current` after the await: the timer may have moved the view on
+    // by the time this resolves, and the merge has to find the row this turn was actually for.
+    const id = current.id;
+    const q = pendingFor as 90 | -90 | 180;
+    rotating = true;
+    try {
+      applyRotation(await rotatePhoto(id, q, { organizerCode: orgCode }));
+      cancelTurn();
+    } catch (e) {
+      // The turn stays pending and re-saveable — a failed write should not also lose the host's
+      // judgement about which way up the photo goes.
+      showToast(writeFailed(e, 'Could not rotate that'), true);
+    } finally {
+      rotating = false;
+    }
+  }
+
+  /** Fold the reply into the row it belongs to.
+   *
+   *  A MERGE, not a refetch, and the reason is sharper than saving a round trip: rotating RENAMES
+   *  the stored file, so the row held here now points at a name that 404s. Left alone that is a
+   *  BROKEN tile, not a stale one. The reply carries every name that changed, the swapped
+   *  dimensions, and shotSideways as a real boolean, so the row is right on this tick. */
+  function applyRotation(r: PhotoRotation) {
+    photos = photos.map((p) => (p.id === r.id
+      ? { ...p, url: r.url, thumbUrl: r.thumbUrl, playUrl: r.playUrl,
+          width: r.width, height: r.height, shotSideways: r.shotSideways }
+      : p));
+  }
   $: if (tab === 'pending' && !showPendingTab) tab = 'all';
   $: selectedCount = selected.size;
 
@@ -249,6 +436,9 @@
 
   // ── Favourite (separate from approval) ───────────────────────────────────────
   async function setRating(photo: Photo, next: number) {
+    // Guarded at the handler and not only at the stars, because the grid's double-tap reaches
+    // here through PhotoCard's own event without any button on this page being pressed.
+    if (refuseWhenLocked()) return;
     const prev = photo.rating;
     if (next === prev) return;
     photo.rating = next; photos = photos;
@@ -265,6 +455,7 @@
 
   // ── Moderation ───────────────────────────────────────────────────────────────
   async function approve(photo: Photo) {
+    if (refuseWhenLocked()) return;
     try {
       await moderate(code, orgCode, [photo.id], 'approve');
       photo.status = 'approved'; photos = photos;
@@ -345,6 +536,11 @@
    *  (the same call the caption editor makes), a comment is deleted outright. Both already take the
    *  organizer code, so neither needed a new endpoint. */
   async function removeWord(w: HostWord) {
+    // THROWS rather than toasting, and that is the difference that matters. Its two callers
+    // read a clean return as "the server removed it" and strike the line out of the list; a
+    // polite `return` here would take a comment off the screen that is still on the event.
+    // They refuse first, and say so properly — this is the floor under them.
+    if (locked) throw new Error(LOCKED_REFUSAL);
     if (w.kind === 'caption') {
       await savePhotoCaption(w.photoId, '', { organizerCode: orgCode });
       // Keep the cards view honest without a refetch — it is showing the same caption.
@@ -356,6 +552,7 @@
   }
 
   async function removeOne(w: HostWord) {
+    if (refuseWhenLocked()) return;
     if (wordsBusy) return;
     wordsBusy = true;
     try {
@@ -369,6 +566,9 @@
   }
 
   async function removeSelected() {
+    // Before the confirm, not after. Asking "Remove 12 lines?" and then refusing is a dialog
+    // that exists only to be wrong.
+    if (refuseWhenLocked()) return;
     if (wordsBusy || !wordSel.size) return;
     const targets = words.filter((w) => wordSel.has(wordKey(w)));
     if (!confirm(`Remove ${targets.length} ${targets.length === 1 ? 'line' : 'lines'}? This cannot be undone.`)) return;
@@ -415,6 +615,12 @@
   }
 
   function openCaption(photo: Photo, e?: Event) {
+    // The lock is on the DOOR. There is no read-only caption editor worth having — the modal is
+    // a textarea, a Remove and a Save — and the caption itself is already on the card and in the
+    // single view's meta line, so refusing to open it costs the operator nothing they cannot
+    // already read. Stopping it here also covers the Edit button in the captions list, which is
+    // the other way in.
+    if (refuseWhenLocked()) return;
     // The window click handler that disarms a Reject also fires on this one; stop it here so the
     // modal does not open with a stale "Sure?" still armed behind it.
     e?.stopPropagation();
@@ -423,6 +629,10 @@
   }
 
   async function saveCaption() {
+    // Belt and braces: openCaption already refuses, so the modal should not be on screen. Kept
+    // because this is the call that actually writes, and because the modal's Remove button
+    // reaches it by a second path.
+    if (refuseWhenLocked()) return;
     if (!captionFor || captionBusy) return;
     const target = captionFor;
     captionBusy = true;
@@ -442,6 +652,10 @@
   // Reject is a two-click confirm: first click arms (shows "Sure?"), second confirms. A click
   // anywhere else (window handler) resets the armed state.
   function requestReject(photo: Photo, e?: Event) {
+    // Refused at the ARMING, not at the second press. A button that flips to "Sure?" has told
+    // the operator it is live, and a lock that only bites on the confirm is a lock that has
+    // already let him believe he is rejecting somebody's photograph.
+    if (refuseWhenLocked()) return;
     e?.stopPropagation();
     if (confirmRejectId === photo.id) { confirmRejectId = null; reject(photo); }
     else confirmRejectId = photo.id;
@@ -449,6 +663,9 @@
   function resetRejectConfirm() { if (confirmRejectId) confirmRejectId = null; }
 
   async function reject(photo: Photo) {
+    // requestReject is its only caller today and already refuses. This is here so the day it
+    // gets a second one — a keyboard shortcut, a bulk path — that caller is gated by default.
+    if (refuseWhenLocked()) return;
     const prev = photo.status;
     photo.status = 'rejected'; photos = photos;
     try {
@@ -462,6 +679,10 @@
   }
 
   async function restore(photo: Photo) {
+    // Un-rejecting is a write like any other. It looks like a kindness, which is exactly why it
+    // is the one somebody would argue out of the list: it puts a photo the host deliberately
+    // binned back in front of their guests.
+    if (refuseWhenLocked()) return;
     // Un-reject → back to 'pending' (not straight to approved): under moderation it re-enters the
     // queue so the Approve button reappears; with moderation off 'pending' is already visible.
     const prev = photo.status;
@@ -493,6 +714,12 @@
    *  Pending tab, because approving a photo that is already approved is a no-op the host cannot
    *  see, and select mode, because that is where the batch buttons live. */
   function startModerating() {
+    // Selecting is otherwise harmless and stays available — it is how Download's "pick them
+    // myself" works, and looking is allowed. THIS entry point is not selecting, it is the
+    // moderation queue: its whole purpose is the Approve/Reject pair at the bottom of the
+    // screen, and walking an operator into that on a customer's event only to disable the two
+    // buttons he came for is a worse answer than saying no at the door.
+    if (refuseWhenLocked()) return;
     if (tab !== 'pending') setTab('pending');
     startSelecting('moderate');
   }
@@ -559,6 +786,7 @@
 
   // ── Bulk curation ──────────────────────────────────────────────────────────
   async function bulkModerate(action: 'approve' | 'reject') {
+    if (refuseWhenLocked()) return;
     const ids = [...selected]; if (!ids.length) return;
     busy = true;
     try {
@@ -673,8 +901,48 @@
 {#if booting}
   <Loading />
 {:else if ev}
+  {#if adminGuarded}
+    <!-- Sticky, for the reason it is sticky on the manager: this is a screen you forget you are on,
+         and a warning that scrolls away is a warning you stop reading about four seconds after you
+         arrive.
+         `top="0"` because this route has no site nav — its own header is the thing at top: 0 — and
+         `flush` because there is no 16px page gutter here for the bar's full-bleed negative margin
+         to cancel (it would push a horizontal scrollbar), and the header below has to MEET the bar
+         rather than sit 18px under it. Both of those used to be done from out here: a sticky
+         <div class="ab-host"> plus a `:global(.admin-banner)` margin override. That worked, but a
+         `:global` rule is scoped to nothing — it reached every copy of this bar in the app, which
+         is the drift AdminBanner was extracted to prevent. Two props say the same thing in the one
+         place that owns the bar. -->
+    <AdminBanner sticky top="0" flush bind:height={adminBarH}>
+      <span>🎩 SITE ADMIN</span>
+      {#if ownership === 'theirs'}
+        <!-- No owner's NAME here, unlike the manager's bar. The manager has the co-host payload
+             and can say whose event it is; this route is served by GET /:code/admin, which names
+             nobody. Saying "someone else's" plainly beats inventing a second request for a word.
+             The operator is one press from the manager, which does say. -->
+        <span class="ab-who">someone else’s event — not yours</span>
+      {:else}
+        <!-- Honest about not knowing yet, rather than accusing the operator of being somewhere he
+             may not be. Held read-only either way; $lib/adminGuard sets out why an unanswered
+             check has to fall that way. -->
+        <span class="ab-who">checking whose event this is…</span>
+      {/if}
+      <span class="ab-chip" class:live={!locked}>{locked ? 'READ-ONLY' : 'EDITING'}</span>
+      <svelte:fragment slot="actions">
+        {#if locked}
+          <button class="ab-btn strong" on:click={takeControl}>Take control</button>
+        {:else}
+          <button class="ab-btn" on:click={releaseControl}>Hand it back</button>
+        {/if}
+        <a class="exit" href="/siteadmin">← Console</a>
+      </svelte:fragment>
+    </AdminBanner>
+  {/if}
   <!-- ── Header ── -->
-  <header class="hd">
+  <!-- `top` inline, only when the bar is there, so a host's page keeps the stylesheet's `top: 0`
+       byte for byte. Both are sticky; without the offset they pin to the same line and the red bar
+       sits on the event name. -->
+  <header class="hd" style={adminGuarded ? `top:${adminBarH}px` : ''}>
     <!-- Two ways back, and in the single view they mean different places.
          `closeSingle` was written and then never wired to anything, so the only exits from a single
          photo were the browser's Back and the Cards toggle — and the nearest thing that LOOKED like
@@ -767,7 +1035,7 @@
     <span class="tab-spacer"></span>
     <!-- Always here, and always the same word, whichever tab is showing. -->
     {#if photos.length}
-      <button class="tab ghost-tab" on:click={() => (scopeOpen = true)} disabled={busy} title="Share photos">📤 Share</button>
+      <button class="tab ghost-tab" on:click={() => (scopeOpen = true)} disabled={busy || locked} title="Share photos">📤 Share</button>
     {/if}
     <!-- Moderation gets its own door, and only when moderation is ON. Selecting is reachable through
          Download's "pick them myself", but a host working through a queue of pending shots is not
@@ -776,7 +1044,7 @@
          which is the only tab the batch actually means anything on. -->
     {#if moderationOn && pendingCount > 0 && view !== 'single'}
       <button class="tab ghost-tab" class:active={selecting && tab === 'pending'}
-              on:click={startModerating} disabled={busy}
+              on:click={startModerating} disabled={busy || locked}
               title="Approve or reject several at once">✓ Moderate ({pendingCount})</button>
     {/if}
     <!-- DOWNLOAD, not Select. Select is a tool, not an intention: a host presses it because they
@@ -805,11 +1073,11 @@
       {#if selectedCount}<button class="lnk" on:click={clearSelection}>Clear</button>{/if}
       <span class="tab-spacer"></span>
       {#if selectIntent === 'moderate'}
-        <button class="btn primary sm" on:click={() => bulkModerate('approve')} disabled={!selectedCount || busy}>✓ Approve{selectedCount ? ` ${selectedCount}` : ''}</button>
-        <button class="btn danger sm" on:click={() => bulkModerate('reject')} disabled={!selectedCount || busy}>✕ Reject{selectedCount ? ` ${selectedCount}` : ''}</button>
+        <button class="btn primary sm" on:click={() => bulkModerate('approve')} disabled={!selectedCount || busy || locked}>✓ Approve{selectedCount ? ` ${selectedCount}` : ''}</button>
+        <button class="btn danger sm" on:click={() => bulkModerate('reject')} disabled={!selectedCount || busy || locked}>✕ Reject{selectedCount ? ` ${selectedCount}` : ''}</button>
       {:else}
         <button class="btn ghost sm" on:click={downloadSelected} disabled={!selectedCount || busy}><DownloadIcon /> Download</button>
-        <button class="btn ghost sm" on:click={shareSelected} disabled={!selectedCount || busy}>📤 Share</button>
+        <button class="btn ghost sm" on:click={shareSelected} disabled={!selectedCount || busy || locked}>📤 Share</button>
       {/if}
     </div>
   {/if}
@@ -858,7 +1126,7 @@
             </button>
           {/if}
           {#if wordSel.size}
-            <button class="btn danger sm" on:click={removeSelected} disabled={wordsBusy}>
+            <button class="btn danger sm" on:click={removeSelected} disabled={wordsBusy || locked}>
               Remove {wordSel.size}
             </button>
           {/if}
@@ -913,7 +1181,8 @@
               </div>
               <div class="w-row-acts">
                 {#if w.kind === 'caption'}
-                  <button class="btn ghost sm" on:click={() => { const p = photos.find((x) => x.id === w.photoId); if (p) openCaption(p); }}>Edit</button>
+                  <button class="btn ghost sm" disabled={locked}
+                          on:click={() => { const p = photos.find((x) => x.id === w.photoId); if (p) openCaption(p); }}>Edit</button>
                 {/if}
                 <!-- Armed, like Reject on this same screen and like deleting a shot in the camera:
                      one tap to say what you mean, a second to mean it. -->
@@ -923,7 +1192,7 @@
                      the slot, and `visibility` keeps it out of the accessibility tree. -->
                 <button class="btn danger sm steady" class:armed={confirmWord === wordKey(w)}
                         on:click={() => (confirmWord === wordKey(w) ? removeOne(w) : (confirmWord = wordKey(w)))}
-                        disabled={wordsBusy}
+                        disabled={wordsBusy || locked}
                         aria-label={confirmWord === wordKey(w) ? `Confirm removing this ${w.kind}` : `Remove this ${w.kind}`}>
                   <span class="lbl" class:off={confirmWord === wordKey(w)} aria-hidden="true">🗑️ Remove</span>
                   <span class="lbl" class:off={confirmWord !== wordKey(w)} aria-hidden="true">Sure?</span>
@@ -935,7 +1204,14 @@
       {/if}
     </div>
   {:else if view === 'slideshow'}
-    <div class="ss-wrap"><SlideshowPanel {code} {orgCode} hasPhotos={photos.length > 0} /></div>
+    <!-- Handed the lock, rather than withdrawn behind `{#if locked}` as it used to be. That was
+         forced by the shape of the panel rather than chosen: its five writes — generate, delete a
+         version, keep one, upload a track, the branding checkout — all live inside it and none of
+         them is reachable from out here, so the door was the only lock this page could fit. The
+         cost was that a locked operator also lost the LIST of renders already made, which is a
+         read and is usually the thing they were asked about. SlideshowPanel's own `readOnly` is
+         the real fix, and this is it. -->
+    <div class="ss-wrap"><SlideshowPanel {code} {orgCode} hasPhotos={photos.length > 0} readOnly={locked} /></div>
   {:else if !photos.length}
     <div class="state empty">
       <div class="empty-i" aria-hidden="true">{emptyState.icon}</div>
@@ -959,13 +1235,14 @@
     <div class="pgrid"
          style={`--tile-ar:${tileAspect(ev.aspectRatios)}`}>
       {#each filtered as p, i (p.id)}
-        <PhotoCard photo={p} selected={selecting && selected.has(p.id)}
+        <PhotoCard photo={p} showSideways selected={selecting && selected.has(p.id)}
                    selectable={selecting}
                    tileAr={tileAspect(ev.aspectRatios)}
                    captionMode="static"
                    hearts={ev.heartsEnabled ? (heartCounts[p.id] ?? 0) : undefined}
                    favourite={p.rating >= 5}
                    doubleTap={selecting ? 'none' : 'favourite'}
+                   readOnly={locked}
                    on:favourite={() => setRating(p, 5)}
                    meta={`${p.participantName} · ${fmtTime(p.takenAt)}`}
                    tileLabel={selecting ? 'Select photo' : 'Open photo'}
@@ -981,7 +1258,7 @@
             <!-- No tick here either: PhotoCard draws it. This one sat in the OTHER corner, so
                  select mode showed two. -->
             {#if !selecting}
-              <button class="fav-corner" class:on={p.rating >= 5} on:click={() => onFavouriteClick(p)}
+              <button class="fav-corner" class:on={p.rating >= 5} on:click={() => onFavouriteClick(p)} disabled={locked}
                       aria-pressed={p.rating >= 5} aria-label="Favourite"><StarIcon filled={p.rating >= 5} size={19} /></button>
             {/if}
           </svelte:fragment>
@@ -991,10 +1268,10 @@
           {#if !selecting}
             <div class="mod">
               {#if p.status === 'rejected'}
-                <button class="btn ghost sm grow" on:click={() => restore(p)}>↩ Restore</button>
+                <button class="btn ghost sm grow" on:click={() => restore(p)} disabled={locked}>↩ Restore</button>
               {:else}
-                {#if p.status === 'pending' && moderationOn}<button class="btn primary sm grow" on:click={() => approve(p)} aria-label="Approve"><span class="mod-g" aria-hidden="true">✓</span><span class="mod-t">Approve</span></button>{/if}
-                <button class="btn danger sm grow" class:armed={confirmRejectId === p.id} on:click={(e) => requestReject(p, e)}
+                {#if p.status === 'pending' && moderationOn}<button class="btn primary sm grow" on:click={() => approve(p)} disabled={locked} aria-label="Approve"><span class="mod-g" aria-hidden="true">✓</span><span class="mod-t">Approve</span></button>{/if}
+                <button class="btn danger sm grow" class:armed={confirmRejectId === p.id} on:click={(e) => requestReject(p, e)} disabled={locked}
                         aria-label={confirmRejectId === p.id ? 'Confirm reject' : 'Reject'}>
                   <!-- "Sure?" keeps its word on every screen: it is a confirmation, and a bare ✕ that
                        means something different from the ✕ a moment ago is how people delete things
@@ -1013,10 +1290,14 @@
       <div class="stage">
         <button class="nav prev" on:click={prev} aria-label="Previous">‹</button>
         {#if current.mediaType === 'video'}
-          <video class="big" src={current.url} controls preload="metadata" muted playsinline></video>
+          <video class="big" bind:this={bigVideoEl} src={current.url} controls preload="metadata"
+                 muted playsinline
+                 style:transform={bigTransform} on:loadedmetadata={measureBig}></video>
         {:else}
           <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
-          <img class="big" src={current.url} alt="" decoding="async" on:click={() => (fsOpen = true)} />
+          <img class="big" bind:this={bigImgEl} src={current.url} alt="" decoding="async"
+               on:click={() => (fsOpen = true)}
+               style:transform={bigTransform} on:load={measureBig} />
         {/if}
         <button class="fs-btn" on:click={() => (fsOpen = true)} title="Full screen" aria-label="Full screen">⛶</button>
         <button class="nav next" on:click={next} aria-label="Next">›</button>
@@ -1025,18 +1306,28 @@
       <div class="single-bar">
         <div class="srow">
           <span class="counter">{singleIndex + 1} / {filtered.length}</span>
-          <button class="star" class:on={current.rating >= 5} on:click={() => onFavouriteClick(current)} aria-label="Favourite">{current.rating >= 5 ? '★' : '☆'}</button>
+          <button class="star" class:on={current.rating >= 5} on:click={() => onFavouriteClick(current)} disabled={locked} aria-label="Favourite">{current.rating >= 5 ? '★' : '☆'}</button>
           <span class="single-meta">{#if current.caption}<span class="scap">{current.caption}</span> · {/if}{#if current.challenge}<span class="smission" class:secondary={!!current.caption}>{current.challenge}</span> · {/if}{current.participantName} · {fmtFull(current.takenAt)}{#if mediaMeta(current)}{' '}· {mediaMeta(current)}{/if}</span>
-          <button class="btn ghost sm capbtn" on:click={(e) => openCaption(current, e)}>💬 {current.caption ? 'Edit caption' : 'Caption'}</button>
+          <button class="btn ghost sm capbtn" on:click={(e) => openCaption(current, e)} disabled={locked}>💬 {current.caption ? 'Edit caption' : 'Caption'}</button>
         </div>
         <div class="srow">
           {#if current.status === 'rejected'}
-            <button class="btn ghost sm grow" on:click={() => restore(current)}>↩ Restore</button>
+            <button class="btn ghost sm grow" on:click={() => restore(current)} disabled={locked}>↩ Restore</button>
           {:else}
-            {#if current.status === 'pending' && moderationOn}<button class="btn primary sm grow" on:click={() => approve(current)}>✓ Approve</button>{/if}
-            <button class="btn danger sm grow" class:armed={confirmRejectId === current.id} on:click={(e) => requestReject(current, e)}>{confirmRejectId === current.id ? 'Sure?' : '✕ Reject'}</button>
+            {#if current.status === 'pending' && moderationOn}<button class="btn primary sm grow" on:click={() => approve(current)} disabled={locked}>✓ Approve</button>{/if}
+            <button class="btn danger sm grow" class:armed={confirmRejectId === current.id} on:click={(e) => requestReject(current, e)} disabled={locked}>{confirmRejectId === current.id ? 'Sure?' : '✕ Reject'}</button>
           {/if}
-          <button class="btn ghost sm grow" on:click={() => shareOne(current)} disabled={busy}>📤 Share</button>
+          <button class="btn ghost sm grow" on:click={() => shareOne(current)} disabled={busy || locked}>📤 Share</button>
+          <!-- ONE slot whichever state it is in, so pressing it cannot move Download, Share or
+               Reject out from under the next tap. Save and Cancel used to appear beside it and
+               reflowed the whole row. See RotateControl.svelte. -->
+          <!-- `busy` is the only lever RotateControl offers, and it disables all six of its
+               buttons — turn left, turn right, Save and Cancel together. Reused rather than
+               adding a `disabled` prop to a component this change does not own; the wording on
+               screen is identical either way, since a busy rotate looks the same as a refused
+               one from outside. turnBy/saveTurn refuse underneath it for the keyboard. -->
+          <RotateControl pending={pendingFor} busy={rotating || locked}
+                         on:turn={(e) => turnBy(e.detail)} on:save={saveTurn} on:cancel={cancelTurn} />
           <button class="btn ghost sm grow" aria-label="Save this photo to your device"
                   on:click={() => downloadOne(current.url, `${current.participantName || 'photo'}.${current.mediaType === 'video' ? 'mp4' : 'jpg'}`)}><DownloadIcon /></button>
         </div>
@@ -1053,12 +1344,17 @@
       <button class="fs-nav prev" on:click|stopPropagation={prev} aria-label="Previous">‹</button>
       <button class="fs-nav next" on:click|stopPropagation={next} aria-label="Next">›</button>
     {/if}
+    <!-- The pending turn applies here too: it is the same photograph, and this is where a host
+         goes to check the turn before saving it. -->
     {#if current.mediaType === 'video'}
       <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
-      <video class="fs-media" src={current.url} controls autoplay playsinline on:click|stopPropagation></video>
+      <video class="fs-media" bind:this={fsVideoEl} src={current.url} controls autoplay playsinline
+             style:transform={fsTransform} on:loadedmetadata={measureFs}
+             on:click|stopPropagation></video>
     {:else}
       <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
-      <img class="fs-media" src={current.url} alt="" on:click|stopPropagation />
+      <img class="fs-media" bind:this={fsImgEl} src={current.url} alt=""
+           style:transform={fsTransform} on:load={measureFs} on:click|stopPropagation />
     {/if}
   </div>
 {/if}
@@ -1081,19 +1377,31 @@
         {#if captionFor.caption}
           <!-- Clearing IS saving nothing — the same call with empty text. The button exists because
                "empty the box and press Save" is not a thing anyone guesses. -->
-          <button class="btn ghost sm" on:click={() => { captionDraft = ''; void saveCaption(); }} disabled={captionBusy}>Remove</button>
+          <button class="btn ghost sm" on:click={() => { captionDraft = ''; void saveCaption(); }} disabled={captionBusy || locked}>Remove</button>
         {/if}
-        <button class="btn primary sm" on:click={saveCaption} disabled={captionBusy}>{captionBusy ? 'Saving…' : 'Save'}</button>
+        <button class="btn primary sm" on:click={saveCaption} disabled={captionBusy || locked}>{captionBusy ? 'Saving…' : 'Save'}</button>
       </div>
     </div>
   </div>
 {/if}
 
 {#if shareModal}
-  <ShareModal {code} {orgCode} share={shareModal} on:close={() => (shareModal = null)} />
+  <!-- Belt AND braces, deliberately. openShare() already refuses when locked and is the only thing
+       that can put this on screen, so `readOnly` is unreachable today — which is exactly the kind
+       of safety that lasts until somebody adds a second opener. The guard belongs next to the
+       write, which is inside the dialog. -->
+  <ShareModal {code} {orgCode} share={shareModal} readOnly={locked} on:close={() => (shareModal = null)} />
 {/if}
 
 <style>
+  /* The site-admin bar pins ABOVE the header rather than behind it, and every line that used to
+     do that from out here now lives on the <AdminBanner> tag itself (`sticky top="0" flush`). Its
+     z-index 30 clears this route's header (10) and stays under .fs (90) and .capback (260), so the
+     full-screen view and the caption modal still cover it. */
+  /* The two star controls are bare buttons with no `.btn:disabled` to soften them, so read-only
+     would have left them looking exactly as pressable as on a host's own screen. */
+  .fav-corner:disabled, .star:disabled { opacity: 0.45; cursor: default; }
+
   .state { text-align: center; padding: 60px 16px; color: var(--text-muted); }
   .state.empty { max-width: 460px; margin: 0 auto; }
   .empty-i { font-size: 2.6rem; line-height: 1; margin-bottom: 12px; }
@@ -1107,7 +1415,21 @@
   .hd { position: sticky; top: 0; z-index: 10; display: grid; align-items: center; gap: 12px;
     grid-template-columns: 1fr auto 1fr;
     padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); }
-  .hd-side { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  /* NO `min-width: 0` on either side, and that is the whole of the fix for the event name being
+     sat on by the view toggles.
+     `1fr` is `minmax(auto, 1fr)`, so a side track's MINIMUM is its content's min-content width —
+     unless the item inside declares `min-width: 0`, which overrides that automatic minimum and
+     tells the track it may shrink to nothing. It duly did, while the controls inside it (all
+     `flex-shrink: 0`, all `white-space: nowrap`) refused to shrink with it; with
+     `justify-content: flex-end` a right-hand group that outgrows its box overflows LEFTWARD, which
+     is how a row of buttons ended up printed over the middle column. Grid tracks never overlap —
+     the content spilling out of one of them does.
+     With the automatic minimum restored the algorithm does the right thing at every width without
+     a breakpoint: an `fr` track whose base size exceeds its equal share is taken out of the flex
+     distribution and keeps that base size (css-grid-1 §12.7), so the controls always get the room
+     they need, the name gets whatever is left and ellipsises into it, and once there is slack the
+     two side tracks come out equal again and the name is back in the true centre of the bar. */
+  .hd-side { display: flex; align-items: center; gap: 14px; }
   .hd-side.right { justify-content: flex-end; }
   /* inline-FLEX with a set line-height, because these two are a <button> and an <a> sitting side by
      side: the button takes `line-height: normal` from the browser and the link inherits the page's,
@@ -1119,7 +1441,6 @@
   /* Manage sits second in the single view: still there, no longer the loudest way out. */
   .back.quiet { font-weight: 600; color: var(--text-muted); }
   .back.quiet:hover { color: var(--accent); }
-  .hd-side { display: flex; align-items: center; gap: 14px; min-width: 0; }
   .back:hover { color: var(--accent); }
   .hd-name { font-weight: 800; font-size: 0.95rem; text-align: center; white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -1130,12 +1451,23 @@
      ran over the left ones — measured at 390px: "Manage" ended at 144px and "Cards" began at 138px,
      six pixels of overlap, with the two sitting on top of each other. Wrapping gives the toggles a
      second line to drop to when the width is not there, which is the one thing a grid track cannot
-     do. The event name stays hidden: it is the only thing here that is not a control. */
+     do. The event name stays hidden: it is the only thing here that is not a control.
+
+     TWO ROWS, ALWAYS, each owning the full width: the ways out of this screen on the first, the
+     ways to look at it on the second. It used to be whichever the arithmetic happened to produce —
+     "← Photos Manage" and the toggles shared a line on a 430px phone and split over two on a 390px
+     one, and in the split state the two bare text links floated at the left of an empty row with
+     the controls jammed against the right edge of the next, which is the "it all looks strange"
+     the host reported. Letting the controls stretch to fill their row makes it read as a toolbar
+     rather than as a line that ran out of space, and puts a target at each thumb. */
   @media (max-width: 560px) {
-    .hd { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 12px; }
+    .hd { display: flex; flex-wrap: wrap; gap: 8px 12px; }
     .hd-name { display: none; }
-    .hd-side { flex: 0 1 auto; }
-    .hd-side.right { flex: 1 1 auto; }
+    .hd-side { flex: 1 1 100%; }
+    .hd-side.right { justify-content: flex-start; }
+    .hd-side.right > * { flex: 1 1 auto; }
+    /* …and the segmented toggle fills its own share rather than leaving a gap inside itself. */
+    .vbtn { flex: 1; }
   }
   .vtoggle { display: flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; flex-shrink: 0; }
   .vbtn { background: transparent; color: var(--text-muted); border: none; padding: 8px 12px; min-height: 40px; font: inherit; font-size: 0.8rem; font-weight: 700; cursor: pointer; }
@@ -1310,16 +1642,38 @@
 
   /* Single view — condensed: two tidy rows instead of a tall stack. */
   .single { max-width: 980px; margin: 0 auto; padding-bottom: 24px; }
-  .stage { position: relative; display: flex; align-items: center; justify-content: center; background: #000; min-height: 40dvh; }
+  /* svh, NOT dvh, and that is the whole of the fix for the picture resizing itself on a phone.
+     `dvh` tracks the DYNAMIC viewport, which on a phone means it changes as the browser's own
+     chrome slides away: scroll a few pixels, the URL bar collapses, every `dvh` in here gets
+     bigger and the media box grows with it — so a portrait shot that started short of the screen
+     edges suddenly reaches them, which is precisely what was reported and precisely why it never
+     happened on a desktop. `svh` is the SMALL viewport: the size with the browser chrome showing,
+     which is a fixed number for the life of the page. Slightly less room at the top of a scroll,
+     and the picture never moves.
+     (`lvh` would be the other stable choice and the wrong one — it assumes the chrome is gone, so
+     the action row below would start life pushed off the bottom of the screen.) */
+  .stage { position: relative; display: flex; align-items: center; justify-content: center; background: #000; min-height: 40svh;
+    /* Belt and braces for a turned picture: the scale in rotatePreview.ts is what keeps a quarter
+       turn inside this box, but it depends on a measurement, and a measurement taken before the
+       media has loaded reads zero. Clipping here means the worst case is a briefly cropped preview
+       rather than a photo painted over the buttons underneath — which is what a transform, having
+       made its own stacking context, does to non-positioned siblings. */
+    overflow: hidden; }
   /* Fit the media so the action bar stays on-screen without vertical scrolling. */
-  .big { max-width: 100%; max-height: min(70dvh, calc(100dvh - 250px)); object-fit: contain; display: block; cursor: zoom-in; }
+  .big { max-width: 100%; max-height: min(70svh, calc(100svh - 250px)); object-fit: contain; display: block; cursor: zoom-in; }
   .fs-btn { position: absolute; top: 10px; right: 10px; width: 38px; height: 38px; border: none; border-radius: 8px;
     background: rgba(0,0,0,.5); color: #fff; font-size: 1.05rem; cursor: pointer; opacity: 0; transition: opacity .15s; }
   .stage:hover .fs-btn { opacity: 1; }
   @media (hover: none) { .fs-btn { opacity: .9; } }   /* touch devices: always visible */
   /* Full-screen viewer (CSS overlay — works on desktop + mobile, unlike the Fullscreen API on iOS). */
-  .fs { position: fixed; inset: 0; z-index: 90; background: rgba(0,0,0,.94); display: flex; align-items: center; justify-content: center; }
-  .fs-media { max-width: 100vw; max-height: 100dvh; object-fit: contain; }
+  .fs { position: fixed; inset: 0; z-index: 90; background: rgba(0,0,0,.94); display: flex; align-items: center; justify-content: center;
+    /* Same reason as `.stage`: a turned picture whose fit has not been measured yet must be
+       cropped, not allowed to paint outside the overlay. */
+    overflow: hidden; }
+  /* Percentages of the overlay rather than viewport units. The overlay is `inset: 0` on a fixed
+     element, so 100% IS the viewport — and unlike `100dvh` it does not change under a collapsing
+     URL bar, which is the same jump the single view had. */
+  .fs-media { max-width: 100%; max-height: 100%; object-fit: contain; }
   .fs-x { position: absolute; top: 14px; right: 16px; width: 42px; height: 42px; border: none; border-radius: 50%; background: rgba(255,255,255,.15); color: #fff; font-size: 1.1rem; cursor: pointer; z-index: 2; }
   .fs-nav { position: absolute; top: 50%; transform: translateY(-50%); width: 54px; height: 80px; border: none; background: rgba(255,255,255,.12); color: #fff; font-size: 2.4rem; line-height: 1; cursor: pointer; z-index: 2; }
   .fs-nav.prev { left: 0; } .fs-nav.next { right: 0; }

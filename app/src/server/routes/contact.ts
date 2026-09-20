@@ -73,12 +73,32 @@ const requireTurnstileOrDropFile = (req: Request, res: Response, next: NextFunct
 // POST /api/contact — public contact / feedback / bug-report form. ALWAYS stored in the DB (a durable
 // mailbox) so nothing is lost if email is unconfigured or the send fails; forwarded to SUPPORT_EMAIL
 // when email is configured. Accepts JSON (contact page) or multipart with an optional 'screenshot'.
+/** The subject line of the support email, built from the parts that EXIST.
+ *
+ *  It used to read `Snapdini feedback report — someone` whenever nobody gave a name. "someone"
+ *  carries no information, and in an inbox it reads as though the sender is being described rather
+ *  than simply unnamed — an anonymous report is a normal thing, and the subject should be shorter
+ *  for it rather than padded out.
+ *
+ *  The event code earns its place because it is the first question asked about any report, and it
+ *  was previously only discoverable by opening the mail and reading the "Where" line.
+ *
+ *  Its own function so the shape can be pinned: a subject line is the most-read string this system
+ *  produces and the least likely to be noticed when it regresses. */
+export function supportSubject(label: string, name?: string | null, eventCode?: string | null): string {
+  return ['Snapdini ' + label, name, eventCode].filter(Boolean).join(' — ');
+}
+
 router.post('/', shotUpload.single('screenshot'), requireTurnstileOrDropFile, async (req: Request, res: Response) => {
   const name = String(req.body?.name || '').trim().slice(0, 80);
   const from = String(req.body?.email || '').trim().slice(0, 200);
   const message = String(req.body?.message || '').trim().slice(0, 5000);
   const kind = KINDS.has(String(req.body?.kind)) ? String(req.body.kind) : 'contact';
   const context = String(req.body?.context || '').trim().slice(0, 300);   // e.g. the page/event it came from
+  // Structured, rather than dug back out of `context`. The code was always arriving — inside a
+  // sentence written for a human ("Camera (ABC123)") — which is no basis for a subject line or a
+  // query. Upper-cased because that is how a join code is written everywhere else it appears.
+  const eventCode = String(req.body?.eventCode || '').trim().slice(0, 20).toUpperCase();
 
   // Honeypot: a field real users never see and never fill (hidden + aria-hidden + tabindex=-1 in
   // the form). Accept SILENTLY with a 200 rather than erroring — a bot that gets a 400 learns to
@@ -100,7 +120,6 @@ router.post('/', shotUpload.single('screenshot'), requireTurnstileOrDropFile, as
   // Refund/cancellation requests: freeze an eligibility snapshot from the event's start time.
   let refundHeader = '';
   if (kind === 'refund') {
-    const eventCode = String(req.body?.eventCode || '').trim();
     if (eventCode) {
       const [ev] = await db.select({ name: events.name, joinCode: events.joinCode, startsAt: events.startsAt, amountPaidCents: events.amountPaidCents })
         .from(events).where(eq(events.joinCode, eventCode));
@@ -118,7 +137,7 @@ router.post('/', shotUpload.single('screenshot'), requireTurnstileOrDropFile, as
         // Our own inbox. Suppression is about people we mail; this is someone mailing US.
         always: true,
         to: SUPPORT_EMAIL,
-        subject: `Snapdini ${label} — ${name || 'someone'}`,
+        subject: supportSubject(label, name, eventCode),
         replyTo: from || undefined,
         html: email.htmlEmail(`New ${label}`, `
           <p><strong>From:</strong> ${escapeHtml(name || 'Anonymous')}${from ? ` &lt;${escapeHtml(from)}&gt;` : ''}</p>
@@ -133,7 +152,8 @@ router.post('/', shotUpload.single('screenshot'), requireTurnstileOrDropFile, as
   }
 
   await db.insert(contactMessages).values({
-    id: uuidv4(), name: name || null, email: from || null, message: fullMessage, kind, imageFilename, emailed, createdAt: Date.now(),
+    id: uuidv4(), name: name || null, email: from || null, message: fullMessage, kind, imageFilename,
+    eventCode: eventCode || null, emailed, createdAt: Date.now(),
   });
   res.json({ success: true });
 });

@@ -1,6 +1,6 @@
 // Read-only mode — serving from a streaming replica.
 //
-// Verified end to end against the real standby (192.168.0.73) on 2026-09-20: the stock image
+// Verified end to end against the real warm standby on 2026-09-20: the stock image
 // crash-looped on `PreventCommandIfReadOnly`, and with this in place the app booted healthy, served
 // reads, refused writes with 503, and wrote nothing. These tests hold the decisions that made that
 // work, because every one of them is the kind that looks like a detail and is not.

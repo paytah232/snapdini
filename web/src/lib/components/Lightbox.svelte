@@ -3,10 +3,14 @@
   import { savePhotoByUrl } from '$lib/saveImage';
   import DownloadIcon from '$lib/components/DownloadIcon.svelte';
   import HeartIcon from '$lib/components/HeartIcon.svelte';
+  import RotateControl from '$lib/components/RotateControl.svelte';
+  import { fitScaleFor, previewTransform } from '$lib/rotatePreview';
   import { mediaMeta, getComments, addComment, deleteComment,
            getShareComments, addShareComment, deleteShareComment,
            setCommentHeart, shareCommentHeart,
-           type Photo, type PhotoComment } from '$lib/events';
+           rotatePhoto, normalizeTurn,
+           type Photo, type PhotoComment, type PhotoRotation } from '$lib/events';
+  import { writeFailed } from '$lib/api';
   import { clampComment, COMMENT_MAX } from '../../../../shared/comment';
   import { showToast } from '$lib/toast';
   import { wantSound } from '$lib/sound';
@@ -20,6 +24,15 @@
    *  the grid uses, rather than a second one, is the whole point: a caption written full-screen and
    *  a caption written on a tile have to behave identically. */
   export let captionMode: 'none' | 'own' | 'any' = 'none';
+  /** Who may turn a photo the phone stored sideways. The same three answers as captionMode, and
+   *  the same reasoning: 'own' is a guest's own shots, 'any' is the host over their whole event,
+   *  'none' is every surface where a viewer is only a viewer.
+   *
+   *  Deliberately NOT inferred from holding an organizerCode or a sessionToken. Those say who is
+   *  asking; they do not say that THIS screen is a place to write from — a share link hands the
+   *  lightbox a visitor token and a read-only gallery hands it a session, and neither is an
+   *  invitation to re-encode somebody's photograph. The parent decides, as it does for captions. */
+  export let rotateMode: 'none' | 'own' | 'any' = 'none';
   /** Offer the download. Off where the host has not allowed downloads. (It reaches Photos via the
    *  share sheet on iOS and a download on Android — one word for both, see saveThis.) */
   export let allowSave = false;
@@ -54,8 +67,10 @@
    *  for a stranger where the host has not opened things up. */
   $: canWrite = !!sessionToken || !!ensureNamed || (!!visitorToken && !!shareToken);
   $: canCaption = captionMode === 'any' || (captionMode === 'own' && !!photo?.isOwn);
+  $: canRotate = rotateMode === 'any' || (rotateMode === 'own' && !!photo?.isOwn);
 
-  const dispatch = createEventDispatcher<{ close: void; caption: Photo; photochange: number; saved: string; commented: { id: string; delta: number }; heart: boolean }>();
+  const dispatch = createEventDispatcher<{ close: void; caption: Photo; photochange: number; saved: string; commented: { id: string; delta: number }; heart: boolean;
+    rotated: { id: string; quarter: number; result: PhotoRotation } }>();
 
   // ── The thread on the photo being looked at ────────────────────────────────
   // Fetched per photo rather than carried on the gallery payload: a thread is only ever read while
@@ -268,8 +283,111 @@
     }
   }
 
-  function prev() { if (index > 0) { index--; dispatch('photochange', index); } }
-  function next() { if (index < photos.length - 1) { index++; dispatch('photochange', index); } }
+  // ── Turning a photo the phone stored sideways ───────────────────────────────
+  //
+  // With rotation lock on, a landscape scene is written into a portrait-shaped file and nothing
+  // downstream can see the difference — capture_orientation records that the phone was HELD
+  // sideways and never which way up, so the only one who knows is the person looking at it. That
+  // is why this is a manual control at all, and why it is PREVIEW THEN COMMIT: turn it on screen
+  // until it looks right, then write it once. A request per 90° tap would re-encode the file,
+  // republish it and evict it from every cache three times over on the way to a place one request
+  // could have reached.
+
+  /** Degrees clockwise turned on screen and not yet written; 0 when nothing is pending.
+   *  Folded into (-180, 180] on every tap, so a fourth tap really is 0 — and the Save that would
+   *  have posted a full circle is not there to be pressed. */
+  let turn = 0;
+  let rotating = false;
+  /** Which photo `turn` belongs to.
+   *
+   *  The subject does not only change on prev/next: the gallery behind us polls and hands down a
+   *  fresh `photos` array, so whatever sits at `index` can become a different photograph with
+   *  nothing in here being called. Keyed on the id, a half-finished turn cannot leak onto the next
+   *  one — which is the single way this feature could do real damage. */
+  let turnFor = '';
+  $: if (photo?.id !== turnFor) { turnFor = photo?.id ?? ''; turn = 0; }
+
+  /** The corrected media, held here until the parent's own state catches up.
+   *
+   *  Keyed by id and never written back into `photos`: that array belongs to the page that opened
+   *  us, and a child reaching into its parent's state is how two copies of the truth begin. The
+   *  parent is told instead (`rotated`, carrying the whole reply) and folds it in. This exists so
+   *  the picture in front of the person who pressed Save is the corrected one on that tick.
+   *
+   *  It has to hold the NEW NAMES, not a flag saying "re-fetch": the rotation renamed the file and
+   *  the old name is already unlinked, so anything still pointing at it is a broken image rather
+   *  than a stale one. */
+  let fixed: { id: string; url: string; playUrl?: string } | null = null;
+  $: mended = fixed && photo && fixed.id === photo.id ? fixed : null;
+  $: stillSrc = mended?.url ?? photo?.url ?? '';
+  $: clipSrc = mended?.playUrl ?? mended?.url ?? photo?.playUrl ?? photo?.url ?? '';
+
+  /** How far to shrink a quarter-turned picture so it still fits the room it had — see
+   *  rotatePreview.ts, which is where the reasoning lives now that the review screen runs the
+   *  same preview through the same two lines. */
+  let imgEl: HTMLImageElement | undefined;
+  let fitScale = 1;
+  function measureFit() {
+    const el: HTMLElement | undefined = photo?.mediaType === 'video' ? videoEl : imgEl;
+    fitScale = fitScaleFor(el?.offsetWidth ?? 0, el?.offsetHeight ?? 0);
+  }
+  $: preview = previewTransform(turn, fitScale);
+
+  function turnBy(q: number) {
+    if (rotating) return;
+    // Measured at the tap. The element is laid out by now, and a transform never changes a layout
+    // box, so this answers the same thing however many turns it has already been given.
+    measureFit();
+    turn = normalizeTurn(turn + q);
+  }
+
+  async function saveTurn() {
+    const p = photo;
+    if (!p || rotating) return;
+    const quarter = normalizeTurn(turn);
+    // Four taps is where it started: nothing to write, and nothing to tell the parent about. The
+    // route refuses 0 anyway, and is right to — honouring it would rename the file and unlink the
+    // old name to hand back the same picture — so sending it would be a round trip spent earning
+    // an error for a viewer who has done nothing wrong.
+    if (quarter === 0) { turn = 0; return; }
+    rotating = true;
+    try {
+      // The caption's pair of credentials, and exactly one of them: the host's code reaches any
+      // photo in their event, a guest's session reaches only their own.
+      const who: { sessionToken: string } | { organizerCode: string } =
+        organizerCode ? { organizerCode } : { sessionToken: sessionToken ?? '' };
+      // The one place the running total meets the API's literal union. `turn` is only ever
+      // normalizeTurn of a multiple of 90, so it is one of these three or it is 0 — and 0 returned
+      // two lines up.
+      const r = await rotatePhoto(p.id, quarter as 90 | -90 | 180, who);
+      // The reply's own urls, never the ones we came in with — see PhotoRotation. playUrl can be
+      // absent for a moment after a clip is turned (the crop is rebuilt behind the response), and
+      // `url` is the right thing to play until it lands, which is the ladder the markup already
+      // walks for every other clip.
+      fixed = { id: p.id, url: r.url, playUrl: r.playUrl };
+      // Dropped only once the corrected source is in hand, so the picture never flicks back to the
+      // orientation that was just corrected while the new bytes are still on the wire.
+      turn = 0;
+      // The grid behind us is still showing the old thumbnail. Tell it — the same call every other
+      // change in here makes, rather than writing into an array we do not own.
+      dispatch('rotated', { id: p.id, quarter, result: r });
+    } catch (e) {
+      // 404 is this route's answer for "not yours" as well as "not there" — it will not confirm
+      // that somebody else's photo id exists. Both are the same sentence to the person looking at
+      // it, and api() already writes it; a 409 (two rotations racing) arrives with the server's
+      // own words. The fallback is only for a failure that brought none.
+      showToast(writeFailed(e, 'Could not rotate that'), true);
+    } finally { rotating = false; }
+  }
+
+  // Paging DISCARDS a pending turn rather than standing in the way of it. The turn is a preview
+  // nobody has committed to, and a viewer held on one picture until they answer a question about
+  // it is a worse thing to build than one who has to press rotate again. The discard itself is the
+  // `turnFor` guard above, which also covers the routes to another photo that do not come through
+  // here (the gallery's poll being the one that matters). What IS refused is moving mid-write: for
+  // the moment a save is in flight the photo under the request stays the photo on screen.
+  function prev() { if (!rotating && index > 0) { index--; dispatch('photochange', index); } }
+  function next() { if (!rotating && index < photos.length - 1) { index++; dispatch('photochange', index); } }
   function onKey(e: KeyboardEvent) {
     // Someone typing has the keyboard, not the viewer. Without this, writing a caption over the
     // lightbox pages the album out from under the half-typed text, and Escape closes the photo
@@ -277,9 +395,12 @@
     const t = e.target as HTMLElement | null;
     if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
     // One layer at a time: Escape out of photo-only first, and only then out of the photo. Closing
-    // the lot from inside photo-only loses the thread somebody was reading.
+    // the lot from inside photo-only loses the thread somebody was reading. An un-saved rotation
+    // is a layer too — and the innermost one bar an armed delete, because it is the thing the
+    // viewer is in the middle of doing.
     if (e.key === 'Escape') {
       if (confirmDel) confirmDel = null;
+      else if (turn) turn = 0;
       else if (photoOnly) photoOnly = false;
       else dispatch('close');
     }
@@ -299,38 +420,65 @@
   <!-- One bar, so the controls cannot drift out of line with each other. They were three separately
        positioned buttons at slightly different tops and heights, which is exactly the sort of thing
        that only shows up once someone looks at it on a phone. A flex row makes alignment structural
-       rather than three numbers that have to be kept in step by hand. -->
+       rather than three numbers that have to be kept in step by hand.
+
+       THREE groups, not two, and the third is the point. The bar used to be "caption on the left,
+       everything else on the right", with the right-hand group wrapping as a whole — so on a phone
+       the last thing on it, which is Close, was the thing that dropped to a second line, and it
+       dropped to a DIFFERENT line depending on how many controls the photo happened to offer. The
+       window chrome (just-the-photo, Close) is now its own group that never wraps and never leaves
+       the top-right corner; the actions wrap underneath themselves instead. -->
   <div class="lb-bar">
-    <div class="lb-bar-l">
-      {#if canCaption}
+    {#if canCaption}
+      <!-- Rendered only when it is offered, rather than an empty box holding the left end of a
+           space-between: with the box always present, a bar with no caption button still reserved
+           a column for one. `.lb-bar-r` takes the right-hand end with an auto margin instead, which
+           is true whether or not this is here. -->
+      <div class="lb-bar-l">
         <!-- Looking at a photo full-screen is when someone actually thinks of what to say about it;
              making them close it and find the tile again is the wrong way round. -->
         <button class="lb-btn" on:click|stopPropagation={() => dispatch('caption', photo)}
                 aria-label={photo.caption ? 'Edit this caption' : 'Add a caption'}>
           💬 {photo.caption ? 'Edit caption' : 'Add a caption'}
         </button>
-      {/if}
-    </div>
+      </div>
+    {/if}
     <div class="lb-bar-r">
-      {#if allowSave}
-        <!-- iOS has no API that writes to the camera roll, so a download lands in Files. The share
-             sheet has "Save Image" on it. Android goes straight to a download instead — its sheet
-             only offers apps to send the photo TO, which is not keeping it. See saveImage.ts. -->
-        <button class="lb-btn" on:click|stopPropagation={saveThis} disabled={saving}
-                aria-label="Download this photo to your device">
-          {#if saving}…{:else if savedMsg}{savedMsg}{:else}<DownloadIcon /> Download{/if}
-        </button>
+      {#if allowSave || canRotate}
+        <div class="lb-acts">
+          {#if allowSave}
+            <!-- iOS has no API that writes to the camera roll, so a download lands in Files. The
+                 share sheet has "Save Image" on it. Android goes straight to a download instead —
+                 its sheet only offers apps to send the photo TO, which is not keeping it. See
+                 saveImage.ts. -->
+            <button class="lb-btn" on:click|stopPropagation={saveThis} disabled={saving}
+                    aria-label="Download this photo to your device">
+              {#if saving}…{:else if savedMsg}{savedMsg}{:else}<DownloadIcon /> Download{/if}
+            </button>
+          {/if}
+          {#if canRotate}
+            <!-- Next to Download because that is where the owner asked for it and because both are
+                 things you do TO the photo you are looking at. Nothing is written until Save; see
+                 `turn` for why a request per tap was the wrong shape, and RotateControl for why the
+                 slot no longer changes size when you press it. -->
+            <RotateControl variant="bar" pending={turn} busy={rotating}
+                           on:turn={(e) => turnBy(e.detail)} on:save={saveTurn}
+                           on:cancel={() => (turn = 0)} />
+          {/if}
+        </div>
       {/if}
-      <!-- Only worth offering when there is something to get out of the way. -->
-      {#if commentsOn || photo?.caption || photo?.challenge}
-        <button class="lb-btn" on:click|stopPropagation={() => (photoOnly = !photoOnly)}
-                aria-pressed={photoOnly}
-                title={photoOnly ? 'Show the details' : 'Just the photo'}
-                aria-label={photoOnly ? 'Show the details' : 'Just the photo'}>
-          {photoOnly ? '⤢' : '⛶'}
-        </button>
-      {/if}
-      <button class="lb-btn close" on:click={() => dispatch('close')} aria-label="Close">✕</button>
+      <div class="lb-chrome">
+        <!-- Only worth offering when there is something to get out of the way. -->
+        {#if commentsOn || photo?.caption || photo?.challenge}
+          <button class="lb-btn" on:click|stopPropagation={() => (photoOnly = !photoOnly)}
+                  aria-pressed={photoOnly}
+                  title={photoOnly ? 'Show the details' : 'Just the photo'}
+                  aria-label={photoOnly ? 'Show the details' : 'Just the photo'}>
+            {photoOnly ? '⤢' : '⛶'}
+          </button>
+        {/if}
+        <button class="lb-btn close" on:click={() => dispatch('close')} aria-label="Close">✕</button>
+      </div>
     </div>
   </div>
   {#if photo}
@@ -346,15 +494,23 @@
            every clip depending on how tall the video happened to be. -->
       <div class="media">
         <!-- svelte-ignore a11y-media-has-caption -->
-        <video bind:this={videoEl} src={photo.playUrl ?? photo.url}
+        <!-- The preview transform applies here too: a clip shot sideways is the same complaint,
+             and the server turns one losslessly through its display matrix. The browser's own
+             control bar is part of the element and turns with the picture while a rotation is
+             pending, which is odd to look at for the few seconds it is there — the alternative was
+             a video whose rotate button did nothing visible until after it had been committed,
+             which is worse. -->
+        <video bind:this={videoEl} src={clipSrc}
                controls autoplay playsinline muted={!$wantSound}
+               style:transform={preview} on:loadedmetadata={measureFit}
                on:volumechange={onVolumeChange}></video>
         {#if !$wantSound}
           <button class="unmute" on:click|stopPropagation={enableSound}>🔇 Sound</button>
         {/if}
       </div>
     {:else}
-      <img src={photo.url} alt="Photo by {photo.participantName}" decoding="async" />
+      <img bind:this={imgEl} src={stillSrc} alt="Photo by {photo.participantName}" decoding="async"
+           style:transform={preview} on:load={measureFit} />
     {/if}
     <!-- Whatever the grid captioned this with must not vanish on the way into the photo. The
          written caption leads; the mission follows it, demoted, so a captioned trick shot still
@@ -463,7 +619,10 @@
 <style>
   .lb { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.92); z-index: 300;
     display: flex; align-items: center; justify-content: center; padding: 24px; }
-  img, video { max-width: 100%; max-height: 86vh; border-radius: 8px; }
+  /* The transition is what makes a rotation read as a TURN rather than a jump cut — it is the
+     movement that tells somebody the picture moved, and did not simply come back different. */
+  img, video { max-width: 100%; max-height: 86vh; border-radius: 8px;
+    transition: transform .18s ease; }
 
   /* ── Stacked: the photo, then the words UNDER it ──────────────────────────────────────────────
    *
@@ -590,10 +749,37 @@
   .cap-heart .hn { font-size: .74rem; font-weight: 800; font-variant-numeric: tabular-nums;
     color: rgba(255,255,255,.9); }
   .cap-meta .sep { opacity: .45; }
+  /* flex-START, not centre. With the actions on two lines and the caption button on one, centring
+     hung the caption button halfway down the taller group and nothing in the bar lined up with
+     anything else — which is exactly what it looked like. Every group now starts at the same top
+     edge, so the first row of controls is one straight line however many rows follow it. */
   .lb-bar { position: absolute; top: 12px; left: 12px; right: 12px; z-index: 3;
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    display: flex; align-items: flex-start; gap: 8px;
     pointer-events: none; }
-  .lb-bar-l, .lb-bar-r { display: flex; align-items: center; gap: 8px; }
+  .lb-bar-l { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  /* The auto margin, not `justify-content: space-between` on the bar: space-between only puts this
+     at the right-hand end while something else is at the left, and the caption button is not
+     always there. An auto margin is right either way. */
+  .lb-bar-r { display: flex; align-items: flex-start; gap: 8px; margin-left: auto; }
+  /* Wraps rather than overflowing — with Download and the rotate slot side by side this is wider
+     than a phone, and a bar that runs off the screen used to take the Close button with it. Only
+     the ACTIONS wrap now; the chrome beside them does not. */
+  .lb-acts { display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+    flex-wrap: wrap; }
+  .lb-chrome { flex: none; display: flex; align-items: center; gap: 8px; }
+  /* On a phone the bar becomes rows rather than a ragged run of pills: the chrome keeps the
+     top-right corner, the actions fill the width beside and beneath it, and the caption button —
+     the widest and the least urgent — drops to a row of its own at the bottom. Every control is
+     the same height and every row is full width, which is what "one set of controls" looks like
+     when there is not enough width to put them on one line. */
+  @media (max-width: 560px) {
+    .lb-bar { flex-wrap: wrap; }
+    .lb-bar-l { order: 2; flex: 1 1 100%; }
+    .lb-bar-l .lb-btn { flex: 1 1 auto; }
+    .lb-bar-r { flex: 1 1 auto; }
+    .lb-acts { flex: 1 1 auto; }
+    .lb-acts > .lb-btn { flex: 1 1 auto; }
+  }
   /* One pill, three uses — same height, same weight, whatever is in it.
      `gap`, not a space in the markup: this is a flex container, so a whitespace-only run between
      the download icon and the word beside it generates no flex item and collapses to nothing —
@@ -609,6 +795,8 @@
   .lb-btn:disabled { opacity: .6; cursor: default; }
   /* The close is the one round one: it is an icon, not a phrase. Square to the bar's height. */
   .lb-btn.close { width: 44px; padding: 0; font-size: 1rem; }
+  /* Save and Cancel used to be two more pills here. They live inside the rotate slot now, so that
+     pressing ↻ cannot change how many controls the bar is holding — see RotateControl.svelte. */
   /* Demoted, not dropped: with a caption present the mission is attribution, not the headline. */
   .cap-mission.secondary { font-weight: 400; opacity: .78; }
   /* The video and its sound prompt as one unit, so the prompt can be placed against the picture

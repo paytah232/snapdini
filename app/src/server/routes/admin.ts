@@ -117,6 +117,48 @@ router.get('/referral-funnel', async (_req: Request, res: Response) => {
   res.json({ totals, sources, engagement });
 });
 
+// ── GET /api/admin/actions — what the operator changed on other people's events ──
+//
+// The read side of admin_actions (0068). Site-admin only, like everything on this router, and that
+// gate is the whole of the access control: the entries quote customers' event names, guest email
+// addresses and the words people wrote under photos, because that is what makes them actionable.
+//
+// NEWEST FIRST, with `id` as the final key. `at` is milliseconds and an operator flipping three
+// switches in one second gives Postgres a tie it may break differently per query — which under
+// LIMIT/OFFSET means consecutive pages OVERLAP, showing one row twice and another never. That is
+// not hypothetical here: it was demonstrated on the users listing above and fixed the same way.
+//
+// NO N+1, and no joins for the body of the row either. Who did it and which event it was are
+// columns on the entry itself, captured when it happened — see the denormalisation note in the
+// migration. The one join is a LEFT JOIN to events, purely so the page can tell a live event
+// (drill into it) from one that has since been deleted (there is nowhere to go).
+router.get('/actions', async (req: Request, res: Response) => {
+  const { limit, offset, q } = listing(req, 50);
+  const eventId = String(req.query.eventId || '').trim();
+
+  let where = ' WHERE 1=1';
+  const params: unknown[] = [];
+  // The second of the two indexed reads. Matched on the recorded id rather than the join code, so
+  // an event renamed or re-slugged since still returns its own history.
+  if (eventId) { where += ' AND a.event_id = ?'; params.push(eventId); }
+  const search = searchClause(q, ['a.admin_email', 'a.event_name', 'a.event_join_code', 'a.action']);
+  where += search.sql; params.push(...search.params);
+
+  const base =
+    `SELECT a.id, a.at, a.admin_user_id AS "adminUserId", a.admin_email AS "adminEmail",
+            a.admin_name AS "adminName", a.event_id AS "eventId", a.event_name AS "eventName",
+            a.event_join_code AS "eventJoinCode", a.action,
+            a.target_type AS "targetType", a.target_id AS "targetId",
+            a.before_value AS "before", a.after_value AS "after",
+            (e.id IS NOT NULL) AS "eventExists"
+       FROM admin_actions a
+       LEFT JOIN events e ON e.id = a.event_id` + where;
+
+  const total = await countOf(base, params);
+  const actions = await all(`${base} ORDER BY a.at DESC, a.id DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+  res.json({ actions, total, limit, offset });
+});
+
 // Recent events (newest first).
 // Events. `kind` exists because demo rolls are the majority of rows on a live instance and none of
 // them are anybody's event — leaving them in "All" buries the real ones. There is no is_demo
@@ -239,17 +281,177 @@ router.post('/contact/:id/handled', async (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
-// Client-side error reports (diagnostic). Unresolved first, newest first.
+// ── Client-side error reports (diagnostic) ───────────────────────────────────
+//
+// GROUPED, which is the entire point of this endpoint and was the entire problem with the one it
+// replaces. Fifty production rows returned newest-first were eleven distinct problems: twelve
+// consecutive lines of one camera permission failure, eight of the next, and the six upload
+// failures that may have cost a guest their photos pushed below them. A list nobody finishes
+// reading is not a shorter list, it is no list — so the unit here is a PROBLEM, and the
+// occurrences hang off it.
+
+/** One report, as the console shows it inside an opened group. */
+export interface ClientErrorOccurrence {
+  key: string; id: string; message: string; context: string | null;
+  eventCode: string | null; url: string | null; userAgent: string | null;
+  stack: string | null; participantId: string | null; participantName: string | null;
+  appVersion: string | null; clientBuild: string | null; displayMode: string | null;
+  viewport: string | null; connection: string | null; outcome: string | null;
+  handled: boolean; at: number;
+}
+
+/** The tallies, straight off the aggregate — counted over the WHOLE table, not over the sample of
+ *  occurrences below. That distinction is the reason these come from SQL rather than from
+ *  counting the rows we happened to fetch: a count that silently means "of the last 300" answers
+ *  "is this still happening" with a number that stops growing. */
+export interface ClientErrorSummary {
+  key: string; count: number; open: number; guests: number;
+  firstSeen: number; lastSeen: number;
+  eventCodes: string[]; versions: string[];
+}
+
+export interface ClientErrorGroup extends ClientErrorSummary {
+  message: string; context: string | null; handled: boolean; latestId: string;
+  latest: ClientErrorOccurrence; occurrences: ClientErrorOccurrence[];
+}
+
+/** Hang the occurrences off their summaries. Pure, and separate from the queries, because this is
+ *  where the claims worth testing live: that a group carries its own occurrences and nobody
+ *  else's, that the newest one is the one whose detail gets shown, and that a group is `handled`
+ *  only when nothing in it is still open.
+ *
+ *  `occurrences` must arrive NEWEST FIRST — the queries below order it that way, and `latest`
+ *  is simply the first one. Sorting again here would be a second ordering rule to keep in step
+ *  with the SQL, and the two would disagree the first time a tie-break changed. */
+export function assembleErrorGroups(
+  summaries: ClientErrorSummary[], occurrences: ClientErrorOccurrence[],
+): ClientErrorGroup[] {
+  const byKey = new Map<string, ClientErrorOccurrence[]>();
+  for (const o of occurrences) {
+    const list = byKey.get(o.key);
+    if (list) list.push(o); else byKey.set(o.key, [o]);
+  }
+  const groups: ClientErrorGroup[] = [];
+  for (const s of summaries) {
+    const occ = byKey.get(s.key);
+    // A summary with no occurrences cannot happen from one connection — but it CAN from two
+    // statements a purge ran between, and a group rendered with no detail row and no message
+    // would look like a rendering bug rather than a race. Drop it; the next load has it right.
+    if (!occ?.length) continue;
+    const latest = occ[0];
+    groups.push({
+      ...s,
+      // From the newest occurrence, not from the oldest: the message is display text and a group
+      // whose wording changed should read as it reads TODAY.
+      message: latest.message, context: latest.context,
+      // A group is only done when every report in it is. This is what makes a resolved group that
+      // recurs reopen on its own — new reports insert `handled = false`, the open count goes back
+      // above zero, and the group returns to the top of the operator's list without anyone having
+      // to notice. It is the "is it still happening" signal, and it is free.
+      handled: s.open === 0,
+      latestId: latest.id,
+      latest, occurrences: occ,
+    });
+  }
+  return groups;
+}
+
+/** How many reports of one problem the console can show. Twenty is "when did this start, who hit
+ *  it, did it follow a deploy" — everything past that is the same answer again, at the cost of a
+ *  stack apiece in a payload the operator reads on a phone. The group's `count` is the real
+ *  total and is not capped. */
+const OCCURRENCE_SAMPLE = 20;
+
 router.get('/client-errors', async (_req: Request, res: Response) => {
-  const errors = await all(
-    `SELECT id, message, context, event_code, user_agent, url, handled, created_at
-       FROM client_errors ORDER BY handled ASC, created_at DESC, id LIMIT 300`);
-  const open = await get<{ n: number }>(`SELECT count(*) AS n FROM client_errors WHERE NOT handled`);
-  res.json({ errors, open: Number(open?.n ?? 0) });
+  // ONE aggregate over the whole table. `COALESCE(fingerprint, 'id:' || id)` is a guard, not a
+  // fallback anyone should hit: 0071 backfilled every row and the capture path always writes the
+  // column. It matters because GROUP BY collapses NULLs TOGETHER — a code path that forgot the
+  // fingerprint would not produce ungrouped rows, it would produce one enormous group containing
+  // every unrelated error in the system, which is a worse screen than the one this replaces.
+  const summaries = await all<ClientErrorSummary>(
+    `SELECT COALESCE(fingerprint, 'id:' || id)                 AS "key",
+            count(*)::int                                      AS "count",
+            count(*) FILTER (WHERE NOT handled)::int           AS "open",
+            -- Distinct IDENTIFIED guests. count(DISTINCT …) skips NULLs, so an entirely anonymous
+            -- group reads 0 — which is the truth ("we cannot tell you who"), not "nobody".
+            count(DISTINCT participant_id)::int                AS "guests",
+            min(created_at)                                    AS "firstSeen",
+            max(created_at)                                    AS "lastSeen",
+            array_remove(array_agg(DISTINCT event_code), NULL)  AS "eventCodes",
+            array_remove(array_agg(DISTINCT app_version), NULL) AS "versions"
+       FROM client_errors
+      GROUP BY 1
+      -- Anything still open first, then most recent. Not the flat list's handled-ASC: a group
+      -- is a mix of both, and sorting a mix by a column it does not have is how the twelve
+      -- identical rows ended up interleaved with everything else in the first place.
+      ORDER BY (count(*) FILTER (WHERE NOT handled)) > 0 DESC, max(created_at) DESC, 1
+      LIMIT 200`);
+
+  // The sample, for the expandable detail. Window-functioned per group rather than a flat
+  // "newest 300 rows overall", because those are not the same fetch: one noisy group would
+  // otherwise fill the whole budget and every other group would open on nothing.
+  const keys = summaries.map((s) => s.key);
+  const occurrences = keys.length ? await all<ClientErrorOccurrence>(
+    `SELECT g."key", g.id, g.message, g.context,
+            g.event_code AS "eventCode", g.url, g.user_agent AS "userAgent", g.stack,
+            g.participant_id AS "participantId",
+            -- JOINED, NEVER STORED. Deleting a guest — retention purge, or an erasure request —
+            -- takes their name off this screen with it, because this is the only place it comes
+            -- from. A name copied into client_errors at capture time would outlive them.
+            p.name AS "participantName",
+            g.app_version AS "appVersion", g.client_build AS "clientBuild",
+            g.display_mode AS "displayMode", g.viewport, g.connection, g.outcome,
+            g.handled, g.created_at AS "at"
+       FROM (SELECT ce.*, COALESCE(ce.fingerprint, 'id:' || ce.id) AS "key",
+                    row_number() OVER (PARTITION BY COALESCE(ce.fingerprint, 'id:' || ce.id)
+                                       ORDER BY ce.created_at DESC, ce.id DESC) AS rn
+               FROM client_errors ce) g
+       LEFT JOIN participants p ON p.id = g.participant_id
+      WHERE g.rn <= ? AND g."key" = ANY(?::text[])
+      ORDER BY g.created_at DESC, g.id DESC`, [OCCURRENCE_SAMPLE, keys]) : [];
+
+  const groups = assembleErrorGroups(summaries, occurrences);
+  // Both counts, because they answer different questions and the old single `open` silently
+  // answered the less useful one. `open` is reports (the denominator for "how bad was it");
+  // `openGroups` is PROBLEMS, which is the number the operator is deciding whether to act on.
+  const open = await get<{ n: number }>(
+    `SELECT count(*) FILTER (WHERE NOT handled)::int AS n FROM client_errors`);
+  res.json({
+    groups,
+    open: Number(open?.n ?? 0),
+    openGroups: groups.filter((g) => g.open > 0).length,
+  });
 });
+
+// Mark a whole GROUP handled, named by any one report in it.
+//
+// THE ROUTE STILL TAKES AN ID on purpose. The fingerprint is derived from a message and can
+// contain every character a browser's error text can, including slashes — it has no business in a
+// path segment, and encoding it there would make the URL in the operator's history a copy of a
+// string we may yet change the rule for. The client names a row it can see; the server expands it
+// to the group. It also means this endpoint keeps working, unchanged, for the one caller that
+// might legitimately mean a single row.
 router.post('/client-errors/:id/handled', async (req: Request, res: Response) => {
-  await run(`UPDATE client_errors SET handled = NOT handled WHERE id = ?`, [String(req.params.id)]);
-  res.json({ ok: true });
+  const id = String(req.params.id);
+  const row = await get<{ fingerprint: string | null; handled: boolean }>(
+    `SELECT fingerprint, handled FROM client_errors WHERE id = ?`, [id]);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  // EXPLICIT, not `NOT handled`. A group is routinely MIXED — resolved last week, recurred this
+  // morning — and there is no single value to negate: toggling off the representative row flips
+  // the whole group to whatever the newest report happened not to be, so the operator presses
+  // "resolve" on a twelve-report group and watches eleven of them reopen. The console sends what
+  // it is showing; the negate is kept only as the answer for a caller that sends no body.
+  const body = req.body as { handled?: unknown } | undefined;
+  const target = typeof body?.handled === 'boolean' ? body.handled : !row.handled;
+  // The NULL-fingerprint arm is unreachable after 0071's backfill and is here anyway, because the
+  // alternative is `WHERE fingerprint = NULL` matching nothing and the button doing nothing at
+  // all — a silent no-op on the one control this screen has.
+  if (row.fingerprint) {
+    await run(`UPDATE client_errors SET handled = ? WHERE fingerprint = ?`, [target, row.fingerprint]);
+  } else {
+    await run(`UPDATE client_errors SET handled = ? WHERE id = ?`, [target, id]);
+  }
+  res.json({ ok: true, handled: target });
 });
 
 // Post-event survey responses (newest first), with the event they belong to.

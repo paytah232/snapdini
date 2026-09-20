@@ -72,8 +72,14 @@ export interface PublicEvent {
    *  response already in a cache) simply falls back to the delay this screen has always used;
    *  null is the same thing said explicitly. */
   revealAt?: number | null;
+  /** The explicit "Hide photos" override, which beats every other reveal rule including instant.
+   *  Optional so an older API simply behaves as it did. Host-only — never on the public event. */
+  revealHidden?: boolean;
   aspectRatios: string[]; videoSeconds: number; startsAt: number; expiresAt: number;
   isDemo: boolean; isUpcoming: boolean; isExpired: boolean; isLocked: boolean; isRevealed: boolean;
+  /** Only the host can open the gallery from here — a manual event, or photos explicitly hidden.
+   *  False for a timed reveal, where waiting is the answer. Optional: an older API says nothing. */
+  awaitingHost?: boolean;
   /** Does the signed-in account own or co-host THIS event? Identity, not the organizer code — and
    *  not merely "somebody is signed in". False for a guest, and false when signed in as anyone
    *  other than this event's host. */
@@ -382,6 +388,73 @@ export const savePhotoCaption = (photoId: string, caption: string,
     body: JSON.stringify({ caption, ...('sessionToken' in who ? { sessionToken: who.sessionToken } : {}) }),
   });
 
+/** Fold any number of degrees into the (-180, 180] window the API speaks in.
+ *
+ *  Four taps on a rotate control is a full circle and therefore nothing at all, and 270 and -90 are
+ *  the same turn said two ways — client and server have to agree on the spelling, or a photo turned
+ *  three times and a photo turned once back would be stored as two different corrections.
+ *
+ *  Deliberately a second copy of the server's normalizeTurn (app/src/server/images.ts) rather than
+ *  an import: nothing under app/ is reachable from the web bundle, and a one-line fold is a cheaper
+ *  thing to keep in step than a shared package would be to introduce for it. */
+export function normalizeTurn(deg: number): number {
+  const wrapped = ((Math.round(deg) % 360) + 360) % 360;   // [0, 360)
+  return wrapped > 180 ? wrapped - 360 : wrapped;          // (-180, 180]
+}
+
+/** What a rotation answers with: everything needed to show the corrected photo without a refetch.
+ *
+ *  THE NEW URLS ARE THE CACHE-BUST — there is no version token to look for, and nothing here may
+ *  go on displaying the url it already had. The server RENAMES the stored file, because /uploads
+ *  is served `immutable, max-age=365d` and a browser will not so much as revalidate that: new
+ *  bytes under an old name are invisible to everyone except someone with an empty cache, so the
+ *  host would press rotate, see nothing happen, and press it again. The old name then stops
+ *  existing, which is the other half of the bargain — a reference nobody updated 404s where it can
+ *  be seen instead of quietly serving the wrong picture.
+ *
+ *  `shotSideways` is a REAL BOOLEAN here, unlike the gallery row where the field is present only
+ *  when true. This reply exists to update a card already on screen, and `undefined` would leave a
+ *  client merging it unable to tell "no longer sideways" from "no opinion" — so the ↻ mark would
+ *  stay up until a reload. */
+export interface PhotoRotation {
+  success: boolean;
+  id: string;
+  /** The full-quality original, under its new name. Download this; play `playUrl`. */
+  url: string;
+  thumbUrl: string;
+  /** Clips only, and only once the phone-decodable copy has been rebuilt. */
+  playUrl?: string;
+  /** The stored dimensions AFTER the turn: swapped by a quarter, unchanged by a half. Optional
+   *  because a file whose dimensions could not be read still rotates. */
+  width?: number;
+  height?: number;
+  /** Total degrees clockwise now baked into the file, normalised — see normalizeTurn. */
+  captureRotation: number;
+  shotSideways: boolean;
+}
+
+/** Turn one stored photo or clip, clockwise, for good.
+ *
+ *  Exactly one credential, the same pair as savePhotoCaption and for the same reasons: a guest's
+ *  session token (their OWN photos only) or the organizer code (anything in their event). A photo
+ *  the caller may not touch answers 404, never 403 — whether a given photo id exists, and whose
+ *  roll it is in, is not a stranger's business. So a 404 from HERE means "not yours, or not there
+ *  any more", and api()'s own sentence for it says exactly that; there is nothing to special-case.
+ *  A 409 is two rotations racing, and the server writes the words for that one itself.
+ *
+ *  `quarter` is a named turn, not an angle: the server refuses 0 and refuses 270 rather than
+ *  folding it, on the grounds that a client sending either has a bug worth seeing. normalizeTurn
+ *  is what keeps an accumulating client on the right side of that.
+ *
+ *  ONE TAP DOES NOT COME HERE. The control turns the picture on screen with a transform and sends
+ *  the accumulated total once, on Save: a request per 90° would re-encode the file, republish it
+ *  and evict it from every cache three times on the way to a place one request could reach. */
+export const rotatePhoto = (photoId: string, quarter: 90 | -90 | 180,
+                            who: { sessionToken: string } | { organizerCode: string }) =>
+  postJson<PhotoRotation>(`/api/photos/${photoId}/rotate`,
+    { quarter, ...('sessionToken' in who ? { sessionToken: who.sessionToken } : {}) },
+    'organizerCode' in who ? org(who.organizerCode) : {});
+
 /** Heart or unheart a photo. EXPLICIT, never a toggle — a retried request must land on what the
  *  guest asked for, not the opposite of it. Comes back with the authoritative count. */
 /** One endpoint, two kinds of caller: a guest passes their session, a gallery-link visitor passes
@@ -558,6 +631,10 @@ export interface PhotosResponse {
   /** More to come when this is a string; null or absent means this is the last page. */
   nextCursor?: string | null;
   revealed: boolean; photoCount?: number; revealMode?: string; revealAt?: number | null;
+  /** Would asking the host actually change anything? True for a manual event and for photos that
+   *  have been explicitly hidden; false for a timed reveal, where waiting is the answer. Optional
+   *  because a server that predates it says nothing, and absent must read as "do not ask". */
+  awaitingHost?: boolean;
   hasHighlights?: boolean; allowDownloads?: boolean; moderationEnabled?: boolean;
   /** Moderated events only: how many photos are waiting for the host. THE signal that separates
    *  "the host is still approving" from "this event is empty" — two states that look identical from
@@ -806,3 +883,186 @@ export const sendInvites = (code: string, organizerCode: string, guestIds?: stri
   postJson<{ sent: number; failed: number; notSent: number; perSend: number;
              skipped: { email: string; name: string | null; reason: string }[] } & GuestListPayload>(
     `/api/events/${code}/guests/invite`, { guestIds }, org(organizerCode));
+
+// ── The site-admin action log ────────────────────────────────────────────────
+//
+// What a site admin changed on an event they do NOT own: who, which event, what, the value before
+// and the value after, and when. Site-admin only, newest first:
+//
+//     GET /api/admin/actions?eventId=<id>&limit=<n>&offset=<n>
+//     → { actions: [...], total, limit, offset }
+//
+// THIS FILE IS THE ONLY PLACE IN THE WEB APP THAT KNOWS THE WIRE SHAPE. Both surfaces that render
+// the log — the console and the event manager — consume `AdminAction` and nothing else, so a
+// rename on the server is a line in `pick()` below rather than a hunt through two pages and a
+// component. That mattered while the endpoint was being written in parallel and it still does:
+// every field is read through a list of candidate names and nothing throws on a missing one. A log
+// that renders four of its six columns is useful; a log that white-screens because `before` came
+// back under another name is not, and this is exactly the screen somebody opens when they are
+// already trying to work out what went wrong.
+//
+// `before` and `after` are OBJECTS WITH THE SAME KEYS holding only what changed (see migration
+// 0068) — `{"revealMode":"manual"}` → `{"revealMode":"instant"}`. So they are unzipped here into
+// one row per key, which is the generic renderer the table was designed around: one shape covers a
+// settings save, a rotation and a bulk moderation, including the toggle nobody has written yet.
+// `after` NULL is meaningful and is not `{}`: it means the thing stopped existing, and `before`
+// then holds the only surviving copy of it.
+
+/** One field that moved, unzipped from the before/after pair. */
+export interface AdminActionChange {
+  key: string;
+  /** THE RECOVERY PATH. There is deliberately no revert — not here and not on the server — so this
+   *  string is the whole remedy: a human reads it and puts the value back through the normal
+   *  control, which is the path that already carries the confirms and the validation. Rendered
+   *  selectable and copyable for exactly that reason. */
+  before: string;
+  after: string;
+}
+
+/** One change, in the shape the UI renders. Every field is always present — absent on the wire
+ *  becomes empty here and the view draws an em dash — so no consumer has to guard. */
+export interface AdminAction {
+  /** Stable enough for an {#each} key; falls back to the row's position if the server sends none. */
+  id: string;
+  /** Epoch ms, or null when nothing parseable arrived. Never a guess: an invented "now" on an audit
+   *  row is worse than no time, because it reads as fact. */
+  at: number | null;
+  /** The admin, as an address. */
+  actor: string;
+  eventId: string;
+  eventName: string;
+  eventCode: string;
+  /** False once the event has been deleted — including by the very action being reported, which is
+   *  why the log keeps no foreign key to it. There is then nowhere to drill into. */
+  eventExists: boolean;
+  /** Verb and noun: 'event.settings' on a 'event', 'photo.rotate' on a 'photo'. */
+  action: string;
+  target: string;
+  changes: AdminActionChange[];
+  /** The raw pair as text. Only used when the values are not key-shaped — a scalar, or a server
+   *  that has not settled on objects — so the row still says something rather than nothing. */
+  before: string;
+  after: string;
+}
+
+export interface AdminActionPage {
+  actions: AdminAction[];
+  /** How many there are in total behind this filter, which is what "load more" is measured against.
+   *  Offset paging, not a cursor: `at` ties are broken by `id DESC` on the server, so consecutive
+   *  pages cannot overlap the way they would on `at` alone. */
+  total: number;
+}
+
+/** First key that is actually there. Not `a ?? b ?? c`: `false` and `0` are values a setting really
+ *  takes, and a nullish chain over a bag of unknown keys drops them for the next candidate. */
+function pick(row: Record<string, unknown>, keys: string[]): unknown {
+  for (const k of keys) {
+    if (row[k] !== undefined && row[k] !== null) return row[k];
+  }
+  return undefined;
+}
+
+/** A value as the log should SHOW it.
+ *
+ *  Booleans and numbers are printed rather than run through a falsy check — "false" is the single
+ *  most important thing this log can say, and `String(v) || '—'` would turn it into a dash. Objects
+ *  become JSON, because `[object Object]` is the log failing at its one job. */
+function showValue(v: unknown): string {
+  if (v === undefined || v === null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'boolean' || typeof v === 'number') return String(v);
+  try { return JSON.stringify(v); } catch { return String(v); }
+}
+
+/** Epoch ms from a number, a numeric string, or an ISO date. Null rather than NaN or Date.now()
+ *  when it is none of those. */
+function showTime(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim()) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return n;
+    const t = Date.parse(v);
+    if (Number.isFinite(t)) return t;
+  }
+  return null;
+}
+
+const plainObject = (v: unknown): Record<string, unknown> | null =>
+  v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+
+/** Unzip the pair into one row per field that moved.
+ *
+ *  Keys from BOTH sides, in before's order first: a delete has no `after` at all, and an action
+ *  that added a field has no `before` for it. Either missing side prints as an em dash in the view
+ *  rather than as the string "undefined". */
+function unzip(before: unknown, after: unknown): AdminActionChange[] {
+  const b = plainObject(before);
+  const a = plainObject(after);
+  if (!b && !a) return [];          // scalars, or nothing — the raw pair is shown instead
+  const keys = [...new Set([...Object.keys(b ?? {}), ...Object.keys(a ?? {})])];
+  return keys.map((key) => ({ key, before: showValue(b?.[key]), after: showValue(a?.[key]) }));
+}
+
+/** THE ONE PLACE that knows the wire shape. Each candidate list is ordered most-specific first, so
+ *  a server sending both `adminEmail` and `admin` gives the address rather than an id. */
+export function normalizeAdminAction(raw: unknown, index: number): AdminAction {
+  const row = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  // An embedded event object is as plausible a shape as flattened columns and costs one line.
+  const ev = plainObject(row.event) ?? {};
+  const before = pick(row, ['before', 'beforeValue', 'before_value', 'oldValue', 'old_value', 'from']);
+  const after = pick(row, ['after', 'afterValue', 'after_value', 'newValue', 'new_value', 'to']);
+
+  return {
+    id: showValue(pick(row, ['id', 'actionId', 'action_id'])) || `row-${index}`,
+    at: showTime(pick(row, ['at', 'createdAt', 'created_at', 'timestamp', 'ts'])),
+    actor: showValue(
+      pick(row, ['adminEmail', 'admin_email', 'actorEmail', 'actor_email', 'adminName', 'admin_name',
+                 'adminUserId', 'admin_user_id', 'actor'])
+      ?? pick(plainObject(row.actor) ?? {}, ['email', 'name', 'id']),
+    ),
+    eventId: showValue(pick(row, ['eventId', 'event_id']) ?? pick(ev, ['id'])),
+    eventName: showValue(pick(row, ['eventName', 'event_name']) ?? pick(ev, ['name'])),
+    eventCode: showValue(
+      pick(row, ['eventJoinCode', 'event_join_code', 'joinCode', 'join_code', 'eventCode', 'event_code'])
+      ?? pick(ev, ['joinCode', 'join_code']),
+    ),
+    // Absent means "we were not told", and the only safe reading of that is that the event is still
+    // there — offering a link that 404s is a smaller failure than hiding a working one.
+    eventExists: pick(row, ['eventExists', 'event_exists']) !== false,
+    action: showValue(pick(row, ['action', 'type', 'kind', 'operation'])),
+    target: showValue(pick(row, ['targetType', 'target_type', 'target', 'field', 'setting'])),
+    changes: unzip(before, after),
+    before: showValue(before),
+    after: showValue(after),
+  };
+}
+
+/** Fetch a page of the log.
+ *
+ *  `eventId` filters to one event — the manager passes it so the operator can see what he has
+ *  already changed HERE before he touches anything; the console omits it for the platform-wide
+ *  view. Both go through the same normaliser, so the two surfaces cannot drift into describing the
+ *  same change differently. */
+export async function listAdminActions(opts: { eventId?: string | null; limit?: number; offset?: number } = {})
+    : Promise<AdminActionPage> {
+  const q = new URLSearchParams();
+  if (opts.eventId) q.set('eventId', opts.eventId);
+  q.set('limit', String(opts.limit ?? 25));
+  if (opts.offset) q.set('offset', String(opts.offset));
+
+  // `unknown`, then narrowed here rather than an `any` cast at the call site: the response shape is
+  // the thing that moves, and the whole point of this module is that it stops moving at this line.
+  const res = await api<unknown>(`/api/admin/actions?${q}`);
+  const body = (plainObject(res) ?? {}) as Record<string, unknown>;
+  // A bare array is as plausible a first draft as any wrapper, so it is accepted too.
+  const listRaw = Array.isArray(res) ? res : pick(body, ['actions', 'items', 'rows', 'entries', 'results']);
+  const list = Array.isArray(listRaw) ? listRaw : [];
+  const total = pick(body, ['total', 'count']);
+
+  return {
+    actions: list.map(normalizeAdminAction),
+    // No total (or a bare array) means "what you have is what there is" — better than a Load more
+    // button that fetches the same page again for ever.
+    total: typeof total === 'number' ? total : list.length,
+  };
+}

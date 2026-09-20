@@ -28,6 +28,9 @@
   export let meta = '';
   /** Multi-select highlight. Drawn on the card, not the tile, so the whole card reads as picked. */
   export let selected = false;
+  /** Show the "shot sideways" note. Off by default: it is a host housekeeping cue, not
+   *  something a guest can or should act on. Only the review screen turns it on. */
+  export let showSideways = false;
   /** aria-label for the tile button. Empty = none, which is right on a guest's own roll where
    *  every tile is "your photo" and the label would just be noise. */
   export let tileLabel = '';
@@ -62,6 +65,22 @@
   /** Whether THIS viewer may press it. A stranger on a shared gallery link can see the counts and
    *  cannot vote: hearts belong to the people who were there. */
   export let canHeart = false;
+  /** This viewer may LOOK but not mark. Set by the review screen when a SITE ADMIN is inside an
+   *  event they do not own — accident prevention, never access control; $lib/adminGuard has the
+   *  long version.
+   *
+   *  It covers the GESTURE specifically, because the gesture is the one thing a caller cannot
+   *  reach: every explicit control on a card is either the caller's own slotted markup, which it
+   *  can gate itself, or the heart, which `canHeart` already answers. Review does refuse the write
+   *  — setRating() says no and toasts — so no photograph was ever in danger. What was wrong is that
+   *  the card had already bloomed a star and drawn itself favourited by the time the refusal
+   *  landed, so the sequence read as "it worked, and then it un-worked", which is a worse thing to
+   *  show somebody than a control that plainly will not move.
+   *
+   *  Folded into `dtLive` rather than checked inside the handler, so it also drops the 280ms the
+   *  single tap otherwise waits to see whether a second one is coming. On a screen where the
+   *  gesture does nothing, opening a photo gets quicker rather than slower. */
+  export let readOnly = false;
   /** How many comments the photo carries. Absent when the host has comments off. A COUNT only —
    *  the thread itself lives in the lightbox, because a grid tile has nowhere to put one. */
   export let comments: number | undefined = undefined;
@@ -129,8 +148,10 @@
   const DOUBLE_MS = 280;
   let openTimer: ReturnType<typeof setTimeout> | undefined;
   /** Whether the gesture is actually available here. Hearting needs somebody entitled to heart;
-   *  favouriting is the caller's call and is only ever set where it means something. */
-  $: dtLive = doubleTap === 'favourite' ? 'favourite'
+   *  favouriting is the caller's call and is only ever set where it means something; and `readOnly`
+   *  takes both of them away — before the bloom, rather than after it. */
+  $: dtLive = readOnly ? 'none'
+    : doubleTap === 'favourite' ? 'favourite'
     : doubleTap === 'heart' && canHeart && hearts !== undefined ? 'heart' : 'none';
   function onCellClick(e: MouseEvent) {
     // No gesture, no delay: a screen where double tap does nothing should open on the first tap
@@ -273,10 +294,14 @@
              photo, and the tile's corners are already spoken for by the heart and the select tick. -->
         <span class="ccount" title="{comments} comment{comments === 1 ? '' : 's'}">💬 {comments}</span>
       {/if}
-      {#if photo.shotSideways}
-        <!-- In the small print rather than over the picture. It is a note about how the shot was
-             taken, which matters to whoever is choosing photos for a print or a slideshow, and
-             matters to nobody who is just looking — so it sits where the other such notes sit. -->
+      {#if photo.shotSideways && showSideways}
+        <!-- Opt-in, and off everywhere a GUEST looks.
+             It answers a question only the host ever asks — "which of these do I still need to
+             straighten?" — and the shutter now corrects a turned phone by itself, so for anything
+             shot from here on the answer is "none of them". What is left is a finite backlog of
+             photos taken before that existed, which is a housekeeping job on the review screen and
+             nobody else's business. A guest looking at their own roll cannot act on it and did not
+             ask; they can simply turn the photo if they want to. -->
         <span class="psideways" title="The phone was held sideways for this shot">↻ shot sideways</span>
       {/if}
       <slot name="foot" />

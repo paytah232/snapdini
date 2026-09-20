@@ -33,6 +33,7 @@ The rest of this guide is the full reference for each page.
 - [Guest emails, unsubscribes & suppression](#guest-emails-unsubscribes--suppression)
 - [Guest referrals & gallery stats](#guest-referrals--gallery-stats)
 - [Moderation, reveal & retention](#moderation-reveal--retention--how-it-behaves)
+- [Backups & recovery](#backups--recovery)
 
 ---
 
@@ -756,6 +757,18 @@ Where you approve, curate and share photos.
   **↩ Restore** (rejected → back to pending).
 - **Single view:** arrow-key navigation, click/⛶ for full screen, **📤 Share** this one photo, or
   save it with the download button.
+- **↺ ↻ Rotate** (single view) — a shot taken on a phone that was turned sideways with rotation
+  lock on is stored sideways, and nothing in the file says which way up it goes: the only person who
+  knows is whoever was standing there. So turn it on screen — either direction, as many times as you
+  like — and press **✓** to save it once, or **✕** to discard it. A turn is judged against the whole
+  picture, which is why the control is here and not on the grid. It works on clips as well as
+  stills; a clip takes a few seconds, because every copy of it (the one that plays, the one that
+  downloads, the shape the guest chose) is turned with it. Nothing is re-encoded, so no quality is
+  lost.
+- **“↻ shot sideways”** under a card is a to-do list, not a verdict: it marks the photos still lying
+  on their side. The camera now straightens a turned phone at the shutter, so anything shot from
+  here on should never carry it — what is left is the backlog from before that existed. Rotating the
+  photo clears the mark. It is shown on this screen only; guests never see it.
 - **Select mode:** tap to select — anywhere on the card, the words under the photo included —
   shift-click for a range, quick-select **All / ★ Favourites**, then bulk **Download** (one photo
   saves as itself; several as a zip), **Share**, **Favourite**, **Approve**, or **Reject**.
@@ -815,6 +828,22 @@ the same camera.
   limit, and a quality picker.
 - **Upload queue:** photos are saved on your device immediately and uploaded one at a time with a live
   %. If you go offline they queue and **auto-retry** when you're back — nothing is lost.
+  A photo you took **during** the event still counts when the upload only lands after it has ended:
+  the time you pressed the shutter travels with the photo, and a queue still draining afterwards is
+  given a day to finish. A photo *taken* after the end is refused, as it always was.
+- **Photos come out the right way up.** Turn the phone sideways with rotation lock on and the page
+  does not turn with it — which used to mean the picture was stored on its side, with nothing in the
+  file to say so. The shutter now straightens it as it takes it. A video cannot be corrected on the
+  phone, so the server turns those over a moment after they arrive; that costs no quality and you do
+  not have to wait for it.
+- **Rotate one yourself.** Open a photo of your own and the viewer offers **↺ ↻** — turn it either
+  way, **✓** keeps it, **✕** forgets it. Your own roll only: nobody can turn anybody else's
+  photograph, and somebody who only opened a gallery link is not offered it at all.
+- **If the event ends while you still have the camera open**, the camera says so: a countdown
+  appears over the last five minutes, and at the end the shutter closes with a line explaining why.
+  Nothing throws you out — your roll, the gallery and anything still uploading stay exactly where
+  they are — and a clip that is recording is never cut off; only starting a new one is refused. The
+  same applies if the host locks the event.
 - **Trick list:** if the host set one up, a pill in the top bar — the event's tick glyph and a
   "2/5" count, captioned *trick list* — opens the list of shots to hunt for. Shoot one and it
   ticks itself off — one go per trick — with confetti when you finish the lot.
@@ -926,6 +955,9 @@ The public gallery for an event.
 - **Back to your camera** — a guest who still holds a session for this event gets a link back to
   their own roll. (A stranger opening a shared gallery has no camera to go back to, so they are not
   offered one.)
+- **Rotate your own photo** — if you were one of the guests, a shot of yours that the phone stored
+  sideways carries **↺ ↻** in the viewer. Your own photos only; a stranger holding the link is not
+  offered it.
 - **"Start your own"** — a footer card inviting guests to run their own event. It is emphasised for
   48 hours after a reveal (the moment guests are most impressed) and carries the source event's join
   code, so sign-ups can be attributed back to the gallery that produced them. See
@@ -945,10 +977,50 @@ filters and paging.
 - **Users** — accounts, event counts, **verified**/admin flags (view-only). Accounts must verify
   their email before they can create an event, which is what blocks bulk sign-up spam.
 - **Contact messages** — the contact-form mailbox; mark done / reopen.
-- **Client errors** — device error reports; resolve / reopen.
+- **Client errors** — diagnostic reports from guests' devices, **one row per problem** rather than
+  one per report: fifty reports are usually a handful of distinct faults, and twelve copies of the
+  same one used to bury the six that had cost somebody their photos. Sorted by what is still open
+  and most recent. Open a row for the stack, the page, the device (installed app or browser tab,
+  viewport, connection), which build the guest was running against what was deployed, and how many
+  different guests were hit. Where the reporting call site says so, a report also carries what the
+  failure cost: an upload that failed today says whether it was still **retrying** or had **given
+  up** — which is not the same as the photo being lost, since the capture stays in the queue and on
+  the device. **Resolve** closes the whole group; if it happens again afterwards the group
+  reopens itself and comes back to the top, which is the "is it still happening?" signal.
+  Guests are named only while they still exist — deleting a guest takes their name off this screen
+  with them.
+- **Admin actions on customers' events** — what a site admin changed on an event they do not own:
+  who, which event, the field, the value before and the value after, newest first. Only that — a
+  host's own work, and an operator's work on their own events, are never collected, so the list
+  stays short enough to read. There is **no revert button** and there is not going to be one:
+  undoing an old change means guessing what the host has done since. The before-value is the remedy
+  — read it, and set it back through the ordinary control.
 - **Promo codes** (billing on) — create Stripe-backed discount codes guests redeem at checkout.
 - **Referral funnel** — where new organizers came from, and gallery engagement. See
   [Guest referrals](#guest-referrals--gallery-stats).
+
+### Working inside a customer's event
+
+**Manage →** opens an event's own manager and review screens — the same pages the host uses, which is
+exactly the danger: they look identical whether the event is yours or a stranger's, and several of
+their controls save the instant they are touched.
+
+- A red **SITE ADMIN** bar stays pinned to the top of both screens, says plainly that the event is
+  not yours — naming the owner on the manager, which is the screen that knows who they are — and
+  shows **READ-ONLY** or **EDITING**.
+- The page opens **read-only**. Every control that would write is dead, and pressing one says why
+  rather than doing nothing. Reading is untouched: the guest list, the shared links, the slideshows
+  already rendered and all the photos are still there to look at, which is usually what you came
+  for.
+- **Take control** unlocks it, behind one confirmation. It holds for that tab and that event —
+  through a reload, and across both the manager and the review screen — and **Hand it back** ends it.
+- The changes that matter are written to the action log described above, which also appears on the
+  event's own manager page so you can see what has already been done here before touching anything:
+  settings, reveal and lock, the theme, moderation and favourites, captions, comments, rotations,
+  and the removal of a guest, a co-host or the event itself.
+- Read the lock for what it is: **it prevents accidents; it is not a permission boundary.** The
+  server accepts these writes from a site admin either way. The guardrail exists so that a stray tap
+  during somebody's wedding is not free.
 
 ---
 
@@ -1157,3 +1229,28 @@ plus the galleries producing the most referrals and per-photo view/download enga
   passed. Its retention clock restarts from the new date, and the purge sweeper leaves unused events
   alone until that whole window (plus a day's grace) has elapsed, so a paid organizer who never ran
   their event does not silently lose it.
+
+## Backups & recovery
+
+How the **hosted** service is backed up. A self-hosted install is yours to back up: `UPGRADING.md`
+carries the one-line `pg_dump` worth taking before any upgrade, and the uploads volume is the other
+half of a copy that can actually be restored.
+
+- **Nightly, to a NAS on the same local network.** Off the machine that serves the site, on a box
+  that is not part of it.
+- **Encrypted at rest** — what sits on the backup target is ciphertext.
+- **Immutable snapshots.** A snapshot cannot be rewritten or deleted within its lifetime, which is
+  what makes the copy worth having against ransomware or a mistaken command as well as against a
+  dead disk.
+- **30 days of retention** — the same 30 days the privacy policy states, and the reason it says
+  so: content deleted from Snapdini may persist in those encrypted backups for up to a month
+  before it is gone everywhere.
+- **The restore is exercised automatically, once a month.** A backup nobody has restored is a
+  hypothesis rather than a backup.
+- **A dead-man's switch watches the schedule.** It alerts when a backup *fails to happen* — a job
+  that quietly stopped running is the failure that costs you everything, and it is exactly the one a
+  "backup failed" alert never fires for.
+
+**The runbook is deliberately not in this repository.** Restoring names hosts, shares and
+credentials, and this repository is public, so the procedure is kept with the deployment instead.
+Nothing above is a restore procedure; it is the shape of the arrangement and what it guarantees.

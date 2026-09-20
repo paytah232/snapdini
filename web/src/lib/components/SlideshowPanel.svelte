@@ -8,10 +8,12 @@
   const money = (c: number) => `$${(c / 100).toFixed(2)}`;
 
   async function toggleFav(id: string) {
+    if (refuseWhenReadOnly()) return;
     try { await favouriteSlideshow(code, orgCode, id); await refresh(); }
     catch (e) { showToast(e instanceof Error ? e.message : 'Failed', true); }
   }
   async function removeVersion(id: string) {
+    if (refuseWhenReadOnly()) return;
     try { await deleteSlideshowVersion(code, orgCode, id); await refresh(); }
     catch (e) { showToast(e instanceof Error ? e.message : 'Failed', true); }
   }
@@ -24,6 +26,37 @@
   export let code: string;
   export let orgCode: string;
   export let hasPhotos = false;
+  /** Shown, not writable. Set by the review screen when a SITE ADMIN is standing inside an event
+   *  they do not own — accident prevention, never access control. The server authorises the same
+   *  account for every one of these writes with or without this prop and the actor is a trusted
+   *  admin; $lib/adminGuard has the long version.
+   *
+   *  A prop, rather than the caller withdrawing the whole panel, which is what it used to do. Five
+   *  things in here write — generate, delete a version, keep (favourite) one, upload a track, buy
+   *  the branding removal — but most of the panel is a READ: the list of slideshows already
+   *  rendered, what each of them was, and the download links. An operator asked "did their
+   *  slideshow come out?" should be able to answer that without taking control of a live wedding
+   *  in order to look at it.
+   *
+   *  The settings ABOVE the button are deliberately left live — what goes in, order, seconds,
+   *  quality, music, the preview player. Every one of them is local state that reaches the server
+   *  only when Generate is pressed, and Generate is dead. A read-only screen that will not even let
+   *  you see what a render would be made of is a screen people take control of on reflex, which
+   *  turns the one deliberate press this guard is built around into a formality. */
+  export let readOnly = false;
+  const READ_ONLY_WHY = 'Read-only — press “Take control” in the red bar to build a slideshow for this event.';
+  /** Returns true for "stop".
+   *
+   *  Answered out loud rather than swallowed, for the reason GuestList's blockedPress() gives: a
+   *  press that does nothing is indistinguishable from a broken page. Every writing control below
+   *  is ALSO marked `disabled`, so from a mouse this ought to be unreachable — it is here for a
+   *  keyboard press on a control that was live when focus landed, and for the sixth write somebody
+   *  adds to this panel and forgets to gate. */
+  function refuseWhenReadOnly(): boolean {
+    if (!readOnly) return false;
+    showToast(READ_ONLY_WHY, true);
+    return true;
+  }
 
   let st: SlideshowStatus | null = null;
   let favouritesOnly = false;
@@ -46,6 +79,7 @@
   let dead = false;      // the panel is gone; a poll still in the air must not re-arm the timer
 
   async function buyBranding() {
+    if (refuseWhenReadOnly()) return;
     brandingBusy = true;
     try {
       const r = await buyBrandingRemoval(code, orgCode);
@@ -98,6 +132,9 @@
     const input = e.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     input.value = '';
+    // After the reset and not before: the chosen file has to come off the input either way, or
+    // picking the same track again once control has been taken raises no change event at all.
+    if (refuseWhenReadOnly()) return;
     if (!file) return;
     uploadingAudio = true;
     try {
@@ -181,6 +218,7 @@
     void refresh();
   }
   async function generate() {
+    if (refuseWhenReadOnly()) return;
     starting = true;
     try {
       // The POST returns only the bare job (no music/recent). Don't assign it to `st` directly —
@@ -287,7 +325,7 @@
               <b>Remove the Snapdini intro &amp; outro frames</b>
               <span class="bo-sub">A one-off <b>{money(st.brandingPriceCents ?? 500)}</b> add-on for this event — unlock once and every render skips the intro &amp; outro.</span>
             </div>
-            <button class="btn primary sm" on:click={buyBranding} disabled={brandingBusy}>{brandingBusy ? 'Starting…' : `Unlock · ${money(st.brandingPriceCents ?? 500)}`}</button>
+            <button class="btn primary sm" on:click={buyBranding} disabled={brandingBusy || readOnly}>{brandingBusy ? 'Starting…' : `Unlock · ${money(st.brandingPriceCents ?? 500)}`}</button>
           </div>
         {/if}
       </div>
@@ -338,9 +376,12 @@
           </div>
         {/if}
 
-        <label class="upload-track">
+        <!-- `disabled` on the INPUT is what makes this inert: a <label> has no disabled state of
+             its own, and a press on one is only a press on the control it points at. The class is
+             cosmetic — the same shape as GuestList's .file.ctl-locked. -->
+        <label class="upload-track" class:ctl-locked={readOnly}>
           {uploadingAudio ? 'Uploading…' : st.hasCustomAudio ? '⬆ Replace with your own (mp3/wav/mp4)' : '⬆ Upload your own (mp3/wav/mp4)'}
-          <input type="file" accept="audio/*,.mp3,.wav,.m4a,.mp4" on:change={onAudioFile} hidden disabled={uploadingAudio} />
+          <input type="file" accept="audio/*,.mp3,.wav,.m4a,.mp4" on:change={onAudioFile} hidden disabled={uploadingAudio || readOnly} />
         </label>
         <p class="rights-note">Only upload music you have the rights to use. You're responsible for any licensing; Snapdini takes no responsibility for third-party content. <a href="/terms" target="_blank" rel="noopener">Terms</a></p>
         <label class="vol"><span>🔊 Preview volume</span>
@@ -372,10 +413,17 @@
 
     <!-- Never hidden while a render runs. Hiding it is what made a second render impossible and made
          a mid-render press look like it had thrown the settings away. -->
-    <button class="btn primary full" on:click={generate} disabled={starting || includeCount === 0 || queueFull}>
+    <button class="btn primary full" on:click={generate} disabled={starting || includeCount === 0 || queueFull || readOnly}>
       {starting ? 'Starting…' : running ? '＋ Queue another render' : st?.status === 'done' ? '↻ Generate another' : '🎬 Generate slideshow'}
     </button>
-    {#if includeCount === 0}
+    {#if readOnly}
+      <!-- Said out loud, and first in the chain. A dead primary button with nothing beside it is
+           the bug report "the slideshow tab does nothing" — which is exactly what withdrawing the
+           whole panel used to produce. -->
+      <p class="hint">Read-only — everything already rendered is listed below and still downloads.
+        Building one, deleting one and keeping one all write to this event, so they wait for
+        “Take control” in the red bar.</p>
+    {:else if includeCount === 0}
       <p class="hint">{favouritesOnly ? 'No favourites yet — star some photos first.' : 'No photos to include yet.'}</p>
     {:else if queueFull}
       <p class="hint">{st?.maxQueue ?? 3} renders are already waiting — the next one starts as soon as this finishes.</p>
@@ -409,10 +457,10 @@
               <div class="rwhen">{fmtAgo(s.createdAt)}{#if s.favourite}{' '}· ★ kept{/if}</div>
             </div>
             <div class="racts">
-              <button class="ic" class:on={s.favourite} on:click={() => toggleFav(s.id)} title={s.favourite ? 'Unfavourite' : 'Keep (favourite)'} aria-label="Favourite"><StarIcon filled={s.favourite} size={15} /></button>
+              <button class="ic" class:on={s.favourite} on:click={() => toggleFav(s.id)} disabled={readOnly} title={s.favourite ? 'Unfavourite' : 'Keep (favourite)'} aria-label="Favourite"><StarIcon filled={s.favourite} size={15} /></button>
               <a class="ic" href={slideshowDownloadUrl(code, s.id)} title="Download {s.resolution === '4k' ? '4K' : '1080p'}" aria-label="Download"><DownloadIcon /></a>
               {#if s.resolution === '4k'}<a class="ic txt" href={slideshowDownloadUrl(code, s.id, '1080p')} title="Download a smaller 1080p version" aria-label="Download 1080p">1080p</a>{/if}
-              <button class="ic" on:click={() => removeVersion(s.id)} title="Delete" aria-label="Delete">🗑️</button>
+              <button class="ic" on:click={() => removeVersion(s.id)} disabled={readOnly} title="Delete" aria-label="Delete">🗑️</button>
             </div>
           </div>
         {/each}
@@ -457,7 +505,10 @@
   .ic { width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--text); cursor: pointer; text-decoration: none; font-size: 0.9rem; }
   .ic.on { color: var(--accent); border-color: var(--accent); }
   .ic.txt { width: auto; padding: 0 8px; font-size: 0.66rem; font-weight: 800; letter-spacing: .02em; }
-  .ic:hover { border-color: var(--accent); }
+  .ic:not(:disabled):hover { border-color: var(--accent); }
+  /* Only the two that WRITE go grey. The download links beside them are <a>s and stay live —
+     read-only has to mean read-ONLY, not useless. */
+  .ic:disabled { opacity: 0.45; cursor: default; }
   .btn:disabled { opacity: 0.7; cursor: default; }
   .preview { width: 100%; border-radius: var(--radius-sm); margin-top: 12px; background: #000; }
   .hint { font-size: 0.76rem; color: var(--text-muted); margin: 8px 0 0; }
@@ -479,7 +530,8 @@
   .play-btn:hover { border-color: var(--accent); }
   .upload-track { display: block; margin-top: 8px; text-align: center; cursor: pointer; font-size: 0.8rem; font-weight: 600;
     padding: 9px; border: 1px dashed var(--border); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text); }
-  .upload-track:hover { border-color: var(--accent); }
+  .upload-track:not(.ctl-locked):hover { border-color: var(--accent); }
+  .upload-track.ctl-locked { opacity: 0.55; cursor: default; }
   .rights-note { font-size: 0.68rem; color: var(--text-muted); margin: 6px 2px 0; line-height: 1.4; }
   .rights-note a { color: var(--accent); }
   .chosen { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }

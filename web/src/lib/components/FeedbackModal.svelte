@@ -5,6 +5,11 @@
 
   // Where it was opened from (e.g. "Manage page", "Camera") — helps us triage in Site admin.
   export let context = '';
+  /** The event this was sent from, as a join code. Sent as its own field rather than left for
+   *  the server to dig out of `context`: that string is prose for a human, and parsing it would
+   *  break the first time somebody reworded it. Empty on the marketing pages, which have no
+   *  event — and that is a real answer, not a missing one. */
+  export let eventCode = '';
 
   const dispatch = createEventDispatcher();
   let kind: 'bug' | 'feedback' | 'suggestion' = 'feedback';
@@ -29,6 +34,7 @@
       fd.append('message', message.trim());
       if (emailAddr.trim()) fd.append('email', emailAddr.trim());
       if (context) fd.append('context', context);
+      if (eventCode) fd.append('eventCode', eventCode);
       if (file) fd.append('screenshot', file);
       // /api/contact is bot-checked, and this form never sent a token — so every in-app report
       // failed with "Bot check failed" and the words went nowhere. The field name is Cloudflare's

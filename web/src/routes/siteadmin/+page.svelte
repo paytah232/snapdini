@@ -5,6 +5,8 @@
   import Loading from '$lib/components/Loading.svelte';
   import { showToast } from '$lib/toast';
   import { dep } from '$lib/reactive';
+  import AdminBanner from '$lib/components/AdminBanner.svelte';
+  import AdminActionLog from '$lib/components/AdminActionLog.svelte';
   import type { User } from '$lib/types';
 
   let loading = true;
@@ -146,24 +148,53 @@
   let contactUnhandled = 0;
 
   // ── Client error reports ──
-  let clientErrors: any[] = [];
+  //
+  // ONE ROW PER PROBLEM, not per report. Fifty reports were eleven problems — twelve consecutive
+  // lines of one camera failure, then eight of the next — and a queue that takes that long to
+  // scroll is one nobody scrolls. The server groups and counts; this list shows the group and the
+  // detail hangs off it.
+  let errGroups: any[] = [];
+  /** Open REPORTS — how many times it happened. */
   let clientErrOpen = 0;
+  /** Open PROBLEMS — how many things there are to look at. The number the badge should have been
+   *  showing all along: "50 open" and "6 open" describe the same queue and only one of them is
+   *  a workload. */
+  let errOpenGroups = 0;
   let errShowDone = false;
   let errQuery = '', errPage = 1;
-  $: errFiltered = clientErrors.filter((e) => match([e.message, e.context, e.event_code], errQuery) && (errShowDone || !e.handled));
+  /** The expanded group, by fingerprint. Survives a reload because the key is the server's and
+   *  does not change when the counts do — marking one resolved must not collapse what you are
+   *  reading. */
+  let openErr: string | null = null;
+  // Searching the group searches the things a group is looked up BY: its wording, where it
+  // happened, and the events it came from. Not the stack — a search that matched minified frame
+  // names would match everything from one build and nothing from the next.
+  $: errFiltered = errGroups.filter((g) => match([g.message, g.context, ...(g.eventCodes ?? [])], errQuery)
+    && (errShowDone || !g.handled));
   $: { dep(errQuery, errShowDone); errPage = 1; }
   $: errPaged = paginate(errFiltered, Math.min(errPage, pageCount(errFiltered.length)));
 
   async function loadClientErrors() {
     try {
-      const r = await api<{ errors: any[]; open: number }>('/api/admin/client-errors');
-      clientErrors = r.errors; clientErrOpen = r.open;
+      const r = await api<{ groups: any[]; open: number; openGroups: number }>('/api/admin/client-errors');
+      errGroups = r.groups ?? []; clientErrOpen = r.open ?? 0; errOpenGroups = r.openGroups ?? 0;
     } catch { /* ignore */ }
   }
-  async function toggleErrHandled(id: string) {
-    try { await postJson(`/api/admin/client-errors/${id}/handled`, {}); await loadClientErrors(); }
-    catch (e) { showToast((e as Error).message, true); }
+  // Resolve the WHOLE group, and say which way rather than asking the server to toggle. A group
+  // is routinely mixed — resolved last week, recurred this morning — so there is nothing to
+  // negate; the button says what it is about to do and then sends exactly that.
+  async function toggleErrHandled(g: any) {
+    try {
+      await postJson(`/api/admin/client-errors/${g.latestId}/handled`, { handled: !g.handled });
+      await loadClientErrors();
+    } catch (e) { showToast((e as Error).message, true); }
   }
+  /** Who to contact, and the three answers are genuinely different. A name; a guest who has since
+   *  been deleted (retention purge or an erasure request — the name went with them, which is the
+   *  design, see 0071); and a report from a page that never had a session at all. */
+  const errGuest = (o: any) => o?.participantName || (o?.participantId ? 'deleted guest' : '—');
+  /** The device in one line, for the occurrence table. */
+  const errDevice = (o: any) => [o?.displayMode, o?.viewport, o?.connection].filter(Boolean).join(' · ') || '—';
 
   async function loadContact() {
     try {
@@ -377,11 +408,15 @@
     <p class="muted">This area is for site administrators only.</p>
     <a class="btn" href="/dashboard">← Back to my events</a>
   {:else}
-    <!-- Distinct top bar so it's unmistakable you're in platform/site-admin mode. -->
-    <div class="admin-banner">
-      <span>🎩 SITE ADMIN MODE — platform-wide controls</span>
-      <a class="exit" href="/dashboard">← Back to my events</a>
-    </div>
+    <!-- Distinct top bar so it's unmistakable you're in platform/site-admin mode.
+         The bar itself now lives in AdminBanner: the event manager needed the same one, and the red
+         declared here could never have reached it — Svelte scopes CSS to the file that declares it,
+         so the second copy would have been forty lines of colour to keep in step by hand. Same
+         reason SiteAdminLink exists. -->
+    <AdminBanner>
+      🎩 SITE ADMIN MODE — platform-wide controls
+      <a slot="actions" class="exit" href="/dashboard">← Back to my events</a>
+    </AdminBanner>
     <header class="head">
       <h1>🎩 Site admin</h1>
       <div class="head-right">
@@ -689,29 +724,102 @@
     </section>
 
     <section class="panel">
-      <h2>Client errors <span class="count">{errFiltered.length}</span>{#if clientErrOpen}<span class="badge">{clientErrOpen} open</span>{/if}</h2>
-      <p class="field-hint">Diagnostic reports from guests' devices (e.g. failed uploads, camera errors) — technical only, no photos or personal content.</p>
+      <h2>Client errors <span class="count">{errFiltered.length}</span>{#if errOpenGroups}<span class="badge">{errOpenGroups} open</span>{/if}</h2>
+      <p class="field-hint">Diagnostic reports from guests' devices (e.g. failed uploads, camera errors) — technical only, no photos or personal content. One row per problem; open it for the stack, the device and who hit it.</p>
       <div class="toolbar">
         <input class="search" placeholder="Search errors — message, context, code…" bind:value={errQuery} />
         <div class="seg">
-          <button class="seg-btn" class:on={!errShowDone} on:click={() => (errShowDone = false)}>Open <small>({clientErrOpen})</small></button>
-          <button class="seg-btn" class:on={errShowDone} on:click={() => (errShowDone = true)}>All <small>({clientErrors.length})</small></button>
+          <button class="seg-btn" class:on={!errShowDone} on:click={() => (errShowDone = false)}>Open <small>({errOpenGroups})</small></button>
+          <button class="seg-btn" class:on={errShowDone} on:click={() => (errShowDone = true)}>All <small>({errGroups.length})</small></button>
         </div>
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Message</th><th>Where</th><th>Event</th><th>When</th><th></th></tr></thead>
+          <thead><tr><th>Problem</th><th>Seen</th><th>Guests</th><th>Event</th><th>Last</th><th></th></tr></thead>
           <tbody>
-            {#each errPaged as e}
-              <tr class={e.handled ? 'done' : ''}>
-                <td class="msg">{e.message}</td>
-                <td class="muted">{e.context || '—'}</td>
-                <td class="muted">{e.event_code || '—'}</td>
-                <td class="muted">{fmtDate(e.created_at)}</td>
-                <td><button class="link-btn" on:click={() => toggleErrHandled(e.id)}>{e.handled ? 'reopen' : 'resolve'}</button></td>
+            {#each errPaged as g}
+              <tr class={g.handled ? 'done' : ''}>
+                <td class="msg">
+                  <div>{g.message}</div>
+                  {#if g.context}<span class="chip">{g.context}</span>{/if}
+                </td>
+                <!-- The count IS the feature. Twelve reports of one thing and one report of
+                     another used to occupy twelve rows and one; now they occupy one row each and
+                     the twelve says so. The open tally appears only when a group is part-handled,
+                     which is what a group that RECURRED after being resolved looks like. -->
+                <td class="num"><b>{g.count}×</b>{#if g.open && g.open !== g.count}<div class="purge-line">{g.open} since resolved</div>{/if}</td>
+                <td class="num">{g.guests || '—'}</td>
+                <td class="muted">{(g.eventCodes ?? []).slice(0, 2).join(', ') || '—'}{#if (g.eventCodes ?? []).length > 2}<span class="muted"> +{g.eventCodes.length - 2}</span>{/if}</td>
+                <td class="muted nowrap">{fmtDate(g.lastSeen)}</td>
+                <td class="nowrap">
+                  <button class="linklike" aria-expanded={openErr === g.key}
+                          on:click={() => (openErr = openErr === g.key ? null : g.key)}
+                          title="Stack, device, connection and who hit it">{openErr === g.key ? 'Hide' : 'Detail'}</button>
+                  <button class="link-btn" on:click={() => toggleErrHandled(g)}>{g.handled ? 'reopen' : 'resolve'}</button>
+                </td>
               </tr>
+              {#if openErr === g.key}
+                <!-- The same `.drill` row the events and revenue tables open, so the page has one
+                     way of opening something rather than three that look slightly different.
+                     Costs no request: the group already arrived with its occurrences. -->
+                <tr class="drill"><td colspan="6">
+                  <div class="setup">
+                    <div class="setup-g">
+                      <div class="setup-h">Where</div>
+                      <div class="setup-r"><span>Context</span><b>{g.context || '—'}</b></div>
+                      <div class="setup-r"><span>Page</span><b>{g.latest?.url || '—'}</b></div>
+                      <div class="setup-r"><span>First seen</span><b>{fmtDate(g.firstSeen)}</b></div>
+                      <div class="setup-r"><span>Last seen</span><b>{fmtDate(g.lastSeen)}</b></div>
+                    </div>
+                    <div class="setup-g">
+                      <div class="setup-h">Latest device</div>
+                      <div class="setup-r"><span>Mode</span><b>{g.latest?.displayMode || '—'}</b></div>
+                      <div class="setup-r"><span>Viewport</span><b>{g.latest?.viewport || '—'}</b></div>
+                      <div class="setup-r"><span>Connection</span><b>{g.latest?.connection || '—'}</b></div>
+                      <div class="setup-r"><span>Outcome</span><b>{g.latest?.outcome || 'not reported'}</b></div>
+                    </div>
+                    <div class="setup-g">
+                      <div class="setup-h">Build</div>
+                      <!-- Two versions on purpose: a disagreement means the guest was running a
+                           bundle we had already replaced, which is the difference between "the fix
+                           did not work" and "the fix never reached them". -->
+                      <div class="setup-r"><span>Deployed</span><b>{(g.versions ?? []).join(', ') || '—'}</b></div>
+                      <div class="setup-r"><span>Their build</span><b>{g.latest?.clientBuild || '—'}</b></div>
+                      <div class="setup-r"><span>Guests hit</span><b>{g.guests || '—'}</b></div>
+                      <div class="setup-r"><span>Reports</span><b>{g.count}</b></div>
+                    </div>
+                  </div>
+                  <!-- The one field whose absence made a report unactionable: production holds a
+                       row reading `camera: TypeError Type error` and nothing else. Say so out loud
+                       when it is missing, rather than rendering an empty box. -->
+                  {#if g.latest?.stack}
+                    <pre class="stack">{g.latest.stack}</pre>
+                  {:else}
+                    <p class="field-hint">No stack — reported by a client build older than this field, or from a call site that had no error object to pass.</p>
+                  {/if}
+                  {#if g.occurrences?.length > 1}
+                    <table class="inner">
+                      <thead><tr><th>When</th><th>Guest</th><th>Event</th><th>Device</th><th>Outcome</th></tr></thead>
+                      <tbody>
+                        {#each g.occurrences as o}
+                          <tr>
+                            <td class="muted nowrap">{fmtDate(o.at)}</td>
+                            <td>{errGuest(o)}</td>
+                            <td class="muted">{o.eventCode || '—'}</td>
+                            <td class="muted">{errDevice(o)}</td>
+                            <td class="muted">{o.outcome || '—'}</td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
+                    {#if g.count > g.occurrences.length}
+                      <p class="field-hint">Showing the {g.occurrences.length} most recent of {g.count}.</p>
+                    {/if}
+                  {/if}
+                </td></tr>
+              {/if}
             {/each}
-            {#if !errFiltered.length}<tr><td colspan="5" class="muted">{clientErrors.length ? (errShowDone ? 'No matches.' : 'No open errors — switch to “All”.') : 'No client errors reported. 🎉'}</td></tr>{/if}
+            {#if !errFiltered.length}<tr><td colspan="6" class="muted">{errGroups.length ? (errShowDone ? 'No matches.' : 'No open errors — switch to “All”.') : 'No client errors reported. 🎉'}</td></tr>{/if}
           </tbody>
         </table>
       </div>
@@ -835,6 +943,13 @@
       </section>
     {/if}
 
+    <!-- Every change a site admin has made to an event they do not own, newest first.
+         Read-only by design: there is no revert here and there is not going to be one — see
+         AdminActionLog for why the before-value plus the ordinary control beats an undo button. -->
+    <section class="panel">
+      <AdminActionLog heading="Admin actions on customers' events" />
+    </section>
+
     <section class="panel">
       <h2>Users <span class="count">{usrTotal}</span></h2>
       <div class="filterbar">
@@ -885,16 +1000,9 @@
 
 <style>
   .wrap { max-width: 1100px; margin: 0 auto; padding: 0 16px 64px; }
-  /* Unmistakable "you're in site-admin mode" bar across the top. */
-  .admin-banner {
-    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
-    background: #7a1f2b; color: #fff; font-weight: 800; letter-spacing: .02em;
-    margin: 0 -16px 18px; padding: 10px 18px; font-size: 0.86rem;
-    border-bottom: 3px solid #c0392b;
-  }
-  .admin-banner .exit { color: #fff; text-decoration: none; font-weight: 700; font-size: 0.82rem;
-    border: 1px solid rgba(255,255,255,.5); border-radius: 8px; padding: 4px 10px; white-space: nowrap; }
-  .admin-banner .exit:hover { background: rgba(255,255,255,.15); }
+  /* The "site-admin mode" bar's own styles moved into AdminBanner — including `.exit`, which the
+     slotted link still carries: slotted markup keeps the CALLER's scope, so the component styles it
+     through a :global() under its own wrapper. Nothing to declare here. */
   .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding-top: 6px; }
   .head-right { display: flex; align-items: center; gap: 12px; }
   h1 { margin: 0 0 4px; }
@@ -985,6 +1093,13 @@
   .link-btn { background: none; border: none; color: #c0392b; cursor: pointer; font-size: 0.82rem; text-decoration: underline; padding: 0; }
   .badge { background: #c0392b; color: #fff; border-radius: 999px; padding: 1px 9px; font-size: 0.72rem; font-weight: 700; }
   td.msg { white-space: normal; max-width: 480px; }
+  /* A context label beside a message. `.ev-code` already looks exactly like this and is not
+     reused, because the next reader would take a value styled as an event code for one. */
+  .chip { display: inline-block; margin-top: 3px; font-size: 0.72rem; background: var(--border, #f0f0f0); padding: 1px 6px; border-radius: 5px; color: var(--text-muted); }
+  /* Scrolls rather than grows: a stack is occasionally forty frames, and one long one would push
+     every other group off the screen — the defect this whole panel was rebuilt to stop. */
+  .stack { margin: 10px 0 0; padding: 10px 12px; background: var(--surface-2, #fafafa); border: 1px solid var(--border, #e5e5e5); border-radius: 8px;
+    font-size: 0.72rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
   tbody tr.done { opacity: 0.5; }
   .rev-totals { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
   .rev-totals .stat { min-width: 130px; }
