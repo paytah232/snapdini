@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isIndexable, canonicalOrigin, robotsMeta, robotsHeader, robotsTxt, sitemapXml } from './seo';
+import { isIndexable, canonicalOrigin, robotsMeta, robotsHeader, robotsTxt, sitemapXml, SITEMAP_LASTMOD } from './seo';
 
 describe('isIndexable', () => {
   it('opts in on 1 / true, case- and space-insensitively', () => {
@@ -80,7 +80,50 @@ describe('robots.txt on a preview host', () => {
   });
 });
 
+describe('SITEMAP_LASTMOD', () => {
+  // This constant is the whole recrawl signal, and it is hand-maintained, so the ways it breaks are
+  // typos and dates that never happened. Both are silent: an invalid lastmod makes Google ignore
+  // the field, which looks exactly like not having one.
+  it('is a real calendar date in YYYY-MM-DD form', () => {
+    expect(SITEMAP_LASTMOD).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    const d = new Date(`${SITEMAP_LASTMOD}T00:00:00Z`);
+    expect(Number.isNaN(d.getTime())).toBe(false);
+    // Round-trips, so 2026-02-31 (which Date happily rolls forward to 3 March) is caught.
+    expect(d.toISOString().slice(0, 10)).toBe(SITEMAP_LASTMOD);
+  });
+
+  it('is not in the future — a claim we cannot have earned yet', () => {
+    // Allow a day of slack for the box's clock and for whoever is west of it.
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    expect(SITEMAP_LASTMOD <= tomorrow).toBe(true);
+  });
+
+  it('is not wired to the clock', () => {
+    // The point of a hand-maintained date is that it does NOT move on its own. If this ever equals
+    // today on a day nobody edited the file, someone has replaced it with `new Date()` and spent
+    // the signal: Google discounts a lastmod that moves without the content moving.
+    const src = sitemapXml('https://x', [{ path: '/', priority: '1.0', lastmod: SITEMAP_LASTMOD }]);
+    expect(src).toContain(`<lastmod>${SITEMAP_LASTMOD}</lastmod>`);
+    expect(SITEMAP_LASTMOD).not.toBe('');
+  });
+});
+
 describe('sitemapXml', () => {
+  it('emits lastmod when given one, because it is the only hint Google reads', () => {
+    const xml = sitemapXml('https://snapdini.com', [{ path: '/', priority: '1.0', lastmod: '2026-09-21' }]);
+    expect(xml).toContain('<lastmod>2026-09-21</lastmod>');
+    // Ordering matters to the schema: lastmod must follow loc and precede changefreq.
+    expect(xml.indexOf('<lastmod>')).toBeGreaterThan(xml.indexOf('<loc>'));
+    expect(xml.indexOf('<changefreq>')).toBeGreaterThan(xml.indexOf('<lastmod>'));
+  });
+
+  it('omits the element entirely when there is no date, rather than emitting an empty one', () => {
+    // An empty <lastmod></lastmod> is a schema error and would invalidate the whole sitemap in
+    // Search Console — worse than the missing field this replaced.
+    const xml = sitemapXml('https://snapdini.com', [{ path: '/', priority: '1.0' }]);
+    expect(xml).not.toContain('<lastmod>');
+  });
+
   it('builds every loc from the canonical origin', () => {
     const xml = sitemapXml('https://snapdini.com', [{ path: '/', priority: '1.0' }, { path: '/pricing', priority: '0.9' }]);
     expect(xml).toContain('<loc>https://snapdini.com/</loc>');

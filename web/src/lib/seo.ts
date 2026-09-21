@@ -72,11 +72,36 @@ export function robotsTxt(opts: { indexable: boolean; origin: string }): string 
           `Sitemap: ${opts.origin}/sitemap.xml`, ''].join('\n');
 }
 
+/**
+ * When the public marketing pages last MEANINGFULLY changed, as `YYYY-MM-DD`.
+ *
+ * Bump this when the copy on those pages changes. Not on every release — on every COPY change.
+ *
+ * `lastmod` is the only one of sitemap.xml's three optional hints that Google reads: it has said
+ * publicly that it ignores `changefreq` and `priority` outright (they are kept below for the other
+ * engines, which is the only reason they are still there). So this single field is the entire
+ * mechanism by which we can ask for a recrawl, and it was missing — which is why "request a
+ * reindex" had nothing to act on. A sitemap with no `lastmod` gives a crawler no reason to believe
+ * anything changed.
+ *
+ * It is deliberately a hand-maintained constant rather than the build clock. Google reads
+ * `lastmod` as a claim about CONTENT and discounts the field on sites where it learns not to trust
+ * it, so wiring it to build time — moving on every deploy whether a word changed or not — would
+ * spend the one signal that works in order to look busy. A stale-but-true date is the safe
+ * failure; an always-fresh false one is not.
+ */
+export const SITEMAP_LASTMOD = '2026-09-21';
+
 /** The sitemap body for an indexable deployment. Non-indexable ones must not serve one at all. */
-export function sitemapXml(origin: string, pages: { path: string; priority: string }[]): string {
+export function sitemapXml(
+  origin: string,
+  pages: { path: string; priority: string; lastmod?: string }[],
+): string {
   const urls = pages
-    .map(({ path, priority }) =>
-      `  <url>\n    <loc>${origin}${path}</loc>\n    <changefreq>weekly</changefreq>\n    <priority>${priority}</priority>\n  </url>`)
+    .map(({ path, priority, lastmod }) =>
+      `  <url>\n    <loc>${origin}${path}</loc>\n` +
+      (lastmod ? `    <lastmod>${lastmod}</lastmod>\n` : '') +
+      `    <changefreq>weekly</changefreq>\n    <priority>${priority}</priority>\n  </url>`)
     .join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>\n`;
 }

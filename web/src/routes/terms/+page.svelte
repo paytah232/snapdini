@@ -1,12 +1,17 @@
 <script lang="ts">
   import Logo from '$lib/components/Logo.svelte';
   import SiteFooter from '$lib/components/SiteFooter.svelte';
+  import { page } from '$app/stores';
   const updated = 'June 2026';
+  // Configuration, NOT the request host. See the note on /privacy.
+  $: origin = $page.data.canonicalOrigin ?? $page.url.origin;
 </script>
 
 <svelte:head>
   <title>Terms & Conditions — Snapdini</title>
   <meta name="description" content="Snapdini terms of service: reliability, refunds, your photos and acceptable use." />
+  <link rel="canonical" href={origin + '/terms'} />
+  <meta name="robots" content={$page.data.robotsMeta ?? 'noindex, nofollow'} />
 </svelte:head>
 
 <main class="wrap">

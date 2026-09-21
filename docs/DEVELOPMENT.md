@@ -1266,6 +1266,17 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
     tell anyone to drop it. What it does not do is advertise a sitemap, and `/sitemap.xml` 404s.
   - Per-event `og:url` (join/gallery/share pages) is still request-derived on purpose — those are
     social previews for one shared link, not canonicals, and they are all `Disallow`ed.
+  - **`SITEMAP_LASTMOD` in `seo.ts` is hand-maintained, and bumping it is how you ask for a
+    recrawl.** Of sitemap.xml's three optional hints, Google reads only `lastmod` — it has said
+    publicly that it ignores `changefreq` and `priority`, which are kept solely for other engines.
+    So that one constant is the entire recrawl signal, and for a long time it was absent: the
+    sitemap listed every page with no date at all, which gives a crawler no reason to believe
+    anything changed. Bump it when the **copy** on the public pages changes, not on every release.
+    It is deliberately not wired to the build clock: Google reads `lastmod` as a claim about
+    content and discounts the field on sites where it learns not to trust it, so a date that moved
+    on every deploy would spend the only signal that works. A stale-but-true date is the safe
+    failure. `seo.test.ts` rejects a malformed or future date; `sitemapRoute.test.ts` checks the
+    route still stamps it onto every entry, which is where it went missing the first time.
   - **Alternative, if you cannot set env on your host**: send the header at your reverse proxy
     instead. Traefik file provider:
 

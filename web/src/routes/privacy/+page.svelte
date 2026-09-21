@@ -7,12 +7,20 @@
   onMount(async () => { try { faceAvailable = !!(await getConfig()).faceMatchingAvailable; } catch { /* leave it hidden */ } });
   import Logo from '$lib/components/Logo.svelte';
   import SiteFooter from '$lib/components/SiteFooter.svelte';
+  import { page } from '$app/stores';
   const updated = 'June 2026';
+  // Configuration, NOT the request host — a preview host must not declare itself canonical. Same
+  // rule as every other public page; this one and /terms were simply missed, which left
+  // www.snapdini.com/privacy and snapdini.com/privacy as two pages with identical content and
+  // neither naming a master.
+  $: origin = $page.data.canonicalOrigin ?? $page.url.origin;
 </script>
 
 <svelte:head>
   <title>Privacy Policy — Snapdini</title>
   <meta name="description" content="Snapdini privacy policy: what we collect, how we use it, how long we keep your photos and emails, the services we use, and our promise never to sell your data or send unsolicited marketing." />
+  <link rel="canonical" href={origin + '/privacy'} />
+  <meta name="robots" content={$page.data.robotsMeta ?? 'noindex, nofollow'} />
 </svelte:head>
 
 <main class="wrap">
