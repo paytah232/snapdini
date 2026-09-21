@@ -18,10 +18,11 @@
   import { loadTileSize, saveTileSize, tileVars, type TileSize } from '$lib/tileSize';
   import { galleryVisitorJoin } from '$lib/events';
   import DownloadIcon from '$lib/components/DownloadIcon.svelte';
+  import Spinner from '$lib/components/Spinner.svelte';
   import { tileAspect } from '$lib/ui';
   import { sortPhotos, type PhotoSort } from '$lib/photoSort';
   import { demoLinks } from '$lib/demo';
-  import { saveMany, type SaveManyProgress, savePhotoByUrl } from '$lib/saveImage';
+  import { saveMany, saveManySummary, type SaveManyProgress, savePhotoByUrl } from '$lib/saveImage';
   import { savedSet, markSaved } from '$lib/saved';
   import ShareScope from '$lib/components/ShareScope.svelte';
   import DownloadFormat from '$lib/components/DownloadFormat.svelte';
@@ -29,6 +30,8 @@
   import StartYourOwn from '$lib/components/StartYourOwn.svelte';
   import { trackGalleryView, trackPhotos } from '$lib/referral';
   import { createRevealWatch, galleryPollBaseMs, galleryPollDelayMs, shouldPollGallery } from '$lib/revealWatch';
+  import { createStaleHeal, onStaleMedia } from '$lib/staleMedia';
+  import { serverNow } from '$lib/serverClock';
   import type { PageData } from './$types';
 
   export let data: PageData;
@@ -125,7 +128,28 @@
      a cached gallery answer from before it does not show a stale picture, it points at a filename
      that no longer exists — a broken tile until the cache expires. Every load inside the window
      asks for the uncached copy. */
-  let rotatedAt = 0;
+  /** WHEN this browser last rotated something here — and it survives a reload, because the
+   *  problem it guards against does.
+   *
+   *  In memory alone this covered the tab that did the rotating and nothing else, which misses the
+   *  most natural thing anybody does next: reload to check. That reload can be answered by the 30s
+   *  shared copy of the listing, which still names the file the rotation replaced — and the
+   *  browser has that file in its OWN cache, immutable for a year, so it paints instantly from
+   *  disk in the old orientation. No request, no 404, nothing for the self-heal to react to. The
+   *  page looks like the rotation silently failed, and pressing reload again does it all over.
+   *
+   *  sessionStorage rather than a store: surviving a reload IS the requirement, and the scope
+   *  wanted is exactly this tab. Per event, so rotating in one does not spend a cache skip in
+   *  another. Timestamped and read through the same window as the in-memory flag, so a tab
+   *  reopened tomorrow does not skip the cache on the strength of yesterday. */
+  const ROT_KEY = `sd-rot:${code}`;
+  let rotatedAt = ((): number => {
+    if (typeof sessionStorage === 'undefined') return 0;
+    try {
+      const at = Number(sessionStorage.getItem(ROT_KEY)) || 0;
+      return at > 0 && serverNow() - at < HEART_FRESH_MS ? at : 0;
+    } catch { return 0; }   // private mode
+  })();
   $: rotateDirty = rotatedAt > 0 && now - rotatedAt < HEART_FRESH_MS;
 
   /* ONE flag, read by EVERY load, because the bug was one load being forgotten.
@@ -135,7 +159,44 @@
      feature that had "fixed" exactly this on the one path somebody thought of. There is no path
      where the cache should be trusted for one of these and not the other, so there is no longer a
      choice to make at the call site. */
-  $: skipCache = heartsDirty || rotateDirty;
+  /** Have we ever had an answer? Not the same question as `!revealed`, which is also true before
+   *  the first reply has landed — and getting those two confused would make the FIRST load of a
+   *  revealed gallery skip the cache, which is the single most valuable thing in it. */
+  let everLoaded = false;
+  /** Known, from the server, to be locked right now. */
+  $: knownLocked = everLoaded && !revealed;
+
+  /*  ...and `knownLocked`, which is the same argument as the other two from the other end.
+   *
+   *  The reply is shared-cacheable for 30s because the ORDER is everyone's. While the gallery is
+   *  locked there is no order in it: the whole body is `{revealed: false}` and a count. So the
+   *  cache is holding nothing worth having, in front of the one field every one of those requests
+   *  exists to watch change.
+   *
+   *  That combination is what made a reveal take over a minute to show up. The poll is 30s jittered
+   *  +/-20%, and the reply to it could be answered from a copy up to 30s old that still said
+   *  locked — so a host pressing "Reveal all now" and a guest with the gallery open were, worst
+   *  case, 66 seconds apart with everything working exactly as designed. The interval was the
+   *  visible half of it and the cache was the half nobody would have found by looking at the
+   *  client.
+   *
+   *  The cost is bounded by what it skips: a locked reply is a single count, which is the same
+   *  reasoning that makes polling affordable here at all (see GALLERY_POLL_MS). And it turns
+   *  itself off at the moment it becomes expensive — one uncached body per guest as the gate
+   *  opens, spread by the crossing watcher's jitter, and every load after that back on the cache. */
+  /** A tile on THIS page has just 404'd, so the names we are holding are provably out of date and
+   *  a cached copy of the same listing would hand us the same dead names back. Same window and the
+   *  same reasoning as a heart or a rotation — see staleMedia.ts for why a 404 is the signal. */
+  let staleAt = 0;
+  $: staleDirty = staleAt > 0 && now - staleAt < HEART_FRESH_MS;
+  $: skipCache = heartsDirty || rotateDirty || knownLocked || staleDirty;
+
+  /*  A gallery that has revealed does not poll, on purpose. So when a host rotates a photo, nothing
+   *  tells the guests: tiles already painted keep their bitmaps and look fine, and everything not
+   *  yet scrolled into view fetches a name that no longer exists. The evidence arrives on its own,
+   *  from the tile itself, and one cache-skipped refetch replaces every name at once. */
+  const staleHeal = createStaleHeal({ refetch: () => loadPhotos() });
+  let stopStaleWatch: (() => void) | undefined;
 
   /** Fold a rotation's reply into the row it belongs to.
    *
@@ -148,12 +209,23 @@
    *
    *  `photos` and not `shownPhotos`: this page owns the former and derives the latter. */
   function applyRotation(r: PhotoRotation) {
-    rotatedAt = Date.now();
+    rotatedAt = serverNow();
     now = rotatedAt;               // `now` ticks once a second; don't wait for it to catch up
+    // THE MERGE FIRST. This is the line that actually puts the corrected photo on screen, and it
+    // now runs before anything that can throw.
+    //
+    // The write below is guarded, and was already, but ordering it after the merge is the part
+    // that does not depend on anyone remembering. Safari in private browsing throws on setItem
+    // rather than failing quietly, so with the write first, deleting that try/catch — a one-line
+    // tidy-up that looks entirely safe — would abandon applyRotation halfway: the reply in hand,
+    // the new names known, and the tile still showing a file that no longer exists. Ordered last,
+    // the worst an unguarded throw can cost is the marker, which only means the next load goes to
+    // the cache a little early.
     photos = photos.map((p) => (p.id === r.id
       ? { ...p, url: r.url, thumbUrl: r.thumbUrl, playUrl: r.playUrl,
           width: r.width, height: r.height, shotSideways: r.shotSideways }
       : p));
+    try { sessionStorage.setItem(ROT_KEY, String(rotatedAt)); } catch { /* private mode */ }
   }
 
   async function reloadForSort() {
@@ -168,11 +240,61 @@
   $: if (!faceEnrolled) meOnly = false;
 
   // Live countdown
-  let now = Date.now();
+  /** The server's clock, like the camera's. `revealAt` is the server's instant, and everything
+   *  derived from `now` on this page — the countdown, `pastZero`, `slowArrival` — is a comparison
+   *  against it. Reading the device clock instead meant a phone four minutes fast showed the
+   *  spinner and "Photos are on their way…" four minutes before anything was, then accused itself
+   *  of being slow 110 seconds after that. See serverClock.ts. */
+  let now = serverNow();
   let tick: ReturnType<typeof setInterval> | undefined;
 
   $: remaining = revealAt ? Math.max(0, revealAt - now) : 0;
   $: countdown = formatCountdown(remaining);
+
+  /** Counted down to zero on a timed reveal, and the server has not said yes yet.
+   *
+   *  This is a real interval, not an instant, and it was the one state the wall had no words for.
+   *  Three things stack up inside it: the skew pad the crossing watcher waits before it asks at all
+   *  (5s, plus up to 12s of anti-herd jitter), the round trip, and — the big one — up to 30s of
+   *  shared cache in front of the answer. So a guest watching the clock hit 00:00:00 can be looking
+   *  at a locked page for the better part of a minute while everything behind it is working
+   *  perfectly. "Unlocking…" in the slot where the numbers were is not enough to carry that: it is
+   *  one word, it never changes, and after fifteen seconds of it the honest reading is that it has
+   *  hung. */
+  /*  `!awaitingHost` is doing real work here and it is not defensive.
+   *
+   *  "Hide all photos" is an explicit override that beats the clock — isRevealed() checks it first
+   *  and returns false for an at_end event that has already ended. But the event keeps its mode and
+   *  its instant, so the payload arrives saying `at_end` with a live `revealAt` AND
+   *  `awaitingHost: true` at the same time. The countdown below was therefore counting down to a
+   *  moment that was going to do nothing at all, and at zero this state would have put a spinner on
+   *  the screen promising a delivery that nobody had authorised.
+   *
+   *  Lying to a guest is worse than telling them nothing. A host hides photos precisely when they
+   *  do not want them seen yet, and the page has a true thing to say in that case — the host has
+   *  not revealed them — which is what it says instead. */
+  $: pastZero = !revealed && !awaitingHost && revealMode === 'at_end' && !!revealAt && remaining === 0;
+  $: sinceZero = pastZero && revealAt ? Math.max(0, now - revealAt) : 0;
+  /** Past the crossing watcher's WORST case, jitter included: the padded first ask (5s, plus up to
+   *  12s of anti-herd spread) and then four retries of 5, 10, 20 and 40s, each of which can run 20%
+   *  long — 107s if every roll goes the wrong way. Rounded up to 110.
+   *
+   *  Derived, not chosen, and there is a test that re-derives it by feeding the watcher's own
+   *  exported functions their unluckiest input. Picked by feel this would have been about 90s,
+   *  which is INSIDE the ladder: the page would have started apologising while the thing it was
+   *  waiting for was still legitimately on its way, on precisely the unlucky clients that least
+   *  needed telling something had gone wrong. Nothing is wrong at 110s either — the 45s poll has
+   *  simply taken over — but a page that has promised "any second now" for that long has stopped
+   *  being believable, and saying so costs nothing. */
+  $: slowArrival = sinceZero > 110_000;
+
+  $: wallMsg = pastZero
+    ? slowArrival
+      ? 'Still on their way\u2026'
+      : 'Photos are on their way\u2026'
+    : awaitingHost
+      ? 'The host hasn\u2019t revealed the photos yet'
+      : modeText(revealMode);
 
   function formatCountdown(ms: number): string {
     const s = Math.floor(ms / 1000);
@@ -198,6 +320,7 @@
     pendingCount = data.pendingCount;
     photos = data.photos ?? [];
     nextCursor = data.nextCursor ?? null;
+    everLoaded = true;
     // Separate call on purpose: this payload is shared-cacheable, so live counts and "which are
     // mine" cannot ride in it. See the hearts endpoint.
     void loadHearts();
@@ -441,8 +564,16 @@
     try { visitorToken = localStorage.getItem(VKEY); } catch { /* private mode */ }
     await firstLoad();
     document.addEventListener('visibilitychange', onVisibility);
+    stopStaleWatch = onStaleMedia(() => {
+      // `now` is advanced by hand as well as `staleAt`. The 1s tick is what normally moves it, and
+      // waiting for the next one would let the refetch this is about to schedule go out before
+      // `staleDirty` had become true — i.e. the one request that must not be answered from the
+      // shared cache would be the one request that was.
+      staleAt = now = serverNow();
+      staleHeal.report();
+    });
     tick = setInterval(() => {
-      now = Date.now();
+      now = serverNow();
       // Fed every second; acts at most once per reveal moment (and re-arms if the host moves it).
       if (!revealed) revealWatch.tick(revealAt);
     }, 1000);
@@ -450,6 +581,8 @@
 
   onDestroy(() => {
     clearTimeout(retryTimer);
+    stopStaleWatch?.();
+    staleHeal.stop();
     moreObserver?.disconnect();
     clearInterval(tick);
     clearTimeout(pollTimer);
@@ -515,7 +648,7 @@
     heartMine = mine;
     // Their own change: every gallery request for the next half-minute skips the shared copy, so
     // re-sorting by Most loved reflects what they just did rather than the order before it.
-    heartsChangedAt = Date.now();
+    heartsChangedAt = serverNow();
     now = heartsChangedAt;   // `now` ticks once a second; don't wait for it to catch up
     try {
       const r = await setHeart(p.id, guestToken, want, vt);
@@ -592,12 +725,19 @@
       // Only what actually got through — a cancelled share sheet returns the batches before it,
       // not the whole list.
       if (r.savedIds.length) saved = markSaved(code, r.savedIds);
-      if (r.cancelled) { showToast(r.saved ? `Stopped — ${r.saved} downloaded` : 'Stopped'); bulkDone = ''; }
+      // saveManySummary, not a sentence built here. This counted successes only and said nothing
+      // at all about failures — so a file that 404'd (the usual reason being a rotation, which
+      // RENAMES the stored file out from under a listing this page may have been holding for
+      // minutes) was reported as a clean "11 photos downloaded" from a batch of twelve. Silently
+      // handing someone eleven photos and calling it twelve is the worst of the available answers:
+      // nobody retries a download that said it worked.
+      if (r.cancelled) { showToast(saveManySummary(r), r.failed > 0); bulkDone = ''; }
       else {
-        showToast(`${r.saved} photo${r.saved === 1 ? '' : 's'} downloaded`);
+        showToast(saveManySummary(r), r.failed > 0);
         // Batched saving is slow, and the toast is long gone by the time the last batch lands. The
-        // button holds the answer to "did that finish?" for a few seconds.
-        bulkDone = `✓ Downloaded ${r.saved}`;
+        // button holds the answer to "did that finish?" for a few seconds — which has to include
+        // the answer "not entirely", or the tick contradicts the toast that just went past.
+        bulkDone = r.failed ? `${r.failed} failed — try again` : `✓ Downloaded ${r.saved}`;
         setTimeout(() => (bulkDone = ''), 4000);
       }
     } catch (e) { showToast(writeFailed(e, 'Could not save those'), true); }
@@ -763,8 +903,8 @@
       <TileSizeToggle bind:size={tileSize} on:change={(e) => saveTileSize(e.detail)} />
     {/if}
     {#if revealed && allowDownloads && photos.length && !selecting}
-      <button class="btn ghost" on:click={downloadAll} disabled={bulkSaving}>
-        {#if bulkSaving}Saving {bulkProgress}…{:else if bulkDone}{bulkDone}{:else}<DownloadIcon /> Download{/if}
+      <button class="btn ghost" on:click={downloadAll} disabled={bulkSaving} aria-busy={bulkSaving || undefined}>
+        {#if bulkSaving}<Spinner /> Saving {bulkProgress}{:else if bulkDone}{bulkDone}{:else}<DownloadIcon /> Download{/if}
       </button>
     {/if}
   </div>
@@ -847,20 +987,39 @@
     <div class="state err">{error}</div>
   {:else if !revealed}
     <div class="reveal-wall">
-      <span class="lock" aria-hidden="true">🔒</span>
-      <p class="msg">{awaitingHost ? 'The host hasn\u2019t revealed the photos yet' : modeText(revealMode)}</p>
+      {#if pastZero}
+        <!-- A spinner rather than the padlock, because the padlock is the wrong claim now: the
+             gate is open and this is a delivery in progress. Movement is doing real work here —
+             it is the only thing on screen that distinguishes "fetching" from "stuck", and the
+             frozen 00:00:00 is what made the old wall read as stuck. -->
+        <span class="spin" aria-hidden="true"></span>
+      {:else}
+        <span class="lock" aria-hidden="true">🔒</span>
+      {/if}
+      <p class="msg" aria-live="polite">{wallMsg}</p>
       <!-- Only where asking would actually change something. On a timed reveal the countdown below
            is the whole answer. It also covers the case this was written for: an INSTANT event whose
            photos had been hidden used to read "Refresh to see photos" — advice that can never work,
            offered to somebody refreshing an empty page at a wedding. -->
-      {#if awaitingHost}
+      {#if awaitingHost && !pastZero}
         <p class="ask-host">Ask the host to reveal the photos now!</p>
       {/if}
-      {#if revealMode === 'at_end' && revealAt}
-        <!-- At zero the page is already asking the server (after a short pad for clock skew), so
-             say so. A counter frozen at 00:00:00 with nothing happening is precisely what made
-             this look broken. -->
-        <div class="countdown" aria-live="polite">{remaining > 0 ? countdown : 'Unlocking…'}</div>
+      {#if pastZero}
+        <!-- Says the two things a person standing there actually wants to know: it is coming, and
+             they do not have to do anything. "No need to refresh" is load-bearing — refreshing is
+             what everyone does to a page that looks stuck, and on a shared-cached reply it is the
+             one action that can genuinely make it slower. -->
+        <p class="arriving">
+          {slowArrival
+            ? 'Taking a little longer than usual \u2014 still checking. No need to refresh.'
+            : 'They\u2019ll appear here by themselves. No need to refresh.'}
+        </p>
+      {:else if revealMode === 'at_end' && revealAt && !awaitingHost}
+        <!-- Not while the host is holding them back. The instant is still on the event, so without
+             this the wall reads "the host hasn't revealed the photos yet" over a clock ticking
+             down to a reveal that is not going to happen — two contradictory answers to the same
+             question, the larger and more confident of which is the false one. -->
+        <div class="countdown">{countdown}</div>
       {/if}
       <p class="count">{photoCount} photo{photoCount === 1 ? '' : 's'} so far</p>
     </div>
@@ -1076,6 +1235,22 @@
     font-family: var(--font-mono); font-size: clamp(1.6rem, 8vw, 2.6rem); font-weight: 800;
     color: var(--accent); letter-spacing: .04em;
   }
+  /* Sized to the padlock it stands in for, so the wall does not jump at the moment of the swap —
+     which is the moment everyone is looking straight at it. */
+  .spin {
+    width: 3rem; height: 3rem; border-radius: 50%;
+    border: 4px solid var(--border);
+    border-top-color: var(--accent);
+    animation: spin 900ms linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* Reduced motion gets a pulse instead of nothing: the whole point of the thing is to say work is
+     happening, and a motionless ring says the opposite rather louder than no ring at all. */
+  @media (prefers-reduced-motion: reduce) {
+    .spin { animation: pulse 1.6s ease-in-out infinite; border-top-color: var(--accent); }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+  }
+  .arriving { color: var(--text-muted); font-size: .95rem; margin: 0; max-width: 32ch; line-height: 1.5; }
 
   /* The grid and the card itself are PhotoCard's (.pgrid / .pcell-wrap). All that belongs to this
      page is what it overlays on the tile. */

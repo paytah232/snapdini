@@ -143,7 +143,12 @@ export const getEvent = (id: string) => api<PublicEvent>(`/api/events/${id}`);
 export const getMyEvents = () => api<{ events: MyEvent[] }>('/api/events/mine');
 export const createEvent = (body: Record<string, unknown>) =>
   postJson<{ joinCode: string; slug: string | null; organizerCode: string; event: Record<string, unknown> }>('/api/events', body);
-export const createDemo = () => postJson<{ joinCode: string; sessionToken: string; organizerCode: string }>('/api/events/demo', {});
+/** The visitor's own zone goes with it: a demo with no timezone stores an ambiguous wall clock,
+ *  which is what let the admin settings form read a start as UTC and write it back as local. */
+export const demoTimezone = () => {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; }
+};
+export const createDemo = () => postJson<{ joinCode: string; sessionToken: string; organizerCode: string }>('/api/events/demo', { timezone: demoTimezone() });
 export const getQr = (id: string) => api<{ qrCode: string; joinUrl: string }>(`/api/events/${id}/qr`);
 
 export const getAdmin = (code: string, organizerCode: string) =>
@@ -336,7 +341,7 @@ export const saveSettings = (code: string, organizerCode: string, body: Record<s
   // have been returned since the reveal rules were written and nothing ever read them, so a host
   // whose reveal was moved to their new event end saw a different time in the form and no reason
   // for it — the exact failure the reveal code's own comments say this exists to prevent.
-  api<{ aspectsRefused?: boolean; revealAtClamped?: boolean; guestSendAtClamped?: boolean }>(`/api/events/${code}/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify(body) });
+  api<{ aspectsRefused?: boolean; revealAtClamped?: boolean; guestSendAtClamped?: boolean; startRefused?: string | null; startsAt?: number }>(`/api/events/${code}/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json', ...org(organizerCode) }, body: JSON.stringify(body) });
 export const setReveal = (code: string, organizerCode: string, on: boolean) =>
   postJson(`/api/events/${code}/${on ? 'reveal' : 'unreveal'}`, {}, org(organizerCode));
 export const toggleLock = (code: string, organizerCode: string) => postJson(`/api/events/${code}/lock`, {}, org(organizerCode));

@@ -11,6 +11,7 @@
   import PhotoCard from '$lib/components/PhotoCard.svelte';
   import StarIcon from '$lib/components/StarIcon.svelte';
   import DownloadIcon from '$lib/components/DownloadIcon.svelte';
+  import Spinner from '$lib/components/Spinner.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import OgHead from '$lib/components/OgHead.svelte';
   import StartYourOwn from '$lib/components/StartYourOwn.svelte';
@@ -18,10 +19,11 @@
   import TileSizeToggle from '$lib/components/TileSizeToggle.svelte';
   import { loadTileSize, saveTileSize, tileVars, type TileSize } from '$lib/tileSize';
   import DownloadFormat from '$lib/components/DownloadFormat.svelte';
-  import { saveMany, type SaveManyProgress } from '$lib/saveImage';
+  import { saveMany, saveManySummary, type SaveManyProgress } from '$lib/saveImage';
   import { downloadFilename, heartedPhotos, favouritesUnion, type DownloadScope } from '$lib/download';
   import { referralLink } from '$lib/referral';
   import { createRevealWatch, galleryPollBaseMs, galleryPollDelayMs, shouldPollGallery } from '$lib/revealWatch';
+  import { serverNow } from '$lib/serverClock';
   import type { PageData } from './$types';
 
   export let data: PageData;
@@ -73,7 +75,9 @@
   let selected = new Set<string>();
 
   // Live countdown
-  let now = Date.now();
+  /** Server time — this page runs the same countdown and the same reveal crossing as the gallery,
+   *  against the same server-supplied instant. See serverClock.ts. */
+  let now = serverNow();
   let tick: ReturnType<typeof setInterval> | undefined;
   $: remaining = revealAt ? Math.max(0, revealAt - now) : 0;
   $: countdown = formatCountdown(remaining);
@@ -263,7 +267,7 @@
     await firstLoad();
     document.addEventListener('visibilitychange', onVisibility);
     tick = setInterval(() => {
-      now = Date.now();
+      now = serverNow();
       if (!revealed) revealWatch.tick(revealAt);
     }, 1000);
   });
@@ -338,12 +342,17 @@
     try {
       const items = list.map((p) => ({ id: p.id, url: p.url, filename: downloadFilename(p) }));
       const r = await saveMany(items, (pr: SaveManyProgress) => (bulkProgress = `${pr.done}/${pr.total}`));
-      if (r.cancelled) { showToast(r.saved ? `Stopped — ${r.saved} downloaded` : 'Stopped'); bulkDone = ''; }
+      // Files that did not arrive are counted and said out loud. A share link is the worst place
+      // for the old behaviour: the recipient has no gallery to check against and no way to know
+      // the roll was ever meant to have one more photo in it, so "N downloaded" after a fetch
+      // quietly 404'd was the end of the story. saveManySummary reports both numbers.
+      if (r.cancelled) { showToast(saveManySummary(r), r.failed > 0); bulkDone = ''; }
       else {
-        showToast(`${r.saved} photo${r.saved === 1 ? '' : 's'} downloaded`);
+        showToast(saveManySummary(r), r.failed > 0);
         // Batched saving is slow and the toast is long gone by the last batch; the button holds the
-        // answer to "did that finish?" for a few seconds.
-        bulkDone = `✓ Downloaded ${r.saved}`;
+        // answer to "did that finish?" for a few seconds — a tick only when there is nothing to
+        // retry.
+        bulkDone = r.failed ? `${r.failed} failed — try again` : `✓ Downloaded ${r.saved}`;
         setTimeout(() => (bulkDone = ''), 4000);
       }
     } catch { showToast('Could not save those', true); }
@@ -400,7 +409,7 @@
         <TileSizeToggle bind:size={tileSize} on:change={(e) => saveTileSize(e.detail)} />
         {#if allowDownloads && !selecting}
           <button class="btn ghost" on:click={downloadAll} disabled={bulkSaving}>
-            {#if bulkSaving}Saving {bulkProgress}…{:else if bulkDone}{bulkDone}{:else}<DownloadIcon /> Download{/if}
+            {#if bulkSaving}<Spinner /> Saving {bulkProgress}{:else if bulkDone}{bulkDone}{:else}<DownloadIcon /> Download{/if}
           </button>
         {/if}
       </div>

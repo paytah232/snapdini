@@ -114,18 +114,58 @@ export interface SaveManyProgress { done: number; total: number; }
  *  caller can mark them — see lib/saved.ts. */
 export interface SaveItem { url: string; filename: string; id?: string; }
 
+export interface SaveManyResult {
+  saved: number;
+  /** Items whose bytes never arrived: the fetch threw, or came back with a status that is not ok.
+   *  Counted rather than skipped — see the comment on the catch inside saveMany. */
+  failed: number;
+  cancelled: boolean;
+  savedIds: string[];
+}
+
+/** The one line to put in front of somebody after a bulk save.
+ *
+ *  Written here rather than at each call site because there are three of them (the camera roll,
+ *  the event gallery and a share link) and they were each building the sentence by hand out of
+ *  `saved` alone. That is how "N downloaded" came to be printed after a run in which files had
+ *  failed: nothing was lying, the callers simply had no other number to print.
+ *
+ *  Deliberately plain. A failure here is very nearly always a photo that was rotated or tidied
+ *  while the save was running, so the honest instruction is "try again" and the honest tone is
+ *  mild — nothing has been lost, and the photo is still in the gallery. The one thing it must not
+ *  do is round a partial result up to a complete one. */
+export function saveManySummary(r: { saved: number; failed: number; cancelled: boolean }): string {
+  const files = (n: number) => `${n} file${n === 1 ? '' : 's'}`;
+  const shots = (n: number) => `${n} photo${n === 1 ? '' : 's'}`;
+  if (r.cancelled) {
+    const stopped = r.saved ? `Stopped — ${r.saved} downloaded` : 'Stopped';
+    return r.failed ? `${stopped}, ${files(r.failed)} failed` : stopped;
+  }
+  if (!r.failed) return `${shots(r.saved)} downloaded`;
+  if (!r.saved) return `${files(r.failed)} failed to download — try again`;
+  return `${shots(r.saved)} downloaded, ${files(r.failed)} failed — try again`;
+}
+
 /** Save many photos the way this platform actually keeps them.
  *
- *  Returns how many were saved. A cancelled share stops the whole run — carrying on would keep
- *  showing sheets to someone who has just said no.
+ *  Returns how many were saved AND how many were not. A cancelled share stops the whole run —
+ *  carrying on would keep showing sheets to someone who has just said no.
+ *
+ *  The failed count is not a nicety. A bulk save is a fetch per photo against URLs the page read
+ *  minutes ago, and the server renames a file on every rotation — so "this URL is a 404 now" is a
+ *  routine, expected outcome rather than an exotic one, and it was being swallowed. The run
+ *  carried on, the total came back as only the successes, and the caller reported that number as
+ *  though it were the whole roll. Carrying on is still right; reporting it as a clean sweep was
+ *  not.
  *
  *  Non-iOS callers should prefer the server's zip: one file, one click, no memory ceiling. This is
  *  for the platform where a zip is a dead end. */
 export async function saveMany(
   items: SaveItem[],
   onProgress?: (p: SaveManyProgress) => void,
-): Promise<{ saved: number; cancelled: boolean; savedIds: string[] }> {
+): Promise<SaveManyResult> {
   let saved = 0;
+  let failed = 0;
   // WHICH ones landed, not just how many. A count cannot mark a grid: a roll where three fetches
   // failed and a share was cancelled halfway needs to tick exactly the ones that got through.
   const savedIds: string[] = [];
@@ -146,8 +186,19 @@ export async function saveMany(
           batch.push(new File([b], it.filename, { type: b.type || 'image/jpeg' }));
           if (it.id) batchIds.push(it.id);
           bytes += b.size;
+        } else {
+          // NOT ok, and counted. This is the ordinary way a photo goes missing mid-save: the URL
+          // was read off the gallery when the page loaded, a rotation since then has moved the
+          // file to a fresh uuid, and this fetch gets a 404 for a photo that is perfectly fine
+          // under its new name. Skipping it silently is what made the run report "40 downloaded"
+          // when it had handed over 39.
+          failed++;
         }
-      } catch { /* skip the ones that fail; the rest of the roll should still arrive */ }
+      } catch {
+        // A dropped connection, a CORS refusal, a tab under memory pressure. Same treatment: the
+        // rest of the roll should still arrive, but the guest is told the count did not.
+        failed++;
+      }
       i++;
     }
     if (!batch.length) continue;
@@ -163,7 +214,7 @@ export async function saveMany(
     } catch (e) {
       // A dismissed share sheet is the one case where nothing reached the device, so this batch is
       // NOT recorded — ticking it would be the exact overstatement the marks exist to avoid.
-      if ((e as DOMException)?.name === 'AbortError') return { saved, cancelled: true, savedIds };
+      if ((e as DOMException)?.name === 'AbortError') return { saved, failed, cancelled: true, savedIds };
       // Anything else: fall back to downloads for this batch rather than losing it.
       for (const f of batch) downloadBlob(f, f.name);
       saved += batch.length;
@@ -172,7 +223,7 @@ export async function saveMany(
     // Let the tab breathe between batches so the memory from the last one is actually released.
     await new Promise((r) => setTimeout(r, 60));
   }
-  return { saved, cancelled: false, savedIds };
+  return { saved, failed, cancelled: false, savedIds };
 }
 
 

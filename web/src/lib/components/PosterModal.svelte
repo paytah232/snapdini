@@ -314,7 +314,26 @@
    *  the host is now standing. What force does NOT do is get past an unfilled requirement: that
    *  branch returns first, and still lands them on the field that is blocking them. */
   async function goPStep(n: number, force = false, ring?: string) {
-    if (n === pStep) return;
+    if (n === pStep) {
+    /* ALREADY HERE IS NOT NOTHING — when the press was a cog.
+     *
+     * A cog says "show me THIS element's settings". Answering it depends on where the controls
+     * happen to live, and for an element whose controls are on the step already open, this early
+     * return answered by doing absolutely nothing: no scroll, no ring, a control that eats the
+     * press. Which made the feature look randomly broken rather than broken in a pattern — from
+     * step 1 the QR cog worked (its controls are on step 3, so this guard did not fire) and the
+     * message cog did not (its controls are on step 1). Land on step 3 first and the message cog
+     * started working, because by then it was a real navigation.
+     *
+     * The strip's own contract already ruled this out: "a refusal is never silent in the
+     * component". This was not even a refusal — it was a request that had already been granted,
+     * answered with silence.
+     *
+     * A bare strip press on the current step stays a no-op, which is right: pressing the step you
+     * are on is not a request to be shown anything. */
+      if (force) void arriveAtStep(true, ring);
+      return;
+    }
     if (!canJumpToStep({ to: n, from: pStep, maxReached: pMax, last: P_LAST, canAdvance: pCanAdvance })) {
       if (n > pStep && !pCanAdvance) {
         pStep = 1;
@@ -339,9 +358,19 @@
   /** The cards strip. A skipped step is pressable and takes you to the nearest one that isn't,
    *  rather than being a dead button that eats the tap. */
   async function goCStep(n: number, force = false, ring?: string) {
-    if (n === cStep) return;
+    // Both of the "already there" exits, for the reason spelled out in goPStep: a cog press is a
+    // request to be SHOWN something, and the card wizard has two ways of arriving at it — asking
+    // for the current step outright, or asking for one that is skipped and resolving back to it.
+    if (n === cStep) {
+      if (force) void arriveAtStep(true, ring);
+      return;
+    }
     const target = cStepSkipped(n) ? (cNextStep(n, n > cStep ? 1 : -1) ?? cNextStep(n, n > cStep ? -1 : 1)) : n;
-    if (target === null || target === cStep) return;
+    if (target === null) return;
+    if (target === cStep) {
+      if (force) void arriveAtStep(true, ring);
+      return;
+    }
     if (!canJumpToStep({ to: target, from: cStep, maxReached: cMax, last: C_LAST, canAdvance: C_CAN_ADVANCE })) {
       if (!force || target < 1 || target > C_LAST) return;   // see goPStep for what force means
       cMax = Math.max(cMax, target);

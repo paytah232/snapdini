@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import Spinner from '$lib/components/Spinner.svelte';
 
   /* ONE SLOT, TWO FACES.
    *
@@ -92,7 +93,7 @@
             disabled={busy} tabindex={idle ? -1 : undefined} aria-busy={busy ? true : undefined}
             title={busy ? 'Saving this rotation…' : 'Save this rotation'}
             aria-label="Save this rotation"
-            >{#if busy}<span class="spin" aria-hidden="true"></span>{:else}✓{/if}</button>
+            >{#if busy}<Spinner />{:else}✓{/if}</button>
     <button class="seg" type="button" on:click={() => dispatch('cancel')}
             disabled={busy} tabindex={idle ? -1 : undefined}
             title="Discard this rotation" aria-label="Discard this rotation">✕</button>
@@ -107,14 +108,6 @@
      is fixed by the wider FACE, but a segment that changed size inside it would still shuffle its
      neighbours within the group. Drawn rather than an emoji: a glyph would be whatever the device
      has for it, at whatever optical size, which is the whole reason the icons here are drawn. */
-  .spin { display: inline-block; width: 1em; height: 1em; border-radius: 50%;
-    border: 2px solid currentColor; border-top-color: transparent;
-    vertical-align: -0.125em; animation: rotspin 0.7s linear infinite; }
-  @keyframes rotspin { to { transform: rotate(360deg); } }
-  /* Slowed rather than stopped. A still spinner is indistinguishable from a frozen page, which is
-     the one message this must never send — reduced motion is a request for less movement, not for
-     a worse answer to "is it still going?". */
-  @media (prefers-reduced-motion: reduce) { .spin { animation-duration: 2.4s; } }
 
   .rot { display: inline-grid; align-items: stretch; justify-items: stretch; }
   .rot > * { grid-area: 1 / 1; }

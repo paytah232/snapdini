@@ -51,7 +51,17 @@ describe('the outline of a turned element comes from the renderer', () => {
   // text. A rotation derived here would be the fourth, and the most visible: the outline would sit
   // beside the words rather than merely be the wrong width.
   it('has exactly one place that turns a rect, and it is the imported one', () => {
-    expect(SCRIPT).toContain("rotatedRect");
+    // The CALL, not the name. `toContain('rotatedRect')` was satisfied by the import line alone,
+    // so the whole of this test's premise — that there is exactly one place turning a rect, and
+    // it is the shared one — held with every call site deleted. "Exactly one" is also now
+    // actually counted rather than asserted in the test's title and nowhere else.
+    // Comments stripped BEFORE counting, because the doc comment above the call writes
+    // "rotatedRect()" with parentheses and so matched the call pattern too. That is the same
+    // shape of mistake this assertion was being repaired for, made inside the repair — which is
+    // a fair measure of how easy it is in a file whose comments quote its own code.
+    const code = SCRIPT.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^[ \t]*\/\/.*$/gm, ' ');
+    const calls = [...code.matchAll(/\brotatedRect\(/g)];
+    expect(calls.length, 'exactly one place may turn a rect').toBe(1);
     const turned = chunk(SCRIPT, 'const turned = (');
     expect(turned).toContain('rotatedRect(r, a.rot, a.x * W, a.y * H)');
     // Nothing else in the component does rotation arithmetic of its own.

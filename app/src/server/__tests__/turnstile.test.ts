@@ -11,7 +11,8 @@ async function load(env: Record<string, string | undefined>) {
   for (const k of ['TURNSTILE_SECRET', 'TURNSTILE_SITE_KEY', 'TURNSTILE_ALLOWED_HOSTNAMES', 'TURNSTILE_FAIL_OPEN', 'BASE_URL']) delete process.env[k];
   Object.assign(process.env, env);
   // bust the module cache so module-level env reads re-evaluate
-  return await import('../turnstile');   // env is read lazily, so one import is fine
+  return await import('../turnstile.js');   // env is read lazily, so one import is fine
+                                             // (.js, not .ts: nodenext resolution wants the emitted specifier)
 }
 const reply = (body: unknown, ok = true) =>
   mock.method(globalThis, 'fetch', async () => ({ ok, json: async () => body }) as unknown as Response);

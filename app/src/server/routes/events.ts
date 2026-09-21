@@ -493,7 +493,19 @@ const DEMO_MISSIONS = [
 ];
 
 
-router.post('/demo', async (_req: Request, res: Response) => {
+/** A timezone we are willing to store, or null.
+ *
+ *  Anything stored here is later handed to Intl by BOTH sides to turn an instant into the wall
+ *  clock a host reads, so a junk value does not degrade gracefully — it throws in the formatter
+ *  and takes the page with it. `new Intl.DateTimeFormat` is the check because it is the same
+ *  implementation that will be asked to use it later: if it accepts the zone here it will accept
+ *  it there, which no allow-list of names can promise. */
+export function usableTimezone(raw: unknown): string | null {
+  if (typeof raw !== 'string' || !raw || raw.length > 64) return null;
+  try { new Intl.DateTimeFormat('en', { timeZone: raw }); return raw; } catch { return null; }
+}
+
+router.post('/demo', async (req: Request, res: Response) => {
   const now = Date.now();
   let joinCode: string;
   let attempts = 0;
@@ -532,6 +544,23 @@ router.post('/demo', async (_req: Request, res: Response) => {
     isLocked: false,
     allowDownloads: true,
     theme: null,
+    /* A DEMO GETS A TIMEZONE TOO, and it is not cosmetic.
+     *
+     * This column was simply never set here, so every demo ever created carried NULL — 59 of the
+     * 74 events on production, and every one of them a demo. A null zone makes the event's start
+     * an ambiguous wall clock, and the admin settings form then read it as UTC while writing it
+     * back in the browser's zone: ten hours apart for a host in Brisbane. The server saw a
+     * reschedule nobody asked for and refused the save, taking the name, the blurb and every
+     * toggle with it.
+     *
+     * That bug is fixed on both sides now, but the ambiguity was the thing that made it possible,
+     * and a demo is the surface where it mattered most: it is what somebody tries BEFORE they buy.
+     * Closing it at the source costs one field.
+     *
+     * The browser's own zone, because whoever pressed the button is the only person this demo is
+     * for. 'UTC' when it is missing or unusable — a real zone, not a null — so the wall clock is
+     * always interpretable even if it is occasionally not the visitor's own. */
+    timezone: usableTimezone((req.body as { timezone?: unknown } | undefined)?.timezone) ?? 'UTC',
     aspectRatios: JSON.stringify(VALID_ASPECTS),
     // Demo is fully entitled (free showcase) so it works regardless of billing. guestCap is kept
     // tiny (creator + one more, e.g. a phone scanning the QR) to limit drive-by spam — the event
@@ -1874,18 +1903,32 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
     const parsed = zonedWallTimeToMs(startDate, startTime || '00:00', tz || 'UTC');
     if (parsed !== null) requestedStart = parsed;
   }
-  // Tolerance: the client recomputes the epoch on every save, so only treat a real move as a move.
+  /** Why the start was left where it was, when the host asked to move it and could not.
+   *
+   *  REFUSED, NOT REJECTED — and the difference is the whole point. These three checks used to
+   *  `return`, which threw away the ENTIRE save: the name, the blurb, every toggle, all of it,
+   *  because one field out of twenty could not be honoured. A host who renamed their event and
+   *  nudged a date that turned out to be locked lost the rename too, and the form went on showing
+   *  the changes it had not saved until a reload quietly took them back.
+   *
+   *  So the start simply stays where it is, everything else saves, and the reason is echoed to the
+   *  host — the same shape as `aspectsRefused` below, and for the same reason: they should find
+   *  out here rather than discover it later.
+   *
+   *  Tolerance: only a real move counts as a move. (The client no longer sends a start it was not
+   *  asked to change at all — see startFieldsUntouched in the admin page — but a server must not
+   *  depend on a client behaving.) */
+  let startRefused: string | null = null;
   if (requestedStart !== null && Math.abs(requestedStart - ev.startsAt) > 60_000) {
     if (!canReschedule) {
-      return res.status(409).json({ error: 'This event has already started and guests have joined, so the start time is locked.' });
+      startRefused = 'This event has already started and guests have joined, so the start time is locked.';
+    } else if (requestedStart < Date.now()) {
+      startRefused = 'Pick a start time in the future.';
+    } else if (requestedStart > anchorStart + RESCHEDULE_WINDOW_MS) {
+      startRefused = 'An event can be moved up to 6 months from its original start date.';
+    } else {
+      startsAt = requestedStart;
     }
-    if (requestedStart < Date.now()) {
-      return res.status(400).json({ error: 'Pick a start time in the future.' });
-    }
-    if (requestedStart > anchorStart + RESCHEDULE_WINDOW_MS) {
-      return res.status(400).json({ error: 'An event can be moved up to 6 months from its original start date.' });
-    }
-    startsAt = requestedStart;
   }
   // Duration is a PAID entitlement — only the Upgrades flow changes it. Settings may reschedule
   // the start, but the event's LENGTH is preserved (shift expiry to keep the same paid span);
@@ -2093,6 +2136,9 @@ router.put('/:joinCode/settings', requireOrganizer, async (req: Request, res: Re
     revealDelayHours: revealDelay, revealAt, moderationEnabled: moderation, allowDownloads: allowDl,
     noFlash: noFlashV, heartsEnabled: heartsV, commentsEnabled: commentsV, timezone: tz, slug: newSlug, aspectRatios: aspects ? JSON.parse(aspects) : ['1:1'], ratingMode: rMode,
     aspectsRefused,
+    // Null when the start was fine or untouched. Non-null means everything else in this response
+    // DID save and only the start did not — the host needs the sentence, not a failure.
+    startRefused,
     // Echoed so a host whose value the validator dropped finds out here rather than on the
     // printed card, exactly as the challenges endpoint echoes the list it stored.
     eventType: newEventType,

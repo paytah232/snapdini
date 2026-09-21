@@ -133,6 +133,54 @@ docker compose up -d
 
 ## Version notes
 
+### 1.5.2
+
+**Nothing to configure.** No new settings, no new environment variables, no database migrations.
+If you pull the images and restart, you are done. Two things change underneath you, and one of
+them is worth reading before you upgrade if you have accounts.
+
+#### Password hashing moves argon2 0.41 → 0.45
+
+Nothing you do, but worth knowing why it is safe, because "the auth library had a major bump" is
+the sort of sentence that should make you check rather than trust.
+
+Hashes minted by 0.41 verify correctly under 0.45, and hashes minted by 0.45 verify correctly under
+0.41 — so **rolling back after people have signed in does not lock anyone out either**. The default
+parameters are unchanged (argon2id, m=65536, t=3, p=4), so new hashes are exactly as strong as old
+ones. The only visible difference is cosmetic: 0.45 writes the parameters in a different order
+inside the hash string, which both versions parse happily and nothing in Snapdini reads.
+
+#### express 4 → 5, and what it means if you have modified anything
+
+Snapdini itself is updated for it. This matters only if you run a fork or have added middleware:
+
+- **`req.body` is now `undefined` rather than `{}`** when a request carries no parsable body
+  (body-parser 2.x). Destructuring it throws, and express 5 forwards that to the error handler — so
+  a route that used to answer 400 answers 500. Snapdini restores the old behaviour globally, but
+  your own handlers will not be covered if they run before that middleware.
+- **`express-async-errors` is removed and must stay removed.** It deep-requires a path express 5
+  does not have, so merely importing it throws and the server does not start. Express 5 forwards a
+  rejected promise from a handler to the error middleware natively, which is what the shim existed
+  for.
+- Route patterns are unchanged in Snapdini, but path-to-regexp 8 is stricter: a bare `*` in a path
+  is no longer valid and wants a named wildcard.
+
+#### Frontend and base images
+
+The frontend moves Svelte 4 → 5 (running in legacy mode — no behaviour change) and Vite 5 → 8. If
+you pull the published images this is invisible to you; the client bundle is about 28% smaller.
+Eleven security advisories clear with it, including the two highest-rated.
+
+Both Dockerfiles now pin their Node 22 base image **by digest** rather than by the floating
+`node:22-alpine` tag. If you build your own images, a rebuild will no longer silently pick up a new
+base — which is the point — so bump the digest deliberately when you want a newer Node.
+
+#### One small data note
+
+Demo events are now created with a timezone; previously they were stored without one. Existing
+demos keep their empty value and are unaffected — the event settings form no longer misreads an
+absent timezone as a request to move the event's start.
+
 ### 1.5.0
 **Five new settings, and every one of them is optional** — the release works with none of them set,
 so trap 2 only applies if you want one. Two things do change under you whether you want them or

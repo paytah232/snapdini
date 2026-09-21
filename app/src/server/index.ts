@@ -1,5 +1,8 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
-import 'express-async-errors'; // lets async route handlers throw to the error middleware
+// NOTE: `express-async-errors` used to be imported here. Express 5 rejects a handler's
+// returned promise into next(err) itself, so the shim is redundant — and worse, it is now
+// fatal: it deep-requires `express/lib/router/layer`, a path express 5 no longer has, so the
+// import alone throws MODULE_NOT_FOUND before the server can boot. Removed with express 5.
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -41,6 +44,7 @@ import surveyRoutes from './routes/survey';
 import emailPrefsRoutes from './routes/email-prefs';
 import unsubscribeRoutes from './routes/unsubscribe';
 import { ensureAdminFromEnv } from './auth';
+import { bodyDefaultsToEmpty } from './lib';
 import pkg from '../../package.json';
 
 const app = express();
@@ -86,6 +90,11 @@ app.post('/api/billing/webhook', express.raw({ type: 'application/json' }), stri
 app.use('/api/events/:joinCode/guests/import', express.json({ limit: '2mb' }));
 
 app.use(express.json());
+// Immediately after the parser, and for every route below it: express 5 leaves `req.body`
+// undefined where express 4 left `{}`, which turns a whole shelf of clean 400s in the routers
+// into 500s. See bodyDefaultsToEmpty in lib.ts for what that costs and why it is one line here
+// rather than forty `?? {}`s spread through the handlers.
+app.use(bodyDefaultsToEmpty);
 
 // Mailgun delivery webhooks. Unlike Stripe's, this one does NOT need the raw body: Mailgun signs
 // the timestamp and token only, never the payload, so the ordinary JSON parser above is fine.

@@ -146,10 +146,21 @@ describe('the upgrade breakdown tells a host what they already have', () => {
   // tier — that is the whole mechanism this group was written for. Below ten guests there is no
   // charged line to account for, so the note would be a bare "you already have this" on a panel
   // whose entire job is offering things you do not.
-  it('says nothing about the pack while the event is still inside the free tier', async () => {
+  it('still says the pack is yours inside the free tier — just does not price it', async () => {
+    // This asserted SILENCE, and silence turned out to be the bug. Own the pack and sit inside the
+    // free guest tier and both branches fell through: no note, because there was no charge to
+    // explain, and no toggle either, because the toggle is for buying what you already have. The
+    // panel simply went quiet about a paid-for feature — which does not read as "nothing to say",
+    // it reads as the option having vanished, on the one screen where a host audits what they own.
+    // Reported from a real event: frame sizes on, guest cap 10, free tier 10, nothing on screen.
     const { container } = render(UpgradePanel, { props: giftedEvent });
     await tick();
-    expect(container.textContent).not.toContain('Frame sizes are already on your event');
+    expect(container.textContent).toContain('Frame sizes are already on your event');
+    // The CHARGING half keeps its own gate — there is nothing to account for at this tier, and
+    // pricing something that costs nothing is its own kind of wrong.
+    expect(container.textContent).not.toContain('charged above');
+    // And it must not offer to sell them what they have.
+    expect(container.textContent).not.toContain('Unlock all frame sizes');
   });
 
   it('explains the pack the moment growing past the free tier starts charging for it', async () => {
@@ -161,9 +172,14 @@ describe('the upgrade breakdown tells a host what they already have', () => {
   it('still offers it to an event that has no wide shape', async () => {
     const { container } = render(UpgradePanel, { props: freeEvent });
     await tick();
-    const chk = [...container.querySelectorAll('label.chk')]
-      .find((l) => /Unlock all frame sizes/.test(l.textContent || ''));
-    expect(chk, 'a host without the pack must still be able to buy it').toBeDefined();
+    // A switch now, not a tick — one feature, on or off. Found by the control it labels rather
+    // than by the element type, so the next restyle does not red this for a reason that has
+    // nothing to do with whether the offer is there.
+    const toggle = container.querySelector('#u-frames') as HTMLInputElement | null;
+    const label = container.querySelector('label[for="u-frames"]');
+    expect(toggle, 'a host without the pack must still be able to buy it').toBeTruthy();
+    expect(label?.textContent || '', 'and the offer must still say what it is')
+      .toMatch(/Unlock all frame sizes/);
     expect(container.textContent).not.toContain('Frame sizes are already on your event');
   });
 

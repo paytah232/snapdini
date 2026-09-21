@@ -235,11 +235,23 @@ describe('the poll cadence', () => {
     expect(seen.size).toBeGreaterThan(40);
   });
 
-  it('is between 30s and 60s — the window the surface can afford', () => {
+  it('stays inside the window the surface can afford', () => {
+    // Was "between 30s and 60s", around a 45s base. The base is 30s now, and the change was not a
+    // preference: the poll's REPLY was itself shared-cacheable for 30s, so the delay a guest
+    // actually experienced was the interval plus the TTL — up to 84s — and a host pressing
+    // "Reveal all now" in front of an open gallery watched it sit there for over a minute. The
+    // cache is skipped while the gallery is locked now (the reply is a single count), which
+    // removes the hidden half; 30s removes most of the visible half.
+    //
+    // The floor is what keeps this honest in the other direction: this interval is multiplied by
+    // every guest holding the link, so it must never quietly become a live feed.
     for (const r of [0, 0.25, 0.5, 0.75, 1]) {
       const d = galleryPollDelayMs(r);
-      expect(d).toBeGreaterThanOrEqual(30_000);
-      expect(d).toBeLessThanOrEqual(60_000);
+      // The ACTUAL jittered range at a 30s base is 24-36s. The first version of this bounded it
+      // at 20-40s, which is looser than the 30-60s it replaced and would let the base drift to
+      // 25s or 33s unnoticed — a test that permits the thing it exists to watch.
+      expect(d).toBeGreaterThanOrEqual(24_000);
+      expect(d).toBeLessThanOrEqual(36_000);
     }
   });
 });

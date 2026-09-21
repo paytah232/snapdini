@@ -150,11 +150,22 @@ describe('the modal header wraps instead of truncating its title', () => {
   // The ✕ must stay on the first row with the title. It only can if it is a child of .head rather
   // than of .head-actions, which is why the markup was changed as well as the CSS.
   it('keeps the close button out of .head-actions so it stays beside the title', () => {
-    const head = src.slice(src.indexOf('<div class="head">'), src.indexOf('<!-- The warning the header button'));
+    // Comments stripped, and every anchor checked before anything is ordered against it.
+    //
+    // Two faults, and the second is the nasty one. The region's right-hand bound was an HTML
+    // COMMENT, so rewording an explanation silently moved the span this test reasons over. And
+    // `actionsEnd` was computed as indexOf('</div>', actionsStart) with actionsStart unguarded:
+    // remove `.head-actions` entirely and actionsStart is -1, indexOf then searches from 0, and
+    // actionsEnd quietly becomes the first unrelated closing tag. The assertion goes on passing
+    // while measuring a different element — which is worse than failing.
+    const markup = src.replace(/<!--[\s\S]*?-->/g, ' ');
+    const head = markup.slice(markup.indexOf('<div class="head">'));
     const actionsStart = head.indexOf('<div class="head-actions">');
+    expect(actionsStart, '.head-actions must exist for this test to mean anything').toBeGreaterThan(-1);
     const actionsEnd = head.indexOf('</div>', actionsStart);
+    expect(actionsEnd, '.head-actions must be closed').toBeGreaterThan(actionsStart);
     const closeAt = head.indexOf('class="x"');
-    expect(closeAt).toBeGreaterThan(-1);
+    expect(closeAt, 'the close button must exist').toBeGreaterThan(-1);
     expect(closeAt, 'close button is inside .head-actions — it will land on row 2').toBeGreaterThan(actionsEnd);
   });
 

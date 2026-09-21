@@ -214,10 +214,24 @@ export function createRevealWatch(opts: RevealWatchOptions): RevealWatch {
  *   · The moderated case is watched by people standing next to the host: a minute of nothing after
  *     "I've approved them" reads as broken, so 60s is too slow at the moment it matters most.
  *
- *  45s keeps the worst case under a minute while costing a third less than 30s would. Backgrounded
- *  tabs poll not at all (see the visibility handling in the pages), which is where most of the
- *  saving actually comes from — a gallery link left open on a phone in a pocket is the common case. */
-export const GALLERY_POLL_MS = 45_000;
+ *  It was 45s, chosen as a compromise between those two and on the understanding that it was the
+ *  whole delay. It was not. The reply to a poll was itself shared-cacheable for 30s, so the real
+ *  worst case a guest experienced was the interval PLUS the TTL — 84s at 45s jittered — and a host
+ *  who pressed "Reveal all now" in front of an open gallery watched it sit there for over a
+ *  minute. The cache is now skipped while the gallery is locked (see `knownLocked` in the gallery
+ *  page), which removes the invisible half of that; 30s removes most of the visible half, and puts
+ *  the worst case at 36s rather than 84s.
+ *
+ *  The cost of the change is smaller than the original 45-vs-30 note implies, because that note
+ *  was written about an interval whose replies were being shared between guests. They are not, now,
+ *  while locked — so what this multiplies is a single count per guest, which is the cheapest thing
+ *  the API serves and the reason polling is affordable here at all. 200 guests on a locked gallery
+ *  is ~6.7 req/s of counts against a stack measured at ~850 req/s.
+ *
+ *  Backgrounded tabs poll not at all (see the visibility handling in the pages), which is where
+ *  most of the saving actually comes from — a gallery link left open on a phone in a pocket is the
+ *  common case. */
+export const GALLERY_POLL_MS = 30_000;
 
 /** ±20% spread on every delay.
  *

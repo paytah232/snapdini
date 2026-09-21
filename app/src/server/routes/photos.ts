@@ -176,6 +176,19 @@ function dirNames(dir: string): Set<string> {
   listings.set(dir, { at: now, names });
   return names;
 }
+
+/** Throw the readdir cache away. Tests only.
+ *
+ *  The cache is module-level and its TTL is wall-clock, which makes any suite that both writes
+ *  files and reads them back order- and speed-dependent: whether a test sees a file it has just
+ *  deleted depends on how long the previous test took. That produced a genuine intermittent — one
+ *  failure in roughly seventeen full runs of the app suite — where a zip test that expected no
+ *  manifest got one, or did not, according to machine load.
+ *
+ *  Exported rather than reached into, so the coupling is visible from both ends: a test that
+ *  needs a clean filesystem view says so, and anyone changing the cache can see who depends on
+ *  being able to clear it. */
+export function __resetListingCache(): void { listings.clear(); }
 const onDisk = (name: string): boolean => {
   // A LEGACY FLAT filename — from before the per-event layout, no "<eventId>/" on it — would make
   // the line below list the uploads ROOT: thousands of event folders, measured at 193ms cold here,
@@ -459,6 +472,138 @@ export function capturedAtFor(raw: unknown, p: { startsAt: number | null }, now:
   return claimed;
 }
 
+/** The clip length this event is ENTITLED to, in seconds.
+ *
+ *  Lifted out of gateUpload and finalizeUpload, which computed it separately and identically. Two
+ *  copies of the rule that decides whether a guest's video survives is one copy too many: the
+ *  gate's copy and the ceiling's copy disagreeing by a second means a clip waved through at the
+ *  door and then destroyed after the transcode, which is the worst of both answers and the
+ *  slowest way to reach it. */
+export function allowedVideoSecs(videoSeconds: number): number {
+  // Self-host (billing off) is the FULL app — that is the pitch, and the licence. An unset
+  // VIDEO_MAX_SECONDS therefore means "no per-event limit", NOT "video disabled": the old reading
+  // silently refused every video upload on a fresh self-hosted install with no error a self-hoster
+  // could act on. Set VIDEO_MAX_SECONDS to a positive number to cap it. Only a HOSTED deployment
+  // gates video behind the paid add-on.
+  return billingEnabled ? videoSeconds : (VIDEO_MAX_SECS > 0 ? VIDEO_MAX_SECS : Number.POSITIVE_INFINITY);
+}
+
+/** The longest clip this server will actually KEEP for this event, in milliseconds.
+ *
+ *  Always finite and never above VIDEO_HARD_MAX_SECS, even where the entitlement is unlimited: the
+ *  hard maximum is a storage and abuse guard rather than a pricing gate, and it is the one number
+ *  in the video path that nothing is allowed to argue with.
+ *
+ *  It has a second job now. finalizeUpload destroys anything longer than this, so it is also the
+ *  honest upper bound on how long a capture we are willing to believe in — which is exactly what
+ *  the late-upload gate needs when a client does not tell us how long its clip was. A duration
+ *  large enough to widen that gate further than this number is a duration attached to a file we
+ *  would have refused anyway, so believing it would buy an attacker nothing and cost us a branch. */
+export function maxAcceptedClipMs(videoSeconds: number): number {
+  const allowed = allowedVideoSecs(videoSeconds);
+  return Math.min(VIDEO_GRACE_SECS > 0 ? allowed + VIDEO_GRACE_SECS : VIDEO_HARD_MAX_SECS, VIDEO_HARD_MAX_SECS) * 1000;
+}
+
+/** The number the client actually sent, or null if it did not send one.
+ *
+ *  `Number()` on its own cannot answer this question, because it maps four different kinds of
+ *  nothing — '', null, [], false — onto the number 0, and 0 is a value this gate now has to be
+ *  able to believe (see captureSpanMs). A string is accepted because it is how the field really
+ *  arrives on the single-shot upload: POST / is multipart, so every field on that wire is text
+ *  and `durationSecs` is '0' rather than 0. A reader that only understood the JSON shape would
+ *  work on the chunked /complete and quietly not on the door most photographs come through. */
+function numericClaim(v: unknown): number | null {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/** How far `capturedAt` may sit from the instant the capture actually BEGAN, in milliseconds.
+ *
+ *  THE PROBLEM THIS EXISTS FOR, because nothing about the field name gives it away.
+ *
+ *  `capturedAt` comes from the client and has meant two different things in two generations of the
+ *  app. The current camera stamps it when recording STARTS. Everything before it stamps it when
+ *  the item is ENQUEUED, which for a clip is when recording STOPS — and that is not only a problem
+ *  for handsets that have not reloaded the page. Items sit in a guest's IndexedDB queue across
+ *  reloads by design, so a queue built before the change keeps draining old-style stamps at us for
+ *  as long as that tab lives. For a still the two instants are the same and none of this matters.
+ *  For a clip they are a whole clip apart.
+ *
+ *  WE CANNOT TELL THE TWO APART. There is no version marker on the wire, and there is nothing in
+ *  the values themselves that separates them: a start stamp and a stop stamp are both plausible
+ *  past instants and both are consistent with an upload arriving some time afterwards. Sniffing
+ *  was considered and rejected — the only rule anyone could propose ("a stop stamp lands nearer to
+ *  `now`") is wrong in precisely the case that matters, a long clip uploaded promptly.
+ *
+ *  SO WE HONOUR BOTH READINGS. Whichever generation sent it, the capture certainly lies inside
+ *  [capturedAt - span, capturedAt + span], and the gate asks whether THAT interval began before
+ *  the event closed. For a photo the span is zero and the gate is bit-for-bit what it always was,
+ *  so nothing about stills moves an inch. For a clip the span is the clip's own length where the
+ *  client tells us, and the longest clip we would keep at all where it does not.
+ *
+ *  THE COST, stated plainly rather than buried: a clip from a CURRENT client that genuinely began
+ *  after the event closed is accepted if it began within its own duration of the end — up to ten
+ *  minutes at the default hard maximum. That is a deliberate trade, not an oversight. The
+ *  alternative is refusing a guest's ten-minute recording of the speeches because an old phone
+ *  stamped it at the stop instead of the start, and a lost video is unrecoverable in a way that a
+ *  slightly late one we kept is not.
+ *
+ *  It is retirable without touching the rule. The day a client sends something that says "this
+ *  stamp is the START", and every pre-change queue has drained, the backward half of the interval
+ *  can go and the span becomes forward-only. Nothing sends such a field today, so nothing here
+ *  pretends to read one — a speculative branch that no client exercises is a branch that is wrong
+ *  by the time anyone needs it.
+ *
+ *  The claim is CLAMPED, never trusted. A forged durationMs of a hundred years would otherwise
+ *  hold the event's door open for a hundred years, and the client is the only witness to it.
+ *
+ *  Both `durationMs` and `durationSecs` are read. The queue has historically carried the clip
+ *  length in whole seconds while the column and the ffprobe result speak milliseconds; accepting
+ *  either costs one branch and removes the entire class of "the field was there, in the other
+ *  unit, and we silently fell back to the ten-minute assumption".
+ *
+ *  AND A `durationSecs` OF ZERO IS A MEASUREMENT, not an absence. The camera counts recording
+ *  time off a one-second interval (`recSecs++`), so a clip the guest taps out in under a second
+ *  really does have a duration of zero whole seconds — and Camera.svelte goes out of its way to
+ *  send it, testing `!= null` rather than truthiness, precisely so the server is not left
+ *  assuming a ten-minute ceiling for a half-second video. `secs > 0` then threw that away: an
+ *  explicit 0 fell down the "no claim at all" branch and collected the entire ceiling, so the one
+ *  field the client took care to send changed nothing whatsoever. Honouring it costs a
+ *  sub-second clip nothing it should have had and takes ten minutes of held-open door off an
+ *  event that closed.
+ *
+ *  WHICH IS WHY THE READING IS `numericClaim` AND NOT `Number`. Number('') is 0. So is
+ *  Number(null), Number([]) and Number(false). Widening the test to `secs >= 0` would therefore
+ *  turn every one of those — an old client that sends nothing, a field that arrived empty, a
+ *  forged value — into "this clip was under a second", which is the original bug back again with
+ *  a new cause and aimed at exactly the clients least able to survive it. Only a number, or a
+ *  string that is really a number, is a claim; everything else is silence.
+ *
+ *  `durationMs` is deliberately NOT given the same treatment. It is the millisecond side of the
+ *  wire — the column and the ffprobe result — where a zero means "not measured" rather than
+ *  "shorter than my resolution", and it is pinned as rubbish by the tests for that reason. The
+ *  asymmetry is the two fields meaning different things, not an oversight. */
+export function captureSpanMs(isVideo: boolean,
+                              body: { durationMs?: unknown; durationSecs?: unknown } | null | undefined,
+                              maxClipMs: number): number {
+  if (!isVideo) return 0;
+  const ms = Number(body?.durationMs);
+  const secs = numericClaim(body?.durationSecs);
+  const claimed = Number.isFinite(ms) && ms > 0 ? ms
+                : secs !== null && secs >= 0 ? secs * 1000
+                : null;
+  // No claim at all is the old client and the camera-roll upload, which are the two cases most in
+  // need of the benefit of the doubt. Assume the longest clip we would keep rather than assume
+  // zero: assuming zero is assuming the stamp is a start stamp, which is assuming away the whole
+  // problem in favour of the guests who are least likely to have one.
+  if (claimed === null) return maxClipMs;
+  return Math.min(claimed, maxClipMs);
+}
+
 /** May a shot that arrives AFTER the event closed still be accepted?
  *
  *  Two conditions, and both halves are the point.
@@ -470,35 +615,94 @@ export function capturedAtFor(raw: unknown, p: { startsAt: number | null }, now:
  *  And still inside the grace — because without it the event never actually closes, and a phone
  *  found in a drawer next year could post into a stranger's gallery.
  *
+ *  `spanMs` IS THE CLIP ALLOWANCE, and it is why this grew a fourth argument. The rule, in the
+ *  owner's words, is that we do the heavy lifting if the guest captures before the event ends,
+ *  regardless of when the capture actually stops. A ninety-second clip begun one second before the
+ *  close used to pass this test purely by luck — CLOCK_SKEW_MS happened to be five minutes and the
+ *  clip happened to be shorter than five minutes. A ten-minute clip begun in the same second did
+ *  not, and was refused outright. That is a clock-skew pad quietly doing a second job it was never
+ *  sized for and nobody had written down, and the fix is to give the clip its own term so the pad
+ *  can go back to meaning clock skew and nothing else. The skew has not changed by a millisecond;
+ *  it has simply stopped being load-bearing for a question it knows nothing about. See
+ *  captureSpanMs for where the span comes from and what it costs us.
+ *
+ *  THE OUTER BOUND IS MEASURED FROM THE END OF THE CAPTURE, not from the end of the event, for the
+ *  same reason. A ten-minute clip begun just before the close has not finished RECORDING until ten
+ *  minutes after it, and only then starts climbing a party's worst connection; handing it the same
+ *  twenty-four hours as a still taken at lunchtime quietly docks its network grace by the length of
+ *  the clip, which is exactly backwards — the long clip is the one that needs the time. Where the
+ *  capture cannot have ended later than the event did, which is every photo and every clip that
+ *  finished before the close, this is arithmetically identical to what it always was.
+ *
+ *  `spanMs` defaults to zero so a caller that has not been taught about clips — and every photo —
+ *  gets precisely the function that was here before any of this.
+ *
  *  Its own function, rather than two lines inside the gate, so the rule can be tested at the
  *  boundaries where it is easy to get wrong by one skew or one window. */
-export function lateUploadAllowed(expiresAt: number, capturedAt: number, now: number): boolean {
-  return capturedAt <= expiresAt + CLOCK_SKEW_MS && now <= expiresAt + LATE_UPLOAD_GRACE_MS;
+export function lateUploadAllowed(expiresAt: number, capturedAt: number, now: number, spanMs = 0): boolean {
+  const mayHaveBegun = capturedAt - spanMs;    // the earliest instant this capture can have started
+  const mayHaveEnded = capturedAt + spanMs;    // the latest instant its camera can have stopped
+  return mayHaveBegun <= expiresAt + CLOCK_SKEW_MS
+      && now <= Math.max(expiresAt, mayHaveEnded) + LATE_UPLOAD_GRACE_MS;
 }
 
 // Returns {status,error} to reject the upload, or null if it's allowed right now.
-function gateUpload(p: UploadParticipant, isVideo: boolean, capturedAt?: number): { status: number; error: string } | null {
-  // Self-host (billing off) is the FULL app — that is the pitch, and the licence. An unset
-  // VIDEO_MAX_SECONDS therefore means "no per-event limit", NOT "video disabled": the old reading
-  // silently refused every video upload on a fresh self-hosted install with no error a self-hoster
-  // could act on. Set VIDEO_MAX_SECONDS to a positive number to cap it. Only a HOSTED deployment
-  // gates video behind the paid add-on.
-  const allowedVideoSecs = billingEnabled
-    ? p.videoSeconds
-    : (VIDEO_MAX_SECS > 0 ? VIDEO_MAX_SECS : Number.POSITIVE_INFINITY);
-  if (isVideo && billingEnabled && allowedVideoSecs === 0) {
+//
+// `durationRaw` is the request BODY, read for one thing only: the clip length the client claims.
+// Handed over whole rather than pre-read at the call sites because there are two call sites — the
+// single-shot POST / and the chunked /complete — and the one property this gate must never lose is
+// that an upload gets the same answer whichever door it came through. A field read at one call
+// site and forgotten at the other is how that property dies quietly.
+//
+// Exported for the tests. The interesting cases here are combinations (a video, after the close,
+// with an old-style stamp and no duration) and a test that can only reach them through two other
+// functions is a test of those two functions, not of the gate.
+export function gateUpload(p: UploadParticipant, isVideo: boolean, capturedAt?: number,
+                           durationRaw?: { durationMs?: unknown; durationSecs?: unknown } | null,
+                           /** May this upload claim a CLIP'S allowance past the close?
+                            *
+                            *  Separate from `isVideo`, and the separation is the point. `isVideo`
+                            *  decides entitlement — whether this event may have video at all —
+                            *  and must stay generous about what counts as a clip, or a genuine
+                            *  recording with an unusual extension slips past the paid check.
+                            *  This decides how far past the event's end the upload may reach,
+                            *  and must be the opposite: as tight as the evidence allows.
+                            *
+                            *  They differ because on the chunked route `isVideo` is partly the
+                            *  CLIENT'S word — `mediaType === 'video'` — and a still declared as a
+                            *  clip would otherwise buy the full ten-minute ceiling of extra reach
+                            *  past the close for a photograph. Low value and bounded, but it is
+                            *  the one way round the rule that a still gets no allowance, and the
+                            *  rule is only worth having if it cannot be opted out of.
+                            *
+                            *  Defaults to `isVideo` so the single-shot route is unchanged: there
+                            *  the flag already comes from the file itself, not from a field. */
+                           clipAllowance: boolean = isVideo): { status: number; error: string } | null {
+  const allowed = allowedVideoSecs(p.videoSeconds);
+  if (isVideo && billingEnabled && allowed === 0) {
     return { status: 403, error: 'Video uploads are not enabled for this event' };
   }
   const now = Date.now();
   if (p.startsAt && now < p.startsAt)     return { status: 403, error: "Event hasn't started yet" };
   if (p.isLocked)                         return { status: 403, error: 'Event is locked' };
-  // Whether a photograph belongs to an event is settled by when the shutter went, not by whether
-  // the network cooperated before a deadline. So: a shot taken INSIDE the window is still accepted
-  // for a while afterwards, and a shot taken AFTER it is refused immediately, as it always was.
+  // Whether a photograph belongs to an event is settled by when the shutter WENT, not by whether
+  // the network cooperated before a deadline — and for a clip, "went" means the instant recording
+  // BEGAN. A guest who presses record with one second left on the clock has captured something
+  // that belongs to this party, and it stays theirs however long the clip runs and however long it
+  // then takes to arrive. A capture that began after the close is refused, as it always was.
   //
   // Both halves matter. Without the first, a queue draining slowly loses real photographs from the
-  // party. Without the second, the event never actually closes.
-  if (now > p.expiresAt && !lateUploadAllowed(p.expiresAt, capturedAt ?? now, now)) {
+  // party and a long clip started at the last moment is thrown away for the crime of being long.
+  // Without the second, the event never actually closes.
+  //
+  // An upload carrying no capturedAt at all — a client too old to send one, or one whose claim was
+  // too implausible for capturedAtFor to honour — still falls back to `now`, exactly as before.
+  // Subtracting a clip's span from that fallback is not a concession, it is arithmetic: the bytes
+  // are in our hands, so the camera must have been running for the length of the clip before they
+  // could be, and the recording therefore began at least that long ago.
+  if (now > p.expiresAt
+      && !lateUploadAllowed(p.expiresAt, capturedAt ?? now, now,
+                            captureSpanMs(clipAllowance, durationRaw, maxAcceptedClipMs(p.videoSeconds)))) {
     return { status: 410, error: 'Event has ended' };
   }
   if (!hasShotsLeft(p))                   return { status: 403, error: 'No shots remaining' };
@@ -646,12 +850,14 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     // Enforce the event's video length limit server-side (defense-in-depth): the in-browser recorder
     // auto-stops at the limit, but a native-camera clip could be any length. Only when we can read a
     // real duration; +3s tolerance for container rounding.
-    const allowed = billingEnabled
-      ? p.videoSeconds
-      : (VIDEO_MAX_SECS > 0 ? VIDEO_MAX_SECS : Number.POSITIVE_INFINITY);
+    // Both numbers now come from the shared helpers rather than being recomputed here. The gate
+    // widens its late-upload window by exactly maxAcceptedClipMs, so if this ceiling and that
+    // widening ever drifted apart we would either wave through clips we then delete after paying
+    // for the transcode, or refuse at the door clips we were perfectly willing to store.
+    const allowed = allowedVideoSecs(p.videoSeconds);
     if (allowed > 0 && typeof dims.durationMs === 'number') {
       const secs = dims.durationMs / 1000;
-      const cap = Math.min(VIDEO_GRACE_SECS > 0 ? allowed + VIDEO_GRACE_SECS : VIDEO_HARD_MAX_SECS, VIDEO_HARD_MAX_SECS);
+      const cap = maxAcceptedClipMs(p.videoSeconds) / 1000;
       // The SERVER keeps whatever it is given, up to an absolute ceiling. The UI is what gates
       // length (the recorder stops itself at the event's limit), and if a capture overshoots anyway
       // — a 10s limit yielding a 15s file because the recorder flushed late — throwing it away
@@ -1991,7 +2197,7 @@ router.post('/', upload.single('photo'), async (req: Request, res: Response) => 
 
   const participant = await participantForUpload(sessionToken);
   if (!participant) { fs.unlinkSync(req.file.path); return res.status(403).json({ error: 'Invalid session' }); }
-  const gate = gateUpload(participant, isVideo, capturedAtFor(req.body?.capturedAt, participant, Date.now()));
+  const gate = gateUpload(participant, isVideo, capturedAtFor(req.body?.capturedAt, participant, Date.now()), req.body);
   if (gate) { fs.unlinkSync(req.file.path); return res.status(gate.status).json({ error: gate.error }); }
 
   try {
@@ -2018,6 +2224,43 @@ const SAFE_UPLOAD_ID = /^[A-Za-z0-9_-]{8,64}$/;
 // divide by 4 (below the client size) so the bound tolerates smaller-than-expected parts, plus margin.
 const MAX_CHUNKS = Math.ceil(MAX_VIDEO_MB / 4) + 16;
 const uploadPartsDir = (uploadId: string) => path.join(INCOMING_DIR, `chunks-${uploadId}`);
+
+/** Is the staged upload REALLY a clip — according to its own bytes?
+ *
+ *  Everything else about "is this a video" on the chunked route is the client's word. `mediaType`
+ *  obviously so. `ext` too: it is destructured straight out of `req.body` a few lines into
+ *  /complete, so an audit correctly pointed out that a first attempt to tighten this — believe the
+ *  extension rather than the declaration — moved the forgery from one client-supplied field to
+ *  another and changed nothing. Posting a JPEG as `ext:"mp4"` bought exactly what posting it as
+ *  `mediaType:"video"` had just been stopped from buying.
+ *
+ *  The bytes are the only thing on this route the client cannot simply assert. Both container
+ *  families the camera produces announce themselves in the first few: ISO-BMFF (mp4/m4v/mov/3gp)
+ *  carries 'ftyp' at offset 4, and Matroska/WebM opens with the EBML magic. A still does neither.
+ *
+ *  WHAT THIS IS FOR, and it is narrow: the extra reach past an event's close that a clip gets,
+ *  because a recording begun before the end may legitimately finish and upload long after it. A
+ *  still has no such claim. This is not an entitlement check and must not be reused as one — the
+ *  paid-video length is enforced against ffprobe on the assembled file, which is stronger still.
+ *
+ *  Chunk 0 is read because it is the only part guaranteed to hold the header. If it is not there
+ *  the answer is `null`, meaning "cannot tell": /complete is about to refuse the whole upload for
+ *  missing parts anyway, and the caller falls back to the declared value so that a legitimate
+ *  clip retrying a lost part still gets 409 "resend" rather than 410 "event has ended" — which
+ *  would wipe the parts it had already managed to send. */
+function stagedLooksLikeVideo(uploadId: string): boolean | null {
+  try {
+    const fd = fs.openSync(path.join(uploadPartsDir(uploadId), '0'), 'r');
+    try {
+      const head = Buffer.alloc(12);
+      const n = fs.readSync(fd, head, 0, 12, 0);
+      if (n < 12) return null;
+      if (head.subarray(4, 8).toString('latin1') === 'ftyp') return true;          // mp4/m4v/mov/3gp
+      if (head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) return true;  // webm/mkv
+      return false;
+    } finally { fs.closeSync(fd); }
+  } catch { return null; }   // no part 0 yet, or unreadable — say so rather than guess
+}
 
 const chunkUpload = multer({
   storage: multer.diskStorage({
@@ -2073,11 +2316,27 @@ router.post('/complete', async (req: Request, res: Response) => {
   const participant = await participantForUpload(sessionToken);
   if (!participant) return res.status(403).json({ error: 'Invalid session' });
 
-  const isVideo = mediaType === 'video' || VIDEO_EXT_RE.test('x.' + String(ext || ''));
+  // Two questions, two answers, and only one of them may be taken on trust.
+  //
+  // `isVideo` is the generous one. It drives entitlement, the size cap and which branch processes
+  // the file, and it must stay generous: a real clip whose extension is unusual must not slip
+  // past the paid-video check by being mistaken for a photograph.
+  //
+  // The allowance — how far past the event's close this upload may reach — is the strict one, and
+  // it is settled by the BYTES. Both `mediaType` and `ext` arrive in the request body, so neither
+  // is evidence of anything; a first version of this believed `ext` and merely moved the forgery
+  // from one field to another. `null` means the header could not be read, in which case there is
+  // nothing better to go on than the declaration — and the upload is about to be refused for
+  // missing parts regardless. See stagedLooksLikeVideo.
+  const extSaysVideo = VIDEO_EXT_RE.test('x.' + String(ext || ''));
+  const isVideo = mediaType === 'video' || extSaysVideo;
+  const sniffed = stagedLooksLikeVideo(uploadId);
+  const clipAllowance = sniffed ?? isVideo;
   const dir = uploadPartsDir(uploadId);
   const wipe = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* */ } };
 
-  const gate = gateUpload(participant, isVideo, capturedAtFor(req.body?.capturedAt, participant, Date.now()));
+  const gate = gateUpload(participant, isVideo, capturedAtFor(req.body?.capturedAt, participant, Date.now()),
+                          req.body, clipAllowance);
   if (gate) { wipe(); return res.status(gate.status).json({ error: gate.error }); }
 
   // All parts present + within the size cap?
@@ -2163,7 +2422,10 @@ router.get('/:joinCode/download', async (req: Request, res: Response) => {
   const rows = await db
     // captureShape is not decoration here: downloadFile needs it to know a clip wanted a shape, and
     // without it every clip in the zip silently falls back to the uncropped original.
-    .select({ filename: photos.filename, mediaType: photos.mediaType, captureShape: photos.captureShape,
+    // `id` is what makes the LATE re-read in zipPhotosToResponse possible at all. Everything else
+    // in this select is a snapshot that ages for as long as the download takes; the id is the one
+    // column that cannot go stale, so it is the handle the archive loop re-resolves the rest from.
+    .select({ id: photos.id, filename: photos.filename, mediaType: photos.mediaType, captureShape: photos.captureShape,
               participantId: photos.participantId, participantName: participants.name })
     .from(photos)
     .innerJoin(participants, eq(participants.id, photos.participantId))
@@ -2186,20 +2448,177 @@ router.get('/:joinCode/download', async (req: Request, res: Response) => {
     .orderBy(asc(participants.name), asc(participants.id), asc(photos.takenAt), asc(photos.id));
   if (!rows.length) return res.status(404).json({ error: 'No photos to download' });
 
-  zipPhotosToResponse(res, event.name, rows);
+  await zipPhotosToResponse(res, event.name, rows);
 });
 
-// Stream a max-compression .zip of the given photo rows, named "<Event> - <Participant> - <n>.ext"
-// where n is that participant's own capture-order number.
-export function zipPhotosToResponse(
+/** How many rows to re-read per database round trip while the archive is being built.
+ *
+ *  One select per file would be 400 round trips threaded through a stream that is already
+ *  minutes long, and this route runs while every other guest at the event is polling the gallery
+ *  off the same pool — that is the chattiness worth avoiding. One select for the whole set would
+ *  be the stale snapshot again, taken slightly later and no more true by entry 300.
+ *
+ *  Fifty is the compromise, and what it actually buys is a bounded WINDOW: a name can only be as
+ *  old as the time it takes to stream the fifty files before it, rather than as old as the whole
+ *  download. Eight queries for a 400-photo event is nothing. It does not close the window — a
+ *  rotate landing inside a batch is still possible, and that is exactly what the warning
+ *  bookkeeping below exists to catch and report rather than swallow. */
+const ZIP_REFRESH_BATCH = 50;
+
+/** How long the archive may make no progress AT ALL before the download is written off as dead.
+ *
+ *  "No progress" is three things at once and all three are load-bearing: no entry has settled, no
+ *  byte has reached the response, and the response is not sitting back-pressured waiting for the
+ *  guest's end to read. Anything less is a timer that kills working downloads — see the long note
+ *  on waitForSettle for the one this replaced.
+ *
+ *  Two minutes because the shortest legitimate silence worth tolerating is an NFS stat storm on a
+ *  purged event, which is seconds, and the longest thing this must catch is a response that will
+ *  otherwise stay open until the process restarts. Anywhere in that range is defensible; what is
+ *  not defensible is not having one.
+ *
+ *  A `let` with a setter rather than a constant, and rather than an environment variable, for
+ *  one reason each. The suite has to be able to exercise the watchdog without waiting two minutes
+ *  for every case — and an env var would oblige both compose files to carry a knob nobody will
+ *  ever deploy (compose-env.test.ts enforces exactly that, and is right to). Two minutes remains
+ *  the only value anything in production uses. */
+let zipSettleIdleMs = 120_000;
+
+/** Test hook: shorten the watchdog. Returns the previous value so a test can put it back.
+ *
+ *  Exported rather than reached into, for the same reason as __resetListingCache: the coupling is
+ *  then visible from both ends, and anyone changing the watchdog can see who depends on being
+ *  able to hurry it along. */
+export function __setZipSettleIdleMs(ms: number): number {
+  const was = zipSettleIdleMs;
+  zipSettleIdleMs = ms;
+  return was;
+}
+
+/** Does this file exist, without stopping the world to find out.
+ *
+ *  `fs.existsSync` on an NFS share is ~4µs warm and ~143µs cold, and it blocks the event loop for
+ *  every microsecond of it — the reason `onDisk()` and its cached readdir exist at all. This is
+ *  the confirming look on a cache MISS, which is rare for one rotated photo and universal for a
+ *  purged event, so it has to be the async one. */
+const exists = (file: string) => fs.promises.access(file).then(() => true, () => false);
+
+/** What a mid-stream zip failure can possibly look like to the person waiting for it.
+ *
+ *  By the time anything in the archive loop can fail, the `200 OK`, the content type and the
+ *  `Content-Disposition` are long gone, and so are the bytes of the first few photos. A JSON error
+ *  is not available. Neither is a status code, nor a header, nor a message of any kind. The only
+ *  channel left is the SHAPE OF THE RESPONSE ITSELF.
+ *
+ *  That channel is real, and it is the whole of the fix. A store-only zip has no length anybody
+ *  knows until the last entry is written, so there is no Content-Length and the body goes out
+ *  `Transfer-Encoding: chunked` — and a chunked body is only COMPLETE once the zero-length
+ *  terminating chunk arrives. Killing the socket before that leaves the framing unterminated,
+ *  which is not ambiguous to anything that speaks HTTP: Chrome and Firefox file the download as
+ *  failed rather than dropping a truncated .zip into the Downloads folder, curl exits 18, and
+ *  nginx in front of us resets its own downstream connection when an upstream dies this way.
+ *
+ *  So the load-bearing rule here is a NEGATIVE one, and it is the easiest thing in the world to
+ *  undo by accident while "tidying up error handling": never call res.end() on a failed archive.
+ *  end() writes that terminating chunk, and the client then receives a well-framed, complete,
+ *  successful HTTP response whose body happens to be half a zip. That is precisely the reported
+ *  failure — a corrupt file and no error anywhere. res.destroy() is not cleanup after the error;
+ *  it IS the error message, and the only one this stage of the response can still send.
+ *
+ *  `archive.abort()` in front of it was missing, and matters for us rather than for the client:
+ *  without it archiver carries on working its queue, statting and opening hundreds of files off
+ *  the share and pushing them into a socket nobody is reading, for a download that already
+ *  failed. */
+export function onZipStreamError(res: { destroy(): unknown }, archive: { abort(): unknown }, err: Error): void {
+  console.error('[zip] failed mid-stream, aborting the download:', err);
+  archive.abort();
+  res.destroy();
+}
+
+/** The note that goes INSIDE the zip when something could not be included.
+ *
+ *  Inside the archive, rather than a header or a status or a different filename, because there is
+ *  nowhere else left to put it: the response headers were written before the first entry had even
+ *  been statted, and the count is not known until the last one has. The archive is the only
+ *  writable surface that still exists at that point.
+ *
+ *  The contract this creates is the point of it. A zip with no such file in it is complete, and
+ *  that claim is now true. A zip with one names exactly what is not there, so "I think a photo is
+ *  missing" stops being something only the host's memory can answer.
+ *
+ *  Plain and undramatic on purpose. The overwhelmingly likely cause is a rotation landing
+ *  mid-archive, and in that case nothing has been lost at all — the photo is in the gallery under
+ *  a new name and a second download will have it. So the copy says "try again", not "your photos
+ *  are gone". */
+function missingManifest(total: number, missing: string[]): string {
+  const n = missing.length;
+  return [
+    'Some photos could not be included in this download',
+    '===================================================',
+    '',
+    `${n} of ${total} ${n === 1 ? 'is' : 'are'} missing from this zip:`,
+    '',
+    ...missing.map((name) => `  - ${name}`),
+    '',
+    'These were looked for a second time once the rest of the download had',
+    'finished, in case they had simply been rotated or re-cropped while it was',
+    'being prepared — that is the usual reason, and it is recovered',
+    'automatically. These ones were still not there, so they have most likely',
+    'been removed from the event. Check the gallery: anything still showing',
+    'there will come through on another download.',
+    '',
+  ].join('\n');
+}
+
+// ── Streaming a zip while the event is still being edited ─────────────────────────────────────
+//
+// Stream a .zip of the given photo rows, named "<Event> - <Participant> - <n>.ext" where n is that
+// participant's own capture-order number. Resolves once the archive is finalised (or has been
+// abandoned), and answers with the entry names that could NOT be included — empty when every row
+// handed in is really in the file.
+//
+// THE RACE EVERYTHING ODD BELOW IS BUILT AROUND.
+//
+// A 400-photo event is minutes of streaming off an NFS share, and the host is very often sitting
+// in the Review screen for those minutes, straightening shots. POST /:id/rotate does not edit a
+// file in place: it writes a fresh uuid, moves the row onto it and unlinks the old name. So a
+// filename read at the start of a download is a filename that can cease to exist halfway through
+// it — for a photo that is completely fine under a different one.
+//
+// Three separate things went wrong with that, and every one of them was silent:
+//
+//   1. The caller SNAPSHOTS the rows with one select and hands the array over. By the time entry
+//      300 is reached that array is minutes old, so it can name a file nobody can open, for a
+//      photo that is still there. The right outcome is the rotated file in the zip — not a hole,
+//      and not an error.
+//   2. `onDisk()` answers from a readdir cached for LISTING_TTL_MS (2s). Inside that window it
+//      will cheerfully say "present" about a name unlinked a second ago, so the guard passes and
+//      the entry gets queued regardless.
+//   3. `archive.file()` only QUEUES. Archiver lstats the path later and opens the read stream
+//      later still. An lstat that fails does `_entriesCount--` and emits 'warning' — and
+//      'warning' had NO LISTENER, so the entry simply vanished and the download completed looking
+//      perfect. A failure in the window between the lstat and the read reaches 'error' instead,
+//      which destroyed the socket mid-body with nothing anywhere to say why.
+//
+// The answers, in the same order: names are re-read from the database in batches immediately
+// before they are queued; a cache miss is confirmed against the real filesystem before anything
+// is declared missing; and every dropped entry is counted, named in a README inside the zip, and
+// returned to the caller. Between them there is no longer a path where a file vanishes and nobody
+// is told.
+export async function zipPhotosToResponse(
   res: Response,
   eventName: string,
   // captureShape is required, not optional: downloadFile needs it to tell that a clip asked for a
   // shape, and a caller that forgets it gets uncropped originals in the zip with no error anywhere.
   // Making it mandatory turns that into a compile failure instead of a silent wrong file.
-  rows: { filename: string; mediaType: string | null; captureShape: string | null;
+  //
+  // `id` is required for the same class of reason. Without it the only filenames this function can
+  // ever see are the ones in the snapshot, which is the defect above; with it, the row is
+  // re-resolvable at the moment it matters. A caller that cannot supply an id cannot be made safe
+  // against a concurrent rotate, so the compiler refuses it rather than letting it look fine.
+  rows: { id: string; filename: string; mediaType: string | null; captureShape: string | null;
           participantId: string; participantName: string | null }[],
-) {
+): Promise<string[]> {
   const fileSafe = (s: string) => s.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
   const evName = fileSafe(eventName || 'Snapdini').slice(0, 40) || 'Snapdini';
   res.setHeader('Content-Type', 'application/zip');
@@ -2211,26 +2630,328 @@ export function zipPhotosToResponse(
   // download to start and a core is pinned. On a 400-photo event it is nearer a minute for a few
   // hundred KB. Bundling is the job here; compressing is not.
   const archive = new ZipArchive({ store: true });
-  archive.on('error', (err: Error) => { console.error('[zip] failed:', err); res.destroy(); });
+
+  // ── Did every entry we queued actually get into the file? ──────────────────────────────────
+  //
+  // Archiver settles each queued entry exactly once, through one of three events: 'entry' when it
+  // is written, 'warning' when the lstat failed and it has been dropped, or 'error' when the whole
+  // stream is finished. Counting all three is what lets this function wait for the queue to be
+  // genuinely resolved — which it must do, because the README below cannot be written until the
+  // last warning has fired, and `append` after `finalize` is a QUEUECLOSED error.
+  //
+  // Waiting does not make the response any slower: finalize() already only completed on queue
+  // drain. The difference is that we now know what happened before we commit to calling it.
+  /** Absolute source path → what that file is, to us.
+   *
+   *  Keyed by PATH, and that is the load-bearing part. The first version of this kept two maps —
+   *  path → entry name, and entry name → photo id — and the second of those is not a key at all.
+   *  Entry names are `<event> - <participant> - <n>`, numbered per participant, so two guests both
+   *  called Sarah each produce "Party - Sarah - 1.jpg": the second overwrites the first, and a
+   *  dropped entry for one of them is then traced back to the OTHER one's row. The recovery pass
+   *  would re-add Sarah B's photo a second time, mark it recovered, and Sarah A's genuinely lost
+   *  photo would never reach the README — which is exactly the silent hole this whole thing was
+   *  written to close, rebuilt inside the fix for it.
+   *
+   *  Paths are server-generated uuids and cannot collide. */
+  const entryFor = new Map<string, { entry: string; id: string }>();
+  /** Queued-and-lost or never-queued, each still carrying the id that can go and find it again.
+   *  `done` is set by the recovery pass rather than collecting names in a set, for the same
+   *  reason: a name is not an identity here. */
+  let missing: { id: string | null; entry: string; done?: boolean }[] = [];
+  let queued = 0, settled = 0, failed = false;
+  let wake: (() => void) | null = null;
+  let onSettle: (() => void) | null = null;
+  const settle = () => {
+    settled++;
+    onSettle?.();                       // progress: push the watchdog's deadline out
+    if (wake && settled >= queued) { const w = wake; wake = null; onSettle = null; w(); }
+  };
+  /** Resolves the moment anything writes this download off — the archiver erroring, the guest
+   *  closing the tab, the watchdog below. Nothing else resolves it, which is what makes it safe
+   *  to race a perfectly healthy finalize() against: it cannot fire first on a download that is
+   *  still working. */
+  let stopWaiting: (() => void) | null = null;
+  const abandoned = new Promise<void>((resolve) => { stopWaiting = resolve; });
+  const giveUp = () => {
+    failed = true;
+    stopWaiting?.();
+    if (wake) { const w = wake; wake = null; w(); }
+  };
+
+  archive.on('entry', settle);
+  archive.on('warning', (err) => {
+    // An lstat failure carries the path it failed on, which is how a dropped entry is traced back
+    // to the photo it was meant to be; the archiver's own warnings (unsupported entry types) carry
+    // an entry data object with the name instead. Between them there is always something to print,
+    // and the fallback exists only so that an unrecognised warning still gets counted rather than
+    // quietly unbalancing the settle count and hanging the response.
+    const p = (err as NodeJS.ErrnoException).path;
+    const hit = p ? entryFor.get(p) : undefined;
+    const named = hit?.entry ?? (err as { data?: { name?: string } }).data?.name ?? p;
+    console.error('[zip] entry dropped by archiver: %s (%s)', named ?? 'unknown entry', err?.message);
+    missing.push({ id: hit?.id ?? null, entry: named ?? 'an unnamed photo' });
+    settle();
+  });
+  archive.on('error', (err: Error) => { onZipStreamError(res, archive, err); giveUp(); });
+  // A cancelled download — the guest closing the tab, a phone losing wifi — otherwise leaves this
+  // function awaiting a queue that will never drain, holding the rows and the archiver for the
+  // life of the process while archiver keeps pulling files off the share for nobody. `close` fires
+  // on a successful response too, hence the writableFinished guard.
+  res.on('close', () => { if (!res.writableFinished && !failed) { archive.abort(); giveUp(); } });
   archive.pipe(res);
+  /** Has a single byte of archive reached the response since the watchdog last looked?
+   *
+   *  ONE ENTRY IS ONE SETTLE, which is why the watchdog cannot be a pure settle timer. A guest's
+   *  half-gigabyte clip going out to a phone on mobile data is many minutes between 'entry'
+   *  events, and every one of those minutes is spent successfully writing the thing. Counting
+   *  bytes is how "the archive has stopped" is told apart from "the archive is busy", and getting
+   *  that wrong now costs the download rather than merely mislogging it.
+   *
+   *  Attached AFTER the pipe above, never before: adding a 'data' listener to a paused readable
+   *  starts it flowing, and doing that ahead of the pipe would spill the first chunks of the zip
+   *  on the floor. */
+  let flowed = false;
+  archive.on('data', () => { flowed = true; });
+
+  /** Write the download off: stop the archiver, and leave the guest with a FAILED transfer.
+   *
+   *  onZipStreamError is the whole of the failure channel at this point — the 200, the headers
+   *  and the first entries are long gone, so destroying the socket without the terminating chunk
+   *  is the only thing left that means "this body is not complete". See its own note. */
+  const abandon = (why: string): void => { onZipStreamError(res, archive, new Error(why)); giveUp(); };
+
+  /** Resolve once every queued entry has settled — or fail the download.
+   *
+   *  THE WATCHDOG THIS REPLACES WAS A LIE, and it is worth writing down exactly how, because it
+   *  read perfectly. It stopped waiting, logged the count, and let the function walk on to
+   *  `await archive.finalize()` — and in archiver 8 (lib/core.js, `finalize()`) that promise
+   *  resolves on the zip module's own `end`, which the module only reaches once
+   *  `_pending === 0 && _queue.idle()`. That is the precise condition the watchdog exists because
+   *  it has NOT happened. So in the one scenario the whole mechanism was written for — a queued
+   *  entry archiver never settles — the request did not stop hanging at all. It hung two minutes
+   *  later, at finalize, with no bytes, no error and no end. A watchdog that moves a hang is
+   *  worse than no watchdog, because it also stops anybody going looking for one.
+   *
+   *  SO THE TIMEOUT NOW FAILS THE DOWNLOAD instead of proceeding with it, and there is no third
+   *  option available. Once archiver has stopped resolving entries no complete zip can be
+   *  produced: the README naming what is missing is itself an append onto the queue that will not
+   *  drain. Racing finalize() against a timer was the alternative and it was rejected — it leaves
+   *  archiver working a response nobody will ever read, and it has to destroy the socket at the
+   *  end of it anyway, so it is the same outcome bought with a live queue still pulling files off
+   *  the share.
+   *
+   *  IDLE, not total: the wait is legitimately minutes on a 400-photo event over NFS, so a total
+   *  timeout would cut healthy downloads short. And idle means NOTHING IS MOVING — see `flowed`
+   *  above for the bytes, and `writableNeedDrain` below for the other half of it. A response that
+   *  is back-pressured is not a stalled archive; it is a guest whose phone has stopped reading,
+   *  and the download it is still attached to is the one thing this must never kill. */
+  function waitForSettle(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (failed || settled >= queued) { resolve(); return; }
+      let idle: ReturnType<typeof setTimeout>;
+      // BOTH hooks are cleared here, not only on the timeout path. giveUp() resolves through
+      // `wake` and used to leave `onSettle` behind it, so a late 'entry' arriving after a
+      // cancelled download re-armed a fresh two-minute timer — which, now that the timer does
+      // something, would have fired on a response that had been over for minutes.
+      const done = () => { clearTimeout(idle); wake = null; onSettle = null; resolve(); };
+      const arm = () => {
+        clearTimeout(idle);
+        flowed = false;
+        idle = setTimeout(() => {
+          if (flowed || res.writableNeedDrain) { arm(); return; }   // alive, merely slow
+          console.error('[zip] "%s": %d of %d entries never settled — failing the download',
+                        evName, queued - settled, queued);
+          abandon(`${queued - settled} of ${queued} entries never settled`);
+          done();
+        }, zipSettleIdleMs);
+      };
+      // Every settle pushes the deadline out, so progress keeps the wait alive and silence ends it.
+      onSettle = arm;
+      wake = done;
+      arm();
+    });
+  }
 
   const perPerson = new Map<string, number>();
-  for (const r of rows) {
-    // The same file the gallery's own download button hands over — see downloadFile. Reading
-    // r.filename here meant a clip the gallery showed cropped came out of the zip uncropped.
-    const rel = downloadFile(r);
-    const file = path.join(UPLOADS_DIR, rel);
-    // onDisk(), not existsSync: every row in a zip lives in ONE event folder, so this is a single
-    // cached readdir (measured 542µs) instead of a synchronous NFS stat per photo (4µs warm, 143µs
-    // COLD — at 14,000 photos ~2.0s of blocked event loop, with every other guest's request waiting
-    // behind it). The same fix was made for the gallery path; the zip was left behind.
-    if (!onDisk(rel)) continue;
-    const ext = r.mediaType === 'video' ? (rel.split('.').pop() || 'mp4') : 'jpg';
-    const who = fileSafe(r.participantName || 'Guest') || 'Guest';
-    const n = (perPerson.get(r.participantId) || 0) + 1; perPerson.set(r.participantId, n);
-    archive.file(file, { name: `${evName} - ${who} - ${n}.${ext}` });
+  for (let start = 0; start < rows.length && !failed; start += ZIP_REFRESH_BATCH) {
+    const slice = rows.slice(start, start + ZIP_REFRESH_BATCH);
+    // RESOLVE LATE. The filenames in `slice` are as old as the snapshot; these are as old as this
+    // line. A rotate that has already committed moved the row to a new uuid and unlinked the old
+    // name, so re-reading is the difference between the zip containing the rotated photo and the
+    // zip containing a hole where it was.
+    let fresh: Map<string, MediaRow> | null = null;
+    try {
+      const now = await db
+        .select({ id: photos.id, filename: photos.filename, mediaType: photos.mediaType,
+                  captureShape: photos.captureShape })
+        .from(photos)
+        .where(inArray(photos.id, slice.map((r) => r.id)));
+      fresh = new Map(now.map((p) => [p.id, p as MediaRow]));
+    } catch (e) {
+      // A database hiccup must not cost the host the other 390 photos, so this batch falls back to
+      // the snapshot and the existence checks below decide. `fresh` staying null is load-bearing
+      // beyond the fallback: it is also what stops an absent row being read as "this photo was
+      // deleted" when the truth is "we never managed to ask".
+      console.error('[zip] could not refresh filenames for the batch at %d, using the snapshot:', start, e);
+    }
+
+    for (const r of slice) {
+      // The NUMBER comes from the snapshot's position and is taken for every row, including the
+      // ones that turn out to be missing. That is a deliberate change from the dense numbering
+      // this loop used to do, and the reason is the same one the caller's ORDER BY is written for:
+      // a given photo must get the same name in two downloads of one event. Skipping the counter
+      // on a missing file renumbers everything after it, so one absent photo silently renames the
+      // whole rest of the zip — and leaves the README below with no name to report it under.
+      // A gap in the numbering is the honest artefact of a gap in the archive.
+      const who = fileSafe(r.participantName || 'Guest') || 'Guest';
+      const n = (perPerson.get(r.participantId) || 0) + 1; perPerson.set(r.participantId, n);
+      const cur = fresh?.get(r.id) ?? r;
+      // The same file the gallery's own download button hands over — see downloadFile. Reading
+      // r.filename here meant a clip the gallery showed cropped came out of the zip uncropped.
+      const rel = downloadFile(cur);
+      const ext = cur.mediaType === 'video' ? (rel.split('.').pop() || 'mp4') : 'jpg';
+      const entry = `${evName} - ${who} - ${n}.${ext}`;
+
+      // The row is gone from the database entirely, and we know that rather than guessing it: a
+      // delete between the snapshot and here takes the file with it, so there is nothing to add
+      // and nothing that a retry will recover. Say so in the README rather than dropping it.
+      if (fresh && !fresh.has(r.id)) { missing.push({ id: r.id, entry }); continue; }
+
+      const file = path.join(UPLOADS_DIR, rel);
+      // onDisk(), not existsSync: every row in a zip lives in ONE event folder, so this is a single
+      // cached readdir (measured 542µs) instead of a synchronous NFS stat per photo (4µs warm, 143µs
+      // COLD — at 14,000 photos ~2.0s of blocked event loop, with every other guest's request waiting
+      // behind it). The same fix was made for the gallery path; the zip was left behind.
+      //
+      // The confirming existsSync only runs on a MISS, and it is there because the cache is wrong
+      // in both directions, not just one. The listing is up to LISTING_TTL_MS old, so a file that
+      // a rotation created a moment ago is not in it — and without this second look that freshly
+      // written, perfectly present photo would be reported to the guest as missing. One stat on
+      // the rare miss costs nothing; the false accusation would be worse than the original bug.
+      // `await fs.promises.access`, not `fs.existsSync`. The comment above is about avoiding a
+      // synchronous stat per photo on an NFS share — ~143µs cold, which at 14,000 photos is two
+      // seconds of BLOCKED event loop with every other guest's request queued behind it. Reaching
+      // for existsSync on the miss path put that straight back: the miss path is rare for one
+      // rotated photo and it is EVERY row for a purged event or a mass rotation, which is exactly
+      // when the origin can least afford to stop answering. Awaiting costs this download the same
+      // wall-clock and costs everybody else nothing.
+      if (!onDisk(rel) && !(await exists(file))) { missing.push({ id: r.id, entry }); continue; }
+
+      entryFor.set(file, { entry, id: r.id });
+      queued++;
+      archive.file(file, { name: entry });
+    }
   }
-  archive.finalize();
+
+  // Everything is queued; wait for archiver to have actually resolved each one before deciding
+  // what to say about the result.
+  //
+  // WITH A WATCHDOG, because the counting is the load-bearing part and it is only as complete as
+  // the three events it listens to. Archiver settles a queued entry through 'entry', 'warning' or
+  // 'error'; if it ever finds a fourth way to abandon one — or if somebody removes a listener —
+  // `settled` never reaches `queued`, this promise never resolves, and the guest's download hangs
+  // open for ever with no error and no bytes. A missing photo is a bad outcome; a response that
+  // never ends is a worse one, and it is the failure mode that silence produces.
+  //
+  // IDLE, not total: the wait is legitimately minutes on a 400-photo event over NFS, so a total
+  // timeout would cut healthy downloads short. What is never legitimate is nothing settling at
+  // all for two minutes while entries are outstanding.
+  await waitForSettle();
+
+  // The socket is already destroyed and the body deliberately unterminated — see onZipStreamError.
+  // Appending anything now would be a QUEUECLOSED error on a stream nobody is reading.
+  if (failed) return missing.map((m) => m.entry);
+
+  // ── One last look, before we admit to anything ────────────────────────────────────────────
+  //
+  // Everything above narrows the race; this closes most of what is left of it. Resolving names in
+  // batches of 50 means a row is read at most fifty files before it is queued — but "at most fifty
+  // files" is still tens of seconds on a large event over NFS, and a rotate landing inside that
+  // window produced a README entry for a photo that was never actually lost. It had simply moved
+  // again, and we reported the last place we looked.
+  //
+  // By the time the queue has drained we know exactly which entries failed, and — because they are
+  // carrying their ids — exactly which rows to go and ask about. One more select, one stat each,
+  // and the overwhelmingly common cause of a miss (a rename, which is entirely recoverable) is
+  // recovered. What is left after this is the genuinely unrecoverable kind: a deleted row, or a
+  // file that is not on the share at all.
+  //
+  // ONE pass, deliberately, and not a loop. Each pass narrows the window by the time the previous
+  // one took, so the second would be defending against a rename landing inside a few milliseconds
+  // of database round trip — while adding a way for a pathological event to keep this function
+  // alive indefinitely. The README is the right answer to the residue, and it is now telling the
+  // truth about it rather than reporting a photo that was merely in motion.
+  //
+  // `fs.existsSync`, not `onDisk()`: the readdir cache is up to LISTING_TTL_MS old and a file that
+  // has just been written is precisely what it will not know about — which is the entire case this
+  // pass exists for. The retry set is small and rare, so the stats are affordable here in a way
+  // they are not in the main loop.
+  if (missing.length) {
+    const ids = [...new Set(missing.map((m) => m.id).filter((id): id is string => id !== null))];
+    let recovered = 0;
+    if (ids.length) {
+      try {
+        const nowRows = await db
+          .select({ id: photos.id, filename: photos.filename, mediaType: photos.mediaType,
+                    captureShape: photos.captureShape })
+          .from(photos)
+          .where(inArray(photos.id, ids));
+        const byId = new Map(nowRows.map((p) => [p.id, p as MediaRow]));
+        for (const m of missing) {
+          if (m.id === null) continue;
+          const cur = byId.get(m.id);
+          if (!cur) continue;                       // the row really is gone
+          const file = path.join(UPLOADS_DIR, downloadFile(cur));
+          if (!(await exists(file))) continue;      // and neither is the file, under any name
+          // The entry keeps the name it was always going to have. The numbering is positional so
+          // that two downloads of one event agree, and a photo recovered here must not be renamed
+          // just because it arrived late — it goes in at the end of the archive under its original
+          // name, which is the only part of it anybody sees.
+          entryFor.set(file, { entry: m.entry, id: m.id });
+          queued++;
+          archive.file(file, { name: m.entry });
+          m.done = true;
+          recovered++;
+        }
+      } catch (e) {
+        // Nothing is lost by failing here: every one of these was already going into the README.
+        console.error('[zip] the recovery pass could not re-read %d rows:', ids.length, e);
+      }
+    }
+    if (recovered) {
+      console.error('[zip] "%s": recovered %d of %d missing entries on the second look',
+                    evName, recovered, missing.length);
+      missing = missing.filter((m) => !m.done);
+      // Filtered BEFORE the wait on purpose: a recovered entry that fails AGAIN re-enters `missing`
+      // through the warning handler during this await, and has then earned its place in the README.
+      //
+      // THE SAME GUARDED WAIT as the first one, and that is the entire change here. This was a
+      // bare promise with neither an idle timer nor an onSettle hook — so an entry the recovery
+      // pass re-queued and archiver then abandoned hung the response exactly as the first wait
+      // used to, seventy lines below the watchdog written to stop it. The newer code had quietly
+      // reintroduced the older bug, which is the argument for there being one way to wait here
+      // rather than two.
+      await waitForSettle();
+      if (failed) return missing.map((m) => m.entry);
+    }
+  }
+
+  const names = missing.map((m) => m.entry);
+  if (names.length) {
+    console.error('[zip] "%s": %d of %d entries could not be included', evName, names.length, rows.length);
+    archive.append(missingManifest(rows.length, names), { name: `${evName} - MISSING PHOTOS.txt` });
+  }
+  // RACED, not awaited bare. finalize() resolves when the zip module emits `end`, so on a healthy
+  // download finalize wins every time and nothing here changes by a millisecond. What the race
+  // defends against is the other end going away DURING that last flush: res.on('close') aborts the
+  // archiver, an aborted archiver unpipes its module and never ends it, and the promise finalize
+  // already handed us would then never settle at all — stranding this function, its rows and its
+  // archiver in memory for the life of the process over a socket that closed minutes ago.
+  // `abandoned` resolves only once something has already written the download off, so it cannot
+  // cut a working one short, and a finalize() that rejects after the race has settled is handled
+  // by the race itself rather than surfacing as an unhandled rejection.
+  await Promise.race([archive.finalize(), abandoned]);
+  return names;
 }
 
 // ── Who may hold a copy of this answer ─────────────────────────────────────────

@@ -128,7 +128,11 @@
   /** Open by default: the log exists to be read BEFORE anything is touched, and one that starts
    *  collapsed is one that gets opened after the fact. Collapsible because on a long support
    *  session it is a list you have already read. */
-  let adminLogOpen = true;
+  /* Closed. It was opened by default on the reasoning that "did I do this?" is worth answering
+   *  before touching anything — which is true, and still leaves it as the first thing on the screen
+   *  every single visit, most of them about something else. A log that is always open is a log that
+   *  is scrolled past, which is the same as one that is never read. One press when it is wanted. */
+  let adminLogOpen = false;
 
   function takeControl() {
     if (!adminGuarded || tookControl) return;
@@ -859,6 +863,30 @@
       .catch(() => {});
   }
 
+  /** The start date, time and zone exactly as hydrateFromEvent() left them. */
+  let hydratedStart: { date: string; time: string; tz: string } | null = null;
+  /** Did the host leave the start alone?
+   *
+   *  This exists because "did the start move" was being asked of an EPOCH the form recomputed
+   *  from scratch on every save, and the recompute was not symmetric with the load:
+   *
+   *    load:  msToZonedWallTime(e.startsAt, e.timezone || 'UTC')
+   *    save:  zonedWallTimeToMs(sDate, sTime, e.timezone || <the BROWSER's zone>)
+   *
+   *  For the 59 of 74 events with no stored timezone those two disagree by the host's whole UTC
+   *  offset — ten hours from Brisbane. So the server was told the start had moved ten hours,
+   *  refused with "this event has already started and guests have joined, so the start time is
+   *  locked", and rejected the entire save: the name, the blurb, the toggles, all of it. The host
+   *  had not gone near the date field, and the fields on screen kept showing the edits until a
+   *  reload threw them away.
+   *
+   *  Comparing the FIELDS rather than a derived instant is what makes this honest. They are the
+   *  only thing the host actually touched, they need no timezone to interpret, and an unchanged
+   *  form now sends no start at all — so the server has nothing to reject and every other setting
+   *  saves. It also fixes the whole class, not just the null-timezone case. */
+  $: startFieldsUntouched = !!hydratedStart
+    && sDate === hydratedStart.date && sTime === hydratedStart.time && sTimezone === hydratedStart.tz;
+
   function hydrateFromEvent(e: AdminEvent) {
     // settings form
     // Read in the EVENT's timezone, not the browser's.
@@ -909,6 +937,10 @@
     sHearts = e.heartsEnabled !== false;
     sComments = e.commentsEnabled === true;
     sTimezone = e.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    // WHAT THE START FIELDS SAID WHEN THEY WERE FILLED IN, so a save can tell whether the host
+    // actually touched them. Without this the form recomputed an epoch on every save and handed
+    // it to the server as if it were an edit — see startFieldsUntouched below.
+    hydratedStart = { date: sDate, time: sTime, tz: sTimezone };
     sSlug = e.slug || '';
     sAspects = new Set(e.aspectRatios && e.aspectRatios.length ? e.aspectRatios : ['1:1']);
     galleryHearts = ev?.galleryHeartsEnabled !== false;
@@ -1337,15 +1369,18 @@
     try {
       // Written in the event's zone too, so what the host typed means what they think it means
       // wherever they happen to be sitting.
-      const startsAt = sDate
-        ? (zonedWallTimeToMs(sDate, sTime || '00:00', sTimezone || 'UTC') ?? new Date(`${sDate}T${sTime || '00:00'}`).getTime())
-        : undefined;
+      // Omitted entirely when the host did not touch the start fields. Sending a recomputed epoch
+      // for an unedited form is what made an ordinary settings save look like a reschedule.
+      const startsAt = (startFieldsUntouched || !sDate)
+        ? undefined
+        : (zonedWallTimeToMs(sDate, sTime || '00:00', sTimezone || 'UTC') ?? new Date(`${sDate}T${sTime || '00:00'}`).getTime());
       const saved = await saveSettings(code, orgCode, {
         name: sName,
         blurb: sBlurb.trim(),
-        startsAt,
-        startDate: sDate,
-        startTime: sTime,
+        // All three together or none: the server falls back to parsing startDate/startTime when
+        // there is no epoch, so leaving those behind would recreate the same phantom reschedule
+        // through the other door.
+        ...(startFieldsUntouched ? {} : { startsAt, startDate: sDate, startTime: sTime }),
         revealMode: sReveal,
         // 'custom' tells the server to read the two fields below instead of an hour count.
         revealDelayHours: sWantsCustomReveal ? REVEAL_CUSTOM : parseInt(String(sDelay), 10) || 0,
@@ -1373,7 +1408,21 @@
       });
       // The server saves everything else even when it will not honour the shapes, so say which
       // happened rather than a blanket "saved".
-      if (saved?.aspectsRefused) {
+      if (saved?.startRefused) {
+        // EVERYTHING ELSE SAVED. This used to be a rejection — one locked field threw away the
+        // whole payload, and the form kept showing edits it had not stored until a reload took
+        // them back. Now the start alone is refused, so the host is told which part did not take
+        // rather than being left to guess which of twenty fields the error was about.
+        shapeNotice = `Saved — but the start time was not changed. ${saved.startRefused}`;
+        showToast('Saved, except the start time', true);
+        // Put the date fields back to the truth. Leaving the refused value on screen is the other
+        // half of the original complaint: an edit that looks applied until something reloads.
+        if (ev) {
+          const z = msToZonedWallTime(saved.startsAt ?? ev.startsAt, sTimezone || 'UTC');
+          if (z) { sDate = z.date; sTime = z.time; }
+          hydratedStart = { date: sDate, time: sTime, tz: sTimezone };
+        }
+      } else if (saved?.aspectsRefused) {
         shapeNotice = 'Saved — but the extra frame shapes need the frame pack, so they were not applied.';
         showToast('Settings saved, except the frame shapes', true);
       } else if (saved?.revealAtClamped || saved?.guestSendAtClamped) {
@@ -1977,23 +2026,6 @@
       <div class="stat"><b>{ev.maxPhotos}</b><span>Max per Person</span></div>
     </div>
 
-    {#if adminGuarded}
-      <!-- What a site admin has already changed HERE, above everything else and open by default —
-           the question "did I do this?" is the one worth answering BEFORE touching anything, and a
-           log you have to go looking for gets read after the damage rather than before it.
-           Not `sec-hide`d: it belongs to the whole page, not to one section. -->
-      <div class="card admin-log-card">
-        <button class="part-head" aria-expanded={adminLogOpen} on:click={() => (adminLogOpen = !adminLogOpen)}>
-          <span class="chev" class:open={adminLogOpen}>›</span>
-          <span class="card-title part-title">Admin changes to this event</span>
-          <span class="part-hint">{adminLogOpen ? 'hide' : 'show'}</span>
-        </button>
-        {#if adminLogOpen}
-          <AdminActionLog eventId={ev.id} showEvent={false} limit={10} />
-        {/if}
-      </div>
-    {/if}
-
     {#if section === null}
       <!-- One tap per destination, and every tile says what is inside it rather than only naming
            itself: "Controls" alone does not tell a host where the reveal switch lives. -->
@@ -2053,6 +2085,30 @@
           </button>
         {/if}
       </div>
+
+      {#if adminGuarded}
+        <!-- LAST on the hub, under the upgrade tile.
+             It started at the top, on the reasoning that "did I do this?" is worth answering before
+             touching anything. True, and it still meant a site admin opened this page to change one
+             setting and was met first by a record of the last time they changed one. The question is
+             worth answering when you ask it, not on every visit.
+             So it takes the position the upgrade tile already argued for: below the things you came
+             to do, because it is not one of them.
+             Hub only. Inside a section the sticky section bar owns the top of the screen and this
+             would wedge itself between that bar and the panel it names. One press back to reach it.
+             `collapsible={false}` because THIS is the disclosure — the component would otherwise add
+             a second one inside it and cost two presses to see a list. -->
+        <div class="card admin-log-card">
+          <button class="part-head" aria-expanded={adminLogOpen} on:click={() => (adminLogOpen = !adminLogOpen)}>
+            <span class="chev" class:open={adminLogOpen}>›</span>
+            <span class="card-title part-title">Admin changes to this event</span>
+            <span class="part-hint">{adminLogOpen ? 'hide' : 'show'}</span>
+          </button>
+          {#if adminLogOpen}
+            <AdminActionLog eventId={ev.id} showEvent={false} collapsible={false} limit={2} />
+          {/if}
+        </div>
+      {/if}
     {:else}
       <!-- STICKY, not fixed. The feedback button a few hundred lines down carries the lesson: a
            fixed control on a phone sits on top of whatever full-width button you have just

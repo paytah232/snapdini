@@ -1,5 +1,5 @@
 // Small shared server-side helpers, deduped out of the route files.
-import type { Request } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import type { Event } from './schema';
 import { scheduledRevealAt } from '../../../shared/reveal';
 
@@ -118,4 +118,34 @@ export function purgeAtForEvent(
   expiresAt: number,
 ): number {
   return isDemoEvent(ev) ? expiresAt : purgeAtFor(expiresAt, ev.retentionDays);
+}
+
+// ── express 5: a body that was never parsed is `undefined`, not `{}` ─────────
+//
+// body-parser 2 — what express 5 brings with it — sets `req.body = undefined` where 1.x left an
+// empty object behind (lib/read.js: `if (!('body' in req)) req.body = undefined`). So every
+// handler in this app that reads a field the way a handler naturally does, `const { theme } =
+// req.body`, stopped answering "400 Invalid theme" to a request that arrived without one and
+// started throwing a TypeError instead — which express 5 dutifully forwards to the error
+// middleware, where it becomes 500 "Something went wrong". Around forty call sites across the
+// routers, every one of them correct when it was written, every one of them now reporting a
+// server fault for a client mistake. And the trigger is not exotic: a POST with no Content-Type
+// is what every scanner, every hand-rolled curl and every fetch() that forgot its header sends.
+//
+// ONE MIDDLEWARE, rather than forty `?? {}`s. The scattered version was considered and rejected
+// twice over: it is forty chances to miss one — the audit that found this had itself only
+// spotted eight — and it is forty places for the next handler to be written without it.
+// Restoring, once and where the bodies are parsed, the property the whole codebase was written
+// against leaves every one of those handlers taking exactly the branch and returning exactly the
+// status code it did under express 4.
+//
+// IT CANNOT SWALLOW A REAL BODY. Only `undefined` is replaced. body-parser 2 decides whether to
+// parse from the request STREAM (`onFinished.isFinished`, then `hasBody`) and not from the value
+// of `req.body`, so a parser mounted further down the stack — the urlencoded one on
+// /api/guest-unsubscribe, multer on the upload routes — still reads its body and still replaces
+// this placeholder with it. The one body that must never be touched, Stripe's raw webhook
+// payload, is read on a route mounted above this one.
+export function bodyDefaultsToEmpty(req: Request, _res: Response, next: NextFunction): void {
+  if (req.body === undefined) req.body = {};
+  next();
 }

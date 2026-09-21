@@ -67,19 +67,21 @@ describe('the download control sits in the card, not on the photo', () => {
 
 describe('selecting works on the whole card, not just the picture', () => {
   it('picks the photo when the text under it is pressed', async () => {
-    const { container, component } = render(PhotoCard, {
-      photo: photo({ caption: 'Nice' }), selectable: true, meta: 'Ada · 7:04 pm',
-    });
     const open = vi.fn();
-    component.$on('open', open);
+    const { container } = render(PhotoCard, {
+      props: { photo: photo({ caption: 'Nice' }), selectable: true, meta: 'Ada · 7:04 pm' },
+      events: { open }
+    });
     await fireEvent.click(container.querySelector('.pmeta')!);
     expect(open).toHaveBeenCalledTimes(1);
   });
 
   it('leaves the foot inert when the grid is not selecting', async () => {
-    const { container, component } = render(PhotoCard, { photo: photo(), meta: 'Ada · 7:04 pm' });
     const open = vi.fn();
-    component.$on('open', open);
+    const { container } = render(PhotoCard, {
+      props: { photo: photo(), meta: 'Ada · 7:04 pm' },
+      events: { open }
+    });
     await fireEvent.click(container.querySelector('.pmeta')!);
     expect(open).not.toHaveBeenCalled();
   });
@@ -95,13 +97,12 @@ describe('selecting works on the whole card, not just the picture', () => {
   });
 
   it('still saves — and does not pick — when the save plate itself is pressed', async () => {
-    const { container, component } = render(PhotoCard, {
-      photo: photo(), selectable: true, canDownload: true,
-    });
     const open = vi.fn();
     const download = vi.fn();
-    component.$on('open', open);
-    component.$on('download', download);
+    const { container } = render(PhotoCard, {
+      props: { photo: photo(), selectable: true, canDownload: true },
+      events: { open, download }
+    });
     await fireEvent.click(container.querySelector('.dl-corner')!);
     expect(download).toHaveBeenCalledTimes(1);
     expect(open).not.toHaveBeenCalled();
@@ -110,11 +111,11 @@ describe('selecting works on the whole card, not just the picture', () => {
   it('does not pick the photo when a disabled save plate swallows the press', async () => {
     // A `disabled` button fires no events at all, so the click lands on the foot behind it. Saving
     // is not picking, and a press that looked like it did nothing must not quietly do something.
-    const { container, component } = render(PhotoCard, {
-      photo: photo(), selectable: true, canDownload: true, saving: true,
-    });
     const open = vi.fn();
-    component.$on('open', open);
+    const { container } = render(PhotoCard, {
+      props: { photo: photo(), selectable: true, canDownload: true, saving: true },
+      events: { open }
+    });
     // Dispatched from the plate so it bubbles through the foot exactly as a real stray press
     // would; fireEvent would not deliver one to a disabled control at all.
     container.querySelector('.dl-corner')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -123,13 +124,12 @@ describe('selecting works on the whole card, not just the picture', () => {
   });
 
   it('opens the caption editor rather than picking, when a card offers one', async () => {
-    const { container, component } = render(PhotoCard, {
-      photo: photo({ caption: 'Nice' }), selectable: true, captionMode: 'edit',
-    });
     const open = vi.fn();
     const caption = vi.fn();
-    component.$on('open', open);
-    component.$on('caption', caption);
+    const { container } = render(PhotoCard, {
+      props: { photo: photo({ caption: 'Nice' }), selectable: true, captionMode: 'edit' },
+      events: { open, caption }
+    });
     await fireEvent.click(container.querySelector('.capstrip.edit')!);
     expect(caption).toHaveBeenCalledTimes(1);
     expect(open).not.toHaveBeenCalled();
@@ -218,10 +218,11 @@ describe('hearting a photo', () => {
   });
 
   it('hearts on a double tap of the picture, and does not also open it', async () => {
-    const { container, component } = render(PhotoCard, { props: heartable });
     const hearted = vi.fn(); const opened = vi.fn();
-    component.$on('heart', (e) => hearted(e.detail));
-    component.$on('open', opened);
+    const { container } = render(PhotoCard, {
+      props: heartable,
+      events: { heart: (e: CustomEvent<boolean>) => hearted(e.detail), open: opened }
+    });
 
     const cell = container.querySelector('.pcell') as HTMLElement;
     await fireEvent.click(cell);
@@ -234,9 +235,8 @@ describe('hearting a photo', () => {
   });
 
   it('still opens the photo on a single tap', async () => {
-    const { container, component } = render(PhotoCard, { props: heartable });
     const opened = vi.fn();
-    component.$on('open', opened);
+    const { container } = render(PhotoCard, { props: heartable, events: { open: opened } });
     await fireEvent.click(container.querySelector('.pcell') as HTMLElement);
     await new Promise((r) => setTimeout(r, 400));
     expect(opened).toHaveBeenCalled();
@@ -245,18 +245,21 @@ describe('hearting a photo', () => {
   // A mistimed second tap must never take a heart away: undoing silently is worse than doing
   // nothing, and the heart itself is right there for taking it back on purpose.
   it('never un-hearts on a double tap', async () => {
-    const { container, component } = render(PhotoCard, { props: { ...heartable, hearts: 3, hearted: true } });
     const hearted = vi.fn();
-    component.$on('heart', (e) => hearted(e.detail));
+    const { container } = render(PhotoCard, {
+      props: { ...heartable, hearts: 3, hearted: true },
+      events: { heart: (e: CustomEvent<boolean>) => hearted(e.detail) }
+    });
     await dblclick(container.querySelector('.pcell') as HTMLElement);
     expect(hearted).not.toHaveBeenCalled();
   });
 
   it('does nothing for somebody who was not at the event', async () => {
-    const { container, component } = render(PhotoCard, { props: { photo: photo(), hearts: 5, canHeart: false } });
     const hearted = vi.fn(); const opened = vi.fn();
-    component.$on('heart', (e) => hearted(e.detail));
-    component.$on('open', opened);
+    const { container } = render(PhotoCard, {
+      props: { photo: photo(), hearts: 5, canHeart: false },
+      events: { heart: (e: CustomEvent<boolean>) => hearted(e.detail), open: opened }
+    });
     await dblclick(container.querySelector('.pcell') as HTMLElement);
     expect(hearted).not.toHaveBeenCalled();
     // …and their tap still opens the photo with no delay in the way.
@@ -270,10 +273,11 @@ describe('double tap on the host’s review grid favourites instead', () => {
   const reviewable = { photo: photo(), hearts: 4, canHeart: false, doubleTap: 'favourite' as const };
 
   it('marks the photo a favourite, and does not open it', async () => {
-    const { container, component } = render(PhotoCard, { props: reviewable });
     const faved = vi.fn(); const opened = vi.fn();
-    component.$on('favourite', faved);
-    component.$on('open', opened);
+    const { container } = render(PhotoCard, {
+      props: reviewable,
+      events: { favourite: faved, open: opened }
+    });
     await dblclick(container.querySelector('.pcell') as HTMLElement);
     expect(faved).toHaveBeenCalled();
     await new Promise((r) => setTimeout(r, 400));
@@ -281,17 +285,18 @@ describe('double tap on the host’s review grid favourites instead', () => {
   });
 
   it('never un-favourites — the corner star is how you take it back', async () => {
-    const { container, component } = render(PhotoCard, { props: { ...reviewable, favourite: true } });
     const faved = vi.fn();
-    component.$on('favourite', faved);
+    const { container } = render(PhotoCard, {
+      props: { ...reviewable, favourite: true },
+      events: { favourite: faved }
+    });
     await dblclick(container.querySelector('.pcell') as HTMLElement);
     expect(faved).not.toHaveBeenCalled();
   });
 
   it('does not heart, because the count on this screen is the room’s', async () => {
-    const { container, component } = render(PhotoCard, { props: reviewable });
     const hearted = vi.fn();
-    component.$on('heart', hearted);
+    const { container } = render(PhotoCard, { props: reviewable, events: { heart: hearted } });
     await dblclick(container.querySelector('.pcell') as HTMLElement);
     expect(hearted).not.toHaveBeenCalled();
     // …and the count is still shown, just not pressable.
@@ -302,9 +307,11 @@ describe('double tap on the host’s review grid favourites instead', () => {
   it('opens on the FIRST tap when the gesture is switched off', async () => {
     // Select mode: a tap means "pick this", and a delay waiting for a second tap that does nothing
     // would be felt on every single card.
-    const { container, component } = render(PhotoCard, { props: { ...reviewable, doubleTap: 'none' as const } });
     const opened = vi.fn();
-    component.$on('open', opened);
+    const { container } = render(PhotoCard, {
+      props: { ...reviewable, doubleTap: 'none' as const },
+      events: { open: opened }
+    });
     await fireEvent.click(container.querySelector('.pcell') as HTMLElement);
     expect(opened, 'no waiting around').toHaveBeenCalled();
   });

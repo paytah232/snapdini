@@ -32,7 +32,7 @@ after(() => { fs.rmSync(path.dirname(IMAGE), { recursive: true, force: true }); 
 async function withUrl(url: string | undefined) {
   if (url === undefined) delete process.env.MACHINE_LEARNING_URL;
   else process.env.MACHINE_LEARNING_URL = url;
-  return await import('../faces');
+  return await import('../faces.js');   // .js, not .ts: nodenext resolution wants the emitted specifier
 }
 
 /** Run `fn` with fetch replaced, and report what it was asked for. */

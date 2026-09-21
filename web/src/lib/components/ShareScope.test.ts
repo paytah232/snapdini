@@ -23,9 +23,11 @@ const props = (over: Record<string, unknown> = {}) => ({
 
 describe('the guest-favourites row', () => {
   it('offers the hearted ones, most-hearted first, and answers with the hearts scope', async () => {
-    const { container, component } = render(ShareScope, { props: props({ voice: 'guest' }) });
     const picked = vi.fn();
-    component.$on('pickHearts', (e) => picked(e.detail));
+    const { container } = render(ShareScope, {
+      props: props({ voice: 'guest' }),
+      events: { pickHearts: (e: CustomEvent<'hearts' | 'both'>) => picked(e.detail) }
+    });
     const r = row(container, 'What everyone loved')!;
     expect(r.textContent).toContain('The 8 with at least one');
     expect(r.textContent).toContain('most-hearted first');
@@ -64,9 +66,11 @@ describe('the guest-favourites row', () => {
 
 describe('the both-sets row', () => {
   it('appears when each half adds something the other does not, and answers with the both scope', async () => {
-    const { container, component } = render(ShareScope, { props: props() });
     const picked = vi.fn();
-    component.$on('pickHearts', (e) => picked(e.detail));
+    const { container } = render(ShareScope, {
+      props: props(),
+      events: { pickHearts: (e: CustomEvent<'hearts' | 'both'>) => picked(e.detail) }
+    });
     const r = row(container, 'Stars and hearts')!;
     expect(r.textContent).toContain('11 in all');
     await fireEvent.click(r);

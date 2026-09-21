@@ -41,8 +41,14 @@
    *  first thing on the screen every single visit, most of them about something else entirely —
    *  which is how a log stops being read: not by being hidden, but by always being there. */
   export let startOpen = false;
+  /** Does this component provide its OWN show/hide?
+   *
+   *  False where the caller already has one. The manager wraps this in a titled disclosure of its
+   *  own, and two nested ones mean two presses to reach a list — the second of which looks like the
+   *  page is broken, because the first press appears to do nothing. */
+  export let collapsible = true;
 
-  let open = startOpen;
+  let open = collapsible ? startOpen : true;
   /** Which event groups are expanded, by key. A Set rather than a flag on the row, so collapsing a
    *  group and loading more pages does not lose what was open. */
   let openGroups = new Set<string>();
@@ -127,12 +133,15 @@
 
 <div class="log">
   <!-- The whole log behind one press. `aria-expanded` on the button that does the expanding, so a
-       screen reader is told the same thing the caret says. -->
-  <button class="disclose" on:click={() => (open = !open)} aria-expanded={open}>
-    <span class="caret" class:on={open} aria-hidden="true">▸</span>
-    <span class="d-title">{heading || 'Admin changes to this event'}</span>
-    {#if total}<span class="count">{total}</span>{/if}
-  </button>
+       screen reader is told the same thing the caret says. Suppressed when the caller is already
+       providing the disclosure — see `collapsible`. -->
+  {#if collapsible}
+    <button class="disclose" on:click={() => (open = !open)} aria-expanded={open}>
+      <span class="caret" class:on={open} aria-hidden="true">▸</span>
+      <span class="d-title">{heading || 'Admin changes to this event'}</span>
+      {#if total}<span class="count">{total}</span>{/if}
+    </button>
+  {/if}
 
   {#if !open}
     <!-- Nothing else. A collapsed log that still explains itself is a log that is not collapsed. -->

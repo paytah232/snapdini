@@ -149,10 +149,10 @@ describe('a blocked control answers its press', () => {
 
   it('Preview asks for the read once there is something to read', async () => {
     const fired: { text: string }[] = [];
-    const { container, component } = render(GuestList, {
+    const { container } = render(GuestList, {
       props: { data: payload(), importText: 'Name,Email\nJo,jo@example.com' },
+      events: { preview: (e: CustomEvent<{ text: string }>) => fired.push(e.detail) }
     });
-    component.$on('preview', (e) => fired.push(e.detail));
     await fireEvent.click(pressable(container, 'Import'));
     await tick();
     await fireEvent.click(pressable(container, 'Preview'));
@@ -182,8 +182,10 @@ describe('a blocked control answers its press', () => {
     // good entry; the list is for emailing join links, so it is not one any more — and the press
     // has to SAY that, in the same words the server would, rather than dying quietly.
     const fired: unknown[] = [];
-    const { container, component } = render(GuestList, { props: { data: payload({ guests: [] }) } });
-    component.$on('add', (e) => fired.push(e.detail));
+    const { container } = render(GuestList, {
+      props: { data: payload({ guests: [] }) },
+      events: { add: (e: CustomEvent<unknown>) => fired.push(e.detail) }
+    });
     await fireEvent.click(pressable(container, '+ Add guest'));
     await tick();
     const name = container.querySelector('input[placeholder="Name"]') as HTMLInputElement;
@@ -244,11 +246,18 @@ describe('the import preview', () => {
     ...over,
   });
 
-  /** Render with the import panel already open. */
-  async function openImport(over: Partial<ImportPreview> | null = null) {
+  /** Render with the import panel already open.
+   *
+   *  Svelte 5 removed `component.$on`, so a caller that wants to watch an event has to say so
+   *  before the component is mounted — hence the second argument, passed straight to `mount`. */
+  async function openImport(
+    over: Partial<ImportPreview> | null = null,
+    events: Record<string, (e: CustomEvent<{ mapping?: string[] }>) => void> = {}
+  ) {
     const r = render(GuestList, {
       props: { data: payload(), importText: 'Name,Email\nJo Smith,jo@example.com',
                preview: over === null ? null : prev(over) },
+      events,
     });
     await fireEvent.click(press(r.container, 'Import'));
     await tick();
@@ -276,12 +285,11 @@ describe('the import preview', () => {
 
   it('lets the host act on that mapper, which is the way out of the dead end', async () => {
     const fired: { mapping?: string[] }[] = [];
-    const { container, component } = await openImport({
+    const { container } = await openImport({
       headers: ['Column 1', 'Column 2'], headerless: true, mapping: ['ignore', 'ignore'],
       counts: { add: 0, skip: 0, duplicate: 0, invalid: 0, noEmail: 0 }, rows: [], total: 0,
       fatal: 'Map a column to Email — that is how the join link is sent, so every guest needs one.',
-    });
-    component.$on('preview', (e) => fired.push(e.detail));
+    }, { preview: (e: CustomEvent<{ mapping?: string[] }>) => fired.push(e.detail) });
     const s = selects(container)[1];
     s.value = 'email';
     await fireEvent.change(s);
@@ -377,8 +385,8 @@ describe('the import preview', () => {
 
   it('sends back the mapping it was shown, so the commit cannot differ from the preview', async () => {
     const fired: { mapping?: string[] }[] = [];
-    const { container, component } = await openImport({ mapping: ['name', 'email'] });
-    component.$on('import', (e) => fired.push(e.detail));
+    const { container } = await openImport({ mapping: ['name', 'email'] },
+      { import: (e: CustomEvent<{ mapping?: string[] }>) => fired.push(e.detail) });
     await fireEvent.click(press(container, 'Import 1 guest'));
     expect(fired).toHaveLength(1);
     expect(fired[0].mapping).toEqual(['name', 'email']);
@@ -403,7 +411,7 @@ describe('where the guest you just saved went', () => {
   it('rings the row an ADD landed on, once the server says which row that is', async () => {
     // An add has no id until the list comes back, so the row is matched on the way back by what
     // the host typed — the id cannot be known at dispatch time.
-    const { container, component } = render(GuestList, { props: { data: payload({ guests: [] }) } });
+    const { container, rerender } = render(GuestList, { props: { data: payload({ guests: [] }) } });
     await fireEvent.click([...container.querySelectorAll('button')]
       .find((b) => b.textContent?.trim() === '+ Add guest')!);
     await tick();
@@ -416,7 +424,7 @@ describe('where the guest you just saved went', () => {
     await tick();
     // Nothing to ring yet — the guest does not exist.
     expect(container.querySelector('details.guest-disc.flash')).toBeNull();
-    component.$set({ data: payload() });
+    await rerender({ data: payload() });
     await tick();
     expect(container.querySelector('details.guest-disc.flash')).not.toBeNull();
   });

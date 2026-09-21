@@ -23,7 +23,4 @@ declare global {
   }
 }
 
-// express-async-errors is a side-effect-only import with no bundled types.
-declare module 'express-async-errors';
-
 export {};

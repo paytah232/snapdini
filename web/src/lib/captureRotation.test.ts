@@ -36,19 +36,23 @@ describe('capture rotation', () => {
 		expect(CAMERA).toMatch(/canvas\.height = Math\.round\(turned \? sw : sh\)/);
 	});
 
-	it('mirrors the selfie in OUTPUT space — written before the turn, applied after it', () => {
-		// This assertion was originally the wrong way round, and it pinned a real bug rather than
-		// catching one: a sideways selfie was saved a half turn out, and this test defended it.
+	it('mirrors the selfie in FRAME space — written after the turn, applied before it', () => {
+		// This assertion has been written both ways round and been wrong once each way, so it is now
+		// anchored to an experiment rather than to an argument.
 		//
-		// Canvas transforms apply to the draw in the reverse of source order, so the mirror must be
-		// written FIRST to be applied LAST. The reason it has to be applied last is that reflection
-		// ANTI-commutes with rotation — R(t)·mirror = mirror·R(-t) — so mirroring in frame space and
-		// then turning sends the picture the opposite way round the clock from the rear camera, for
-		// the very same `rot`. Order here is a correctness property, not a style choice.
-		const mirrorAt = CAMERA.indexOf("if (facing === 'user') ctx.scale(-1, 1);");
+		// Three captures, one phone, one turn (rot = -90): the rear photo (rotate, no mirror) and the
+		// clip (server display matrix, no mirror) both came out upright, and the front-camera photo
+		// (rotate + mirror) came out 180 degrees out. Two of the three share the rotation and omit
+		// the mirror and are correct, so the sign of `rot` is not the variable — the mirror's space
+		// is. Output-space mirroring is what produced the half turn.
+		//
+		// Canvas applies transforms in the reverse of source order, so "written after" means "applied
+		// before". The two orders differ by exactly R(2t) — 180 degrees at a quarter turn — which is
+		// why getting it wrong is never subtly wrong.
 		const rotateAt = CAMERA.indexOf('if (rot !== 0) ctx.rotate(');
-		expect(mirrorAt).toBeGreaterThan(-1);
-		expect(rotateAt).toBeGreaterThan(mirrorAt);
+		const mirrorAt = CAMERA.indexOf("if (facing === 'user') ctx.scale(-1, 1);");
+		expect(rotateAt).toBeGreaterThan(-1);
+		expect(mirrorAt).toBeGreaterThan(rotateAt);
 	});
 
 	it('swaps the canvas axes on a QUARTER turn only', () => {

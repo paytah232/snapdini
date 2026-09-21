@@ -1,17 +1,40 @@
+import { reportStaleMedia } from './staleMedia';
+
 // On a grid <img> whose thumbnail is missing (e.g. pre-backfill photos), fall back to
 // the full-resolution original — once, to avoid an error loop if that's missing too.
+//
+// The fallback alone was never enough, and for the commonest cause it is actively wrong. A
+// rotation RENAMES the stored file (it has to — /uploads is immutable for a year), so both the
+// thumbnail and the original move together: falling back from one rotated-away stem to the other
+// is a second 404 on the same missing photo. The fallback still earns its place for the case it
+// was written for — a pre-backfill photo that genuinely has no thumbnail — so it stays, and the
+// report is what covers the rename. See lib/staleMedia.ts.
 export function imgFallback(e: Event, fullUrl: string): void {
   const t = e.currentTarget as HTMLImageElement;
   if (!t.dataset.fb) {
+    // FIRST failure: try the original, and say nothing yet. A missing thumbnail on its own is the
+    // ordinary pre-backfill case — the photo is fine, only its derivative was never generated —
+    // and reporting it would spend the page's whole heal budget on an event where nothing has been
+    // renamed and no refetch can help.
     t.dataset.fb = '1';
     t.src = fullUrl;
+    return;
   }
+  // SECOND failure: the thumbnail AND the original are both gone, which a missing derivative
+  // cannot explain. A rename moves both together, so this is the signal worth acting on.
+  reportStaleMedia(t.currentSrc || t.src);
 }
 
 // On a video-poster <img> whose poster is missing (e.g. pre-backfill clips, or ffmpeg failed),
 // hide the broken image so the cell just shows its dark background + ▶ overlay.
+//
+// Hiding it is right either way, but it is not the end of the story when the clip has been
+// rotated: the poster is re-cut under the new stem and the CLIP itself has moved too, so a cell
+// that quietly loses its poster is also a cell whose play button now leads to a 404.
 export function hidePoster(e: Event): void {
-  (e.currentTarget as HTMLImageElement).style.display = 'none';
+  const t = e.currentTarget as HTMLImageElement;
+  reportStaleMedia(t.currentSrc || t.src);
+  t.style.display = 'none';
 }
 
 // Svelte action for modals/dialogs: move focus into the element on open and restore it

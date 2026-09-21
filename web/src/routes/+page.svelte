@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { demoTimezone } from '$lib/events';
   import SiteNav from '$lib/components/SiteNav.svelte';
   import { usecaseLinks } from '$lib/usecases';
   import { onMount } from 'svelte';
@@ -85,7 +86,7 @@
     demoBusy = true;
     try {
       const { joinCode, sessionToken, organizerCode } = await postJson<{ joinCode: string; sessionToken: string; organizerCode: string }>(
-        '/api/events/demo', {}
+        '/api/events/demo', { timezone: demoTimezone() }
       );
       // Stash the demo's session + organizer code so the camera can link into the host + gallery views.
       localStorage.setItem('session_' + joinCode, sessionToken);

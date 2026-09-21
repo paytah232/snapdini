@@ -1,4 +1,5 @@
 import type { AppConfig, User } from './types';
+import { noteServerDate } from './serverClock';
 
 /** An API failure, carrying the HTTP status for logging without putting it in front of anyone. */
 export class ApiError extends Error {
@@ -124,6 +125,12 @@ export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Pro
    *  and it is the honest one when their signal is fine and our origin is the one struggling. */
   const timeout = () => new ApiError(humanStatus(408), 408);
   let res: Response;
+  // Bracketing the fetch so the round trip can be measured. Both instants are needed, not just
+  // one: the `Date` header says when the SERVER thinks it replied, and without knowing how long
+  // the reply spent in the air there is no way to place that against this device's clock. See
+  // serverClock.ts — this is the only place either number is available, which is why the sampling
+  // lives in the shared wrapper rather than at any call site.
+  const sentAt = Date.now();
   try {
     res = await fetch(path, { credentials: 'same-origin', ...init, signal: deadline.signal });
   } catch {
@@ -133,6 +140,20 @@ export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Pro
     // too, and is told apart by who caused it.
     throw deadline.timedOut() ? timeout() : new ApiError(humanStatus(0), 0);
   }
+  // Sampled from the HEADERS, before the body is read, and that is deliberate: the body of a
+  // thousand-photo gallery can take far longer to arrive than the headers did, and folding that
+  // into the round trip would make every large response look like a badly out-of-sync clock.
+  // Taken on EVERY reply, including error statuses — a 409 tells the time as well as a 200.
+  // Optional chaining, and not merely for the tests that found this. `fetch` is replaceable —
+  // stubs, service workers, instrumentation wrappers — and a stand-in Response that carries a
+  // status and a json() but no `headers` is common enough that reading one unguarded turned every
+  // API call in this file into a TypeError. A clock sample is the least important thing this
+  // function does; it must never be able to take the response down with it.
+  // `Age` as well as `Date`, and it is not optional: a reply served from the browser's own cache
+  // carries the Date it was first generated with and arrives in about a millisecond, which read as
+  // a perfect measurement of a clock tens of seconds behind. See serverClock.ts.
+  noteServerDate(res.headers?.get?.('date') ?? null, sentAt, Date.now(), res.headers?.get?.('age') ?? null);
+
   // The headers can arrive long before the body does, so the deadline has to cover the read as
   // well — a stalled origin that has sent `200 OK` and then nothing is the same hang wearing a
   // status line.

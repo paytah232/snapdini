@@ -520,7 +520,14 @@ describe('undo is armed at pointerdown and pushed at the first change', () => {
     // pieces of later work have edited within a few lines of it, and this is a third.
     const onMount = SCRIPT.slice(SCRIPT.indexOf('onMount(() => {'), SCRIPT.indexOf('onDestroy(('));
     const b = onMount.replace(/\/\/[^\n]*/g, '');
-    expect(b.indexOf('applyingHistory = true;')).toBeLessThan(b.indexOf('restore();'));
+    // Anchored before being ordered. indexOf yields -1 on a miss and -1 precedes every real
+    // index, so deleting the flag assignment satisfied "the flag is set before restore runs" —
+    // the assertion passed precisely because the thing it is about had gone.
+    const flagAt = b.indexOf('applyingHistory = true;');
+    const restoreAt = b.indexOf('restore();');
+    expect(flagAt, 'the guard flag must be set at all').toBeGreaterThan(-1);
+    expect(restoreAt, 'and restore() must still be called').toBeGreaterThan(-1);
+    expect(flagAt).toBeLessThan(restoreAt);
     expect(b.indexOf('restore();')).toBeLessThan(b.indexOf('void tick().then(() => { applyingHistory = false; });'));
     expect(b).not.toContain('prevCfg');
   });

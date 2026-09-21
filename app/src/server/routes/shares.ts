@@ -173,7 +173,10 @@ router.get('/:token/download', async (req: Request, res: Response) => {
   if (share.kind === 'favourites') conds.push(eq(photos.isHighlighted, true));
   const where = and(...conds);
   const rows = await db
-    .select({ filename: photos.filename, mediaType: photos.mediaType, captureShape: photos.captureShape,
+    // `id` is not decoration: zipPhotosToResponse re-resolves each filename from the database
+    // just before it queues it, because a rotate landing mid-archive renames the file underneath a
+    // download that is minutes long. The id is the only column in this select that cannot go stale.
+    .select({ id: photos.id, filename: photos.filename, mediaType: photos.mediaType, captureShape: photos.captureShape,
               participantId: photos.participantId, participantName: participants.name })
     .from(photos)
     .innerJoin(participants, eq(participants.id, photos.participantId))
@@ -184,7 +187,7 @@ router.get('/:token/download', async (req: Request, res: Response) => {
     .orderBy(asc(participants.name), asc(participants.id), asc(photos.takenAt), asc(photos.id));
   if (!rows.length) return res.status(404).json({ error: 'No photos to download' });
 
-  zipPhotosToResponse(res, event.name, rows);
+  await zipPhotosToResponse(res, event.name, rows);
 });
 
 // ══ Link reactions — hearts and comments for people who only have the link ═══════════════════════

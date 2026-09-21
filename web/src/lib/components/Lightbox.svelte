@@ -4,7 +4,7 @@
   import DownloadIcon from '$lib/components/DownloadIcon.svelte';
   import HeartIcon from '$lib/components/HeartIcon.svelte';
   import RotateControl from '$lib/components/RotateControl.svelte';
-  import { fitScaleFor, previewTransform } from '$lib/rotatePreview';
+  import { fitScaleFor, preloadStills, previewTransform } from '$lib/rotatePreview';
   import { mediaMeta, getComments, addComment, deleteComment,
            getShareComments, addShareComment, deleteShareComment,
            setCommentHeart, shareCommentHeart,
@@ -14,6 +14,7 @@
   import { clampComment, COMMENT_MAX } from '../../../../shared/comment';
   import { showToast } from '$lib/toast';
   import { wantSound } from '$lib/sound';
+  import { reportStaleMedia } from '$lib/staleMedia';
   import { compactCount } from '$lib/counts';
 
   export let photos: Photo[] = [];
@@ -365,8 +366,11 @@
       // `url` is the right thing to play until it lands, which is the ladder the markup already
       // walks for every other clip.
       fixed = { id: p.id, url: r.url, playUrl: r.playUrl };
-      // Dropped only once the corrected source is in hand, so the picture never flicks back to the
-      // orientation that was just corrected while the new bytes are still on the wire.
+      // "In hand" used to mean the URL was in hand. It is the BYTES that are painted, and until
+      // they arrive the element is still showing the old picture — so clearing `turn` on the same
+      // tick took the preview off the very thing it was correcting, and the photo snapped back
+      // before it snapped forward. Wait for them. See preloadStills.
+      await preloadStills([r.thumbUrl, r.url]);
       turn = 0;
       // The grid behind us is still showing the old thumbnail. Tell it — the same call every other
       // change in here makes, rather than writing into an array we do not own.
@@ -500,9 +504,15 @@
              pending, which is odd to look at for the few seconds it is there — the alternative was
              a video whose rotate button did nothing visible until after it had been committed,
              which is worse. -->
+        <!-- `on:error` because this element had none, and the lightbox is where its absence is
+             loudest: the grid at least degrades to a dark cell, whereas opening a clip that has
+             been rotated out from under you gave a black rectangle, no message, and no way to
+             recover short of reloading the page. Reporting it lets the page fetch the new name;
+             the src is reactive, so the clip reloads by itself once it arrives. -->
         <video bind:this={videoEl} src={clipSrc}
                controls autoplay playsinline muted={!$wantSound}
                style:transform={preview} on:loadedmetadata={measureFit}
+               on:error={() => reportStaleMedia(clipSrc)}
                on:volumechange={onVolumeChange}></video>
         {#if !$wantSound}
           <button class="unmute" on:click|stopPropagation={enableSound}>🔇 Sound</button>
@@ -510,7 +520,8 @@
       </div>
     {:else}
       <img bind:this={imgEl} src={stillSrc} alt="Photo by {photo.participantName}" decoding="async"
-           style:transform={preview} on:load={measureFit} />
+           style:transform={preview} on:load={measureFit}
+           on:error={() => reportStaleMedia(stillSrc)} />
     {/if}
     <!-- Whatever the grid captioned this with must not vanish on the way into the photo. The
          written caption leads; the mission follows it, demoted, so a captioned trick shot still

@@ -10,7 +10,7 @@
 // wiring that cannot be rendered, everything below can be pressed. Where a source check WOULD have
 // been needed ("does Save ever send 0?"), pressing four times and counting the requests answers the
 // same question without pinning the spelling of the guard.
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import Lightbox from './Lightbox.svelte';
@@ -68,6 +68,32 @@ function stubFetch(body: unknown = reply()) {
   return { calls, fn };
 }
 
+/* jsdom does not fetch anything, so a real `new Image()` here never fires load OR error and the
+ * save sits out preloadStills' whole timeout before the preview comes off. That is correct
+ * behaviour against a browser that cannot load images and useless for testing one that can — so
+ * these tests get an Image that resolves immediately, which is what the code is written against.
+ *
+ * Without it the two assertions about what is on screen AFTER a save are really assertions about
+ * what is on screen DURING one, and they read as regressions in the fix that put them there. */
+class InstantImage {
+  set src(_v: string) { queueMicrotask(() => this.onload?.()); }
+  onload?: () => void;
+  onerror?: () => void;
+  decode() { return Promise.resolve(); }
+}
+/** Two ticks used to be enough, because saving a turn was one await deep: post, then swap.
+ *  Holding the preview until the turned bytes are decoded adds a preload, a decode() and the
+ *  promise plumbing around them, so the assertions were landing partway through the save and
+ *  reporting the half-finished state as the finished one. Drain properly instead of counting
+ *  ticks — a count is a thing that silently becomes wrong the next time the chain grows. */
+async function settled() {
+  // A macrotask, not a pile of microtask awaits: one setTimeout(0) lets everything already queued
+  // run, however deep the chain gets, and does not have to be re-tuned when it grows again.
+  await new Promise((r) => setTimeout(r, 0));
+  await tick();
+}
+
+beforeEach(() => vi.stubGlobal('Image', InstantImage as never));
 afterEach(() => vi.unstubAllGlobals());
 
 // ── Agreeing with the server on what a turn is called ────────────────────────────────────────
@@ -255,7 +281,7 @@ describe('saving the turn', () => {
     });
     await tap(container);
     await fireEvent.click(saveBtn(container)!);
-    await tick(); await tick();
+    await settled();
 
     // The rename IS the cache-bust. Keeping /uploads/p1.jpg here would be a broken image, not a
     // stale one — the server unlinks the old name the moment the row moves.
@@ -271,7 +297,7 @@ describe('saving the turn', () => {
     const withPlay = render(Lightbox, { photos: [clip()], index: 0, rotateMode: 'any', sessionToken: 's1' });
     await tap(withPlay.container);
     await fireEvent.click(saveBtn(withPlay.container)!);
-    await tick(); await tick();
+    await settled();
     expect(withPlay.container.querySelector('video')!.getAttribute('src')).toBe('/uploads/p1-r_play.mp4');
 
     // playUrl is absent for a moment after a clip is turned — the crop is rebuilt behind the
@@ -282,22 +308,25 @@ describe('saving the turn', () => {
     const noPlay = render(Lightbox, { photos: [clip()], index: 0, rotateMode: 'any', sessionToken: 's1' });
     await tap(noPlay.container);
     await fireEvent.click(saveBtn(noPlay.container)!);
-    await tick(); await tick();
+    await settled();
     expect(noPlay.container.querySelector('video')!.getAttribute('src')).toBe('/uploads/p1-r.mp4');
   });
 
   it('hands the parent the whole reply, rather than reaching into its photos', async () => {
     const body = reply({ shotSideways: false, width: 3, height: 4 });
     stubFetch(body);
-    const { container, component } = render(Lightbox, {
-      photos: [photo({ shotSideways: true })], index: 0, rotateMode: 'any', sessionToken: 's1',
-    });
     const told: { id: string; quarter: number; result: PhotoRotation }[] = [];
-    component.$on('rotated', (e) => told.push(e.detail));
+    const { container } = render(Lightbox, {
+      props: { photos: [photo({ shotSideways: true })], index: 0, rotateMode: 'any', sessionToken: 's1' },
+      events: {
+        rotated: (e: CustomEvent<{ id: string; quarter: number; result: PhotoRotation }>) =>
+          told.push(e.detail)
+      }
+    });
 
     await tap(container);
     await fireEvent.click(saveBtn(container)!);
-    await tick(); await tick();
+    await settled();
 
     expect(told).toHaveLength(1);
     expect(told[0].id).toBe('p1');
@@ -312,15 +341,15 @@ describe('saving the turn', () => {
     // 404 is what this route answers for "not yours" as well as "not there".
     vi.stubGlobal('fetch', vi.fn(async () => (
       { ok: false, status: 404, json: async () => ({}) } as unknown as Response)));
-    const { container, component } = render(Lightbox, {
-      photos: [photo()], index: 0, rotateMode: 'any', sessionToken: 's1',
-    });
     const told: unknown[] = [];
-    component.$on('rotated', (e) => told.push(e.detail));
+    const { container } = render(Lightbox, {
+      props: { photos: [photo()], index: 0, rotateMode: 'any', sessionToken: 's1' },
+      events: { rotated: (e: CustomEvent<unknown>) => told.push(e.detail) }
+    });
 
     await tap(container);
     await fireEvent.click(saveBtn(container)!);
-    await tick(); await tick();
+    await settled();
 
     // Nothing was corrected, so nothing pretends it was: the turn is still pending and still
     // saveable, the picture keeps the name it came in with, and the parent is not sent off to
@@ -355,11 +384,11 @@ describe('saving the turn', () => {
 // ── A pending turn must not leak onto the next photograph ────────────────────────────────────
 describe('paging away with a turn pending', () => {
   it('discards it rather than carrying it to the next photo', async () => {
-    const { container, component } = render(Lightbox, {
-      photos: [photo(), photo({ id: 'p2', url: '/uploads/p2.jpg' })], index: 0, rotateMode: 'any',
-    });
     const moved: number[] = [];
-    component.$on('photochange', (e) => moved.push(e.detail));
+    const { container } = render(Lightbox, {
+      props: { photos: [photo(), photo({ id: 'p2', url: '/uploads/p2.jpg' })], index: 0, rotateMode: 'any' },
+      events: { photochange: (e: CustomEvent<number>) => moved.push(e.detail) }
+    });
 
     await tap(container, 1);
     await fireEvent.click(container.querySelector('.nav.r')!);
@@ -375,13 +404,13 @@ describe('paging away with a turn pending', () => {
     // Nothing in the component is called for this: the parent re-assigns `photos` and the picture
     // at `index` becomes a different photograph. A turn keyed to the index rather than the id
     // would silently belong to the wrong file.
-    const { container, component } = render(Lightbox, {
+    const { container, rerender } = render(Lightbox, {
       photos: [photo()], index: 0, rotateMode: 'any',
     });
     await tap(container);
     expect(transformOf(container.querySelector('img'))).toContain('rotate(90deg)');
 
-    await component.$set({ photos: [photo({ id: 'p9', url: '/uploads/p9.jpg' })] });
+    await rerender({ photos: [photo({ id: 'p9', url: '/uploads/p9.jpg' })] });
     await tick();
     expect(transformOf(container.querySelector('img'))).not.toContain('rotate');
   });
@@ -393,12 +422,14 @@ describe('paging away with a turn pending', () => {
       await hang;
       return { ok: true, status: 200, json: async () => reply() } as unknown as Response;
     }));
-    const { container, component } = render(Lightbox, {
-      photos: [photo(), photo({ id: 'p2', url: '/uploads/p2.jpg' })], index: 0, rotateMode: 'any',
-      sessionToken: 's1',
-    });
     const moved: number[] = [];
-    component.$on('photochange', (e) => moved.push(e.detail));
+    const { container } = render(Lightbox, {
+      props: {
+        photos: [photo(), photo({ id: 'p2', url: '/uploads/p2.jpg' })], index: 0, rotateMode: 'any',
+        sessionToken: 's1',
+      },
+      events: { photochange: (e: CustomEvent<number>) => moved.push(e.detail) }
+    });
 
     await tap(container);
     await fireEvent.click(saveBtn(container)!);
@@ -412,11 +443,11 @@ describe('paging away with a turn pending', () => {
   });
 
   it('Escape backs out of the turn before it backs out of the photo', async () => {
-    const { container, component } = render(Lightbox, {
-      photos: [photo()], index: 0, rotateMode: 'any',
-    });
     let closed = 0;
-    component.$on('close', () => closed++);
+    const { container } = render(Lightbox, {
+      props: { photos: [photo()], index: 0, rotateMode: 'any' },
+      events: { close: () => closed++ }
+    });
 
     await tap(container);
     await fireEvent.keyDown(window, { key: 'Escape' });

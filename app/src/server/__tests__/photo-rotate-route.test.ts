@@ -491,6 +491,25 @@ function cameraFields(): { single: string[]; complete: string[] } {
  *  so nothing here is expected in the row. */
 const TRANSPORT = new Set(['photo', 'chunk', 'sessionToken', 'uploadId', 'index', 'total', 'ext']);
 
+/** Fields the camera sends that the server USES but deliberately does not store.
+ *
+ *  A third category, and it needs to exist or the two that came before it start absorbing things
+ *  they do not describe. TRANSPORT is plumbing — an upload id means nothing once the parts are
+ *  reassembled. SENT is a claim the row must carry. This is a claim the server ACTS on and then
+ *  throws away, because something else knows the answer better.
+ *
+ *  `durationSecs` is the case in point. The camera reports how long it recorded for, and the gate
+ *  needs that to decide whether a clip begun before the close may finish after it — but the stored
+ *  `durationMs` comes from ffprobe reading the finished file, which is authoritative in a way a
+ *  client's claim can never be. Asserting the claim lands in the row would be asserting the wrong
+ *  thing, and adding it to TRANSPORT would be filing it as plumbing when the whole point is that
+ *  it changes a decision.
+ *
+ *  Membership here is not a free pass. Anything in this set needs its own test proving the server
+ *  really does read it — see "the advisory fields are read, not merely tolerated" below — because
+ *  "sent and ignored" is precisely the bug this file was written for. */
+const ADVISORY = new Set(['durationSecs']);
+
 /** A value for every non-transport field the camera sends, and what the row must then hold. Each
  *  one is deliberately NOT the default the server would fall back to, so a field that is dropped
  *  on the way in cannot pass by coincidence. */
@@ -555,7 +574,7 @@ describe('the upload insert carries every field the camera sends', () => {
       assert.equal(r.code, 200, JSON.stringify(r.body));
       const values = photoInsert();
       const sent = pathName.endsWith('complete') ? cameraFields().complete : cameraFields().single;
-      const expected = sent.filter((f) => !TRANSPORT.has(f));
+      const expected = sent.filter((f) => !TRANSPORT.has(f) && !ADVISORY.has(f));
       assert.ok(expected.length >= 5, 'the camera stopped sending fields this test knows about');
       for (const field of expected) {
         const want = SENT[field];
@@ -566,6 +585,28 @@ describe('the upload insert carries every field the camera sends', () => {
       }
     });
   }
+
+  test('the advisory fields are read, not merely tolerated', async () => {
+    // The exemption above says "the row need not carry this". It must not come to mean "nobody has
+    // to do anything with it" — that is the original sin this whole file exists to catch, wearing
+    // a slightly better disguise.
+    //
+    // So: for every field in ADVISORY, prove the server actually consults it. `durationSecs` earns
+    // its place through captureSpanMs, which is what lets a long clip begun before the close be
+    // honoured however long it runs — and which visibly narrows when the real figure is supplied
+    // instead of being left to fall back to the ceiling.
+    assert.deepEqual([...ADVISORY], ['durationSecs'], 'a new advisory field needs its own proof below');
+
+    const cap = photosRoutes.maxAcceptedClipMs(600);
+    const claimed = photosRoutes.captureSpanMs(true, { durationSecs: 15 }, cap);
+    const unknown = photosRoutes.captureSpanMs(true, {}, cap);
+    assert.equal(claimed, 15_000, 'the claim is read, in seconds, and believed up to the ceiling');
+    assert.ok(unknown > claimed, 'and without it the server has to assume the worst');
+    assert.equal(unknown, cap);
+    // A still has no span to give it: pressing the shutter and finishing are the same instant, and
+    // inventing one would let a genuinely-post-close photograph in.
+    assert.equal(photosRoutes.captureSpanMs(false, { durationSecs: 15 }, cap), 0);
+  });
 
   test('captureRotation specifically — the field that was being dropped', async () => {
     // Both halves, as the camera sends them for a turned still: it MEASURED 90 and it APPLIED 90.

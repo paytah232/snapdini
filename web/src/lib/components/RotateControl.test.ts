@@ -34,13 +34,13 @@ describe('the slot', () => {
   });
 
   it('offers exactly one face to a person at a time', async () => {
-    const { container, component } = render(RotateControl, { pending: 0 });
+    const { container, rerender } = render(RotateControl, { pending: 0 });
     for (const l of REST) expect(live(container, l), `${l} at rest`).not.toBeNull();
     for (const l of ['Turn right', 'Save this rotation', 'Discard this rotation']) {
       expect(live(container, l), `${l} is not offered at rest`).toBeNull();
     }
 
-    await component.$set({ pending: 90 });
+    await rerender({ pending: 90 });
     await tick();
     for (const l of WORKING) expect(live(container, l), `${l} once a turn is pending`).not.toBeNull();
     expect(live(container, CLOCKWISE), 'the resting face steps aside').toBeNull();
@@ -70,8 +70,10 @@ describe('what it asks the page to do', () => {
     // Anticlockwise used to be three presses of ↻. A left arrow that only appeared once something
     // was pending would still be three — you would have to go the wrong way first to reveal it.
     const turns: number[] = [];
-    const { container, component } = render(RotateControl, { pending: 0 });
-    component.$on('turn', (e) => turns.push(e.detail));
+    const { container } = render(RotateControl, {
+      props: { pending: 0 },
+      events: { turn: (e: CustomEvent<number>) => turns.push(e.detail) }
+    });
     await fireEvent.click(live(container, 'Turn left')!);
     await fireEvent.click(live(container, CLOCKWISE)!);
     expect(turns).toEqual([-90, 90]);
@@ -79,8 +81,10 @@ describe('what it asks the page to do', () => {
 
   it('and either way again while a turn is pending', async () => {
     const turns: number[] = [];
-    const { container, component } = render(RotateControl, { pending: 90 });
-    component.$on('turn', (e) => turns.push(e.detail));
+    const { container } = render(RotateControl, {
+      props: { pending: 90 },
+      events: { turn: (e: CustomEvent<number>) => turns.push(e.detail) }
+    });
     await fireEvent.click(live(container, 'Turn right')!);
     await fireEvent.click(live(container, 'Turn left')!);
     expect(turns).toEqual([90, -90]);
@@ -88,9 +92,10 @@ describe('what it asks the page to do', () => {
 
   it('saves and discards', async () => {
     let saved = 0, cancelled = 0;
-    const { container, component } = render(RotateControl, { pending: 180 });
-    component.$on('save', () => saved++);
-    component.$on('cancel', () => cancelled++);
+    const { container } = render(RotateControl, {
+      props: { pending: 180 },
+      events: { save: () => saved++, cancel: () => cancelled++ }
+    });
     await fireEvent.click(live(container, 'Save this rotation')!);
     await fireEvent.click(live(container, 'Discard this rotation')!);
     expect([saved, cancelled]).toEqual([1, 1]);

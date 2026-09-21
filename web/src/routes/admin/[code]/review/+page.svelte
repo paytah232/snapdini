@@ -23,7 +23,7 @@
   import PhotoCard from '$lib/components/PhotoCard.svelte';
   import DownloadIcon from '$lib/components/DownloadIcon.svelte';
   import RotateControl from '$lib/components/RotateControl.svelte';
-  import { fitScaleFor, previewTransform } from '$lib/rotatePreview';
+  import { fitScaleFor, preloadStills, previewTransform } from '$lib/rotatePreview';
   import ShareScope from '$lib/components/ShareScope.svelte';
   import SlideshowPanel from '$lib/components/SlideshowPanel.svelte';
   import ShareModal from '$lib/components/ShareModal.svelte';
@@ -384,7 +384,14 @@
     const q = pendingFor as 90 | -90 | 180;
     rotating = true;
     try {
-      applyRotation(await rotatePhoto(id, q, { organizerCode: orgCode }));
+      const r = await rotatePhoto(id, q, { organizerCode: orgCode });
+      // The bytes, not just the names — see preloadStills. cancelTurn() below takes the preview
+      // transform off, and until these have arrived the thing under that transform is still the
+      // OLD picture, so taking it off first is a visible snap back to the orientation just
+      // corrected. Both urls: the grid tile shows the thumbnail and the single view the original,
+      // and a save can happen with either on screen.
+      await preloadStills([r.thumbUrl, r.url]);
+      applyRotation(r);
       cancelTurn();
     } catch (e) {
       // The turn stays pending and re-saveable — a failed write should not also lose the host's
@@ -1507,11 +1514,21 @@
   .w-via { font-style: italic; }
   /* One cell, two labels stacked in it: the button is as wide as the WIDER of them and stays that
      width whichever is showing. */
-  /* place-ITEMS centres each label inside the column; place-CONTENT centres the column inside the
-     button. Only the first was set, and it looks correct right up until something makes the button
-     wider than its own text — which is exactly what a stretching flex parent does. The label then
-     sits hard against the left edge of a button that is centred in every other respect. */
-  .steady { display: grid; place-items: center; place-content: center; }
+  /* `.btn.steady`, not `.steady`, and the second class is the whole fix.
+   *
+   *  This was never a centring problem. `.btn` sets `display: inline-block` and lives FURTHER DOWN
+   *  this stylesheet — same specificity, so it won on source order and the grid never existed. The
+   *  two labels simply sat next to each other in inline flow, and `visibility: hidden` keeps a box:
+   *  the visible word was pushed off-centre by exactly the width of its hidden twin, in whichever
+   *  direction the hidden one happened to be. Both states looked wrong because both were wrong.
+   *
+   *  Two rounds of centring properties were added to a rule that was not applying. Raising the
+   *  specificity is what makes them do anything — and it is order-independent, so this does not
+   *  break again the next time a rule moves.
+   *
+   *  place-ITEMS centres each label in the cell; place-CONTENT centres the cell in the button,
+   *  which matters because `.btn` has a min-height taller than a small label. */
+  .btn.steady { display: grid; place-items: center; place-content: center; }
   .steady .lbl { grid-area: 1 / 1; white-space: nowrap; }
   .steady .lbl.off { visibility: hidden; }
   /* One line, not a stack. Two short buttons sitting one above the other made every row in the

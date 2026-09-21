@@ -1,5 +1,6 @@
 <script lang="ts">
   import { postJson } from '$lib/api';
+  import Toggle from '$lib/components/Toggle.svelte';
   import { showToast } from '$lib/toast';
   import type { BillingConfig, BillingQuote, AppOptions } from '$lib/types';
   import { retentionIncludedDays, retentionLabel, videoAddonCents } from '$lib/featureUpsell';
@@ -368,26 +369,38 @@
         </label>
       {/if}
     </div>
-    <!-- Shown ONLY when it is explaining something. This note exists because the breakdown below can
-         charge for a frame pack the event already owns, and hiding it outright once left that line
-         with no explanation and no control near it — the reason the block is here at all.
-         But its explanatory half is already gated on !featuresFreeAt: at a tier where the pack costs
-         nothing there is no charged line to account for, and what is left is a bare "you already
-         have this" on a panel whose entire job is offering things you do not. So the gate moves up
-         to the whole note, and the case it was added for still reads exactly as before. -->
-    {#if framePackOwned && !featuresFreeAt(uGuests)}
+    <!-- SAID WHENEVER IT IS TRUE, and only EXPLAINED when there is something to explain.
+         The gate used to sit on the whole note, on the reasoning that at a tier where the pack
+         costs nothing there is no charged line to account for, and what is left is a bare "you
+         already have this" on a panel whose job is offering things you do not.
+         That reasoning missed what the host actually sees. Own the pack AND sit inside the free
+         guest tier and BOTH branches fall through: no note, and no toggle either, because the
+         toggle is for buying what you have already got. The panel simply goes quiet about a
+         feature you paid for — which does not read as "nothing to say here", it reads as the
+         option having disappeared, on the one screen where a host is auditing what they have.
+         Reported from a real event: frame sizes on, guest cap 10, free tier 10, nothing on screen.
+         So the sentence always shows when the pack is owned, and the charging half keeps its own
+         gate — which is all the original note was really for. -->
+    {#if framePackOwned}
       <!-- The space that joins these two sentences lives INSIDE the block, on the same line as the
            opening tag. Svelte trims a block whose content starts on the next line, which is how
            this rendered as "on your event.They are included". -->
       <!-- The tail is one unbroken line on purpose: a newline inside the block renders as a space,
            which is how this printed "+$5.00 ." with the full stop adrift. -->
-      <p class="chk owned-note">Frame sizes are already on your event. They
+      <p class="chk owned-note">Frame sizes are already on your event.{#if !featuresFreeAt(uGuests)}{' '}They
         are included free below {billing.freeAllGuests + 1} guests and charged above
-        it{#if frameUplift}{' '}— <span class="addon">+{money(frameUplift)}</span>{/if}.</p>
-    {:else if !framePackOwned && !hasAllShapes}
-      <label class="chk"><input type="checkbox" bind:checked={uFrames} />
-        Unlock all frame sizes (frame pack){#if featuresFreeAt(uGuests)}{' '}<span class="was">{money(billing.framePackCents)}</span>{:else}{' '}<span class="addon">+{money(billing.framePackCents)}</span>{/if}
-      </label>
+        it{#if frameUplift}{' '}— <span class="addon">+{money(frameUplift)}</span>{/if}.{/if}</p>
+    {:else if !hasAllShapes}
+      <!-- A TOGGLE, not a checkbox — and this does not contradict Toggle.svelte's own note that
+           "frame shapes stay a checkbox". That note is about CHOOSING SHAPES: the 1:1 / 4:5 / 16:9
+           list, where each box is one answer to a single question and a column of switches would
+           read as several settings. This is the other thing entirely — one feature, on or off, the
+           same shape of question as every switch on the controls page. It sat here as a checkbox
+           only because the toggle did not exist as a component when this panel was written. -->
+      <div class="chk chk-toggle">
+        <Toggle id="u-frames" bind:checked={uFrames} />
+        <label for="u-frames">Unlock all frame sizes (frame pack){#if featuresFreeAt(uGuests)}{' '}<span class="was">{money(billing.framePackCents)}</span>{:else}{' '}<span class="addon">+{money(billing.framePackCents)}</span>{/if}</label>
+      </div>
     {/if}
 
     <!-- Same priced line-item breakdown as the create form, reflecting the selected plan. -->
@@ -461,6 +474,12 @@
   .u > span { display: block; margin-bottom: 4px; }
   .u select { width: 100%; min-width: 0; padding: 9px 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font: inherit; font-size: 0.88rem; }
   .chk { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 0.82rem; }
+  /* The switch is taller than a checkbox, so the row needs a little more air to sit level with the
+     priced lines above and below it. `cursor: pointer` on the label because a <label for> is the
+     control here — the toggle hides its own input, and a label that does not look pressable is a
+     hit target people do not know they have. */
+  .chk-toggle { gap: 10px; margin-top: 14px; }
+  .chk-toggle label { cursor: pointer; }
   .foot { margin-top: 14px; }
   .full { width: 100%; }
   .btn { display: inline-block; font-weight: 700; border-radius: var(--radius-sm); padding: 11px 18px; font-size: 0.9rem; border: 1px solid transparent; cursor: pointer; font-family: inherit; text-align: center; }

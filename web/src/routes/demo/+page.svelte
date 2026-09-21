@@ -13,6 +13,7 @@
   // (see the comment on POST /api/events/demo: there are far more demo rolls than real events).
   // Bots do not run this script; phones do. The cost is one splash frame, which is what a QR scan
   // looks like anyway.
+  import { demoTimezone } from '$lib/events';
   import { onMount } from 'svelte';
   import { postJson } from '$lib/api';
   import Loading from '$lib/components/Loading.svelte';
@@ -30,7 +31,7 @@
     try {
       const { joinCode, sessionToken, organizerCode } = await postJson<{
         joinCode: string; sessionToken: string; organizerCode: string;
-      }>('/api/events/demo', {});
+      }>('/api/events/demo', { timezone: demoTimezone() });
       // The same two keys the landing page writes. The session token is what makes this feel like a
       // scan rather than a signup: without it the camera opens on a "what's your name?" prompt.
       try {
