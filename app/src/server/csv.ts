@@ -60,8 +60,8 @@ export const looksAddress = (s: string): boolean => /[^\s@]@[^\s@]/.test(s);
  *  Snapdini reaches a guest by EMAIL and by nothing else — the guest list exists to send a lot of
  *  people a link, not to run an invitation process. A phone number is therefore a field no part of
  *  this product can act on, and keeping personal data we have no use for is precisely what data
- *  minimisation forbids. This product ships a privacy impact assessment (docs/PIA-face-matching.md),
- *  so that is a commitment rather than a preference. The column was dropped in
+ *  minimisation forbids. Data minimisation is a standing commitment in this product rather than a
+ *  preference, so this is not a tidiness call. The column was dropped in
  *  0053_guest_drop_phone.sql. Do not re-add it "for completeness".
  *
  *  Contrast `notes`, which stays. A note is RENDERED BACK TO THE HOST in the guest row, so being

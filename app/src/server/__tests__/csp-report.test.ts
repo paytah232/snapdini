@@ -74,6 +74,9 @@ describe('the face-matching boot line', () => {
     const boot = SRC.slice(SRC.indexOf("console.log(process.env.MACHINE_LEARNING_URL"), SRC.indexOf('const server = app.listen'));
     assert.match(boot, /FACE MATCHING IS LIVE/);
     assert.match(boot, /inert/);
-    assert.match(boot, /PIA-face-matching\.md/);   // says where the obligation is written down
+    // Pins WHAT gates the feature, not merely that it is on. This assertion used to require the
+    // line to name an internal document; that document should never have been in a public repo, so
+    // the test was holding a leak in place. The obligation is the thing worth asserting.
+    assert.match(boot, /privacy review is signed off/);
   });
 });

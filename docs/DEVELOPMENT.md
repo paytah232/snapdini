@@ -364,8 +364,8 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
 - **The guest list stores name, email and notes — and NO phone number. Data minimisation, and it
   is not to be re-added.** Snapdini reaches a guest by email and by nothing else, so a phone number
   is a field nothing in this product can act on, and keeping personal data with no purpose is what
-  data minimisation forbids — this deployment publishes a PIA (`docs/PIA-face-matching.md`), which
-  makes that a commitment rather than a preference. The column existed briefly in `0047` and was
+  data minimisation forbids — and data minimisation is a standing commitment in this product rather
+  than a preference. The column existed briefly in `0047` and was
   dropped by **`0053_guest_drop_phone.sql`**; production never created it (`event_guests` ships new
   in 1.5.0 and prod was on 1.4.3 at `0038`), so there was no data to lose.
   - **The test a field has to pass:** `notes` stays because it is **rendered back to the host** in
@@ -2343,8 +2343,8 @@ way). Vars with a safe default do not block a release; the ones that silently di
 container is on.
 
 **Face matching must be inert in production, and the check is `MACHINE_LEARNING_URL`.** The feature
-is built but not enabled: it carries privacy obligations that are still open (`PIA-face-matching.md`),
-and that one variable is the whole interlock — `faces-killswitch.test.ts` treats it as a safety
+is built but not enabled: it carries privacy obligations that are still open, and that one variable
+is the whole interlock — `faces-killswitch.test.ts` treats it as a safety
 device rather than a config flag, and it overrides a stale `face_matching_enabled = true` left on an
 events row. The risk is not the code, it is the deploy: **devel sets this variable**, so an `.env`
 copied from devel turns face matching on in production without a word. Presence-test it the same way

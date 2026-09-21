@@ -694,7 +694,7 @@ initWithRetry()
        copied env file turns the feature on in production silently. A line in the boot log is what
        makes that loud instead, and it prints in both states so its absence is not the signal. */
     console.log(process.env.MACHINE_LEARNING_URL
-      ? '[faces] FACE MATCHING IS LIVE — MACHINE_LEARNING_URL is set. This must NOT be a production boot until the privacy review is signed off (docs/PIA-face-matching.md).'
+      ? '[faces] FACE MATCHING IS LIVE — MACHINE_LEARNING_URL is set. This must NOT be a production boot until the privacy review is signed off.'
       : '[faces] face matching inert (MACHINE_LEARNING_URL unset) — the intended state for production');
     const server = app.listen(PORT, '0.0.0.0', () => console.log(`Snapdini running on port ${PORT}`));
     // Multi-GB media uploads (e.g. a 90s 4K/8K clip) can take a long time on event Wi-Fi/mobile;

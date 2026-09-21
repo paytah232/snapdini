@@ -4,8 +4,8 @@
 -- a lot of people one link, not to run an invitation process. Nothing in this product — not the
 -- invite, not the nudge, not the gallery blast, not the reminder — can act on a phone number. So
 -- the column was collecting personal data for no purpose, which is exactly what data minimisation
--- forbids, and this deployment publishes a privacy impact assessment (docs/PIA-face-matching.md),
--- which makes that a commitment rather than a preference.
+-- forbids. Data minimisation is a standing commitment in this product rather than a preference,
+-- so this is not a tidiness call.
 --
 -- WHY `notes` STAYS and phone does not. A note is rendered back to the host inside the guest row;
 -- being read by the host is the whole job it does. A phone number was read by nothing. That is the

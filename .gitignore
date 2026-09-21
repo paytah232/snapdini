@@ -43,6 +43,16 @@ CLAUDE.md
 /docs/*.webm
 /docs/reel-frames/
 
+# The internal privacy impact assessment for face matching. Working notes for OUR OWN legal review
+# — an unreviewed document, with open questions and a "Reviewed by: pending" on the bottom of it —
+# and not documentation anyone self-hosting can use. It was purged from this public repo once, in
+# `3aed2c1`, and came back thirteen days later inside an unrelated docs commit. This line is what
+# stops a third time; a removal with no rule behind it is a removal waiting to be undone.
+# The document itself lives outside the repo, in `../private/`. The guidance a self-hoster genuinely
+# needs is stated INLINE in README.md rather than linked, which is the whole point — a link to a
+# file we cannot publish is not guidance.
+/docs/PIA-face-matching.md
+
 # scratch fixtures written by test runs
 /testsuite/tmp/
 
