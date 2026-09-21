@@ -8,6 +8,7 @@ import { isIndexable, sitemapXml, canonicalOrigin, SITEMAP_LASTMOD } from '$lib/
 // a non-canonical deployment serves nothing here at all.
 export const GET: RequestHandler = ({ url }) => {
   if (!isIndexable(env.SEO_INDEXABLE)) return new Response('Not found', { status: 404 });
+
   // `/privacy` and `/terms` are here because they are real, indexable, publicly linked pages that
   // robots.txt does not block — leaving them out of the sitemap while crawling them anyway was just
   // an inconsistency. Low priority: they should be findable, not competing with the landing pages.
