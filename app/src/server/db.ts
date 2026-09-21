@@ -30,6 +30,31 @@ export const pool = new Pool({
   connectionTimeoutMillis: 5_000,
 });
 
+// ── The pool must not kill the process when the server hangs up ──────────────
+//
+// node-postgres emits 'error' on an IDLE pooled client when the server closes it underneath us: a
+// Postgres restart, a replica promotion, an admin `pg_terminate_backend`, an idle timeout enforced
+// server-side. There is no request in flight to reject it into, so the event goes to the Pool — and
+// an EventEmitter with no 'error' listener THROWS. Node then exits the process.
+//
+// This is not hypothetical. It killed devel on 2026-09-21 with "terminating connection due to
+// administrator command": the pool had 123 uses on that client, the stack ended at
+// `throw er; // Unhandled 'error' event`, and the app was gone while the container stayed up, so
+// nothing restarted it.
+//
+// It matters most in the one scenario the app is explicitly built to survive. The read-only failover
+// added in 1.5.1 exists BECAUSE promotions are expected here — and a promotion terminates every
+// connection the pool is holding. Without this listener the app would crash at exactly the moment
+// that code was written to carry it through.
+//
+// The pool discards the broken client on its own and opens a fresh one on the next checkout. All
+// this has to do is not die, and say so, which is why it logs rather than rethrows.
+
+
+pool.on('error', (err: Error) => {
+  console.error(`[db] idle pooled client dropped by the server: ${err.message} — the pool will replace it`);
+});
+
 // Drizzle ORM client — the primary data-access API across the backend.
 export const db = drizzle(pool, { schema });
 export { schema };
