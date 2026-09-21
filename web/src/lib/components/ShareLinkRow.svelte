@@ -156,7 +156,18 @@
   .who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .title { font-weight: 600; font-size: 0.92rem; }
   .sub { color: var(--text-muted); font-size: 0.78rem; }
-  .acts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  /* Its OWN row, always — `flex: 0 0 100%` forces the wrap that used to depend on how long the
+     link happened to be.
+
+     With space-between and ordinary wrapping, a short link left room for the buttons beside it and
+     a long one pushed them underneath. Same component, same page, two different layouts decided by
+     the width of a slug: the gallery link sat beside its URL and above its pills, while the
+     favourites link had its buttons neatly below. Nothing about the CONTROLS differs between them,
+     so nothing about their position should either.
+
+     Below is the right one of the two: the pills say what the link is, and the actions belong under
+     the thing they act on rather than floating beside its name. */
+  .acts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 0 0 100%; }
 
   .disclose {
     display: flex; align-items: center; gap: 6px; width: 100%;

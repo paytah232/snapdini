@@ -35,6 +35,22 @@
   /** In the manager the event is implied by the page, so its column would read the same on every
    *  row and say nothing. */
   export let showEvent = true;
+  /** Closed unless somebody asks for it, everywhere.
+   *
+   *  This is a record you consult when something looks wrong, not a feed. Open by default it is the
+   *  first thing on the screen every single visit, most of them about something else entirely —
+   *  which is how a log stops being read: not by being hidden, but by always being there. */
+  export let startOpen = false;
+
+  let open = startOpen;
+  /** Which event groups are expanded, by key. A Set rather than a flag on the row, so collapsing a
+   *  group and loading more pages does not lose what was open. */
+  let openGroups = new Set<string>();
+
+  function toggleGroup(key: string) {
+    openGroups.has(key) ? openGroups.delete(key) : openGroups.add(key);
+    openGroups = openGroups;   // Svelte does not see Set mutation
+  }
 
   let rows: AdminAction[] = [];
   let total = 0;
@@ -69,6 +85,29 @@
 
   onMount(() => { void load(); });
 
+  /* One entry per EVENT, newest activity first.
+   *
+   *  Flat, this list answers "what happened recently" and nothing else. The question actually asked
+   *  of it is "what was done to THIS customer's event", and with fifty rows spread across a dozen
+   *  events that question takes a scroll and a squint. Grouping puts one line per event on screen
+   *  with its count, and the detail one press away.
+   *
+   *  Rows arrive newest-first, and inserting into a plain object keeps insertion order for string
+   *  keys — so groups come out ordered by most recent activity with no sort at all.
+   *
+   *  The manager gets exactly one group and never renders its header: the event is the page. */
+  type Group = { key: string; name: string; code: string; exists: boolean; items: AdminAction[] };
+  $: groups = (() => {
+    const by = new Map<string, Group>();
+    for (const a of rows) {
+      const key = a.eventId || a.eventCode || '—';
+      let g = by.get(key);
+      if (!g) { g = { key, name: a.eventName, code: a.eventCode, exists: a.eventExists, items: [] }; by.set(key, g); }
+      g.items.push(a);
+    }
+    return [...by.values()];
+  })();
+
   const when = (at: number | null) => (at === null ? '—' : new Date(at).toLocaleString());
   /** Em dash for absent, so a row missing one field still reads as a row. */
   const or = (s: string) => (s ? s : '—');
@@ -87,9 +126,17 @@
 </script>
 
 <div class="log">
-  {#if heading}<h2>{heading}{#if total}<span class="count">{total}</span>{/if}</h2>{/if}
+  <!-- The whole log behind one press. `aria-expanded` on the button that does the expanding, so a
+       screen reader is told the same thing the caret says. -->
+  <button class="disclose" on:click={() => (open = !open)} aria-expanded={open}>
+    <span class="caret" class:on={open} aria-hidden="true">▸</span>
+    <span class="d-title">{heading || 'Admin changes to this event'}</span>
+    {#if total}<span class="count">{total}</span>{/if}
+  </button>
 
-  {#if loading}
+  {#if !open}
+    <!-- Nothing else. A collapsed log that still explains itself is a log that is not collapsed. -->
+  {:else if loading}
     <p class="muted">Loading…</p>
   {:else if notYet}
     <p class="muted">The action log isn't live on this server yet. It fills in on its own once the
@@ -103,8 +150,20 @@
       {:else}No site admin has changed anyone else's event.{/if}
     </p>
   {:else}
+    {#each groups as g (g.key)}
+      {#if showEvent}
+        <!-- One line per event: who it is, how much happened, and when it last did. Enough to decide
+             whether to open it, which is the only decision being made at this level. -->
+        <button class="grp" on:click={() => toggleGroup(g.key)} aria-expanded={openGroups.has(g.key)}>
+          <span class="caret" class:on={openGroups.has(g.key)} aria-hidden="true">▸</span>
+          <span class="g-name">{g.name || g.code || g.key}</span>
+          {#if !g.exists}<span class="r-gone">deleted</span>{/if}
+          <span class="g-meta">{g.items.length} change{g.items.length === 1 ? '' : 's'} · {when(g.items[0].at)}</span>
+        </button>
+      {/if}
+      {#if !showEvent || openGroups.has(g.key)}
     <ul class="rows">
-      {#each rows as a (a.id)}
+      {#each g.items as a (a.id)}
         <li class="row">
           <div class="r-head">
             <span class="r-what">{or(a.action)}{#if a.target}<span class="r-target">{a.target}</span>{/if}</span>
@@ -170,6 +229,8 @@
         </li>
       {/each}
     </ul>
+      {/if}
+    {/each}
     {#if rows.length < total}
       <button class="log-btn" on:click={() => void load(true)} disabled={loadingMore}>
         {loadingMore ? 'Loading…' : `Load more — ${rows.length} of ${total}`}
@@ -182,7 +243,22 @@
 
 <style>
   .log { min-width: 0; }
-  .log h2 { margin: 0 0 10px; font-size: 1.02rem; }
+  /* The two disclosures share a caret and differ in weight: the outer one is a heading, the inner
+     one is a row in a list. */
+  .disclose, .grp {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    background: none; border: 0; padding: 8px 0; cursor: pointer;
+    color: var(--text); font: inherit; text-align: left;
+  }
+  .disclose { font-weight: 700; font-size: 1.02rem; }
+  .grp { border-top: 1px solid var(--border); font-size: 0.9rem; }
+  .caret { display: inline-block; transition: transform .15s ease; flex: none; color: var(--text-muted); }
+  .caret.on { transform: rotate(90deg); }
+  @media (prefers-reduced-motion: reduce) { .caret { transition: none; } }
+  .d-title, .g-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .g-name { font-weight: 600; }
+  /* Pushed to the far end so the counts line up down the list and can be compared at a glance. */
+  .g-meta { margin-left: auto; color: var(--text-muted); font-size: 0.78rem; white-space: nowrap; }
   .count { margin-left: 8px; font-size: 0.8rem; font-weight: 600; color: var(--text-muted); }
   .muted { color: var(--text-muted); font-size: 0.86rem; margin: 0; }
   .bad { color: #c0392b; font-size: 0.86rem; margin: 0 0 8px; }

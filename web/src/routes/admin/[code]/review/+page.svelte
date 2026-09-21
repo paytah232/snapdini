@@ -1507,10 +1507,19 @@
   .w-via { font-style: italic; }
   /* One cell, two labels stacked in it: the button is as wide as the WIDER of them and stays that
      width whichever is showing. */
-  .steady { display: grid; place-items: center; }
+  /* place-ITEMS centres each label inside the column; place-CONTENT centres the column inside the
+     button. Only the first was set, and it looks correct right up until something makes the button
+     wider than its own text — which is exactly what a stretching flex parent does. The label then
+     sits hard against the left edge of a button that is centred in every other respect. */
+  .steady { display: grid; place-items: center; place-content: center; }
   .steady .lbl { grid-area: 1 / 1; white-space: nowrap; }
   .steady .lbl.off { visibility: hidden; }
-  .w-row-acts { flex: none; display: flex; flex-direction: column; gap: 5px; }
+  /* One line, not a stack. Two short buttons sitting one above the other made every row in the
+     list taller than its own text, which is a lot of vertical space to spend on two words. They fit
+     side by side once they stop carrying full-size button padding — and a caption row is a dense
+     list, where a slightly smaller control is the right register anyway. */
+  .w-row-acts { flex: none; display: flex; flex-direction: row; align-items: flex-start; gap: 5px; }
+  .w-row-acts .btn.sm { padding: 7px 11px; font-size: 0.78rem; }
   @media (max-width: 520px) {
     .w-row { flex-wrap: wrap; }
     .w-row-acts { flex-direction: row; width: 100%; justify-content: flex-end; }
