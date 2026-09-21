@@ -76,23 +76,75 @@ describe('the camera stops when the countdown does', () => {
 		// That is why it looked intermittent in the two places it was reported: flipping the lens
 		// raises .cam-loading (inset: 0, solid black) over it, and switching photo/video moves the
 		// letterbox geometry it had been showing through. Nothing hid it — it was never in front.
-		const rule = CAMERA.slice(CAMERA.indexOf('.endnote {'));
-		const body = rule.slice(0, rule.indexOf('}'));
-		expect(body).toMatch(/position:\s*absolute/);
-		// The slot this file keeps for exactly this, so two stacked controls cannot disagree about
-		// where the mode pill stops.
-		expect(body).toMatch(/bottom:\s*var\(--above-modes\)/);
-		const z = body.match(/z-index:\s*(\d+)/);
-		expect(z, 'it needs a z-index or the overlay wins again').toBeTruthy();
-		// Clear of the loading overlay (3), the install strip (7), the bottom bar (8) and the
-		// mode pill (10) — every layer that was painting over it.
-		expect(Number(z![1])).toBeGreaterThan(10);
+		// BOTH of them. The countdown is still a pill (.endnote) and the ended state is now a card
+		// (.endcard), and the trap is a property of being a child of .cam rather than of either
+		// shape — so a test that only knew about the pill would have let the card walk straight
+		// back into it the moment the markup changed. It nearly did.
+		for (const sel of ['.endnote {', '.endcard {']) {
+			const rule = CAMERA.slice(CAMERA.indexOf(sel));
+			const body = rule.slice(0, rule.indexOf('}'));
+			expect(body, `${sel} not found`).toBeTruthy();
+			expect(body, sel).toMatch(/position:\s*absolute/);
+			// The slot this file keeps for exactly this, so two stacked controls cannot disagree
+			// about where the mode pill stops.
+			expect(body, sel).toMatch(/bottom:\s*var\(--above-modes\)/);
+			const z = body.match(/z-index:\s*(\d+)/);
+			expect(z, `${sel} needs a z-index or the overlay wins again`).toBeTruthy();
+			// Clear of the loading overlay (3), the install strip (7), the bottom bar (8) and the
+			// mode pill (10) — every layer that was painting over it.
+			expect(Number(z![1]), sel).toBeGreaterThan(10);
+		}
+	});
+
+	it('never draws the ended card over the out-of-shots panel', () => {
+		// They can both be true at once — a roll running out on an event that is also closing — and
+		// .oos-panel is absolutely positioned at its own bottom: 190px. The card deliberately keeps
+		// the NOTE's slot rather than borrowing the panel's, so the two stack instead of overlap.
+		const card = CAMERA.slice(CAMERA.indexOf('.endcard {'));
+		expect(card.slice(0, card.indexOf('}'))).not.toMatch(/bottom:\s*190px/);
 	});
 
 	it('does not leave the install strip sharing its line', () => {
-		// Both want --above-modes, and they can be up at the same time.
+		// Both want --above-modes, and they can be up at the same time. Two different answers,
+		// because the two notes are different shapes: the pill steps the strip up by its own
+		// height, and the card — taller, and variable with the queue counts inside it — stands the
+		// strip down rather than have this file guess a second magic number that drifts.
 		expect(CAMERA).toMatch(/\.cam\.has-note \.install-offer \{[^}]*bottom:\s*calc\(var\(--above-modes\)/);
-		expect(CAMERA).toContain('class:has-note={eventEnded || endingSoon}');
+		expect(CAMERA).toMatch(/\.cam\.has-endcard \.install-offer \{[^}]*display:\s*none/);
+		// The classes have to be handed out on the right states, or both rules above are dead CSS.
+		expect(CAMERA).toContain('class:has-note={endingSoon}');
+		expect(CAMERA).toContain('class:has-endcard={eventEnded}');
+	});
+
+	it('does not call a stalled capture "still uploading"', () => {
+		// pendingCount lumps in-flight and given-up together, which is right for a badge and wrong
+		// for a sentence: telling a guest their capture is still on its way when it has stopped
+		// trying is the one message that makes them close the page and actually lose it.
+		expect(CAMERA).toContain("$: stuckUploads = queue.filter((q) => q.status === 'error').length;");
+		const card = CAMERA.slice(CAMERA.indexOf('<div class="endcard"'), CAMERA.indexOf('{:else if endingSoon}'));
+		// The two states must carry DIFFERENT instructions, which is the whole point of splitting
+		// them: "keep this page open" is true of an upload still climbing and false of one that has
+		// given up — and handed to a guest whose captures stopped trying, it is the sentence that
+		// makes them close the tab and lose them.
+		expect(card).toMatch(/pendingUploads[\s\S]*keep this page open/);
+		expect(card).toMatch(/stuckUploads[\s\S]*(nudge|retry)/);
+		expect(card).not.toMatch(/stuckUploads[^{]*keep this page open/);
+		// And a way to act on the stalled ones, or naming them is just bad news with no door.
+		expect(card).toMatch(/stuckUploads[\s\S]*drawerOpen = true/);
+	});
+
+	it('tells the guest the late ones still count', () => {
+		// The whole reason this stopped being a one-line pill. "This event has ended — 2 still
+		// uploading" reads as a contradiction and leaves the only actionable question unanswered:
+		// is there any point leaving this open? Since the late-upload change there is — a capture
+		// taken before the close is honoured for as long as the gallery exists.
+		expect(CAMERA).toMatch(/lateStillCounts =[\s\S]*taken before the event ended[\s\S]*still counts?\./);
+		const card = CAMERA.slice(CAMERA.indexOf('<div class="endcard"'), CAMERA.indexOf('{:else if endingSoon}'));
+		expect(card).toContain('{lateStillCounts}');
+		// Singular and plural both written, because "1 photos still count" is the kind of detail
+		// that makes a reassurance read like a machine and stops being reassuring.
+		expect(CAMERA).toMatch(/It was taken before the event ended, so it still counts\./);
+		expect(CAMERA).toMatch(/They were taken before the event ended, so they still count\./);
 	});
 
 	it('stops asking differently when the camera is simply held by something else', () => {

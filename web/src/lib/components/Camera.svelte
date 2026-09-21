@@ -667,6 +667,18 @@
   let allowDownloads = true;
 
   $: pendingCount = queue.filter((q) => q.status !== 'done').length;
+  /** Still going, versus stopped and waiting for a person. pendingCount lumps them together, which
+   *  is right for a badge — "there is something in the queue" — and wrong for a sentence: telling a
+   *  guest a capture is "still uploading" when it has actually given up is the one message that
+   *  makes them close the page and lose it. */
+  $: stuckUploads = queue.filter((q) => q.status === 'error').length;
+  /** The reassurance, with the grammar settled in one place rather than three times inline. This is
+   *  the sentence the card exists for: since the late-upload change, a capture taken before the
+   *  close is honoured for as long as the gallery exists, so the guest who closes the tab is the
+   *  only one who loses anything. */
+  $: lateStillCounts = pendingUploads + stuckUploads === 1
+    ? 'It was taken before the event ended, so it still counts.'
+    : 'They were taken before the event ended, so they still count.';
   $: hasUploadError = queue.some((q) => q.status === 'error');
   // The Queue button used to linger after everything had uploaded, badge-less and doing nothing —
   // it stayed as long as the queue ARRAY was non-empty, and completed items are never removed from
@@ -3619,7 +3631,7 @@
   <!-- The counter-rotation is published as a variable rather than applied here: rotating this
        element would rotate the viewfinder and the layout with it, which is the thing we are
        specifically not doing. Individual glyphs opt in. -->
-  <div id="cam-root" class="cam" class:has-note={eventEnded || endingSoon} style="--glyph-rot: {glyphRot}deg; --note-bottom: {noteVar}; --topbar-h: {topbarH ? `${topbarH}px` : `72px`}">
+  <div id="cam-root" class="cam" class:has-note={endingSoon} class:has-endcard={eventEnded} style="--glyph-rot: {glyphRot}deg; --note-bottom: {noteVar}; --topbar-h: {topbarH ? `${topbarH}px` : `72px`}">
     <div class="viewfinder">
       <!-- svelte-ignore a11y-media-has-caption -->
       <!-- Mirrored on the front camera, because that is what a phone does and what people expect
@@ -4151,7 +4163,33 @@
          is a standing condition, and a guest who looks up thirty seconds later must still be told
          why the button stopped working. -->
     {#if eventEnded}
-      <div class="endnote" role="status">{endedNote}{#if pendingCount} — {pendingCount} still uploading{/if}</div>
+      <!-- A card rather than the pill the countdown uses, because this one has something to SAY. The
+           old line read "This event has ended — 2 still uploading", which is two facts that appear
+           to contradict each other and no answer to the question it raises: is there any point
+           leaving this open? There is, and as of the late-upload change there is more than there
+           was — a capture taken before the close is honoured for as long as the gallery exists, so
+           the guest who shuts the tab is the only one who actually loses anything. -->
+      <div class="endcard" role="status" aria-live="polite">
+        <div class="endcard-title">{endedNote}</div>
+        {#if pendingUploads || stuckUploads}
+          <p class="endcard-body">
+            {lateStillCounts}
+            <!-- The two states need different instructions and used to share one. "Leave this page
+                 open and they will finish" is true of an upload still climbing and false of one
+                 that has stopped trying — and given to a guest whose captures had given up, it is
+                 the sentence that makes them close the tab. -->
+            {#if pendingUploads}
+              <b>{pendingUploads}</b> still going — keep this page open.
+            {/if}
+            {#if stuckUploads}
+              <b>{stuckUploads}</b> stopped trying and {stuckUploads === 1 ? 'needs' : 'need'} a nudge.
+            {/if}
+          </p>
+          {#if stuckUploads}
+            <button class="btn soft sm" on:click={() => (drawerOpen = true)}>Open the queue</button>
+          {/if}
+        {/if}
+      </div>
     {:else if endingSoon}
       <div class="endnote soon" role="status" aria-live="polite">Event ends in {countdown}</div>
     {/if}
@@ -4719,6 +4757,28 @@
      ~42px: 2x6px padding, one 0.82rem line, and the 12px these controls space themselves by. */
   .cam.has-note .install-offer { bottom: calc(var(--above-modes) + 42px); }
   .endnote.soon { background: var(--accent-fill, #f5c518); color: var(--accent-ink, #111); }
+
+  /* The ended card. Same material as .oos-panel — this is the other moment the camera has to stop
+     being a camera and explain itself — but it keeps the note's slot rather than the panel's 190px,
+     so the two can never end up drawn over each other when a roll runs out on an event that is also
+     closing. */
+  .endcard {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    bottom: var(--above-modes); z-index: 11;
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 14px 18px; border-radius: 16px; width: min(340px, 88vw);
+    background: rgba(0,0,0,.72); border: 1px solid rgba(255,255,255,.22);
+    backdrop-filter: blur(6px); box-shadow: 0 8px 28px rgba(0,0,0,.4);
+    pointer-events: auto; text-align: center;
+  }
+  .endcard-title { color: #fff; font-size: .95rem; font-weight: 700; }
+  .endcard-body { margin: 0; color: rgba(255,255,255,.86); font-size: .82rem; line-height: 1.45; }
+  .endcard-body b { color: #fff; }
+  /* The pill's neighbour-offset is a hard-coded 42px, which is its own height and nothing else's.
+     The card is taller and variable, so rather than guess a second number the install prompt stands
+     down entirely: offering to install the app for an event that has finished is noise competing
+     with the one message on screen that the guest needs to act on. */
+  .cam.has-endcard .install-offer { display: none; }
   .cam-error .big { font-size: 48px; }
   .cam-error p { max-width: 30ch; line-height: 1.4; }
   .cam-error .btn { width: auto; min-width: 150px; }
