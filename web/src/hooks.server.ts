@@ -29,6 +29,30 @@ import { isTokenRoute, redactPath } from '../../shared/token-paths';
 // having to remember this file. The explicit list is the readable statement of the four routes we
 // know about; the shape rule is what makes forgetting it survivable.
 
+/** Page routes whose HTML must never be held by a cache — ours, a CDN's, or a browser's.
+ *
+ *  These pages are rendered FOR a person: a host's event manager, their dashboard, the platform
+ *  console, the create wizard that carries an organizer code in its fragment. None of them should
+ *  ever be handed to a second reader.
+ *
+ *  Until now they said nothing at all about caching, and were safe only because Cloudflare does not
+ *  cache HTML by default. That is somebody else's default, in somebody else's dashboard, and this
+ *  product already has a Cache Rule making one `/api/` path cacheable — the next such rule, written
+ *  for a good reason by somebody moving fast, is all it would take. A page that must not be stored
+ *  should say so itself rather than rely on nobody switching it on.
+ *
+ *  `/e` and `/gallery` are deliberately ABSENT. They are the same page for every guest and their
+ *  data comes from the API, which does its own caching properly — making the shell uncacheable
+ *  would cost the thing the cache rule was added for and protect nothing.
+ *
+ *  Prefix-matched on a path SEGMENT, so `/admin` catches `/admin/ABC123` without `/administrator`
+ *  (were there ever one) sneaking in. */
+const PRIVATE_PREFIXES = ['/admin', '/dashboard', '/siteadmin', '/app', '/login', '/signup'] as const;
+
+export function isPrivatePage(pathname: string): boolean {
+  return PRIVATE_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + '/'));
+}
+
 export const handle: Handle = async ({ event, resolve }) => {
   const id = (env.GTAG_ID || '').trim();
   const uetId = (env.MSUET_ID || '').trim();
@@ -59,5 +83,15 @@ export const handle: Handle = async ({ event, resolve }) => {
     },
   });
   if (xRobots) response.headers.set('X-Robots-Tag', xRobots);
+  // Set LAST and unconditionally, so it wins over anything a route decided for itself. A page on
+  // this list is private whatever else it believes about caching.
+  //
+  // Token routes come along for the ride: the credential IS the URL there, so a stored copy is a
+  // stored credential. isTokenRoute is reused rather than re-listed for the reason its own file
+  // gives — two lists of the same routes drift, and that is how a 400-day bearer token ended up in
+  // analytics once already.
+  if (isPrivatePage(event.url.pathname) || isTokenRoute(event.url.pathname)) {
+    response.headers.set('Cache-Control', 'private, no-store');
+  }
   return response;
 };
