@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { capturedAtFor, captureSpanMs, gateUpload, lateUploadAllowed,
+import { capturedAtFor, captureSpanMs, gateUpload, lateUploadAllowed, mediaWindowOpen,
          maxAcceptedClipMs } from '../routes/photos';
 
 /* A photo taken during an event and uploaded just after it closed used to be refused.
@@ -103,33 +103,70 @@ describe('the routes actually hand the gate a body to read', () => {
 });
 
 describe('lateUploadAllowed — the shutter decides, the network does not', () => {
+  // This suite was named for a principle the function did not actually implement. It had a second
+  // clause bounding how long the UPLOAD took — 24 hours — which is a judgement about signal
+  // strength wearing the costume of a rule about events. The signature no longer takes `now` at
+  // all, which is the change stated as plainly as it can be: the arrival time is not an input to
+  // this decision. Whether there is still an event to land in is a separate question, asked by
+  // mediaWindowOpen.
+
   test('taken inside, uploaded eighteen minutes late: accepted', () => {
     // The exact case this exists for.
-    assert.equal(lateUploadAllowed(ENDS, ENDS - 47 * MIN, ENDS + 18 * MIN), true);
+    assert.equal(lateUploadAllowed(ENDS, ENDS - 47 * MIN), true);
   });
 
   test('taken inside, uploaded next morning: still accepted', () => {
-    // A phone that went flat at the party and was charged overnight is the same story, longer gap.
-    assert.equal(lateUploadAllowed(ENDS, ENDS - 2 * HOUR, ENDS + 9 * HOUR), true);
+    // A phone that went flat at the party and was charged overnight.
+    assert.equal(lateUploadAllowed(ENDS, ENDS - 2 * HOUR), true);
+  });
+
+  test('taken inside, uploaded THREE DAYS later: still accepted', () => {
+    // The case that changed. Under the old 24-hour bound this was refused, and on 2026-09-21 it
+    // was: nineteen uploads for a hen do, one handset draining fifteen queued captures in ninety
+    // seconds, every shutter pressed while the event was open. A guest who flies home before
+    // opening the app again has taken exactly the same photograph as one who uploaded instantly.
+    assert.equal(lateUploadAllowed(ENDS, ENDS - MIN), true);
   });
 
   test('taken AFTER the end: refused, however promptly it arrives', () => {
-    // The event really is over. This is the half that stops the grace window becoming an extension.
-    assert.equal(lateUploadAllowed(ENDS, ENDS + 10 * MIN, ENDS + 11 * MIN), false);
-  });
-
-  test('taken inside, but arriving beyond the grace: refused', () => {
-    assert.equal(lateUploadAllowed(ENDS, ENDS - MIN, ENDS + 25 * HOUR), false);
+    // The half that must not move. Removing the network bound must not turn the close into a
+    // suggestion — what the event is entitled to refuse is a NEW capture, and this is that test.
+    assert.equal(lateUploadAllowed(ENDS, ENDS + 10 * MIN), false);
   });
 
   test('a phone a couple of minutes fast is still believed', () => {
     // Handset clocks drift. Reading a slightly-fast phone's shot as "taken after the end" would
     // refuse a photograph that was plainly taken at the party.
-    assert.equal(lateUploadAllowed(ENDS, ENDS + 2 * MIN, ENDS + 3 * MIN), true);
+    assert.equal(lateUploadAllowed(ENDS, ENDS + 2 * MIN), true);
   });
 
   test('an hour fast is not', () => {
-    assert.equal(lateUploadAllowed(ENDS, ENDS + HOUR, ENDS + HOUR + MIN), false);
+    assert.equal(lateUploadAllowed(ENDS, ENDS + HOUR), false);
+  });
+});
+
+describe('mediaWindowOpen — the ceiling that replaced the network grace', () => {
+  const NOW = ENDS + 30 * HOUR;
+
+  test('open while the purge is still ahead of us', () => {
+    assert.equal(mediaWindowOpen(NOW + HOUR, null, NOW), true);
+  });
+
+  test('shut once the purge instant has passed', () => {
+    // The sweeper may not have run yet, but accepting here writes a file into an event that is
+    // about to lose every other one.
+    assert.equal(mediaWindowOpen(NOW - HOUR, null, NOW), false);
+  });
+
+  test('shut once the sweeper has actually been through', () => {
+    // purgeAt is NULLED by the sweep and purgedAt stamped, so purgedAt is the authority. Reading
+    // only purgeAt here would see null, lean long, and accept an upload into a purged event.
+    assert.equal(mediaWindowOpen(null, NOW - HOUR, NOW), false);
+  });
+
+  test('leans long when no purge is scheduled at all', () => {
+    // Same instinct as purgeAtFor: every wrong answer here costs somebody their photographs.
+    assert.equal(mediaWindowOpen(null, null, NOW), true);
   });
 });
 
@@ -204,14 +241,14 @@ describe('lateUploadAllowed — a clip begun before the close is honoured to its
     // claim lands 9m59s past the end — nearly ten minutes past a five-minute skew pad. The guest
     // filmed the speeches starting one second before the event closed and lost the lot.
     const stopStamped = ENDS - SEC + 10 * MIN;
-    assert.equal(lateUploadAllowed(ENDS, stopStamped, ENDS + 40 * MIN, 10 * MIN), true);
+    assert.equal(lateUploadAllowed(ENDS, stopStamped, 10 * MIN), true);
   });
 
   test('...and with no clip allowance it is refused, which is the behaviour being fixed', () => {
     // GUARD / documentation. Same numbers, no fourth argument: this is what the gate used to do,
     // written down so the next person can see what the argument buys rather than inferring it.
     const stopStamped = ENDS - SEC + 10 * MIN;
-    assert.equal(lateUploadAllowed(ENDS, stopStamped, ENDS + 40 * MIN), false);
+    assert.equal(lateUploadAllowed(ENDS, stopStamped), false);
   });
 
   test('a clip with no duration claim at all gets the benefit of the doubt', () => {
@@ -220,32 +257,34 @@ describe('lateUploadAllowed — a clip begun before the close is honoured to its
     // favour of precisely the guests least likely to be on a new client.
     const span = captureSpanMs(true, {}, CAP);
     assert.equal(span, CAP);
-    assert.equal(lateUploadAllowed(ENDS, ENDS - SEC + CAP, ENDS + CAP + 40 * MIN, span), true);
+    assert.equal(lateUploadAllowed(ENDS, ENDS - SEC + CAP, span), true);
   });
 
-  test('a ninety-second clip whose chunks are still landing a day and a minute after the close', () => {
-    // THE CHUNKED PATH. /chunk does not gate at all — only /complete does — so no individual part
-    // can ever be refused for arriving late; the question is whether the upload as a whole is
-    // still allowed when the LAST part lands. A bad connection pushes that past the twenty-four
-    // hours, and the twenty-four hours used to be measured from the EVENT's end rather than from
-    // the end of the capture, silently docking a long clip's network grace by its own length.
+  test('the chunked path: the last part may land whenever it lands', () => {
+    // /chunk does not gate at all — only /complete does — so the question was always whether the
+    // upload as a whole is still allowed when the LAST part arrives. Under the old bound a bad
+    // connection could push that past twenty-four hours and lose a clip that had been recording
+    // while the event was open. There is no arrival bound left to push past: `now` is not an
+    // argument to this function any more, which is the whole point of the change.
     const begun = ENDS - SEC;
-    assert.equal(lateUploadAllowed(ENDS, begun, ENDS + 24 * HOUR + MIN, 90 * SEC), true);
-    assert.equal(lateUploadAllowed(ENDS, begun, ENDS + 24 * HOUR + MIN), false);   // the old bound
+    assert.equal(lateUploadAllowed(ENDS, begun, 90 * SEC), true);
   });
 
-  test('a long clip gets its full day measured from its own last frame, and no more', () => {
-    const begun = ENDS - SEC;
-    assert.equal(lateUploadAllowed(ENDS, begun, ENDS + 24 * HOUR + 9 * MIN, 10 * MIN), true);
-    // GUARD: the grace is a day, not a day and a bit for anyone who claims a long clip.
-    assert.equal(lateUploadAllowed(ENDS, begun, ENDS + 24 * HOUR + 11 * MIN, 10 * MIN), false);
+  test('the span moves the BEGIN estimate, and that is now the only thing it does', () => {
+    // It used to do two jobs — widen the begin estimate AND extend the arrival window measured
+    // from the capture's last frame. The second job is gone with the window. Here the stamp lands
+    // well past the close and only the span can rescue it, by showing the recording must have
+    // started before it.
+    const stopStamped = ENDS + 8 * MIN;                       // past the five-minute skew pad
+    assert.equal(lateUploadAllowed(ENDS, stopStamped), false); // no span: reads as a late capture
+    assert.equal(lateUploadAllowed(ENDS, stopStamped, 10 * MIN), true);  // a ten-minute clip began inside
   });
 
   test('a capture genuinely begun after the close is still refused, whatever span it claims', () => {
     // GUARD. The line the generosity is not allowed to cross: an hour past the end is not "the
     // speeches ran long", it is a different evening, and the event has to actually close.
     for (const span of [0, 90 * SEC, CAP]) {
-      assert.equal(lateUploadAllowed(ENDS, ENDS + HOUR, ENDS + HOUR + MIN, span), false, `span ${span}`);
+      assert.equal(lateUploadAllowed(ENDS, ENDS + HOUR, span), false, `span ${span}`);
     }
   });
 
@@ -253,7 +292,7 @@ describe('lateUploadAllowed — a clip begun before the close is honoured to its
     // GUARD. Begin and stop are the same instant for a photograph, so there is nothing to widen,
     // and the photo path must come out of this change bit-for-bit as it went in.
     assert.equal(captureSpanMs(false, { durationSecs: 600, durationMs: 600_000 }, CAP), 0);
-    assert.equal(lateUploadAllowed(ENDS, ENDS + 10 * MIN, ENDS + 11 * MIN, 0), false);
+    assert.equal(lateUploadAllowed(ENDS, ENDS + 10 * MIN, 0), false);
   });
 });
 
@@ -274,7 +313,7 @@ describe('captureSpanMs — the clip length is read, clamped, and never believed
     // century of it would otherwise be a century of open door.
     const century = 100 * 365 * 24 * 60 * 60 * 1000;
     assert.equal(captureSpanMs(true, { durationMs: century }, CAP), CAP);
-    assert.equal(lateUploadAllowed(ENDS, ENDS + 24 * HOUR, ENDS + 25 * HOUR,
+    assert.equal(lateUploadAllowed(ENDS, ENDS + 24 * HOUR,
                                    captureSpanMs(true, { durationMs: century }, CAP)), false);
   });
 
@@ -299,9 +338,9 @@ describe('captureSpanMs — the clip length is read, clamped, and never believed
     // unmeasured clip is given the ceiling and let in, a clip that says it was under a second
     // has nothing to be given and the event is properly shut.
     const begun = ENDS + 7 * MIN;
-    assert.equal(lateUploadAllowed(ENDS, begun, begun + MIN, captureSpanMs(true, {}, CAP)), true,
+    assert.equal(lateUploadAllowed(ENDS, begun, captureSpanMs(true, {}, CAP)), true,
       'no claim is still the benefit of the doubt');
-    assert.equal(lateUploadAllowed(ENDS, begun, begun + MIN, captureSpanMs(true, { durationSecs: 0 }, CAP)), false,
+    assert.equal(lateUploadAllowed(ENDS, begun, captureSpanMs(true, { durationSecs: 0 }, CAP)), false,
       'a clip that says it was under a second cannot hold a closed event open for ten minutes');
   });
 
@@ -346,8 +385,57 @@ describe('gateUpload — the whole door, not just the rule behind it', () => {
   const CAP = maxAcceptedClipMs(base.videoSeconds);
   // gateUpload reads the wall clock itself, so the event is placed relative to now rather than to
   // the fixed ENDS the pure functions above can use.
-  const endedMsAgo = (ms: number) => ({ ...base, startsAt: Date.now() - 48 * HOUR, expiresAt: Date.now() - ms });
+  // purgeAt sits a fortnight out: the ordinary state of an event that has finished but whose photos
+  // are still there to be looked at. It is what makes these cases about the SHUTTER rather than
+  // about retention — the retention ceiling has its own tests below.
+  const endedMsAgo = (ms: number) => ({
+    ...base, startsAt: Date.now() - 48 * HOUR, expiresAt: Date.now() - ms,
+    purgeAt: Date.now() + 14 * 24 * HOUR, purgedAt: null,
+  });
   const ENDED = { status: 410, error: 'Event has ended' };
+
+  test('THE HEN DO: a still taken inside, uploaded thirty hours later, is accepted', () => {
+    // The case this change exists for, at the gate rather than at the predicate. On 2026-09-21
+    // nineteen uploads for event 7JZM3BE9 were refused between three and six hours past the old
+    // twenty-four-hour ceiling — one handset draining fifteen queued captures in ninety seconds,
+    // every shutter pressed while the event was open. A flat battery charged the next evening is
+    // not a reason to lose a photograph.
+    const p = { ...endedMsAgo(30 * HOUR), purgeAt: Date.now() + 14 * 24 * HOUR, purgedAt: null };
+    assert.equal(gateUpload(p, false, p.expiresAt - 2 * HOUR), null);
+  });
+
+  test('...and a week later, and a month later, for as long as the photos still exist', () => {
+    // There is no arrival bound left at all. The only thing that can stop it is the photos being
+    // gone, which is the next two tests.
+    for (const late of [7 * 24 * HOUR, 30 * 24 * HOUR]) {
+      const p = { ...endedMsAgo(late), purgeAt: Date.now() + 14 * 24 * HOUR, purgedAt: null };
+      assert.equal(gateUpload(p, false, p.expiresAt - 2 * HOUR), null, `${late}ms late`);
+    }
+  });
+
+  test('once the retention window has passed, it is refused — and says so honestly', () => {
+    // Not 'Event has ended', because that is not what happened and a guest whose phone was flat
+    // deserves to be told which of the two it was.
+    const p = { ...endedMsAgo(40 * 24 * HOUR), purgeAt: Date.now() - HOUR, purgedAt: null };
+    assert.deepEqual(gateUpload(p, false, p.expiresAt - 2 * HOUR),
+                     { status: 410, error: 'Event photos have been deleted' });
+  });
+
+  test('and once the sweeper has actually run, likewise', () => {
+    // purgeAt is NULLED by the sweep, so a check that read only purgeAt would see null, lean long,
+    // and accept an upload into an event whose photos are already deleted.
+    const p = { ...endedMsAgo(40 * 24 * HOUR), purgeAt: null, purgedAt: Date.now() - HOUR };
+    assert.deepEqual(gateUpload(p, false, p.expiresAt - 2 * HOUR),
+                     { status: 410, error: 'Event photos have been deleted' });
+  });
+
+  test('GUARD: a capture taken AFTER the close is still refused, however fresh the event', () => {
+    // The half that must not have moved. Removing the arrival bound must not turn the close into
+    // a suggestion — with retention wide open, a shot taken an hour after the end is still a new
+    // photograph and the event is entitled to refuse it.
+    const p = { ...endedMsAgo(2 * HOUR), purgeAt: Date.now() + 14 * 24 * HOUR, purgedAt: null };
+    assert.deepEqual(gateUpload(p, false, p.expiresAt + HOUR), ENDED);
+  });
 
   test('/complete for a maximum-length clip begun a second before the close, old-style stamp', () => {
     // The chunked path end to end, arriving half an hour after the camera stopped. The stamp is

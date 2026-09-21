@@ -428,6 +428,10 @@ type UploadParticipant = {
   // the same reason `eventChallenges` is: the shape arrives from the client and is worthless
   // without the list to check it against.
   aspectRatios: string | null;
+  /** When this event's media is due to be deleted, and when it actually was. Together they are the
+   *  only honest ceiling on a late upload: a shot may arrive for as long as there is still an event
+   *  for it to land in. `purgeAt` is nulled and `purgedAt` stamped by the sweeper. */
+  purgeAt: number | null; purgedAt: number | null;
 };
 
 async function participantForUpload(sessionToken: string): Promise<UploadParticipant | null> {
@@ -438,20 +442,34 @@ async function participantForUpload(sessionToken: string): Promise<UploadPartici
     eventId: events.id, moderationEnabled: events.moderationEnabled, videoSeconds: events.videoSeconds,
     challengeSet: participants.challengeSet, eventChallenges: events.challenges,
     aspectRatios: events.aspectRatios,
+    // The retention window — what now bounds a late upload. See lateUploadAllowed.
+    purgeAt: events.purgeAt, purgedAt: events.purgedAt,
   }).from(participants).innerJoin(events, eq(events.id, participants.eventId))
     .where(eq(participants.sessionToken, sessionToken));
   return p ?? null;
 }
 
-/** How long after an event closes an upload may still arrive for a shot taken INSIDE it.
+/* THE NETWORK GRACE PERIOD IS GONE, DELIBERATELY.
  *
- *  Generous on purpose, and it is not a grace period for the event — the event really is over. It
- *  is a grace period for the NETWORK. The phone that produced the refusals this exists for was at a
- *  hen do on a crowded connection, still draining its queue eighteen minutes after the end; a phone
- *  that goes flat at a wedding and is charged overnight is the same story with a longer gap. The
- *  photograph was taken during the event either way, and whether it counts should not depend on
- *  signal strength. */
-const LATE_UPLOAD_GRACE_MS = 24 * 60 * 60_000;
+ *  A 24-hour ceiling used to live here, described as "a grace period for the NETWORK" — right about
+ *  the intent, wrong about the consequence. Twenty-four hours is still a judgement about
+ *  connectivity, and it still throws away photographs on the strength of one.
+ *
+ *  On 2026-09-21 it did exactly that: nineteen uploads for a hen do were refused between three and
+ *  six hours past the ceiling, one handset draining fifteen queued captures in ninety seconds.
+ *  Every one of those shutters had been pressed while the event was open.
+ *
+ *  A phone that goes flat and is charged the next evening, a guest who flies home before opening
+ *  the app again, a venue whose wifi never comes back — the photograph was taken inside the event
+ *  in all three cases, and the only thing separating them from a phone that uploaded instantly is
+ *  luck. What the event is entitled to refuse is a NEW capture taken after it closed. That is a
+ *  different question from how long the upload took, and only the first one is the event's
+ *  business.
+ *
+ *  So the rule is now the one this file's tests always claimed in their title: the shutter decides,
+ *  the network does not. The ceiling that replaces it is not "none" — it is the event's own
+ *  retention window, which is the only limit that means anything: past it there is no event left
+ *  for the photo to land in. See lateUploadAllowed and mediaWindowOpen. */
 
 /** How far ahead of us a phone's clock may be and still be believed. Phones drift, and a handset a
  *  minute or two fast must not have its shots read as "taken after the end". */
@@ -639,11 +657,27 @@ export function captureSpanMs(isVideo: boolean,
  *
  *  Its own function, rather than two lines inside the gate, so the rule can be tested at the
  *  boundaries where it is easy to get wrong by one skew or one window. */
-export function lateUploadAllowed(expiresAt: number, capturedAt: number, now: number, spanMs = 0): boolean {
+export function lateUploadAllowed(expiresAt: number, capturedAt: number, spanMs = 0): boolean {
   const mayHaveBegun = capturedAt - spanMs;    // the earliest instant this capture can have started
-  const mayHaveEnded = capturedAt + spanMs;    // the latest instant its camera can have stopped
-  return mayHaveBegun <= expiresAt + CLOCK_SKEW_MS
-      && now <= Math.max(expiresAt, mayHaveEnded) + LATE_UPLOAD_GRACE_MS;
+  return mayHaveBegun <= expiresAt + CLOCK_SKEW_MS;
+}
+
+/** Is there still an event for a photo to land in?
+ *
+ *  This is the ceiling that replaced the 24-hour network grace, and the difference is what it is a
+ *  statement ABOUT. The old bound asked how long the upload took, which is a fact about a phone's
+ *  signal and says nothing about whether the photograph belongs in the gallery. This asks whether
+ *  the gallery still exists, which is the only thing that can actually make a late upload
+ *  impossible: past the purge the photo rows and the files are deleted, so accepting one would
+ *  write a file into an event that has nothing to show it.
+ *
+ *  `purgedAt` set means the sweeper has already been through — there is nothing to join. `purgeAt`
+ *  null with no `purgedAt` means no purge is scheduled, and we lean long, the same way purgeAtFor
+ *  leans long, because every wrong answer here costs somebody their photographs. */
+export function mediaWindowOpen(purgeAt: number | null, purgedAt: number | null, now: number): boolean {
+  if (purgedAt != null) return false;
+  if (purgeAt == null) return true;
+  return now <= purgeAt;
 }
 
 // Returns {status,error} to reject the upload, or null if it's allowed right now.
@@ -700,10 +734,20 @@ export function gateUpload(p: UploadParticipant, isVideo: boolean, capturedAt?: 
   // Subtracting a clip's span from that fallback is not a concession, it is arithmetic: the bytes
   // are in our hands, so the camera must have been running for the length of the clip before they
   // could be, and the recording therefore began at least that long ago.
-  if (now > p.expiresAt
-      && !lateUploadAllowed(p.expiresAt, capturedAt ?? now, now,
-                            captureSpanMs(clipAllowance, durationRaw, maxAcceptedClipMs(p.videoSeconds)))) {
-    return { status: 410, error: 'Event has ended' };
+  if (now > p.expiresAt) {
+    // Two different refusals, and they are told apart because they are different things to be told.
+    // "You are too late" and "you took this after it finished" used to share one message, which
+    // meant a guest whose phone had simply been flat read it as an accusation and a guest genuinely
+    // shooting afterwards read it as a network problem.
+    const span = captureSpanMs(clipAllowance, durationRaw, maxAcceptedClipMs(p.videoSeconds));
+    if (!lateUploadAllowed(p.expiresAt, capturedAt ?? now, span)) {
+      return { status: 410, error: 'Event has ended' };
+    }
+    // The shutter was pressed inside the event. The only thing that can refuse it now is that the
+    // event's media has been deleted, and then there is genuinely nowhere to put it.
+    if (!mediaWindowOpen(p.purgeAt, p.purgedAt, now)) {
+      return { status: 410, error: 'Event photos have been deleted' };
+    }
   }
   if (!hasShotsLeft(p))                   return { status: 403, error: 'No shots remaining' };
   return null;

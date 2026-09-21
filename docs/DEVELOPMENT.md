@@ -2069,14 +2069,30 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
     handset two minutes fast must not have its shots read as "taken after the end"), and not before
     the event began. Anything else falls back to the server's own clock, which is what this did
     before the field existed.
-  - **Both halves of `lateUploadAllowed()` are the point.** Taken inside the window, because whether
-    a photograph belongs to an event is settled by when the shutter went and not by whether the
-    network cooperated before a deadline; AND still inside the grace, because without that the event
-    never actually closes and a phone found in a drawer next year could post into a stranger's
-    gallery. The grace is 24 hours and it is a grace period for the NETWORK rather than for the
-    event — a phone that goes flat at a wedding and is charged overnight is the same story as the
-    hen do with a longer gap. A shot taken AFTER the end is still refused immediately, exactly as it
-    always was.
+  - **`lateUploadAllowed()` asks one question: did the shutter go before the event closed?** It no
+    longer takes `now` at all, and that removal is the rule stated as plainly as it can be — how
+    long the upload took is a fact about a phone's signal, and it says nothing about whether the
+    photograph belongs in the gallery.
+  - **There used to be a second clause: a 24-hour ceiling on arrival.** It was described here as a
+    grace period for the NETWORK rather than for the event, which was honest about the intent and
+    wrong about the effect — twenty-four hours is still a judgement about connectivity, and it
+    still threw photographs away on the strength of one. On 2026-09-21 it did: nineteen uploads for
+    a hen do refused between three and six hours past the ceiling, one handset draining fifteen
+    queued captures in ninety seconds, every shutter pressed while the event was open.
+  - **The argument for keeping it was that otherwise the event never closes** — "a phone found in a
+    drawer next year could post into a stranger's gallery". Both halves of that are answered
+    elsewhere. It is not a stranger's gallery: a session token is issued per participant per event,
+    so the only gallery a drawer phone can reach is the one its owner joined, and `hasShotsLeft`
+    still caps what they may add. And the event does still close — to NEW captures, which is the
+    half `lateUploadAllowed` keeps and which is the only half the event is entitled to refuse.
+  - **What bounds it now is `mediaWindowOpen()`: retention, not connectivity.** A late upload is
+    accepted for as long as there is still an event for it to land in, and refused once `purgeAt`
+    has passed or `purgedAt` is stamped — at which point the photo rows and the files are deleted
+    anyway, so accepting one would write a file into an event with nothing to show it. That refusal
+    says **"Event photos have been deleted"** rather than "Event has ended", because a guest whose
+    phone was simply flat deserves to be told which of the two happened. Note `purgeAt` is NULLED by
+    the sweeper and `purgedAt` stamped, so reading only `purgeAt` would see null, lean long, and
+    accept into a purged event — both fields are load-bearing.
 
 - **A camera that goes on working after the event has ended is worse than one that says so.**
   `isExpired` was read once, on the way in, with a comment saying mid-session expiry is left alone
