@@ -411,17 +411,6 @@
   // aspect
   let allowedAspects: string[] = ['1:1'];
   let aspect = '1:1';
-  // Is the CAMERA handing the recorder frames already cropped to `aspect` right now? Set only from
-  // what the camera returned (applyRecordShape), never from what it was asked for. It is what
-  // re-enables the viewfinder's framing in video, and framing to a crop that is not happening is
-  // precisely the bug that took the framing away to begin with.
-  let videoShapeLive = false;
-  // Whether the lens currently attached will crop at all. Tracks reality rather than latching:
-  // a phone's lenses do not all have the same capture pipeline, so a refusal by one is not a
-  // verdict on the next. False puts the control away in video — shapes are a photo setting again
-  // there, exactly as before, because a control that cannot do what it says is worse than none.
-  let videoShapeSupported = true;
-  let videoShapeToldOnce = false;   // said once per visit, not once per tap
 
   // upload queue
   interface QueueItem { id: string; blob: Blob; mediaType: 'photo' | 'video'; source: 'capture' | 'upload'; ext: string; status: 'pending' | 'uploading' | 'done' | 'error'; error?: string; progress?: number; size: number; durationSecs?: number; w?: number; h?: number; retries?: number; uploadId?: string; challengeId?: string; doneChunks?: number[]; captureOrientation?: 'portrait' | 'landscape'; captureShape?: string; captureRotation?: number; captureTurn?: number; capturedAt?: number; }
@@ -2103,11 +2092,6 @@
     // (seconds, usually paid) and one ten-second clip plausibly holds several tricks at once,
     // which would make ticking any one of them arbitrary.
     if (v) { armed = null; missionsOpen = false; }
-    // Into video, assume nothing: applyRecordShape sets this from what the camera actually returns
-    // once the stream is up. Starting from false means the viewfinder cannot frame to a shape that
-    // has not been proven yet — including in 'phone' quality, which returns below without ever
-    // acquiring a stream because the recording happens in an app we do not control at all.
-    if (v) videoShapeLive = false;
     applyViewfinderAspect();   // the framing differs by mode; do not make them wait for a re-attach
     // Phone mode used to launch the native camera the instant you entered video mode. Entering a
     // mode is not the same as starting a recording — the guest is still choosing a shape, checking
@@ -2137,6 +2121,7 @@
     if (q !== 'high' && q !== 'standard' && q !== 'smooth' && q !== 'phone') return;
     if (recording || q === videoQuality) return;
     videoQuality = q;
+    applyViewfinderAspect();   // into or out of 'phone', which is the one quality a shape skips
     lowFpsWarned = false;   // let a fresh warning fire if the new quality still struggles
     try { localStorage.setItem('snap_vidq', q); } catch { /* ignore */ }
     // PHONE mode has no resolution of ours to re-acquire — the recording happens in an app we do
@@ -2331,9 +2316,8 @@
    *  letterboxed inside it — so with any shape selected the thirds were thirds of the SCREEN, not of
    *  the picture, which is both useless for composing and visibly out of square with the frame.
    *
-   *  Deliberately reads videoShapeLive rather than the requested shape: in video mode the crop only
-   *  exists where the camera agreed to it, and drawing a framed grid over an unframed picture would
-   *  be the same lie applyViewfinderAspect exists to avoid.
+   *  Video in 'phone' quality is never framed: that clip is recorded by the phone's own camera app
+   *  and arrives as an upload, which nothing crops — framing it would promise a shape it never gets.
    *
    *  A PLAIN FUNCTION, with the reactive value derived from it — not the other way round. The
    *  reactive statement alone was not enough: setAspect() assigns `aspect` and then calls
@@ -2347,9 +2331,14 @@
     try { localStorage.setItem('snap_grid', gridOn ? '1' : '0'); } catch { /* the choice just will not stick */ }
   }
 
-  const framedFor = (a: string): string =>
-    a !== 'full' && (!videoMode || videoShapeLive) ? a.replace(':', ' / ') : '';
-  $: framedAspect = framedFor(aspect);
+  /** Can the chosen shape apply to what the shutter makes right now? Always for a photo and for a
+   *  clip recorded here; never for a 'phone'-quality clip (see framedFor). */
+  const shapeApplies = (inVideo: boolean, q: string): boolean => !inVideo || q !== 'phone';
+  // The mode and quality are parameters rather than read from the closure so that the reactive line
+  // below re-runs when they change, not only when `aspect` does.
+  const framedFor = (a: string, inVideo = videoMode, q: string = videoQuality): string =>
+    a !== 'full' && shapeApplies(inVideo, q) ? a.replace(':', ' / ') : '';
+  $: framedAspect = framedFor(aspect, videoMode, videoQuality);
 
   function applyViewfinderAspect() {
     if (!videoEl) return;
@@ -2358,13 +2347,11 @@
     // are pinned to full width and centre-cropped vertically (taller ratios overflow
     // and are clipped by the viewfinder, shorter ones letterbox) — matching capture.
     //
-    // VIDEO IS FRAMED ONLY ONCE THE CROP IS REAL. A photo is always cropped (cropRect, at the
-    // shutter). A clip is cropped by the CAMERA, and only where the browser honours the aspectRatio
-    // constraint — applyRecordShape asks, reads back what turned up, and sets videoShapeLive from
-    // that. Where it did not take, this stays unframed and shows the frame that will actually be
-    // recorded, which is what a guest lining a shot up is entitled to. The framing is drawn from
-    // the verified fact and never from the request: promising a crop nothing performs is the bug
-    // this whole mechanism exists to keep buried.
+    // THE FRAMING IS THE CROP THAT WILL HAPPEN. A photo is cropped at the shutter (cropRect). A clip
+    // is cropped by the camera where it honours the aspectRatio constraint, and otherwise by the
+    // server from the full frame (cropClipToShape) — the same centred window either way, so the
+    // guest lines up the clip they will get back. A 'phone'-quality clip is not cropped at all and
+    // is shown unframed (framedFor).
     s.objectFit = 'cover';
     s.width = '100%';
     s.maxWidth = '100%';
@@ -2374,7 +2361,7 @@
     else { s.aspectRatio = framed; s.height = 'auto'; }
   }
 
-  /** Make the CAMERA deliver the chosen shape, so a clip is genuinely cropped to it.
+  /** Ask the CAMERA for the chosen shape — the cheap way to crop a clip, where a browser offers it.
    *
    *  Photos are cropped into a canvas at capture. A clip cannot be: MediaRecorder records whatever
    *  the track hands it, frame for frame. So crop the TRACK instead — `aspectRatio` is a real
@@ -2385,10 +2372,17 @@
    *  and the preview frame rate does not move. The crop is a true centre crop, verified against a
    *  bar pattern — the outer bars are gone, not squeezed in.
    *
-   *  Nothing here is taken on trust. We ask, then read `getSettings()` back, because a browser may
-   *  honour the constraint, refuse it outright, or accept it and quietly do nothing — and on a
-   *  phone there is no way to know in advance which. Only a ratio that actually arrived turns the
-   *  framing on.
+   *  A refusal costs the guest nothing. Every iPhone refuses (iOS 18 and 26, field reports from
+   *  1.5.6), and so does Firefox — but the clip carries the shape it was asked for (captureShape,
+   *  see enqueue) and the server cuts the same centred window from the full frame afterwards
+   *  (cropClipToShape). So the viewfinder frames to the shape and the control stays whether or not
+   *  the camera obliged: the clip the gallery shows is the shape on screen either way. This used to
+   *  put the control away, toast "clips won't be cropped" and file a client error on every refusal
+   *  — written before the server crop existed, and untrue from the day it shipped.
+   *
+   *  We still read `getSettings()` back rather than trusting the ask, because a browser may honour
+   *  the constraint, refuse it outright, or accept it and quietly do nothing — and a track left
+   *  half-constrained is worse than a plain one.
    *
    *  Deliberately NOT folded into the getUserMedia constraints in startCamera(): an
    *  OverconstrainedError there drops into the retry chain and costs the guest their chosen lens,
@@ -2403,7 +2397,7 @@
     // A photo has its own crop and wants the sensor's biggest frame, so this is a video-mode affair
     // only. Recording is excluded because resizing a track mid-clip is a resolution change the
     // recorder never agreed to.
-    if (!videoMode || recording || !track) { videoShapeLive = false; return; }
+    if (!videoMode || recording || !track) return;
     const target = aspectValue(aspect);
     const q = VQ_RES[videoQuality === 'phone' ? 'standard' : videoQuality];
     const base: MediaTrackConstraints = { width: { ideal: q.w }, height: { ideal: q.h }, frameRate: { ideal: 30 } };
@@ -2411,8 +2405,7 @@
     // left on the track by a previous choice comes off again.
     if (target === null) {
       try { await track.applyConstraints(base); } catch { /* it keeps what it has, which is uncropped either way */ }
-      videoShapeLive = false;
-      matchRecBitrate(); applyViewfinderAspect();
+      matchRecBitrate();
       return;
     }
     // `exact` first: it is the only form a browser must either honour or refuse, so a success is
@@ -2422,31 +2415,14 @@
       try { await track.applyConstraints({ ...base, aspectRatio }); } catch { continue; }
       const got = track.getSettings?.() ?? {};
       if (shapeDelivered(got.width, got.height, target)) {
-        videoShapeLive = true;
-        videoShapeSupported = true;
         matchRecBitrate();       // a different-sized frame: the bitrate was sized for the old one
-        applyViewfinderAspect();
         return;
       }
     }
-    // The camera will not do it. Put the track back to a plain frame so that what is recorded and
-    // what is shown are at least the same thing, and stop offering a control that cannot deliver.
+    // The camera will not do it. Put the track back to a plain frame and let the server cut the
+    // shape from it — the clip is tagged with the shape at enqueue either way.
     try { await track.applyConstraints(base); } catch { /* ignore */ }
-    videoShapeLive = false;
-    noteShapeRefused();
     matchRecBitrate();
-    applyViewfinderAspect();
-  }
-
-  // Said once, and only to a guest who asked for something we could not give them. The report is
-  // also the only way we ever learn whether real phones honour the constraint: a headless browser's
-  // fake camera says nothing about a Samsung, and this is the field evidence that would.
-  function noteShapeRefused() {
-    videoShapeSupported = false;
-    if (videoShapeToldOnce) return;
-    videoShapeToldOnce = true;
-    showToast('This camera records full frame — clips won’t be cropped to a shape.');
-    reportClientError(`camera: aspectRatio not honoured for video (${aspect})`, 'camera', ev?.joinCode);
   }
 
   // A sheet, not a cycle. With five shapes enabled — which every demo has — reaching Square from
@@ -2466,10 +2442,8 @@
   async function setAspect(a: string) {
     aspect = a;
     try { localStorage.setItem('snap_aspect', a); } catch { /* the choice just will not stick */ }
-    // A photo crops in the canvas, so the new framing is true the instant it is picked. In video the
-    // camera has to agree first — drop the framing until applyRecordShape has read the answer back,
-    // rather than flicking to the new shape and possibly away from it again.
-    if (videoMode) videoShapeLive = false;
+    // The new framing is true the instant it is picked: a photo crops in the canvas, a clip is cut by
+    // the camera or, failing that, by the server.
     applyViewfinderAspect();
     await applyRecordShape();
   }
@@ -3863,7 +3837,7 @@
              again, and a control that cannot do what it says is worse than no control. Disabled
              while recording because resizing the track mid-clip is a resolution change the recorder
              never agreed to. -->
-        {#if allowedAspects.length > 1 && (!videoMode || videoShapeSupported)}<button class="ctrl" on:click={() => (shapeSheet = true)} disabled={recording} title={videoMode ? 'Clip shape' : 'Photo shape'} aria-label="Choose {videoMode ? 'clip' : 'photo'} shape (currently {ASPECT_LABELS[aspect] || aspect})">{aspect === 'full' ? 'Full' : aspect}</button>{/if}
+        {#if allowedAspects.length > 1 && shapeApplies(videoMode, videoQuality)}<button class="ctrl" on:click={() => (shapeSheet = true)} disabled={recording} title={videoMode ? 'Clip shape' : 'Photo shape'} aria-label="Choose {videoMode ? 'clip' : 'photo'} shape (currently {ASPECT_LABELS[aspect] || aspect})">{aspect === 'full' ? 'Full' : aspect}</button>{/if}
         <button class="ctrl" on:click={() => (settingsOpen = !settingsOpen)} class:active={settingsOpen} title="Settings" aria-label="Camera settings">
           <!-- Drawn rather than typed: the ⚙ character is rendered by whatever font the device has
                and frequently is not recognisably a cog, which is the one icon users navigate by. -->
