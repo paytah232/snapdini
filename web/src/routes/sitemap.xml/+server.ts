@@ -1,7 +1,7 @@
 import type { RequestHandler } from './$types';
 import { env } from '$env/dynamic/private';
 import { useCaseSlugs } from '$lib/usecases';
-import { isIndexable, sitemapXml, canonicalOrigin, SITEMAP_LASTMOD } from '$lib/seo';
+import { isIndexable, sitemapXml, canonicalOrigin, canonicalSetting, SITEMAP_LASTMOD } from '$lib/seo';
 
 // sitemap.xml — public marketing pages only, and ONLY on the canonical deployment. A preview host
 // publishing a sitemap of its own URLs is how a dev clone got itself indexed in the first place, so
@@ -20,6 +20,6 @@ export const GET: RequestHandler = ({ url }) => {
     { path: '/terms', priority: '0.3' },
     // One date for all of them, stamped in one place. See SITEMAP_LASTMOD for why it is not `now`.
   ].map((p) => ({ ...p, lastmod: SITEMAP_LASTMOD }));
-  const xml = sitemapXml(canonicalOrigin(env.ORIGIN, url.origin), pages);
+  const xml = sitemapXml(canonicalOrigin(canonicalSetting(env.CANONICAL_ORIGIN, env.ORIGIN), url.origin), pages);
   return new Response(xml, { headers: { 'content-type': 'application/xml; charset=utf-8' } });
 };

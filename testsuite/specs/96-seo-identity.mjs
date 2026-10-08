@@ -55,6 +55,13 @@ await spec('96-seo-identity', async () => {
     ok('the homepage declares a canonical', !!canon, canon);
     ok('canonical and og:url agree', canon === ogUrl, `${canon} vs ${ogUrl}`);
     const canonHost = canon ? new URL(canon).host : '';
+    if (suppressed) {
+      // The second half of the bug. With noindex in place the dev host still said `canonical:
+      // <itself>`, and Google kept it as the original for weeks: noindex is not a canonicalization
+      // signal, rel=canonical is. A suppressed host has to name the real site (CANONICAL_ORIGIN).
+      ok('a suppressed host does not declare itself the original',
+        !!canonHost && canonHost !== new URL(BASE).host, `canonical=${canon} host=${new URL(BASE).host}`);
+    }
     if (!suppressed) {
       const firstLoc = attr(sitemap.body, /<loc>([^<]*)<\/loc>/);
       ok('the sitemap uses that same host', firstLoc && new URL(firstLoc).host === canonHost,

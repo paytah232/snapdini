@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isIndexable, canonicalOrigin, robotsMeta, robotsHeader, robotsTxt, sitemapXml, SITEMAP_LASTMOD } from './seo';
+import { isIndexable, canonicalOrigin, canonicalSetting, robotsMeta, robotsHeader, robotsTxt, sitemapXml, SITEMAP_LASTMOD } from './seo';
 
 describe('isIndexable', () => {
   it('opts in on 1 / true, case- and space-insensitively', () => {
@@ -30,6 +30,27 @@ describe('canonicalOrigin', () => {
   });
   it('falls back rather than emitting a broken canonical', () => {
     expect(canonicalOrigin('not a url', 'https://snapdini.com')).toBe('https://snapdini.com');
+  });
+});
+
+describe('canonicalSetting', () => {
+  // The dev host had noindex AND `canonical: <itself>` for weeks, and Google kept it as the master
+  // copy: noindex is not a canonicalization signal, rel=canonical is. A suppressed host has to
+  // point at the real site, and this is the knob that lets it.
+  it('prefers CANONICAL_ORIGIN, so a preview host can name the real site as the original', () => {
+    expect(canonicalSetting('https://snapdini.com', 'https://snapdini-dev.pugno-nas.synology.me'))
+      .toBe('https://snapdini.com');
+    expect(canonicalOrigin(canonicalSetting('https://snapdini.com', 'https://dev.example'), 'https://dev.example'))
+      .toBe('https://snapdini.com');
+  });
+  it('falls back to ORIGIN when CANONICAL_ORIGIN is unset, empty or blank (the compose default)', () => {
+    for (const v of [undefined, null, '', '   ']) {
+      expect(canonicalSetting(v, 'https://snapdini.com')).toBe('https://snapdini.com');
+    }
+  });
+  it('yields undefined when neither is set, so canonicalOrigin falls back to the request', () => {
+    expect(canonicalSetting(undefined, undefined)).toBeUndefined();
+    expect(canonicalOrigin(canonicalSetting('', ''), 'https://req.example')).toBe('https://req.example');
   });
 });
 

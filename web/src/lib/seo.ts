@@ -10,6 +10,15 @@
 // explicit opt-in. Default OFF, which is the whole point — the next preview host suppresses itself
 // without anyone remembering to do anything.
 //
+// That turned out to be only half the fix. The dev stack's ORIGIN *is* the dev host, so with
+// noindex in place it STILL emitted `canonical: <itself>` (plus og:url and the JSON-LD url), and
+// Google kept it as the master copy for weeks: in Google's own list of canonicalization signals a
+// redirect and rel="canonical" are the strong ones, and noindex is not a canonicalization signal
+// at all. A page that says "don't index me" while also saying "I am the original" has told Google
+// nothing about which URL should win. Hence CANONICAL_ORIGIN: a non-indexable host points every
+// canonical at the real site, which is the one signal Google documents for cross-domain duplicates
+// that does not also break the host for the people using it (a blanket 301 would).
+//
 // Pure and framework-free so it is unit-testable (seo.test.ts).
 
 /** Only `1`/`true` opts a deployment in. Anything else — unset, empty, typo — stays out. */
@@ -19,7 +28,23 @@ export function isIndexable(flag: string | null | undefined): boolean {
 }
 
 /**
- * The origin every canonical/og:url on an indexable page must use. Falls back to the request
+ * Which configured value the canonicals are built from: CANONICAL_ORIGIN when set, else ORIGIN.
+ *
+ * Callers pass both in from `$env/dynamic/private` themselves rather than this module reading
+ * them, so `compose-env.test.ts` — which scans every `env.X` read in web/src and asserts both
+ * compose files pass X to the web service — keeps guarding them. A var read in here would be
+ * invisible to that test, and that is exactly the silent-omission trap it exists to catch.
+ */
+export function canonicalSetting(
+  canonicalOriginEnv: string | null | undefined,
+  originEnv: string | null | undefined,
+): string | undefined {
+  const c = (canonicalOriginEnv || '').trim();
+  return c || (originEnv ?? undefined);
+}
+
+/**
+ * The origin every canonical/og:url must use. Falls back to the request
  * origin only when nothing is configured, so a misconfigured deployment still emits valid absolute
  * URLs rather than `undefined/pricing`.
  */

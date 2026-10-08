@@ -103,7 +103,8 @@ your TLS / reverse proxy at that, and make sure the address it serves is exactly
   setting.
 - **Set `SEO_INDEXABLE=1` on exactly one deployment** — the public one named in `BASE_URL`. Unset
   means `noindex`, which is the right default for a staging copy and the reason a preview host
-  cannot outrank your real one.
+  cannot outrank your real one. On that staging copy also set `CANONICAL_ORIGIN` to the real
+  site's origin, so its pages name the real site as the original rather than themselves.
 - **Pin a version** with `IMAGE_TAG` in `.env` (e.g. `IMAGE_TAG=1.5.0`; default `latest`). Point at
   your own registry with `IMAGE_PREFIX`.
 - **Upgrades**: run `./upgrade.sh [version]`, or see **[UPGRADING.md](UPGRADING.md)**.

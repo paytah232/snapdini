@@ -196,6 +196,12 @@ services:
       # noindex and no sitemap is served, so a staging or preview host suppresses itself instead of
       # competing with the real site for its own search results. Set it to 1 on exactly one host.
       - SEO_INDEXABLE=${SEO_INDEXABLE:-}
+      # Where a NON-indexable deployment points its canonical / og:url: the real site's origin
+      # (e.g. https://snapdini.com on a staging copy). noindex alone did not stop Google treating
+      # the dev host as the original — rel=canonical is the signal it ranks, so a preview host must
+      # name the real site. Unset ⇒ canonicals use this deployment's own ORIGIN (right for the one
+      # host that has SEO_INDEXABLE=1).
+      - CANONICAL_ORIGIN=${CANONICAL_ORIGIN:-}
       # Comma-separated emails whose signed-in sessions never fire conversions (site admins are always
       # excluded) — keeps the operator's own testing out of the ad data.
       - ANALYTICS_EXCLUDE_EMAILS=${ANALYTICS_EXCLUDE_EMAILS:-}

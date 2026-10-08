@@ -1261,6 +1261,14 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
     Logic is in `web/src/lib/seo.ts` (unit-tested); pages read `$page.data.canonicalOrigin` and
     `$page.data.robotsMeta` from `routes/+layout.server.ts`, and `hooks.server.ts` adds an
     `X-Robots-Tag` header so routes rendering no head tags are covered too.
+  - **A non-indexable host must set `CANONICAL_ORIGIN` to the real site** (the dev stack has
+    `CANONICAL_ORIGIN=https://snapdini.com`). noindex alone did not undo the damage above: the dev
+    host's `ORIGIN` is the dev host, so it kept emitting `canonical: <itself>`, and Google kept it
+    as the original for weeks — in Google's own list of canonicalization signals, redirects and
+    `rel=canonical` are the strong ones and noindex is not a signal at all. A blanket 301 to prod
+    would also work for Google but would break the dev host for everyone using it. Unset,
+    canonicals fall back to `ORIGIN`, which is right for the one indexable host.
+    `testsuite/specs/96-seo-identity.mjs` fails a suppressed host that points its canonical at itself.
   - **Crawling stays ALLOWED on a non-indexable host, deliberately.** A crawler has to fetch a page
     to see the noindex, so `Disallow: /` would strand a preview host in the index with no way to
     tell anyone to drop it. What it does not do is advertise a sitemap, and `/sitemap.xml` 404s.

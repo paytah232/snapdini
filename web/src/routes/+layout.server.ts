@@ -3,7 +3,7 @@ import { env } from '$env/dynamic/private';
 import { isValidGtagId } from '$lib/consent';
 import { composeSendTo } from '$lib/conversions';
 import { isValidUetId, uetAction } from '$lib/msads';
-import { isIndexable, canonicalOrigin, robotsMeta } from '$lib/seo';
+import { isIndexable, canonicalOrigin, canonicalSetting, robotsMeta } from '$lib/seo';
 
 // Surfaces analytics/ads config to pages:
 //  • analyticsEnabled — gates the "Your Privacy Choices" opt-out link (US requirement).
@@ -36,11 +36,13 @@ export const load: LayoutServerLoad = async ({ request, fetch, url }) => {
   }
 
   // SEO identity. Pages must NEVER build a canonical from the request host — see $lib/seo.
+  // CANONICAL_ORIGIN lets a non-indexable host name the real site as the original instead of
+  // itself; unset, the canonical is this deployment's own ORIGIN.
   const seoIndexable = isIndexable(env.SEO_INDEXABLE);
 
   return {
     seoIndexable,
-    canonicalOrigin: canonicalOrigin(env.ORIGIN, url.origin),
+    canonicalOrigin: canonicalOrigin(canonicalSetting(env.CANONICAL_ORIGIN, env.ORIGIN), url.origin),
     robotsMeta: robotsMeta(seoIndexable),
     analyticsEnabled,
     analyticsExclude,
