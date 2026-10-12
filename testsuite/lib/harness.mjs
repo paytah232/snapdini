@@ -14,7 +14,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const BASE = (process.argv[2] || 'http://localhost:3001').replace(/\/$/, '');
-export const DB = 'snapdini-dev-db';
+// The Postgres container the specs read state from. Overridable so the same suite can drive the
+// next stack (:3003, snapdini-next-db) without being edited.
+export const DB = process.env.SNAPDINI_DB || 'snapdini-dev-db';
 // The dev stack's uploads folder on the host, for the best-effort disk sweep in cleanup(). Only
 // meaningful on the local driver; on s3 (or a box where the folder is not mounted) the sweep is
 // skipped and the purge the specs drive through the API is what removes the objects.
