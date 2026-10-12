@@ -84,7 +84,13 @@ export async function copyAll(from: MediaStore, to: MediaStore, a: Args, log: (s
         const src = await from.stat(key);
         if (!src) throw new Error('vanished from the source');
         const dst = await to.stat(key);
-        const same = dst && dst.size === src.size && (a.verify !== 'etag' || dst.etag === src.etag);
+        // "Already there" is a size match — and under --verify etag a validator match too, but
+        // only when both sides hold a STRONG one (an MD5 from a bucket). The local driver's
+        // validator is weak (`W/"size-mtime"`) and can never equal a bucket's, so comparing those
+        // would re-copy every object on every run and the tool would not be resumable at all.
+        const strong = (e: string) => !!e && !e.startsWith('W/');
+        const same = dst && dst.size === src.size
+          && (a.verify !== 'etag' || !strong(dst.etag) || !strong(src.etag) || dst.etag === src.etag);
         if (same) { report.skipped++; report.manifest[key] = { size: src.size }; }
         else if (a.dryRun) { report.copied++; report.manifest[key] = { size: src.size }; }
         else {
