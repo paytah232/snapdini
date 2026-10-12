@@ -841,6 +841,11 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
   // correction can be the last thing to touch the clip — again, see the bottom of this function.
   const derivations: Promise<unknown>[] = [];
 
+  // Everything below can throw — an invalid image, a clip past the ceiling, a roll that filled up
+  // between the gate and the claim, a database error — and some of it throws AFTER the clip's
+  // derivation chains are already running against the working directory. Whatever the reason,
+  // the directory is handed back once those chains settle; the switch stops them publishing.
+  try {
   let dims: { width?: number; height?: number; durationMs?: number } = {};
   if (!isVideo) {
     try { dims = await stripImageMetadata(finalPath); await makeThumbnail(finalPath); }
@@ -1023,7 +1028,6 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     cancelled = true;
     await co.remove([baseName, ...derivedNames(baseName)]).catch(() => {});
     invalidateListing(p.eventId);
-    if (!isVideo) await co.release();
     const e = new Error('No shots remaining') as Error & { status?: number };
     e.status = 403; throw e;
   }
@@ -1111,6 +1115,11 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     // that a second upload in flight has already made wrong.
     photosRemaining: remainingFor({ maxPhotos: claim.maxPhotos, extraPhotos: claim.extraPhotos, photosTaken: claim.photosTaken }),
   };
+  } catch (e) {
+    cancelled = true;
+    void drain(derivations).then(() => co.release());
+    throw e;
+  }
 }
 
 /** Wait for every promise in `list`, including any pushed onto it while waiting. */
