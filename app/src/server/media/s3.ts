@@ -106,7 +106,15 @@ export class S3Store implements MediaStore {
     }
     if (typeof src === 'string') {
       const size = (await fs.promises.stat(src)).size;
-      await this.putStream(Key, fs.createReadStream(src), size, ContentType);
+      const rs = fs.createReadStream(src);
+      try { await this.putStream(Key, rs, size, ContentType); }
+      finally {
+        // The descriptor is released on 'close', a tick after the SDK has read the last byte and
+        // resolved. Wait for it: a checkout that removes its directory the moment publish()
+        // returns was unlinking a file still open — harmless on a local disk, a silly-renamed
+        // `.nfs…` file and an ENOTEMPTY on a network one.
+        await closed(rs);
+      }
       if (opts.move) await fs.promises.unlink(src).catch(() => {});
       return;
     }
@@ -332,12 +340,28 @@ export class S3Store implements MediaStore {
       async release() {
         if (released) return;
         released = true;
-        await fs.promises.rm(dir, { recursive: true, force: true });
+        // Best effort, never thrown: a working directory that will not go is litter the hourly
+        // sweeper collects, and litter must not fail the upload that has already succeeded. One
+        // retry after a beat covers a descriptor that is still being closed.
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try { await fs.promises.rm(dir, { recursive: true, force: true }); return; }
+          catch (e) {
+            if (attempt === 2) { console.warn(`[media] could not remove working directory ${dir}:`, (e as Error).message); return; }
+            await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+          }
+        }
       },
     };
     try {
       for (const a of opts.adopt ?? []) {
-        await fs.promises.rename(a.from, co.path(a.name));
+        // Staging and the working directory share a filesystem in every deployment we ship, so
+        // this is a rename; across devices it degrades to a copy and never to a failure.
+        try { await fs.promises.rename(a.from, co.path(a.name)); }
+        catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e;
+          await fs.promises.copyFile(a.from, co.path(a.name));
+          await fs.promises.unlink(a.from).catch(() => {});
+        }
       }
       if (opts.fetch) await co.fetch(opts.fetch);
     } catch (e) {
@@ -346,6 +370,12 @@ export class S3Store implements MediaStore {
     }
     return co;
   }
+}
+
+/** Resolves once a read stream has released its descriptor (or already has). */
+function closed(rs: fs.ReadStream): Promise<void> {
+  if (rs.closed) return Promise.resolve();
+  return new Promise((resolve) => { rs.once('close', () => resolve()); rs.once('error', () => resolve()); });
 }
 
 function isNotFound(e: unknown): boolean {

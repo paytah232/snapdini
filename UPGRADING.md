@@ -781,7 +781,11 @@ way back is the same change reversed while the old copy still exists.
    ```
    (`stop app` then `exec app` needs the container running — run the copy from a one-off
    `docker compose run --rm app npx tsx …` if you prefer the app fully down.)
-5. **Keep the folder** untouched for a few weeks. Rolling back is `MEDIA_DRIVER=local` and a
+5. **Point `UPLOADS_HOST` at local disk** (or leave it unset: the compose default `./data/uploads`
+   is local). On `s3` that volume holds only in-flight uploads and the working copies tools need,
+   and it must not be a network share: NFS keeps a deleted file alive as a `.nfs…` entry while
+   anything still holds it open, which stops the working directories being removed cleanly.
+6. **Keep the old folder** untouched for a few weeks. Rolling back is `MEDIA_DRIVER=local` and a
    restart. After that the volume can go: on `s3` it only ever holds in-flight uploads and the
    working copies tools need, both of which the app deletes itself.
 

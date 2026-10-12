@@ -879,7 +879,10 @@ export async function backfillPlaybackProxies(store: MediaStore, filenames: stri
     try { exists = await store.exists(rel); } catch { continue; }
     if (!exists) continue;                                              // purged already
     const name = keyName(rel);
-    const co = await store.checkout(keyDir(rel), { fetch: [name] });
+    // The proxy is fetched WITH the original: makePlaybackProxy early-outs on a proxy that already
+    // exists, and without it in the working directory every boot would re-transcode every clip
+    // on the s3 driver — found as five proxies whose bucket copies differed from the folder's.
+    const co = await store.checkout(keyDir(rel), { fetch: [name, playName(name)] });
     try {
       if (!(await co.fetch([name])).has(name)) continue;
       // Correct the original BEFORE the proxy looks at it: a proxy built from a shifted file
