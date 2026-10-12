@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
 import sharp from 'sharp';
+import { keyDir, keyName, type MediaStore } from './media';
 
 // Each sharp operation runs single-threaded; we instead run a bounded NUMBER of operations in
 // parallel (the semaphore below). That keeps total threads ≈ cores under an upload burst
@@ -55,8 +56,17 @@ export async function stripImageMetadata(filePath: string): Promise<{ width?: nu
     .rotate()
     .jpeg({ quality: IMAGE_QUALITY, chromaSubsampling: hi ? '4:4:4' : '4:2:0', mozjpeg: !hi })
     .toBuffer({ resolveWithObject: true }));
-  await fs.promises.writeFile(filePath, data);
+  await writeAtomic(filePath, data);
   return { width: info.width, height: info.height };
+}
+
+/** Write beside the target and rename into place, so nothing — a reader, a checkout publishing
+ *  what changed — can ever see a half-written file. The temporary name carries `.tmp.`, which
+ *  media/keys.ts knows to skip. */
+async function writeAtomic(file: string, data: Buffer): Promise<void> {
+  const tmp = `${file}.tmp${path.extname(file) || '.bin'}`;
+  await fs.promises.writeFile(tmp, data);
+  await fs.promises.rename(tmp, file);
 }
 
 /** The same scrub, but to PNG — for the one upload whose TRANSPARENCY is the point.
@@ -74,7 +84,7 @@ export async function stripImageMetadataPng(filePath: string): Promise<{ width?:
     .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
     .png({ compressionLevel: 9 })
     .toBuffer({ resolveWithObject: true }));
-  await fs.promises.writeFile(filePath, data);
+  await writeAtomic(filePath, data);
   return { width: info.width, height: info.height };
 }
 
@@ -93,7 +103,7 @@ export async function makeThumbnail(originalPath: string): Promise<void> {
     .resize(640, 640, { fit: 'cover' })
     .webp({ quality: 72 })
     .toBuffer());
-  await fs.promises.writeFile(thumb, buf);
+  await writeAtomic(thumb, buf);
 }
 
 // Extract a poster frame from a video and write it as the sibling thumbnail (same naming as
@@ -114,7 +124,7 @@ export async function makeVideoPoster(videoPath: string): Promise<boolean> {
   if (!frame) return false;
   try {
     const buf = await withImageSlot(() => sharp(frame).resize(640, 640, { fit: 'cover' }).webp({ quality: 72 }).toBuffer());
-    await fs.promises.writeFile(thumb, buf);
+    await writeAtomic(thumb, buf);
     return true;
   } catch { return false; }
 }
@@ -272,8 +282,10 @@ export function derivedNames(filename: string): string[] {
 // starts two independent chains (audio-lead → proxy, and crop → poster → download copy) and it is
 // the last one to finish that decides when the name is safe to move.
 //
-// Keyed on the resolved path of the ORIGINAL, which is the one name every derived file is computed
-// from — so a caller holding any of them can ask about the set by naming the file it came from.
+// Keyed on the BASE NAME of the original — a uuid, so unique across every event — which is the one
+// name every derived file is computed from. A caller holding any of them can ask about the set by
+// naming the file it came from, and it can do so from a different directory: on the s3 driver the
+// upload's chains run in one working directory and a rotate request arrives holding another.
 //
 // IN-PROCESS, DELIBERATELY. The promises this tracks live in this process and nowhere else, so a
 // restart that forgets the register has already killed the work the register described: there is
@@ -290,7 +302,7 @@ const deriving = new Map<string, number>();
  *  wedged its upload shut for the life of the process would be a worse bug than the race this
  *  closes. */
 export async function whileDeriving<T>(originalPath: string, job: () => Promise<T>): Promise<T> {
-  const key = path.resolve(originalPath);
+  const key = path.basename(originalPath);
   deriving.set(key, (deriving.get(key) ?? 0) + 1);
   try {
     return await job();
@@ -303,7 +315,7 @@ export async function whileDeriving<T>(originalPath: string, job: () => Promise<
 
 /** Is anything still being written under this upload's base name? */
 export function isDeriving(originalPath: string): boolean {
-  return deriving.has(path.resolve(originalPath));
+  return deriving.has(path.basename(originalPath));
 }
 
 /** Parse "4:5" into a ratio. Null for 'full', blank, or anything unrecognised — all of which mean
@@ -365,7 +377,10 @@ const align16 = (n: number) => Math.ceil(n / 16) * 16;
  *  Returns true only when a verified cropped file now exists. False means "serve the original",
  *  which is always a correct outcome — a clip in the wrong shape is a far smaller problem than a
  *  clip that does not play. */
-export async function cropClipToShape(videoPath: string, shape: string | null | undefined): Promise<boolean> {
+export async function cropClipToShape(videoPath: string, shape: string | null | undefined,
+                                      /** `onDl` receives the download re-encode's promise, which outlives this one — so a
+                                       *  caller that must wait for every copy, or publish each as it lands, can. */
+                                      opts: { onDl?: (dl: Promise<boolean>) => void } = {}): Promise<boolean> {
   const want = shapeRatio(shape);
   if (!want) return false;
 
@@ -451,9 +466,10 @@ export async function cropClipToShape(videoPath: string, shape: string | null | 
       // awaiting: cropClipToShape resolves as soon as the lossless crop is in place, and without
       // this the base name would read as finished while the most expensive copy of the lot was
       // still being written into it.
-      void whileDeriving(videoPath, () => cropByReencode(videoPath, want,
+      const dl = whileDeriving(videoPath, () => cropByReencode(videoPath, want,
         { outName: dlName(path.basename(videoPath)), crf: 18, capLongEdge: false }))
         .catch(() => false);
+      opts.onDl?.(dl);
       return true;
     } catch {
       await cleanup();
@@ -783,7 +799,7 @@ export async function rotateImageTo(srcPath: string, destPath: string, clockwise
     .rotate(clockwise)
     .jpeg({ quality: IMAGE_QUALITY, chromaSubsampling: hi ? '4:4:4' : '4:2:0', mozjpeg: !hi })
     .toBuffer({ resolveWithObject: true }));
-  await fs.promises.writeFile(destPath, data);
+  await writeAtomic(destPath, data);
   return { width: info.width, height: info.height };
 }
 
@@ -836,62 +852,72 @@ export async function rotateClipTo(srcPath: string, destPath: string, clockwise:
   });
 }
 
-// Generate a missing thumbnail for one original if it doesn't already have a sibling _thumb.webp.
-async function backfillOne(original: string): Promise<boolean> {
-  const name = path.basename(original);
-  if (name.includes('_thumb')) return false;
-  const isPhoto = /\.jpe?g$/i.test(name);
-  const isVideo = /\.(mp4|webm|mov|m4v)$/i.test(name);
-  if (!isPhoto && !isVideo) return false;
-  const thumb = path.join(path.dirname(original), thumbName(name));
-  try { await fs.promises.access(thumb); return false; } catch { /* missing → make it */ }
-  try { if (isPhoto) await makeThumbnail(original); else await makeVideoPoster(original); return true; }
-  catch { return false; }
+/** Is this name an original a thumbnail is cut from — a still or a clip, and not itself a thumb. */
+function isOriginalName(name: string): 'photo' | 'video' | null {
+  if (name.includes('_thumb')) return null;
+  if (/\.jpe?g$/i.test(name)) return 'photo';
+  if (/\.(mp4|webm|mov|m4v)$/i.test(name)) return 'video';
+  return null;
 }
 
-// One-time/best-effort: generate missing thumbnails for pre-existing photo originals. Scans the
-// uploads dir AND one level of event subfolders (/uploads/<eventId>/…, the per-event layout),
-// skipping dotdirs (staging / render temp). Runs on boot.
 /**
  * Build playback copies for guest videos uploaded before this existed.
  *
- * Takes an explicit list rather than walking the uploads directory: that directory also holds
- * slideshow renders, which are already H.264 MP4 and are not guest media — a blind walk transcoded
- * 83 of them into 49MB of proxies nothing would ever play. The caller passes exactly the filenames
- * that `photos` says are videos.
+ * Takes an explicit list rather than walking the store: the store also holds slideshow renders,
+ * which are already H.264 MP4 and are not guest media — a blind walk transcoded 83 of them into
+ * 49MB of proxies nothing would ever play. The caller passes exactly the filenames that `photos`
+ * says are videos.
  *
- * One at a time via the video slot, so a boot on a small box cannot peg every core.
+ * One at a time via the video slot, so a boot on a small box cannot peg every core. Each clip is
+ * checked out, corrected and proxied, and whatever changed is published before the checkout goes.
  */
-export async function backfillPlaybackProxies(uploadsDir: string, filenames: string[]): Promise<number> {
+export async function backfillPlaybackProxies(store: MediaStore, filenames: string[]): Promise<number> {
   let made = 0;
   for (const rel of filenames) {
     if (!rel || rel.includes('_play')) continue;
-    const abs = path.join(uploadsDir, rel);
-    try { await fs.promises.access(abs); } catch { continue; }          // purged already
-    // Correct the original BEFORE the proxy looks at it: a proxy built from a shifted file
-    // faithfully reproduces the shift, and the download would stay wrong either way.
-    try { await fixAudioLead(abs); } catch { /* best effort */ }
-    try { if (await makePlaybackProxy(abs)) made++; } catch { /* best effort */ }
+    let exists = false;
+    try { exists = await store.exists(rel); } catch { continue; }
+    if (!exists) continue;                                              // purged already
+    const name = keyName(rel);
+    const co = await store.checkout(keyDir(rel), { fetch: [name] });
+    try {
+      if (!(await co.fetch([name])).has(name)) continue;
+      // Correct the original BEFORE the proxy looks at it: a proxy built from a shifted file
+      // faithfully reproduces the shift, and the download would stay wrong either way.
+      try { await fixAudioLead(co.path(name)); } catch { /* best effort */ }
+      try { if (await makePlaybackProxy(co.path(name))) made++; } catch { /* best effort */ }
+      await co.publish();
+    } catch { /* best effort */ }
+    finally { await co.release(); }
   }
   if (made) console.log(`[video] playback copies ready for ${made} clip(s)`);
   return made;
 }
 
-export async function backfillThumbnails(uploadsDir: string): Promise<number> {
-  let entries: import('fs').Dirent[];
-  try { entries = await fs.promises.readdir(uploadsDir, { withFileTypes: true }); }
-  catch { return 0; }
+/** One-time/best-effort: generate missing thumbnails for pre-existing originals. Walks the root
+ *  and one level of event folders (the per-event layout) through the store's listings, so it costs
+ *  one listing per folder and touches only originals that lack a `_thumb`. Runs on boot. */
+export async function backfillThumbnails(store: MediaStore): Promise<number> {
   let made = 0;
-  for (const ent of entries) {
-    if (ent.name.startsWith('.')) continue;                          // .incoming / .ss-tmp
-    if (ent.isDirectory()) {
-      // One level down: an event folder (or the legacy themes/ dir — harmless to scan).
-      let sub: string[];
-      try { sub = await fs.promises.readdir(path.join(uploadsDir, ent.name)); } catch { continue; }
-      for (const n of sub) if (await backfillOne(path.join(uploadsDir, ent.name, n))) made++;
-    } else if (await backfillOne(path.join(uploadsDir, ent.name))) {  // legacy flat files
-      made++;
-    }
+  let dirs: string[];
+  try { dirs = ['', ...(await store.listDirs(''))]; } catch { return 0; }
+  for (const dir of dirs) {
+    let names: Set<string>;
+    try { names = new Set(await store.list(dir)); } catch { continue; }
+    const todo = [...names].filter((n) => isOriginalName(n) && !names.has(thumbName(n)));
+    if (!todo.length) continue;
+    const co = await store.checkout(dir);
+    try {
+      for (const n of todo) {
+        try {
+          if (!(await co.fetch([n])).has(n)) continue;
+          const ok = isOriginalName(n) === 'photo' ? (await makeThumbnail(co.path(n)), true) : await makeVideoPoster(co.path(n));
+          if (!ok) continue;
+          await co.publish([thumbName(n)]);
+          made++;
+        } catch { /* best effort, per file */ }
+      }
+    } finally { await co.release(); }
   }
   if (made) console.log(`[thumbs] backfilled ${made} thumbnail(s)`);
   return made;

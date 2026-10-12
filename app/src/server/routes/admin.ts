@@ -1,10 +1,9 @@
 import { Router, type Request, type Response } from 'express';
-import path from 'path';
 import { requireAdmin } from '../auth';
 import { get, all, run } from '../db';
 import { billingEnabled, stripe, CURRENCY } from '../billing';
 import { sweep } from '../cleanup';
-import { UPLOADS_DIR } from '../paths';
+import { media } from '../media';
 import { DEMO_NAME } from '../lib';
 
 // ── Site-admin API ────────────────────────────────────────────────────────────
@@ -271,10 +270,16 @@ router.get('/contact', async (_req: Request, res: Response) => {
 });
 
 // Admin-gated view of a feedback screenshot (kept out of the public /uploads tree).
-router.get('/feedback-image/:file', (req: Request, res: Response) => {
+router.get('/feedback-image/:file', async (req: Request, res: Response) => {
   const file = String(req.params.file || '');
   if (!/^[A-Za-z0-9_-]+\.jpg$/.test(file)) return res.status(400).end();
-  return res.sendFile(path.join(UPLOADS_DIR, 'feedback', file));
+  const body = await media().get(`feedback/${file}`);
+  if (!body) return res.status(404).end();
+  res.setHeader('Content-Type', 'image/jpeg');
+  res.setHeader('Content-Length', String(body.size));
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.on('close', () => { if (!res.writableFinished) body.stream.destroy(); });
+  body.stream.pipe(res);
 });
 router.post('/contact/:id/handled', async (req: Request, res: Response) => {
   await run(`UPDATE contact_messages SET handled = NOT handled WHERE id = ?`, [String(req.params.id)]);

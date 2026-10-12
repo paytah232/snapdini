@@ -105,6 +105,12 @@ your TLS / reverse proxy at that, and make sure the address it serves is exactly
   means `noindex`, which is the right default for a staging copy and the reason a preview host
   cannot outrank your real one. On that staging copy also set `CANONICAL_ORIGIN` to the real
   site's origin, so its pages name the real site as the original rather than themselves.
+- **Photos live in a folder or in a bucket — your choice, one variable.** The default,
+  `MEDIA_DRIVER=local`, keeps them on the `UPLOADS_HOST` volume as always. `MEDIA_DRIVER=s3` keeps
+  them in any S3-compatible store (SeaweedFS, Garage, MinIO, AWS S3, Backblaze B2, Wasabi…) with
+  the `S3_*` settings beside it; the volume is then only transient staging. Keys are the same
+  relative paths either way, so moving is a copy and a flip — see
+  **[UPGRADING.md](UPGRADING.md#moving-media-to-s3)**.
 - **Pin a version** with `IMAGE_TAG` in `.env` (e.g. `IMAGE_TAG=1.5.0`; default `latest`). Point at
   your own registry with `IMAGE_PREFIX`.
 - **Upgrades**: run `./upgrade.sh [version]`, or see **[UPGRADING.md](UPGRADING.md)**.

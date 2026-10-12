@@ -25,7 +25,8 @@ import { billingEnabled } from '../billing';
 
 const router = Router();
 
-import { UPLOADS_DIR, INCOMING_DIR, eventDir, eventRelPath, uploadDiskPath } from '../paths';
+import { INCOMING_DIR, eventRelPath } from '../paths';
+import { media, listingFor, invalidateListing, archiveSource, keyDir, keyName, __resetListingCache as resetListings, type Listing, type Checkout } from '../media';
 const MAX_PHOTO_MB   = parseInt(process.env.MAX_FILE_SIZE_MB || '64'); // headroom for an 8K still at max quality (q100/4:4:4)
 const MAX_VIDEO_MB   = parseInt(process.env.MAX_VIDEO_SIZE_MB || '8192'); // plans for 90s 8K clips (multi-GB)
 const VIDEO_MAX_SECS = parseInt(process.env.VIDEO_MAX_SECONDS || '0');
@@ -143,41 +144,13 @@ export function challengeCaptions(stored: string | null | undefined): Map<string
   return byId;
 }
 
-// `onDisk` is asked up to three times for EVERY row a gallery returns — the `_dl`, `_play` and
-// `_crop` siblings — and it was asking the filesystem each time, synchronously, on the event loop.
-// UPLOADS_DIR is normally a remote volume (an 18TB NFS share here), and the cost is paid by every
-// request the process is serving, not just this one.
-//
-// All three siblings live in the same event folder as the original, so ONE readdir answers every
-// question about every row: 500 filesystem questions for a 200-clip gallery become 1. Measured on
-// this box against the real share with the client cache dropped between runs, median of 5: 73.0ms
-// of blocked loop → 12.2ms at 200 clips, 230.8ms → 30.6ms at 500. The tail is the better argument —
-// worst of five went 376ms → 17ms, and 1196ms → 101ms. (The NFS round trip here is 0.2ms, not the
-// 10ms this was first blamed on; it is the SEQUENCE of a thousand blocking calls that costs, so a
-// slower link or a busier server only widens the gap.) Kept for a couple of seconds because a
-// gallery is polled continuously and the answers only change when a crop or proxy lands (seconds
-// after an upload) or the event is purged. That window is one the callers are already built for:
-// the whole fallback ladder in playFile/downloadFile exists because a crop lands AFTER the upload
-// response, and "until it lands, serve the original" is the documented, correct answer. Within a
-// single response all three lookups now come from one consistent snapshot, which three separate
-// stat calls never guaranteed.
-const LISTING_TTL_MS = 2_000;
-const listings = new Map<string, { at: number; names: Set<string> }>();
-function dirNames(dir: string): Set<string> {
-  const now = Date.now();
-  const hit = listings.get(dir);
-  if (hit && now - hit.at < LISTING_TTL_MS) return hit.names;
-  let names: Set<string>;
-  // Missing directory reads as "nothing on disk", exactly as existsSync did for every name in it.
-  try { names = new Set(fs.readdirSync(dir)); } catch { names = new Set(); }
-  // A cache with no bound is a leak: event folders are unbounded over the life of the process. The
-  // entries are short-lived by TTL anyway, so dropping the lot is enough — no LRU needed.
-  if (listings.size > 64) listings.clear();
-  listings.set(dir, { at: now, names });
-  return names;
-}
+// WHICH SIBLINGS EXIST is answered from one listing per event folder (media/index.ts: `listing`),
+// cached for two seconds, instead of a filesystem question per row — see the note there for the
+// measurements. The ladder below is synchronous and takes that listing as an argument, so a caller
+// building gallery rows asks once (`listingFor(event.id)`) and every row reads from one consistent
+// snapshot, which three separate stats never guaranteed.
 
-/** Throw the readdir cache away. Tests only.
+/** Throw the listing cache away. Tests only.
  *
  *  The cache is module-level and its TTL is wall-clock, which makes any suite that both writes
  *  files and reads them back order- and speed-dependent: whether a test sees a file it has just
@@ -188,19 +161,12 @@ function dirNames(dir: string): Set<string> {
  *  Exported rather than reached into, so the coupling is visible from both ends: a test that
  *  needs a clean filesystem view says so, and anyone changing the cache can see who depends on
  *  being able to clear it. */
-export function __resetListingCache(): void { listings.clear(); }
-const onDisk = (name: string): boolean => {
-  // A LEGACY FLAT filename — from before the per-event layout, no "<eventId>/" on it — would make
-  // the line below list the uploads ROOT: thousands of event folders, measured at 193ms cold here,
-  // to answer one question. Those rows are the rare leftovers and never arrive in bulk, so they
-  // keep the single stat and this change is strictly cheaper than what it replaces, never dearer.
-  const dir = path.dirname(name);
-  if (dir === '.' || dir === '/' || dir === '') {
-    try { return fs.existsSync(path.join(UPLOADS_DIR, name)); } catch { return false; }
-  }
-  const abs = path.join(UPLOADS_DIR, name);
-  return dirNames(path.dirname(abs)).has(path.basename(abs));
-};
+export function __resetListingCache(): void { resetListings(); }
+
+/** The listing that says nothing is there. It is the ladder's documented fallback — serve the
+ *  original — for a caller that has no listing to hand, and the default so a forgotten argument
+ *  degrades to a correct answer rather than a crash. Every real caller passes a real one. */
+export const NO_LISTING: Listing = { prefix: '', has: () => false };
 
 /** The fields the crop/play/download ladder actually reads. Named because three functions share
  *  it and one of them (downloadFile) had already written it out by hand — and because taking the
@@ -215,10 +181,10 @@ const wantsCrop = (p: { mediaType?: string | null; captureShape?: string | null 
 /** The cropped sibling's name, but only once the file is really there. Existence IS the flag: the
  *  crop runs after the upload response and can fail, so a column saying "cropped" could point at a
  *  file that was never written. */
-function cropped(p: MediaRow): string | null {
+function cropped(p: MediaRow, names: Listing = NO_LISTING): string | null {
   if (!wantsCrop(p)) return null;
   const name = cropName(p.filename);
-  return onDisk(name) ? name : null;
+  return names.has(name) ? name : null;
 }
 
 /** The file to PLAY.
@@ -237,15 +203,15 @@ function cropped(p: MediaRow): string | null {
  *
  *  Null means "nothing better than `url`", which is right for an MP4 that needed no crop at all.
  */
-export function playFile(p: MediaRow): string | null {
+export function playFile(p: MediaRow, names: Listing = NO_LISTING): string | null {
   if (p.mediaType !== 'video') return null;
   if (wantsCrop(p)) {
     const dl = dlName(p.filename);
-    if (onDisk(dl)) return dl;
+    if (names.has(dl)) return dl;
   }
-  const crop = cropped(p);
+  const crop = cropped(p, names);
   const proxy = playName(crop ?? p.filename);
-  if (onDisk(proxy)) return proxy;
+  if (names.has(proxy)) return proxy;
   return crop;
 }
 
@@ -259,12 +225,12 @@ export function playFile(p: MediaRow): string | null {
  *    _crop.mp4 — right shape, surplus hidden in the bitstream (or, for a WebM, already a true crop)
  *    original  — no crop was wanted, or none succeeded
  */
-export function downloadFile(p: MediaRow): string {
+export function downloadFile(p: MediaRow, names: Listing = NO_LISTING): string {
   if (!wantsCrop(p)) return p.filename;
   const dl = dlName(p.filename);
-  if (onDisk(dl)) return dl;
+  if (names.has(dl)) return dl;
   const crop = cropName(p.filename);
-  return onDisk(crop) ? crop : p.filename;
+  return names.has(crop) ? crop : p.filename;
 }
 
 /** Should the gallery mark this one "shot sideways"?
@@ -372,21 +338,23 @@ export async function commentsFor(eventId: string, photoIds: string[]): Promise<
  *  The count is shared truth and caches fine; the messages themselves are a separate, per-viewer
  *  read (see GET /:joinCode/comments), because the visibility rule they must pass depends on who is
  *  asking. */
-export function photoRow(p: PhotoRowInput, myParticipantId: string | null, captions: Map<string, string>, hearts?: HeartInfo, comments?: CommentInfo) {
+export function photoRow(p: PhotoRowInput, myParticipantId: string | null, captions: Map<string, string>, hearts?: HeartInfo, comments?: CommentInfo,
+                         /** Which derived files exist for this event, from ONE listing — see listingFor. */
+                         names: Listing = NO_LISTING) {
   return {
     id:              p.id,
     // The clip in the shape the guest chose, when the server managed to cut one; otherwise the file
     // exactly as it arrived. The uncropped original is never deleted — it stays beside this until
     // the event's normal purge, so a crop that turns out to be wrong on some device is a thing we
     // can still put right rather than a thing we have destroyed.
-    url:             `/uploads/${downloadFile(p)}`,
-    thumbUrl:        `/uploads/${thumbName(cropped(p) ?? p.filename)}`,  // grid thumbnail / video poster
+    url:             `/uploads/${downloadFile(p, names)}`,
+    thumbUrl:        `/uploads/${thumbName(cropped(p, names) ?? p.filename)}`,  // grid thumbnail / video poster
     // A phone-decodable H.264 copy, when one has been built. The original stays the download; this
     // is only what a <video> element plays, because the original may be VP8/WebM that phones
     // software-decode (stutter) and Safari may refuse entirely.
     // Omitted when it would only repeat `url` — which is the common case once the re-encode has
     // landed, since by then the same file is both the best play and the right download.
-    ...(playFile(p) && playFile(p) !== downloadFile(p) ? { playUrl: `/uploads/${playFile(p)}` } : {}),
+    ...(playFile(p, names) && playFile(p, names) !== downloadFile(p, names) ? { playUrl: `/uploads/${playFile(p, names)}` } : {}),
     takenAt:         p.takenAt,
     participantName: p.participantName,
     participantId:   p.participantId,
@@ -845,13 +813,25 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
                               source: 'capture' | 'upload' = 'capture', challengeRaw?: unknown,
                               orientationRaw?: unknown, shapeRaw?: unknown, rotationRaw?: unknown,
                               turnRaw?: unknown, capturedAtRaw?: unknown) {
-  const destDir = eventDir(p.eventId);
-  fs.mkdirSync(destDir, { recursive: true });
   const baseName = path.basename(stagedPath);                       // <uuid>.ext
-  const finalPath = path.join(destDir, baseName);
-  fs.renameSync(stagedPath, finalPath);
+  // The event's folder, checked out of the store with the staged file adopted into it. On the local
+  // driver that IS the folder the file is served from, so this is the same atomic rename it always
+  // was; on s3 it is a working directory that lives exactly as long as this upload's derivations
+  // and is deleted afterwards — nothing on the local disk of an s3 deployment outlives the job.
+  const co = await media().checkout(p.eventId, { adopt: [{ name: baseName, from: stagedPath }] });
+  const finalPath = co.path(baseName);
   const storedName = eventRelPath(p.eventId, baseName);             // "<eventId>/<uuid>.ext"
   const sizeBytes = fs.statSync(finalPath).size;
+  // Abandon before anything was published: the local file goes and, on s3, so does the directory.
+  const scrap = async () => { try { fs.unlinkSync(finalPath); } catch { /* */ } await co.release(); };
+  // Publishing, with one switch. A claim that fails below (the roll filled up) must stop every
+  // derivation that is still running from pushing its copy into the store afterwards.
+  let cancelled = false;
+  const publish = async (names?: string[]) => {
+    if (cancelled) return;
+    await co.publish(names);
+    invalidateListing(p.eventId);
+  };
 
   // How far the phone was turned relative to the page when this was framed. Read here rather than
   // at the insert because for a clip it is not only stored, it is WORK: see the correction
@@ -865,32 +845,12 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
   if (!isVideo) {
     try { dims = await stripImageMetadata(finalPath); await makeThumbnail(finalPath); }
     catch {
-      try { fs.unlinkSync(finalPath); } catch { /* */ }
+      await scrap();
       const e = new Error('Invalid or unsupported image file') as Error & { status?: number }; e.status = 400; throw e;
     }
+    await publish([baseName, thumbName(baseName)]);
   } else {
     dims = await probeVideoMeta(finalPath).catch(() => ({}));
-    await makeVideoPoster(finalPath).catch(() => false);
-    // Deliberately NOT awaited: a 30s clip takes ~15s to transcode and the guest is standing at a
-    // party. The gallery falls back to the original until the proxy lands.
-    //
-    // CHAINED, not run alongside: fixAudioLead rewrites the original in place, and a proxy built
-    // from the file as it arrived would simply carry the fault into the copy meant to be free of
-    // it. Correcting first also usually means no proxy is needed at all — an in-step H.264 clip
-    // takes the early-out instead of a full transcode.
-    //
-    // WRAPPED IN whileDeriving, like the crop chain below. Everything this kicks off writes files
-    // under `finalPath`'s base name for minutes afterwards, and POST /:id/rotate moves that base
-    // name — so the rotate route has to be able to ask whether this is still running. Nothing else
-    // reads the register; see the note on it in images.ts for what happens when a rename lands in
-    // the middle of one of these.
-    //
-    // COLLECTED, not discarded, because a clip with a capture turn has one more pass coming and it
-    // has to be the last one. Pushing the promise is the only change; nothing waits on it here.
-    derivations.push(whileDeriving(finalPath, () => fixAudioLead(finalPath)
-      .catch(() => false)
-      .then(() => makePlaybackProxy(finalPath))
-      .catch(() => false)));
     // Enforce the event's video length limit server-side (defense-in-depth): the in-browser recorder
     // auto-stops at the limit, but a native-camera clip could be any length. Only when we can read a
     // real duration; +3s tolerance for container rounding.
@@ -908,7 +868,7 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
       // punishes the guest for our bug. A guest never gets that moment back; we can always fix the
       // recorder. `source` therefore decides how we REPORT an overage, never whether we keep it.
       if (secs > cap) {
-        try { fs.unlinkSync(finalPath); } catch { /* */ }
+        await scrap();
         const e = new Error(`Video is too long — this server accepts clips up to ${Math.round(cap)}s`) as Error & { status?: number };
         e.status = 413; throw e;
       }
@@ -924,6 +884,37 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     }
   }
 
+  if (isVideo) {
+    // The poster and the clip go to the store together, BEFORE the length check is behind us: a
+    // clip this server refuses was never published, so there is nothing to take back.
+    await makeVideoPoster(finalPath).catch(() => false);
+    await publish([baseName, thumbName(baseName)]);
+    // Deliberately NOT awaited: a 30s clip takes ~15s to transcode and the guest is standing at a
+    // party. The gallery falls back to the original until the proxy lands.
+    //
+    // CHAINED, not run alongside: fixAudioLead rewrites the original in place, and a proxy built
+    // from the file as it arrived would simply carry the fault into the copy meant to be free of
+    // it. Correcting first also usually means no proxy is needed at all — an in-step H.264 clip
+    // takes the early-out instead of a full transcode.
+    //
+    // WRAPPED IN whileDeriving, like the crop chain below. Everything this kicks off writes files
+    // under `finalPath`'s base name for minutes afterwards, and POST /:id/rotate moves that base
+    // name — so the rotate route has to be able to ask whether this is still running. Nothing else
+    // reads the register; see the note on it in images.ts for what happens when a rename lands in
+    // the middle of one of these.
+    //
+    // COLLECTED, not discarded, because a clip with a capture turn has one more pass coming and it
+    // has to be the last one. Pushing the promise is the only change; nothing waits on it here.
+    //
+    // PUBLISHED when it settles: the corrected original (if the audio moved) and the proxy (if one
+    // was built) go to the store as one step. On the local driver that is a no-op.
+    derivations.push(whileDeriving(finalPath, () => fixAudioLead(finalPath)
+      .catch(() => false)
+      .then(() => makePlaybackProxy(finalPath))
+      .catch(() => false)
+      .then(() => publish())
+      .catch(() => { /* the original still plays */ })));
+  }
   // Every item starts 'pending'; visibility is gated by the event's moderation SETTING at view time.
   // Which mission this shot was for, if the guest picked one. Validated against THEIR set, not the
   // event's whole list: the text becomes the photo's caption in the gallery, so an unchecked value
@@ -1027,7 +1018,12 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     return row;
   });
   if (!claim) {
-    try { fs.unlinkSync(finalPath); } catch { /* */ }
+    // Published already, so take it back: the original, its poster, and any derived copy a chain
+    // that is still running may have pushed. The switch above stops the rest from following.
+    cancelled = true;
+    await co.remove([baseName, ...derivedNames(baseName)]).catch(() => {});
+    invalidateListing(p.eventId);
+    if (!isVideo) await co.release();
     const e = new Error('No shots remaining') as Error & { status?: number };
     e.status = 403; throw e;
   }
@@ -1041,10 +1037,16 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
   // whether the crop is still running, or failed, or was never needed.
   if (isVideo) {
     if (shape && shape !== 'full') {
-      derivations.push(whileDeriving(finalPath, () => cropClipToShape(finalPath, shape)
+      derivations.push(whileDeriving(finalPath, () => cropClipToShape(finalPath, shape, {
+          // The full-resolution download copy outlives cropClipToShape's own promise. Collected
+          // here so the turn below and the release at the bottom both wait for it, and published
+          // the moment it lands.
+          onDl: (dl) => derivations.push(dl.then(() => publish()).catch(() => { /* */ })),
+        })
         // The poster is cut from the original, so it shows the uncropped frame. Re-cut it from the
         // cropped file so the grid thumbnail matches the clip it opens.
-        .then((ok) => { if (ok) return makeVideoPoster(path.join(destDir, cropName(baseName))); })
+        .then((ok) => { if (ok) return makeVideoPoster(co.path(cropName(baseName))); })
+        .then(() => publish())
         .catch(() => { /* the original still plays */ })));
     }
     // ── The turn the phone was given, applied to the clip ─────────────────────────────────────
@@ -1081,10 +1083,17 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     // state the "shot sideways" badge exists to show, so the clip surfaces in the host's review
     // screen and the rotate button finishes the job by hand.
     if (turn) {
-      void whileDeriving(finalPath, () => Promise.allSettled(derivations)
-        .then(() => turnClipUpright(photoId, storedName, turn, dims)))
-        .catch((e) => console.warn(`[video] capture turn failed for ${storedName}:`, (e as Error).message));
+      derivations.push(whileDeriving(finalPath, () => Promise.allSettled(derivations)
+        .then(() => turnClipUpright(photoId, storedName, turn, dims, co, publish)))
+        .catch((e) => console.warn(`[video] capture turn failed for ${storedName}:`, (e as Error).message)));
     }
+    // The working copy is handed back once EVERY chain has settled — including the ones pushed
+    // into `derivations` after this line (the download re-encode, the turn), which is why this
+    // drains the list rather than taking a snapshot of it. On the local driver the release is a
+    // no-op: the folder is the store. On s3 it is the moment the local disk forgets this upload.
+    void drain(derivations).then(() => co.release());
+  } else {
+    await co.release();
   }
   // Every photo is STORED 'pending' on purpose: visibility is decided at read time against the
   // event's current setting, which is what lets a host switch moderation on later and have the
@@ -1102,6 +1111,16 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     // that a second upload in flight has already made wrong.
     photosRemaining: remainingFor({ maxPhotos: claim.maxPhotos, extraPhotos: claim.extraPhotos, photosTaken: claim.photosTaken }),
   };
+}
+
+/** Wait for every promise in `list`, including any pushed onto it while waiting. */
+async function drain(list: Promise<unknown>[]): Promise<void> {
+  let seen = 0;
+  while (seen < list.length) {
+    const batch = list.slice(seen);
+    seen = list.length;
+    await Promise.allSettled(batch);
+  }
 }
 
 /** Put an uploaded clip the right way up, in place, once its derived copies are finished.
@@ -1131,7 +1150,8 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
  *
  *  Resolves either way; the caller treats failure as "leave it to the badge and the button". */
 async function turnClipUpright(photoId: string, rel: string, turn: number,
-                               dims: { width?: number; height?: number }): Promise<void> {
+                               dims: { width?: number; height?: number },
+                               co: Checkout, publish: () => Promise<void>): Promise<void> {
   // The original and every clip the pipeline derives from it — the crop the guest chose, the
   // playback proxy, the proxy of the crop, and the full-resolution download copy. derivedNames is
   // the ONE list (see images.ts): a copy missing from it is a copy left sideways, and the failure
@@ -1153,19 +1173,22 @@ async function turnClipUpright(photoId: string, rel: string, turn: number,
   //
   // Inverted, any container we can store is turned and only the stills are skipped. WebM does carry
   // a display matrix — measured, not assumed — so there was never a reason to leave it out.
-  const names = [rel, ...derivedNames(rel)].filter((n) => !/\.(webp|jpe?g|png|gif)$/i.test(n));
+  const names = [rel, ...derivedNames(rel)].filter((n) => !/\.(webp|jpe?g|png|gif)$/i.test(n)).map(keyName);
   const staged: { tmp: string; final: string }[] = [];
   const scrap = () => {
-    for (const s of staged) { try { fs.unlinkSync(uploadDiskPath(s.tmp)); } catch { /* */ } }
+    for (const s of staged) { try { fs.unlinkSync(co.path(s.tmp)); } catch { /* */ } }
   };
 
+  // Which of them exist, from the checkout: the working directory already holds everything this
+  // upload's chains have built, and fetch() only reaches for the store on s3 for anything it lacks.
+  const present = await co.fetch(names);
   for (const name of names) {
     // Most of these will not exist. A clip with no chosen shape has no crop and no download copy,
     // and one that was already H.264 and in step needs no proxy — absent is the normal case, not a
     // fault, exactly as it is for the rotate route and the delete route.
-    try { fs.accessSync(uploadDiskPath(name)); } catch { continue; }
+    if (!present.has(name)) continue;
     const tmp = `${name}.turn${path.extname(name)}`;
-    if (!await rotateClipTo(uploadDiskPath(name), uploadDiskPath(tmp), turn)) { scrap(); return; }
+    if (!await rotateClipTo(co.path(name), co.path(tmp), turn)) { scrap(); return; }
     staged.push({ tmp, final: name });
   }
   // The original itself has gone — the guest deleted the clip while we were queued behind ffmpeg.
@@ -1174,18 +1197,17 @@ async function turnClipUpright(photoId: string, rel: string, turn: number,
 
   // Only now, and same-directory so each is atomic. Everything above this line can still walk away
   // leaving the upload exactly as it was.
-  try { for (const s of staged) fs.renameSync(uploadDiskPath(s.tmp), uploadDiskPath(s.final)); }
+  try { for (const s of staged) fs.renameSync(co.path(s.tmp), co.path(s.final)); }
   catch { scrap(); return; }
 
   // Posters are cut with ffmpeg, which auto-rotates, so re-cutting is all it takes for the grid
   // thumbnail to match the clip it opens. The original's, and the crop's when there is one — the
   // gallery picks between them (photoRow's thumbUrl).
-  await makeVideoPoster(uploadDiskPath(rel)).catch(() => false);
-  const crop = cropName(rel);
-  try {
-    fs.accessSync(uploadDiskPath(crop));
-    await makeVideoPoster(uploadDiskPath(crop)).catch(() => false);
-  } catch { /* no crop to poster */ }
+  await makeVideoPoster(co.path(keyName(rel))).catch(() => false);
+  const crop = cropName(keyName(rel));
+  if (present.has(crop)) await makeVideoPoster(co.path(crop)).catch(() => false);
+  // Everything that turned, and both posters, to the store in one step.
+  await publish();
 
   // WHAT IS NOW BAKED IN, so nothing does it twice. capture_rotation is the record of work done on
   // the pixels whoever did it, and from here that includes us: the badge reads it, and the rotate
@@ -1274,8 +1296,9 @@ router.delete('/:id', async (req: Request, res: Response) => {
   // in images.ts beside the functions that name those copies, because the rotate route has to
   // account for exactly the same set and two hand-kept lists is how one of them ends up short.
   for (const f of [gaveBack.filename, ...derivedNames(gaveBack.filename)]) {
-    try { fs.unlinkSync(path.join(UPLOADS_DIR, f)); } catch { /* already gone is fine */ }
+    try { await media().delete(f); } catch { /* already gone is fine; a store that cannot be reached leaves an orphan the purge collects */ }
   }
+  invalidateListing(keyDir(gaveBack.filename));
 
   // Mission progress is DERIVED from the photos table, so this delete may have just un-ticked a
   // trick — and the client cannot work that out for itself: the gallery payload carries the
@@ -1482,6 +1505,16 @@ router.post('/:id/rotate', async (req: Request, res: Response) => {
 
   const oldRel = photo.filename;
   const isVideo = photo.mediaType === 'video';
+  const dir = keyDir(oldRel);
+  const oldBase = keyName(oldRel);
+
+  // Every file this may read — the original and whichever derived copies exist — as real files:
+  // the event folder itself on the local driver, a working copy on s3 fetched from one listing.
+  // Released at the bottom whatever happens, so an s3 deployment keeps nothing on disk.
+  const co = await media().checkout(dir);
+  const present = await co.fetch([oldBase, ...derivedNames(oldBase)]);
+  const lp = (rel: string) => co.path(keyName(rel));
+  try {
 
   // ONE ANSWER FOR "THIS PHOTO IS NOT YOURS TO MOVE RIGHT NOW". Written once because it is given
   // from three places — the guarded UPDATE at the bottom, and the two ways the source can vanish
@@ -1492,7 +1525,9 @@ router.post('/:id/rotate', async (req: Request, res: Response) => {
    *  Asked of the DISK rather than inferred from the failure, because the two things that fail here
    *  fail differently — sharp throws, rotateClipTo returns false — and neither reliably carries an
    *  ENOENT for a caller to match on. */
-  const sourceGone = () => { try { fs.accessSync(uploadDiskPath(oldRel)); return false; } catch { return true; } };
+  // On s3 this asks the WORKING copy, which cannot vanish under us, so the answer there is always
+  // "still here" and the guarded UPDATE below is what catches the race — which it always was.
+  const sourceGone = () => { try { fs.accessSync(lp(oldRel)); return false; } catch { return true; } };
 
   // A CLIP WHOSE COPIES ARE STILL BEING BUILT IS NOT READY TO BE RENAMED.
   //
@@ -1514,25 +1549,30 @@ router.post('/:id/rotate', async (req: Request, res: Response) => {
   //
   // 409 and not 423: this is temporary and retrying is the correct response, which is exactly what
   // the client does with the conflict the guarded UPDATE returns.
-  if (isDeriving(uploadDiskPath(oldRel))) {
+  if (isDeriving(lp(oldRel))) {
     return res.status(409).json({ error: 'That clip is still being prepared — give it a moment and try again' });
   }
-  // Same folder, same extension, new uuid. `uploadDiskPath` rather than a bare join for every
-  // filesystem call below, because it is the one helper that resolves and re-checks containment —
-  // these names come from our own column, but a path helper that is only correct for trusted input
-  // is a trap for whoever adds the next caller.
-  const dir = path.posix.dirname(oldRel);
+  // Same folder, same extension, new uuid. Every local path below comes from the checkout, which
+  // is the one helper that re-checks a name cannot leave the folder — these names come from our
+  // own column, but a path helper that is only correct for trusted input is a trap for whoever
+  // adds the next caller.
   const newBase = `${uuidv4()}${path.extname(oldRel)}`;
-  const newRel = dir === '.' ? newBase : `${dir}/${newBase}`;
+  const newRel = dir ? `${dir}/${newBase}` : newBase;
   const written: string[] = [];
-  const binWritten = () => { for (const f of written) { try { fs.unlinkSync(uploadDiskPath(f)); } catch { /* */ } } };
+  // Throw away what this handler wrote: the working files, and — once publish() has run — the
+  // objects too. Idempotent and best-effort, as every cleanup here is.
+  let published = false;
+  const binWritten = async () => {
+    for (const f of written) { try { fs.unlinkSync(lp(f)); } catch { /* */ } }
+    if (published) await co.remove(written.map(keyName)).catch(() => {});
+  };
 
   let width = photo.width, height = photo.height;
   try {
     if (!isVideo) {
-      const dims = await rotateImageTo(uploadDiskPath(oldRel), uploadDiskPath(newRel), quarter);
+      const dims = await rotateImageTo(lp(oldRel), lp(newRel), quarter);
       written.push(newRel);
-      await makeThumbnail(uploadDiskPath(newRel));
+      await makeThumbnail(lp(newRel));
       written.push(thumbName(newRel));
       // sharp read the result back, so these are measured rather than swapped arithmetically.
       width = dims.width ?? null;
@@ -1541,7 +1581,7 @@ router.post('/:id/rotate', async (req: Request, res: Response) => {
       // Metadata only, `-c copy`, not one frame decoded — see rotateClipTo. A re-encode would cost
       // minutes in the single video slot and hand the guest back a visibly worse copy of their own
       // clip, to fix something that is a header value.
-      if (!await rotateClipTo(uploadDiskPath(oldRel), uploadDiskPath(newRel), quarter)) {
+      if (!await rotateClipTo(lp(oldRel), lp(newRel), quarter)) {
         if (sourceGone()) return res.status(409).json({ error: CONFLICT });
         return res.status(500).json({ error: 'That clip could not be rotated' });
       }
@@ -1561,23 +1601,22 @@ router.post('/:id/rotate', async (req: Request, res: Response) => {
       const from = derivedNames(oldRel), to = derivedNames(newRel);
       for (let i = 0; i < from.length; i++) {
         if (!/\.(mp4|m4v|mov)$/i.test(from[i])) continue;      // the thumbs are re-cut below, not moved
-        try { fs.accessSync(uploadDiskPath(from[i])); } catch { continue; }
-        if (await rotateClipTo(uploadDiskPath(from[i]), uploadDiskPath(to[i]), quarter)) { written.push(to[i]); continue; }
-        binWritten();
+        if (!present.has(keyName(from[i]))) continue;
+        if (await rotateClipTo(lp(from[i]), lp(to[i]), quarter)) { written.push(to[i]); continue; }
+        await binWritten();
         if (sourceGone()) return res.status(409).json({ error: CONFLICT });
         return res.status(500).json({ error: 'That clip could not be rotated' });
       }
       // Posters are cut with ffmpeg, which auto-rotates, so re-cutting them is all it takes for the
       // grid to match the clip it opens. Both the original's and (when there is one) the crop's —
       // the gallery picks between them, see photoRow's thumbUrl.
-      await makeVideoPoster(uploadDiskPath(newRel)).catch(() => false);
+      await makeVideoPoster(lp(newRel)).catch(() => false);
       written.push(thumbName(newRel));
       const newCrop = cropName(newRel);
-      try {
-        fs.accessSync(uploadDiskPath(newCrop));
-        await makeVideoPoster(uploadDiskPath(newCrop)).catch(() => false);
+      if (written.includes(newCrop)) {
+        await makeVideoPoster(lp(newCrop)).catch(() => false);
         written.push(thumbName(newCrop));
-      } catch { /* no crop to poster */ }
+      }
       // A clip's stored width/height are the CODED dimensions off ffprobe, which a metadata
       // rotation does not change — but what the gallery lays out with is the DISPLAYED shape, and
       // that is what just turned. So the pair is swapped for a quarter turn and left alone for a
@@ -1585,7 +1624,7 @@ router.post('/:id/rotate', async (req: Request, res: Response) => {
       if (quarter % 180 !== 0) { width = photo.height; height = photo.width; }
     }
   } catch (e) {
-    binWritten();
+    await binWritten();
     // Two rotations racing. The winner unlinked our source between the row read at the top of this
     // handler and sharp opening it, so sharp throws "Input file is missing" and the express error
     // handler would report a 500 — an internal fault, for something that is only a conflict, and
@@ -1599,6 +1638,12 @@ router.post('/:id/rotate', async (req: Request, res: Response) => {
   // is 0 (and 0 badges again, because the photo really is sideways again).
   const total = normalizeTurn((photo.captureRotation ?? 0) + quarter);
 
+  // To the store BEFORE the row moves onto the new names, so a reader that follows the row can
+  // never be sent to an object that is not there yet. Only the names that were actually written —
+  // a poster that failed to cut is simply absent, as it always was.
+  await co.publish(written.map(keyName));
+  published = true;
+
   // The WHERE carries the filename we started from, so two rotates racing each other cannot both
   // claim the same source: the second one finds the row already moved, throws its own output away
   // and says so. Without it the loser would overwrite the winner's row with a name derived from a
@@ -1608,7 +1653,7 @@ router.post('/:id/rotate', async (req: Request, res: Response) => {
     .where(and(eq(photos.id, photo.id), eq(photos.filename, oldRel)))
     .returning({ id: photos.id });
   if (!moved) {
-    binWritten();
+    await binWritten();
     return res.status(409).json({ error: CONFLICT });
   }
 
@@ -1626,9 +1671,10 @@ router.post('/:id/rotate', async (req: Request, res: Response) => {
   const olds = [oldRel, ...derivedNames(oldRel)];
   const news = [newRel, ...derivedNames(newRel)];
   for (let i = 0; i < olds.length; i++) {
-    try { fs.accessSync(uploadDiskPath(news[i])); } catch { continue; }   // nothing replaced it — keep it
-    try { fs.unlinkSync(uploadDiskPath(olds[i])); } catch { /* already gone is fine */ }
+    if (!written.includes(news[i])) continue;                          // nothing replaced it — keep it
+    await co.remove([keyName(olds[i])]).catch(() => { /* already gone is fine */ });
   }
+  invalidateListing(dir);
 
   // The filename travels with the quarter, and it has to. A rotation REPLACES the file under a
   // fresh uuid and the loop above has just unlinked the old one, so the name the row used to carry
@@ -1653,12 +1699,13 @@ router.post('/:id/rotate', async (req: Request, res: Response) => {
   // the original rather than the crop. That is the documented fallback ("until it lands, serve the
   // original"), it is correct to play, and it settles by itself on the next poll.
   const after = { ...photo, filename: newRel, width, height, captureRotation: total };
+  const names = await listingFor(dir);
   res.json({
     success: true,
     id: photo.id,
-    url: `/uploads/${downloadFile(after)}`,
-    thumbUrl: `/uploads/${thumbName(cropped(after) ?? newRel)}`,
-    ...(playFile(after) ? { playUrl: `/uploads/${playFile(after)}` } : {}),
+    url: `/uploads/${downloadFile(after, names)}`,
+    thumbUrl: `/uploads/${thumbName(cropped(after, names) ?? newRel)}`,
+    ...(playFile(after, names) ? { playUrl: `/uploads/${playFile(after, names)}` } : {}),
     width: width ?? undefined,
     height: height ?? undefined,
     captureRotation: total,
@@ -1667,6 +1714,9 @@ router.post('/:id/rotate', async (req: Request, res: Response) => {
     // to tell "no longer sideways" from "no opinion", and the mark would stay up until a reload.
     shotSideways: shotSideways(after),
   });
+  } finally {
+    await co.release();
+  }
 });
 
 // ── THE VISIBILITY RULE, in one place ─────────────────────────────────────────
@@ -2545,7 +2595,7 @@ export function __setZipSettleIdleMs(ms: number): number {
  *  every microsecond of it — the reason `onDisk()` and its cached readdir exist at all. This is
  *  the confirming look on a cache MISS, which is rare for one rotated photo and universal for a
  *  purged event, so it has to be the async one. */
-const exists = (file: string) => fs.promises.access(file).then(() => true, () => false);
+const exists = (key: string) => media().exists(key).catch(() => false);
 
 /** What a mid-stream zip failure can possibly look like to the person waiting for it.
  *
@@ -2816,6 +2866,16 @@ export async function zipPhotosToResponse(
     });
   }
 
+  /** Queue one object. On the local driver archiver is handed the file itself and lstats it in its
+   *  own time (its 'warning' then carries that path); on s3 it is handed a stream that opens the
+   *  object only when its turn comes, so a 400-photo zip is not 400 open requests. */
+  const queue = (key: string, entry: string, id: string) => {
+    const src = archiveSource(key);
+    if ('path' in src) { entryFor.set(src.path, { entry, id }); archive.file(src.path, { name: entry }); }
+    else { entryFor.set(key, { entry, id }); archive.append(src.stream, { name: entry }); }
+    queued++;
+  };
+
   const perPerson = new Map<string, number>();
   for (let start = 0; start < rows.length && !failed; start += ZIP_REFRESH_BATCH) {
     const slice = rows.slice(start, start + ZIP_REFRESH_BATCH);
@@ -2838,6 +2898,12 @@ export async function zipPhotosToResponse(
       // deleted" when the truth is "we never managed to ask".
       console.error('[zip] could not refresh filenames for the batch at %d, using the snapshot:', start, e);
     }
+    // Which derived copies exist, from one listing of the event folder (every row in a zip belongs
+    // to one event) — taken AFTER the refresh above, so it is as fresh as the names it answers for.
+    // The confirming `exists` below runs only on a MISS: the listing is up to two seconds old, so a
+    // file a rotation created a moment ago is not in it, and without that second look a freshly
+    // written, perfectly present photo would be reported to the guest as missing.
+    const have = await listingFor(keyDir(slice[0].filename)).catch(() => NO_LISTING);
 
     for (const r of slice) {
       // The NUMBER comes from the snapshot's position and is taken for every row, including the
@@ -2852,7 +2918,7 @@ export async function zipPhotosToResponse(
       const cur = fresh?.get(r.id) ?? r;
       // The same file the gallery's own download button hands over — see downloadFile. Reading
       // r.filename here meant a clip the gallery showed cropped came out of the zip uncropped.
-      const rel = downloadFile(cur);
+      const rel = downloadFile(cur, have);
       const ext = cur.mediaType === 'video' ? (rel.split('.').pop() || 'mp4') : 'jpg';
       const entry = `${evName} - ${who} - ${n}.${ext}`;
 
@@ -2861,29 +2927,15 @@ export async function zipPhotosToResponse(
       // and nothing that a retry will recover. Say so in the README rather than dropping it.
       if (fresh && !fresh.has(r.id)) { missing.push({ id: r.id, entry }); continue; }
 
-      const file = path.join(UPLOADS_DIR, rel);
-      // onDisk(), not existsSync: every row in a zip lives in ONE event folder, so this is a single
-      // cached readdir (measured 542µs) instead of a synchronous NFS stat per photo (4µs warm, 143µs
-      // COLD — at 14,000 photos ~2.0s of blocked event loop, with every other guest's request waiting
-      // behind it). The same fix was made for the gallery path; the zip was left behind.
-      //
-      // The confirming existsSync only runs on a MISS, and it is there because the cache is wrong
-      // in both directions, not just one. The listing is up to LISTING_TTL_MS old, so a file that
-      // a rotation created a moment ago is not in it — and without this second look that freshly
-      // written, perfectly present photo would be reported to the guest as missing. One stat on
-      // the rare miss costs nothing; the false accusation would be worse than the original bug.
-      // `await fs.promises.access`, not `fs.existsSync`. The comment above is about avoiding a
-      // synchronous stat per photo on an NFS share — ~143µs cold, which at 14,000 photos is two
-      // seconds of BLOCKED event loop with every other guest's request queued behind it. Reaching
-      // for existsSync on the miss path put that straight back: the miss path is rare for one
-      // rotated photo and it is EVERY row for a purged event or a mass rotation, which is exactly
-      // when the origin can least afford to stop answering. Awaiting costs this download the same
-      // wall-clock and costs everybody else nothing.
-      if (!onDisk(rel) && !(await exists(file))) { missing.push({ id: r.id, entry }); continue; }
+      // The listing, not a stat per row: every row in a zip lives in ONE event folder, so this is a
+      // single cached listing (measured 542µs as a readdir) instead of a synchronous NFS stat per
+      // photo (4µs warm, 143µs COLD — at 14,000 photos ~2.0s of blocked event loop, with every
+      // other guest's request waiting behind it). The confirming look on a miss is ASYNC for the
+      // same reason: the miss path is rare for one rotated photo and it is EVERY row for a purged
+      // event, which is exactly when the origin can least afford to stop answering.
+      if (!have.has(rel) && !(await exists(rel))) { missing.push({ id: r.id, entry }); continue; }
 
-      entryFor.set(file, { entry, id: r.id });
-      queued++;
-      archive.file(file, { name: entry });
+      queue(rel, entry, r.id);
     }
   }
 
@@ -2926,10 +2978,10 @@ export async function zipPhotosToResponse(
   // alive indefinitely. The README is the right answer to the residue, and it is now telling the
   // truth about it rather than reporting a photo that was merely in motion.
   //
-  // `fs.existsSync`, not `onDisk()`: the readdir cache is up to LISTING_TTL_MS old and a file that
-  // has just been written is precisely what it will not know about — which is the entire case this
-  // pass exists for. The retry set is small and rare, so the stats are affordable here in a way
-  // they are not in the main loop.
+  // A real `exists`, not the listing: the listing is up to two seconds old and a file that has just
+  // been written is precisely what it will not know about — which is the entire case this pass
+  // exists for. The retry set is small and rare, so the lookups are affordable here in a way they
+  // are not in the main loop.
   if (missing.length) {
     const ids = [...new Set(missing.map((m) => m.id).filter((id): id is string => id !== null))];
     let recovered = 0;
@@ -2945,15 +2997,13 @@ export async function zipPhotosToResponse(
           if (m.id === null) continue;
           const cur = byId.get(m.id);
           if (!cur) continue;                       // the row really is gone
-          const file = path.join(UPLOADS_DIR, downloadFile(cur));
-          if (!(await exists(file))) continue;      // and neither is the file, under any name
+          const key = downloadFile(cur, await listingFor(keyDir(cur.filename)).catch(() => NO_LISTING));
+          if (!(await exists(key))) continue;       // and neither is the file, under any name
           // The entry keeps the name it was always going to have. The numbering is positional so
           // that two downloads of one event agree, and a photo recovered here must not be renamed
           // just because it arrived late — it goes in at the end of the archive under its original
           // name, which is the only part of it anybody sees.
-          entryFor.set(file, { entry: m.entry, id: m.id });
-          queued++;
-          archive.file(file, { name: m.entry });
+          queue(key, m.entry, m.id);
           m.done = true;
           recovered++;
         }
@@ -3049,6 +3099,8 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
   // Visible set for guests/gallery: moderation on → only approved; off → anything not binned.
   const visible = event.moderationEnabled ? eq(photos.status, 'approved') : ne(photos.status, 'rejected');
   const captions = challengeCaptions(event.challenges);
+  // Which derived files exist, once for the whole response — see listingFor.
+  const names = await listingFor(event.id);
 
   // ── Organizer mode — sees all photos regardless of reveal state ───────────
   if (organizerCode) {
@@ -3102,7 +3154,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
       revealed: true,
       allowDownloads: !!event.allowDownloads,
       moderationEnabled: !!event.moderationEnabled,
-      photos: rows.map(p => photoRow(p, null, captions, hearts, comments)),
+      photos: rows.map(p => photoRow(p, null, captions, hearts, comments, names)),
     });
   }
 
@@ -3227,7 +3279,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
             captureTurn: row.captureTurn == null ? null : Number(row.captureTurn),
             captureShape: row.captureShape == null ? null : String(row.captureShape),
           };
-          return photoRow(p, null, capsH, hrtH, cmtH);
+          return photoRow(p, null, capsH, hrtH, cmtH, names);
         }),
       });
     }
@@ -3330,7 +3382,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
       // asked again.
       moderationEnabled: !!event.moderationEnabled,
       allowDownloads: !!event.allowDownloads,
-      photos: rows.map(p => photoRow(p, null, captions, hearts, comments)),
+      photos: rows.map(p => photoRow(p, null, captions, hearts, comments, names)),
     });
   }
 
@@ -3410,7 +3462,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
       // number on purpose: before the reveal there is nothing of anyone else's this guest may see,
       // and the count exists to answer "is there a gallery worth linking to yet".
       ownCount: ownRows.length, othersCount: 0,
-      myParticipantId: participant.id, photos: ownRows.map(p => photoRow(p, participant.id, captions, hearts, comments)) });
+      myParticipantId: participant.id, photos: ownRows.map(p => photoRow(p, participant.id, captions, hearts, comments, names)) });
   }
 
   const rows = await db
@@ -3478,7 +3530,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
     allowDownloads: !!event.allowDownloads,
     ownCount, othersCount,
     myParticipantId: participant.id,
-    photos: rows.map(p => photoRow(p, participant.id, captions, hearts, comments)),
+    photos: rows.map(p => photoRow(p, participant.id, captions, hearts, comments, names)),
   });
 });
 

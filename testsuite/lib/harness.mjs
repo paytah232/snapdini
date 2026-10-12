@@ -15,7 +15,10 @@ import path from 'node:path';
 
 export const BASE = (process.argv[2] || 'http://localhost:3001').replace(/\/$/, '');
 export const DB = 'snapdini-dev-db';
-export const POOL = '/bigdata/snapdini/dev';
+// The dev stack's uploads folder on the host, for the best-effort disk sweep in cleanup(). Only
+// meaningful on the local driver; on s3 (or a box where the folder is not mounted) the sweep is
+// skipped and the purge the specs drive through the API is what removes the objects.
+export const POOL = process.env.SNAPDINI_UPLOADS_HOST || '/snapdini/dev';
 const SAMPLE = path.join(import.meta.dirname, '..', '..', 'loadtest', 'sample.jpg');
 export const img = fs.readFileSync(SAMPLE);
 
@@ -169,13 +172,15 @@ export async function bootstrapOwner({ assert = false } = {}) {
 export async function cleanup({ clientErrors = false } = {}) {
   try {
     // Remove upload files for this run's events, then delete the test user (cascades events/participants/photos).
-    for (const c of createdJoinCodes) {
-      const files = dbq(`SELECT filename FROM photos ph JOIN events e ON e.id=ph.event_id WHERE e.join_code='${c}'`).split('\n').filter(Boolean);
-      for (const f of files) { try { fs.rmSync(path.join(POOL, f), { force: true }); fs.rmSync(path.join(POOL, f.replace(/\.[^.]+$/, '_thumb.webp')), { force: true }); } catch {} }
-    }
-    // Whole-directory sweep: robust even when the photos rows are already gone.
-    for (const id of createdEventIds) {
-      try { fs.rmSync(path.join(POOL, id), { recursive: true, force: true }); } catch {}
+    if (fs.existsSync(POOL)) {
+      for (const c of createdJoinCodes) {
+        const files = dbq(`SELECT filename FROM photos ph JOIN events e ON e.id=ph.event_id WHERE e.join_code='${c}'`).split('\n').filter(Boolean);
+        for (const f of files) { try { fs.rmSync(path.join(POOL, f), { force: true }); fs.rmSync(path.join(POOL, f.replace(/\.[^.]+$/, '_thumb.webp')), { force: true }); } catch {} }
+      }
+      // Whole-directory sweep: robust even when the photos rows are already gone.
+      for (const id of createdEventIds) {
+        try { fs.rmSync(path.join(POOL, id), { recursive: true, force: true }); } catch {}
+      }
     }
     try { dbq(`DELETE FROM users WHERE email='${EMAIL}'`); } catch {}
     // Second accounts the spec registered itself, by EXACT address. Never a LIKE pattern: a

@@ -1,6 +1,5 @@
 import crypto from 'crypto';
 import { MAIL_BATCH_SIZE } from '../../../../shared/mail-batch';
-import fs from 'fs';
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import QRCode from 'qrcode';
@@ -19,6 +18,7 @@ import { DEMO_NAME, RESCHEDULE_WINDOW_MS, RETENTION_DAYS, baseUrl, isDemoEvent, 
 import { normaliseAddress } from '../delivery';
 import { referrerFromCookie, isSelfReferral } from '../referrals';
 import { startSlideshow, slideshowInfo, toggleSlideshowFavourite, deleteSlideshow, slideshowFile, streamSlideshow1080 } from '../slideshow';
+import { media, withLocalFile } from '../media';
 import { billingEnabled, quote, FREE_ALL_GUESTS, brandingRemovable, RETENTION_PAID_DAYS, customPlanError } from '../billing';
 import { sendWelcome } from '../lifecycle';
 import options from '../options';
@@ -1244,10 +1244,19 @@ router.get('/:joinCode/slideshow/:id/download', requireOrganizer, async (req: Re
   res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
 
   if (want1080) {
-    const job = streamSlideshow1080(info.path, res);
-    res.on('close', () => job.kill());   // client aborted → stop the encode
+    // ffmpeg needs a real file: a checkout for the length of the transcode, released after — on
+    // the local driver that is the stored file itself, on s3 a copy that goes when the stream ends.
+    await withLocalFile(info.key, (file) => new Promise<void>((resolve) => {
+      const job = streamSlideshow1080(file, res);
+      res.on('close', () => { job.kill(); resolve(); });   // client aborted → stop the encode
+      res.on('finish', () => resolve());
+    })).catch(() => { if (!res.headersSent) res.status(404).json({ error: 'Slideshow not found' }); });
   } else {
-    fs.createReadStream(info.path).pipe(res);
+    const body = await media().get(info.key);
+    if (!body) return res.status(404).json({ error: 'Slideshow not found' });
+    res.setHeader('Content-Length', String(body.size));
+    res.on('close', () => { if (!res.writableFinished) body.stream.destroy(); });
+    body.stream.pipe(res);
   }
 });
 

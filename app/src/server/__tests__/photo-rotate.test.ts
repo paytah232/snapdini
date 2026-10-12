@@ -291,7 +291,7 @@ describe('the reason the file is renamed is still true', () => {
     assert.match(body, /const olds = \[oldRel, \.\.\.derivedNames\(oldRel\)\];/,
       'the pre-rotation files are no longer cleaned up — every rotation would leak a full-size '
       + 'original plus its thumbnail onto the uploads volume.');
-    assert.match(body, /fs\.accessSync\(uploadDiskPath\(news\[i\]\)\); \} catch \{ continue; \}/,
+    assert.match(body, /if \(!written\.includes\(news\[i\]\)\) continue;/,
       'the cleanup no longer checks that a replacement exists before deleting the file it replaces. '
       + 'That check is the difference between litter (recoverable) and deleting the only copy of a '
       + "guest's crop, which nothing in the product ever rebuilds.");

@@ -13,7 +13,8 @@ import { and, asc, desc, eq, lt } from 'drizzle-orm';
 import { all, db } from './db';
 import { slideshows } from './schema';
 import { makePlaybackProxy, playName, makeSlot } from './images';
-import { UPLOADS_DIR, uploadDiskPath, eventDir, eventRelPath } from './paths';
+import { UPLOADS_DIR, eventRelPath } from './paths';
+import { media, listing, withLocalFile, invalidateListing, keyDir, keyName, keyFromWebPath, type Checkout } from './media';
 import { brandingRemovable as billingBrandingRemovable, BRANDING_REMOVAL_CENTS, billingEnabled as BILLING_ON } from './billing';
 
 const CARD_SECS = 3;   // how long the intro / outro branding cards show
@@ -222,6 +223,19 @@ async function cachedAudioSeconds(file: string): Promise<number | undefined> {
     const hit = audioSecsCache.get(key);
     if (hit === undefined) audioSecsCache.set(key, await probeAudioSeconds(file));
     return audioSecsCache.get(key) || undefined;
+  } catch { return undefined; }
+}
+/** The same, for a custom track in the STORE: keyed by key + size + validator (one HEAD per poll
+ *  on s3, a stat on local), and probed through a checkout only on a miss — the panel polls every
+ *  1.5s while a render runs, and a download-and-ffprobe per poll is not what that should cost. */
+async function cachedAudioSecondsForKey(key: string): Promise<number | undefined> {
+  try {
+    const st = await media().stat(key);
+    if (!st) return undefined;
+    const k = `${key}:${st.size}:${st.etag}`;
+    const hit = audioSecsCache.get(k);
+    if (hit === undefined) audioSecsCache.set(k, await withLocalFile(key, probeAudioSeconds));
+    return audioSecsCache.get(k) || undefined;
   } catch { return undefined; }
 }
 // Offer ONLY the no-attribution set (Mixkit Free License, prefix "c0-") so slideshows are
@@ -474,10 +488,11 @@ export async function slideshowInfo(eventId: string) {
     sourcesFitIn1080 = rows.length > 0 && canvasFor('4k', rows).downgraded;
   } catch { /* none */ }
   let hasCustomAudio = false, customAudioSecs: number | undefined;
+  // One listing of the event folder answers the custom track AND the proxy question below.
+  const names = await listing(eventId).catch(() => new Set<string>() as ReadonlySet<string>);
   try {
-    const dir = eventDir(eventId);
-    const own = fs.readdirSync(dir).find((n) => n.startsWith('audio-'));
-    if (own) { hasCustomAudio = true; customAudioSecs = await cachedAudioSeconds(path.join(dir, own)); }
+    const own = [...names].find((n) => n.startsWith('audio-'));
+    if (own) { hasCustomAudio = true; customAudioSecs = await cachedAudioSecondsForKey(eventRelPath(eventId, own)); }
   } catch { /* none */ }
   const job = jobs.get(eventId) ?? { status: 'idle' as unknown as Job['status'] };
   const recent = await listSlideshows(eventId);
@@ -509,8 +524,7 @@ export async function slideshowInfo(eventId: string) {
     if (!job.url?.startsWith('/uploads/')) return undefined;
     const rel = job.url.slice('/uploads/'.length);
     const play = playName(rel);
-    try { return fs.existsSync(path.join(UPLOADS_DIR, play)) ? `/uploads/${play}` : undefined; }
-    catch { return undefined; }
+    return keyDir(play) === eventId && names.has(keyName(play)) ? `/uploads/${play}` : undefined;
   })();
   // What is waiting behind the running render. The panel shows it so a host who queued a second
   // one can see that it exists, rather than wondering whether their second press did anything.
@@ -569,10 +583,7 @@ function begin(eventId: string, entry: Pending): void {
       // A 4K render is what you want to keep and download; it is not what a phone should be asked
       // to stream in a preview. Build a 1080p H.264 copy alongside it, in the background so the
       // host is not kept waiting on the render they already have. 1080p renders need nothing.
-      if (r.resolution !== '1080p') {
-        void makePlaybackProxy(path.join(UPLOADS_DIR, eventRelPath(eventId, `slideshow-${entry.id}.mp4`)))
-          .catch(() => false);
-      }
+      if (r.resolution !== '1080p') void proxyForRender(eventId, `slideshow-${entry.id}.mp4`);
     })
     .catch((e) => {
       const error = String(e?.message || e);
@@ -589,16 +600,30 @@ function begin(eventId: string, entry: Pending): void {
     });
 }
 
+/** The 1080p H.264 copy of a finished render, built through a checkout of the event folder: the
+ *  render is fetched (a no-op on the local driver, where it is already there), the proxy is cut
+ *  beside it, published, and the working copy is released. */
+async function proxyForRender(eventId: string, name: string): Promise<void> {
+  let co: Checkout | null = null;
+  try {
+    co = await media().checkout(eventId, { fetch: [name] });
+    if (!(await co.fetch([name])).has(name)) return;
+    if (await makePlaybackProxy(co.path(name))) { await co.publish([playName(name)]); invalidateListing(eventId); }
+  } catch { /* best effort: the full-quality render still downloads */ }
+  finally { await co?.release(); }
+}
+
 // Recent renders for an event, newest first.
 export async function listSlideshows(eventId: string) {
   try {
     const rows = await db.select().from(slideshows).where(eq(slideshows.eventId, eventId))
       .orderBy(desc(slideshows.createdAt), asc(slideshows.id));   // `id` last so the list is a total order
+    const names = await listing(eventId).catch(() => new Set<string>() as ReadonlySet<string>);
     return rows.map((s) => {
       // playUrl is the lighter copy for the in-browser preview; url stays the full-quality
       // download. Only present once the transcode has finished.
       const play = playName(s.filename);
-      const hasPlay = (() => { try { return fs.existsSync(path.join(UPLOADS_DIR, play)); } catch { return false; } })();
+      const hasPlay = keyDir(play) === eventId && names.has(keyName(play));
       return { id: s.id, url: `/uploads/${s.filename}`, ...(hasPlay ? { playUrl: `/uploads/${play}` } : {}),
                favourite: !!s.favourite, label: s.label || 'Slideshow',
                resolution: s.resolution || '4k', createdAt: s.createdAt };
@@ -616,19 +641,19 @@ export async function toggleSlideshowFavourite(eventId: string, id: string): Pro
 export async function deleteSlideshow(eventId: string, id: string): Promise<boolean> {
   const [row] = await db.select().from(slideshows).where(and(eq(slideshows.id, id), eq(slideshows.eventId, eventId)));
   if (!row) return false;
-  try { fs.unlinkSync(path.join(UPLOADS_DIR, row.filename)); } catch { /* already gone */ }
-  try { fs.unlinkSync(path.join(UPLOADS_DIR, playName(row.filename))); } catch { /* none built */ }
+  try { await media().delete(row.filename); } catch { /* already gone */ }
+  try { await media().delete(playName(row.filename)); } catch { /* none built */ }
+  invalidateListing(eventId);
   await db.delete(slideshows).where(eq(slideshows.id, id));
   return true;
 }
 
-// Locate a rendered slideshow on disk (for download) — null if the row/file is gone.
-export async function slideshowFile(eventId: string, id: string): Promise<{ path: string; resolution: string } | null> {
+// Locate a rendered slideshow in the store (for download) — null if the row/object is gone.
+export async function slideshowFile(eventId: string, id: string): Promise<{ key: string; resolution: string } | null> {
   const [row] = await db.select().from(slideshows).where(and(eq(slideshows.id, id), eq(slideshows.eventId, eventId)));
   if (!row) return null;
-  const p = path.join(UPLOADS_DIR, row.filename);
-  if (!fs.existsSync(p)) return null;
-  return { path: p, resolution: row.resolution || '4k' };
+  if (!(await media().exists(row.filename))) return null;
+  return { key: row.filename, resolution: row.resolution || '4k' };
 }
 
 // Live-transcode a (4K) render down to 1080p and stream it to the response. Fragmented MP4 so it
@@ -652,8 +677,9 @@ export async function purgeOldSlideshows(): Promise<number> {
     const stale = await db.select().from(slideshows)
       .where(and(eq(slideshows.favourite, false), lt(slideshows.createdAt, Date.now() - SLIDESHOW_TTL_MS)));
     for (const s of stale) {
-      try { fs.unlinkSync(path.join(UPLOADS_DIR, s.filename)); } catch { /* gone */ }
-      try { fs.unlinkSync(path.join(UPLOADS_DIR, playName(s.filename))); } catch { /* none built */ }
+      try { await media().delete(s.filename); } catch { /* gone */ }
+      try { await media().delete(playName(s.filename)); } catch { /* none built */ }
+      invalidateListing(s.eventId);
       await db.delete(slideshows).where(eq(slideshows.id, s.id));
       removed++;
     }
@@ -695,6 +721,20 @@ function run(eventId: string, opts: Opts, outId: string): Promise<{ url: string;
 }
 
 async function renderFilm(eventId: string, opts: Opts, outId: string): Promise<{ url: string; resolution: string }> {
+  // The event's media as real files for the length of the render: the folder itself on the local
+  // driver, a working copy on s3 — and a second one for a header image stored under a legacy
+  // prefix. Both released whatever happens, so the local disk keeps nothing afterwards.
+  const co = await media().checkout(eventId);
+  const extra: Checkout[] = [];
+  try {
+    return await renderFilmIn(eventId, opts, outId, co, extra);
+  } finally {
+    await co.release();
+    for (const x of extra) await x.release();
+  }
+}
+
+async function renderFilmIn(eventId: string, opts: Opts, outId: string, co: Checkout, extra: Checkout[]): Promise<{ url: string; resolution: string }> {
   const D = Math.min(8, Math.max(2, Math.round(opts.secondsPer || D_DEFAULT)));   // 2–8s/photo
   // Include video clips too when asked; otherwise photos only. Rejected/pending always excluded.
   let rows = await all<{ filename: string; is_highlighted: boolean; media_type: string; width: number | null; height: number | null }>(
@@ -708,9 +748,12 @@ async function renderFilm(eventId: string, opts: Opts, outId: string): Promise<{
        ORDER BY taken_at ASC, id ASC`, [eventId]);
   if (opts.favouritesOnly) rows = rows.filter((r) => r.is_highlighted);
 
+  // Fetched in one pass (a listing plus, on s3, the downloads); a row whose object is gone — or
+  // which somehow lives outside this event's folder — is left out, as a missing file always was.
+  const present = await co.fetch(rows.filter((r) => keyDir(r.filename) === eventId).map((r) => keyName(r.filename)));
   const allItems: Item[] = rows
-    .map((r) => ({ path: path.join(UPLOADS_DIR, r.filename), isVideo: r.media_type === 'video', width: r.width, height: r.height }))
-    .filter((it) => fs.existsSync(it.path));
+    .filter((r) => keyDir(r.filename) === eventId && present.has(keyName(r.filename)))
+    .map((r) => ({ path: co.path(keyName(r.filename)), isVideo: r.media_type === 'video', width: r.width, height: r.height }));
   // Every visible item the host asked for goes in — the render id doubles as the shuffle seed, so a
   // shuffled film is fixed for the life of that render and only a NEW render deals a new order.
   const items = orderForRender(allItems, orderOf(opts.order), outId);
@@ -741,7 +784,18 @@ async function renderFilm(eventId: string, opts: Opts, outId: string): Promise<{
     const th = evRow?.theme ? JSON.parse(evRow.theme) : null;
     if (th?.bg) themeBg = th.bg;
     if (th?.accent) accent = th.accent;
-    if (th?.headerImage) headerImage = uploadDiskPath(String(th.headerImage)); // throws (→ no header image) if it escapes UPLOADS_DIR
+    if (th?.headerImage) {
+      // throws (→ no header image) if it is not a key of ours
+      const key = keyFromWebPath(String(th.headerImage));
+      if (keyDir(key) === eventId) {
+        if ((await co.fetch([keyName(key)])).has(keyName(key))) headerImage = co.path(keyName(key));
+      } else {
+        // A legacy `themes/` image: its own checkout, released with the render.
+        const hc = await media().checkout(keyDir(key), { fetch: [keyName(key)] });
+        extra.push(hc);
+        if ((await hc.fetch([keyName(key)])).has(keyName(key))) headerImage = hc.path(keyName(key));
+      }
+    }
   } catch { /* default theme */ }
   // ffmpeg pad/letterbox colour from the theme bg (#rrggbb → 0xrrggbb), falling back to black.
   const hex = themeBg.replace('#', '');
@@ -808,16 +862,19 @@ async function renderFilm(eventId: string, opts: Opts, outId: string): Promise<{
 
   // Resolve the (optional) backing music — one or more tracks, played IN ORDER. Multiple tracks are
   // concatenated into a single temp file so the loop/trim path below is unchanged.
-  const resolveTrack = (t: string): string | null => {
+  const resolveTrack = async (t: string): Promise<string | null> => {
     if (t === '__custom__') {
-      try { const dir = eventDir(eventId); const f = fs.readdirSync(dir).find((n) => n.startsWith('audio-')); return f ? path.join(dir, f) : null; }
-      catch { return null; }
+      try {
+        const f = (await media().list(eventId)).find((n) => n.startsWith('audio-'));
+        if (!f) return null;
+        return (await co.fetch([f])).has(f) ? co.path(f) : null;
+      } catch { return null; }
     }
     const p = path.join(MUSIC_DIR, path.basename(t));
     return fs.existsSync(p) ? p : null;
   };
   const trackIds = (opts.tracks && opts.tracks.length) ? opts.tracks : (opts.track ? [opts.track] : []);
-  const trackPaths = trackIds.map(resolveTrack).filter((p): p is string => !!p);
+  const trackPaths = (await Promise.all(trackIds.map(resolveTrack))).filter((p): p is string => !!p);
   const loopMusic = opts.loopMusic !== false;   // default: loop the music to fill the whole show
   let music: string | null = null;
   if (trackPaths.length === 1) music = trackPaths[0];
@@ -827,9 +884,10 @@ async function renderFilm(eventId: string, opts: Opts, outId: string): Promise<{
     else music = trackPaths[0];   // concat failed → fall back to the first track
   }
 
-  const outDir = eventDir(eventId);
-  fs.mkdirSync(outDir, { recursive: true });
-  const outPath = path.join(outDir, `slideshow-${outId}.mp4`);
+  // Rendered into the working directory and moved into the store only once it is complete — so
+  // the folder never holds a half-written film, which it used to while ffmpeg wrote into it.
+  const outName = `slideshow-${outId}.mp4`;
+  const outPath = path.join(workDir, outName);
 
   const tl = buildTimeline(durs, FPS, T);
   const totalSecs = tl.totalFrames / FPS;
@@ -865,6 +923,8 @@ async function renderFilm(eventId: string, opts: Opts, outId: string): Promise<{
       undefined, Math.max(ENCODE_BUDGET_FLOOR_MS, Math.round(totalSecs * 1000)));
     if (job) job.progress = 99;
     noteRenderRate(resolution, totalSecs, Date.now() - encodeStarted);
+    await media().put(eventRelPath(eventId, outName), outPath, { move: true });
+    invalidateListing(eventId);
   } finally {
     // Success or failure, the whole working directory goes — chunk parts included, and they are the
     // biggest thing in it.

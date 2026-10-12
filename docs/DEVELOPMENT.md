@@ -1148,6 +1148,17 @@ in-memory `Map`s keyed by row id, coalesces every bump, and flushes on an interv
     guests losing playback. One slot each. Both are built from `makeSlot()`; pinned by
     `slideshow-slot.test.ts`.
 
+- **Media goes through ONE store (`src/server/media/`), never a disk path.** Feature code names a
+  photo by its key (the `photos.filename` column, `<eventId>/<uuid>.jpg`) and asks `media()` —
+  `put/get/stat/exists/delete/deletePrefix/list`. Two drivers answer: `local` (the `UPLOADS_DIR`
+  folder, the default) and `s3` (`MEDIA_DRIVER=s3` + `S3_*`), and `media-store.test.ts` runs one
+  contract against both, with an in-process S3 stub. Tools that need a real file — sharp, ffmpeg,
+  archiver — get one through a **checkout** (`media().checkout(eventId)`): on local that is the
+  event folder itself, on s3 a temporary working directory that is deleted on `release()`, so the
+  local disk of an s3 deployment never keeps a photo. Adopt a staged upload into it, work, then
+  `publish()` what changed. Which derived siblings exist (`_crop`, `_play`, `_dl`) comes from one
+  cached listing per event (`listingFor`), passed into `photoRow`/`playFile`/`downloadFile` — one
+  question per response, not one per row. Cut-over and audit tools live in `src/server/tools/`.
 - **`UPLOADS_DIR` is a REMOTE volume, so never ask it a question per row.** The uploads volume is
   normally an NFS share (18TB here), and `playFile()`/`downloadFile()` ask "is this sibling on
   disk?" up to three times for every row a gallery returns — `existsSync`, synchronous, on the event

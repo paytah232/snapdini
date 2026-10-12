@@ -22,7 +22,9 @@ import { migrateUploadsToPerEvent } from './migrate-uploads';
 import options from './options';
 import { publicBillingConfig, billingEnabled } from './billing';
 import * as email from './email';
-import { UPLOADS_DIR, eventDir, eventRelPath } from './paths';
+import { UPLOADS_DIR, INCOMING_DIR, eventRelPath } from './paths';
+import { media, invalidateListing, joinKey } from './media';
+import { serveUploads } from './media/serve';
 import { MUSIC_DIR, probeHasAudioStream } from './slideshow';
 import authRoutes from './routes/auth';
 import eventsRoutes, { requireOrganizer } from './routes/events';
@@ -397,7 +399,13 @@ app.use('/uploads', (req: Request, res: Response, next) => {
   next();
 });
 // Uploaded media is content-addressed by UUID filename and never mutates → cache hard.
-app.use('/uploads', express.static(UPLOADS_DIR, { immutable: true, maxAge: '365d' }));
+if (media().driver === 'local') {
+  app.use('/uploads', express.static(UPLOADS_DIR, { immutable: true, maxAge: '365d' }));
+} else {
+  // The same contract, out of the bucket: unauthenticated by uuid, immutable for a year, ETag/304
+  // and Range honoured. Access control stays here — there are no presigned URLs. See media/serve.ts.
+  app.use('/uploads', serveUploads(media()));
+}
 
 // NOTE there is no static mount and no page route below this line, and that is deliberate.
 //
@@ -440,11 +448,10 @@ app.get('/api/config', (_req, res) => {
 // ── Theme header-image upload ─────────────────────────────────────────────────
 
 const themeStorage = multer.diskStorage({
-  // Into the event's own folder (requireOrganizer has already set req.event before multer runs).
-  destination: (req, _file, cb) => {
-    const dir = eventDir((req as Request).event!.id);
-    fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
+  // Staged, then put into the event's folder in the store once it has been re-encoded.
+  destination: (_req, _file, cb) => {
+    fs.mkdirSync(INCOMING_DIR, { recursive: true });
+    cb(null, INCOMING_DIR);
   },
   // The extension follows the KIND, because one of them has to stay a PNG. Multer names the file
   // before the body is parsed, so `kind` is read off the query string rather than a form field.
@@ -471,17 +478,20 @@ app.post('/api/events/:joinCode/theme-image', requireOrganizer, themeUpload.sing
   const isLogo = req.query.kind === 'logo';
   try { await (isLogo ? stripImageMetadataPng : stripImageMetadata)(req.file.path); }
   catch { fs.unlinkSync(req.file.path); return res.status(400).json({ error: 'Invalid or unsupported image file' }); }
-  res.json({ url: `/uploads/${eventRelPath(req.event!.id, req.file.filename)}` });
+  const key = eventRelPath(req.event!.id, req.file.filename);
+  await media().put(key, req.file.path, { move: true });
+  invalidateListing(req.event!.id);
+  res.json({ url: `/uploads/${key}` });
 });
 
 // ── Custom slideshow backing track upload (organizer's own mp3 / wav / mp4 audio) ─────────────
 const audioStorage = multer.diskStorage({
-  // Into the event's own folder. Named `audio-*` so the static-mount guard keeps it private and the
-  // slideshow builder can find it (it's the only `audio-` file per event).
-  destination: (req, _file, cb) => {
-    const dir = eventDir((req as Request).event!.id);
-    fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
+  // Staged, then put into the event's folder in the store once it has been probed. Named `audio-*`
+  // so the static-mount guard keeps it private and the slideshow builder can find it (it's the
+  // only `audio-` file per event).
+  destination: (_req, _file, cb) => {
+    fs.mkdirSync(INCOMING_DIR, { recursive: true });
+    cb(null, INCOMING_DIR);
   },
   filename: (_req, file, cb) => {
     const ext = (file.originalname.split('.').pop() || 'mp3').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 4) || 'mp3';
@@ -504,11 +514,13 @@ app.post('/api/events/:joinCode/slideshow-audio', requireOrganizer, audioUpload.
     fs.unlinkSync(req.file.path);
     return res.status(400).json({ error: 'That file has no playable audio. Use an mp3, wav, m4a or mp4.' });
   }
+  const ev = req.event!.id;
+  await media().put(eventRelPath(ev, req.file.filename), req.file.path, { move: true });
   // Keep only the newest custom track per event.
   try {
-    const dir = eventDir(req.event!.id);
-    for (const f of fs.readdirSync(dir)) if (f.startsWith('audio-') && f !== req.file.filename) fs.unlinkSync(path.join(dir, f));
+    for (const f of await media().list(ev)) if (f.startsWith('audio-') && f !== req.file.filename) await media().delete(joinKey(ev, f));
   } catch { /* ignore */ }
+  invalidateListing(ev);
   res.json({ ok: true, filename: req.file.filename });
 });
 
@@ -696,6 +708,15 @@ initWithRetry()
     console.log(process.env.MACHINE_LEARNING_URL
       ? '[faces] FACE MATCHING IS LIVE — MACHINE_LEARNING_URL is set. This must NOT be a production boot until the privacy review is signed off.'
       : '[faces] face matching inert (MACHINE_LEARNING_URL unset) — the intended state for production');
+    // Where the media lives, in the boot log, in both states — and a probe of it. A bucket that
+    // cannot be reached is logged loudly rather than fatally: the pages still serve, and uploads
+    // will say so themselves.
+    try {
+      await media().list('');
+      console.log(`[media] driver=${media().driver}` + (media().driver === 's3' ? ` endpoint=${process.env.S3_ENDPOINT} bucket=${process.env.S3_BUCKET}${process.env.S3_PREFIX ? ` prefix=${process.env.S3_PREFIX}` : ''}` : ` dir=${UPLOADS_DIR}`));
+    } catch (e) {
+      console.error(`[media] driver=${media().driver} is NOT answering:`, (e as Error).message);
+    }
     const server = app.listen(PORT, '0.0.0.0', () => console.log(`Snapdini running on port ${PORT}`));
     // Multi-GB media uploads (e.g. a 90s 4K/8K clip) can take a long time on event Wi-Fi/mobile;
     // Node's default 5-min requestTimeout would abort them mid-transfer. Allow up to an hour.
@@ -706,7 +727,7 @@ initWithRetry()
     migrateUploadsToPerEvent()
       .catch((e) => console.error('[migrate] failed:', (e as Error).message))
       .finally(() => {
-        backfillThumbnails(UPLOADS_DIR)
+        backfillThumbnails(media())
           .catch(() => {})
           // After thumbnails, never alongside them — both are ffmpeg/sharp bound. Driven from the
           // photos table so it only ever touches guest uploads, not slideshow renders.
@@ -714,7 +735,7 @@ initWithRetry()
             try {
               const vids = await db.select({ filename: photos.filename })
                 .from(photos).where(eq(photos.mediaType, 'video'));
-              await backfillPlaybackProxies(UPLOADS_DIR, vids.map((v) => v.filename));
+              await backfillPlaybackProxies(media(), vids.map((v) => v.filename));
             } catch { /* best effort */ }
           });
       });

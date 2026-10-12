@@ -11,13 +11,17 @@ import multer from 'multer';
 import { db } from '../db';
 import { events, participants, photoFaces, photos } from '../schema';
 import { detectFaces, embedSelfie, faceMatchingAvailable, matchAgainstEnrolled, MATCH_THRESHOLD, similarity } from '../faces';
+import { thumbName } from '../images';
+import { withLocalFile } from '../media';
 
 const router = Router();
-const UPLOADS_DIR = process.env.UPLOADS_DIR || '/data/uploads';
 // The selfie never lands in the gallery, so it goes to a temp path and is unlinked in a finally.
 const selfieUpload = multer({ dest: '/tmp', limits: { fileSize: 12 * 1024 * 1024 } });
 
-const thumbFor = (filename: string) => path.join(UPLOADS_DIR, filename.replace(/\.[^.]+$/, '_thumb.webp'));
+/** The faces in a stored photo's THUMBNAIL — fetched as a real file for the ML call and released
+ *  after. Absent (the thumb is not cut yet, or the photo is gone) reads as no faces. */
+const facesInThumb = (filename: string, minScore?: number) =>
+  withLocalFile(thumbName(filename), (p) => detectFaces(p, minScore)).catch(() => [] as Awaited<ReturnType<typeof detectFaces>>);
 
 /** How alike two selfie embeddings have to be before we call them the same photo of the same face.
  *
@@ -99,7 +103,7 @@ router.post('/enrol', selfieUpload.single('selfie'), async (req: Request, res: R
       .from(photos).where(eq(photos.eventId, me.eventId));
     let matched = 0;
     for (const ph of existing) {
-      const faces = await detectFaces(thumbFor(ph.filename));
+      const faces = await facesInThumb(ph.filename);
       let best = -1;
       for (const f of faces) { const s = similarity(embedding, f.embedding); if (s > best) best = s; }
       if (best >= MATCH_THRESHOLD) {
@@ -173,7 +177,7 @@ export async function matchNewPhoto(eventId: string, photoId: string, filename: 
       .filter((r) => !!r.emb)
       .map((r) => ({ participantId: r.id, embedding: JSON.parse(r.emb as string) as number[] }));
     if (!enrolled.length) return;
-    const hits = await matchAgainstEnrolled(thumbFor(filename), enrolled);
+    const hits = await withLocalFile(thumbName(filename), (p) => matchAgainstEnrolled(p, enrolled)).catch(() => []);
     for (const h of hits) {
       await db.insert(photoFaces)
         .values({ photoId, participantId: h.participantId, score: h.score, createdAt: Date.now() })

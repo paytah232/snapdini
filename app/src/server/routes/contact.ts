@@ -1,7 +1,6 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
 import fs from 'fs';
-import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import * as email from '../email';
 import { eq } from 'drizzle-orm';
@@ -9,7 +8,8 @@ import { db } from '../db';
 import { contactMessages, events } from '../schema';
 import { requireTurnstile } from '../turnstile';
 import { escapeHtml } from '../lib';
-import { UPLOADS_DIR } from '../paths';
+import { INCOMING_DIR } from '../paths';
+import { media } from '../media';
 import { stripImageMetadata } from '../images';
 
 const router = Router();
@@ -32,11 +32,12 @@ function refundSnapshot(ev: { name: string; joinCode: string; startsAt: number; 
   ].join('\n');
 }
 
-// Optional screenshot for bug reports / feedback → UPLOADS_DIR/feedback/<uuid>.jpg. Kept out of the
-// public tree by the /uploads/feedback guard in index.ts; admins view it via an admin route.
+// Optional screenshot for bug reports / feedback → staged, then stored under feedback/<uuid>.jpg.
+// Kept out of the public tree by the /uploads/feedback guard in index.ts; admins view it via an
+// admin route.
 const shotUpload = multer({
   storage: multer.diskStorage({
-    destination: (_req, _file, cb) => { const d = path.join(UPLOADS_DIR, 'feedback'); fs.mkdirSync(d, { recursive: true }); cb(null, d); },
+    destination: (_req, _file, cb) => { fs.mkdirSync(INCOMING_DIR, { recursive: true }); cb(null, INCOMING_DIR); },
     filename: (_req, _file, cb) => cb(null, `${uuidv4()}.jpg`),
   }),
   limits: { fileSize: 10 * 1024 * 1024 },
@@ -113,8 +114,10 @@ router.post('/', shotUpload.single('screenshot'), requireTurnstileOrDropFile, as
 
   let imageFilename: string | null = null;
   if (req.file) {
-    try { await stripImageMetadata(req.file.path); imageFilename = `feedback/${req.file.filename}`; }
+    try { await stripImageMetadata(req.file.path); }
     catch { dropScreenshot(req); return res.status(400).json({ error: 'That screenshot could not be read' }); }
+    imageFilename = `feedback/${req.file.filename}`;
+    await media().put(imageFilename, req.file.path, { move: true });
   }
 
   // Refund/cancellation requests: freeze an eligibility snapshot from the event's start time.

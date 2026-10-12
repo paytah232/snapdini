@@ -32,20 +32,17 @@ export function uploadDiskPath(webPath: string): string {
 
 // ── Per-event storage ────────────────────────────────────────────────────────
 // All of an event's assets (guest photos/videos + thumbs, theme image, slideshows, custom audio,
-// poster bg) live under UPLOADS_DIR/<eventId>/. Benefits: no filename clashes, trivial manual
-// inspection, and purge = remove the one folder. Stored DB paths are RELATIVE to UPLOADS_DIR, e.g.
-// "<eventId>/<uuid>.jpg", so the web URL is "/uploads/<eventId>/<uuid>.jpg" and the disk path is
-// join(UPLOADS_DIR, that). Event ids are safe path segments (uuid/crypto), but sanitise anyway.
+// poster bg) live under one KEY PREFIX, <eventId>/. Benefits: no filename clashes, trivial manual
+// inspection, and purge = remove the one prefix. Stored DB paths are the keys, e.g.
+// "<eventId>/<uuid>.jpg", so the web URL is "/uploads/<eventId>/<uuid>.jpg". Where those bytes
+// live — this folder, or a bucket — is the media store's business (media/), and nothing outside
+// it builds a disk path for a key any more. Event ids are safe path segments (uuid/crypto), but
+// sanitise anyway.
 
 const SAFE_SEG = /^[A-Za-z0-9_-]+$/;
 function seg(id: string): string {
   if (!SAFE_SEG.test(id)) throw new Error('unsafe path segment: ' + id);
   return id;
-}
-
-// On-disk directory for one event's assets (not auto-created).
-export function eventDir(eventId: string): string {
-  return path.join(UPLOADS_DIR, seg(eventId));
 }
 
 // Relative "<eventId>/<name>" to store in DB path columns.
@@ -54,6 +51,8 @@ export function eventRelPath(eventId: string, name: string): string {
 }
 
 // Staging dir for in-flight uploads (multer runs before we know the event, so files land here then
-// get moved into the event folder). A dotfile dir so express.static (dotfiles:'ignore') never serves
-// it, and under UPLOADS_DIR so the move into the event folder is a same-filesystem atomic rename.
+// get adopted into the event's checkout). A dotfile dir so express.static (dotfiles:'ignore') never
+// serves it, and under UPLOADS_DIR so the move into the event folder on the local driver is a
+// same-filesystem atomic rename. On the s3 driver this and `.work/` are the only things ever
+// written to the local disk, and both are transient.
 export const INCOMING_DIR = path.join(UPLOADS_DIR, '.incoming');

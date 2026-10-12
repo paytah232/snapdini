@@ -5,7 +5,7 @@
 // "too late" path matters as much as the happy one.
 import fs from 'node:fs';
 import path from 'node:path';
-import { POOL, api, createEvent, dbq, group, join, ok, spec, upload } from '../lib/harness.mjs';
+import { BASE, api, createEvent, dbq, group, join, ok, spec, upload } from '../lib/harness.mjs';
 
 const photosOf = (eventId) => Number(dbq(`SELECT count(*) FROM photos WHERE event_id='${eventId}'`));
 const takenBy  = (pid) => Number(dbq(`SELECT photos_taken FROM participants WHERE id='${pid}'`));
@@ -65,8 +65,11 @@ await spec('12-guest-delete', async () => {
     const fn2 = dbq(`SELECT filename FROM photos WHERE id='${ph2}'`);
     const d2 = await api('DELETE', `/api/photos/${ph2}`, { body: { sessionToken: tok2 } });
     ok('delete succeeded for the file check', d2.status === 200, `status ${d2.status}`);
-    const gone = !fs.existsSync(path.join(POOL, fn2));
-    ok('the original is removed from disk', gone, `still present: ${fn2}`);
+    // Asked of the server, not the disk: whichever store holds the photos (a folder or a bucket),
+    // a deleted original must stop being served. /uploads is immutable-cached, but this is the
+    // origin, so a 404 here is the truth.
+    const served = await fetch(`${BASE}/uploads/${fn2}`);
+    ok('the original is no longer served', served.status === 404, `status ${served.status} for ${fn2}`);
   }
   void file;
 

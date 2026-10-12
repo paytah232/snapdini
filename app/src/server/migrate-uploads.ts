@@ -3,14 +3,19 @@ import path from 'path';
 import { eq } from 'drizzle-orm';
 import { db } from './db';
 import { events, photos, slideshows } from './schema';
-import { UPLOADS_DIR, eventDir, eventRelPath } from './paths';
+import { UPLOADS_DIR, eventRelPath } from './paths';
 import { thumbName } from './images';
+import { media } from './media';
 
 // One-off, idempotent migration to the per-event folder layout (/uploads/<eventId>/…). Moves any
 // assets still in the old flat / type-subdir locations into their event folder and rewrites the DB
 // path. Safe to run on every boot: once migrated there's nothing left to move. Best-effort per item
 // so one bad row never blocks startup.
 export async function migrateUploadsToPerEvent(): Promise<number> {
+  // A folder-layout migration: it moves files between directories under UPLOADS_DIR. A bucket was
+  // filled by the copy tool from a tree this had already migrated, so there is nothing there for
+  // it to do, and it must not go rummaging through the staging directory looking.
+  if (media().driver !== 'local') return 0;
   let moved = 0;
   const mv = (src: string, dest: string): boolean => {
     try {
@@ -72,7 +77,7 @@ export async function migrateUploadsToPerEvent(): Promise<number> {
         const evId = ids.find((id) => f.startsWith(id + '-'));
         if (!evId) continue;
         const rest = f.slice(evId.length + 1);
-        if (mv(path.join(adir, f), path.join(eventDir(evId), `audio-${rest}`))) moved++;
+        if (mv(path.join(adir, f), path.join(UPLOADS_DIR, evId, `audio-${rest}`))) moved++;
       }
     }
   } catch (e) { console.error('[migrate] audio:', (e as Error).message); }

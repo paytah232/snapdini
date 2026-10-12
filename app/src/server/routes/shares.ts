@@ -8,6 +8,7 @@ import { thumbName } from '../images';
 import { isRevealed } from '../lib';
 import { scheduledRevealAt } from '../../../../shared/reveal';
 import { challengeCaptions, perViewer, playFile, zipPhotosToResponse } from './photos';
+import { listingFor } from '../media';
 
 const router = Router();
 
@@ -103,6 +104,8 @@ router.get('/:token', async (req: Request, res: Response) => {
     .from(photoHearts).innerJoin(photos, eq(photos.id, photoHearts.photoId))
     .where(and(where, eq(photoHearts.visitorId, me.id)))).map((h) => h.photoId) : [];
 
+  // Which derived files exist, once for the whole wall — see listingFor.
+  const names = await listingFor(event.id);
   res.json({
     event: {
       name: event.name,
@@ -143,7 +146,7 @@ router.get('/:token', async (req: Request, res: Response) => {
       // the same function. Without it a share played the ORIGINAL upload: a WebM original will not
       // play at all in Safari, and every original is the full-size file rather than the 1080p proxy.
       // A share is the copy that leaves the event; it should not be the one that plays worst.
-      ...(playFile(p) ? { playUrl: `/uploads/${playFile(p)}` } : {}),
+      ...(playFile(p, names) ? { playUrl: `/uploads/${playFile(p, names)}` } : {}),
       sizeBytes: p.sizeBytes ?? undefined,
       width: p.width ?? undefined,
       height: p.height ?? undefined,

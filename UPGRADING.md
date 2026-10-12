@@ -739,3 +739,53 @@ ranges; if you use a different CDN, replace those ranges with your own, and make
 preserves `X-Forwarded-For` rather than overwriting it.
 
 Migrations `0026` (event reschedule) and `0027` (indexes) apply automatically.
+
+---
+
+## Moving media to S3
+
+From 1.5.8 the photos can live in any S3-compatible bucket instead of the `UPLOADS_HOST` folder.
+Nothing changes unless you ask: `MEDIA_DRIVER` defaults to `local`, and an upgrade with no new
+settings runs exactly as before. Rows in the database hold the same relative keys
+(`<eventId>/<uuid>.jpg`) on both drivers, so the move is a copy and an environment change, and the
+way back is the same change reversed while the old copy still exists.
+
+1. **Create the bucket and a key for it** on your store — one bucket and one access key per
+   environment, never a production key on a dev stack. Turn versioning ON if the store offers it,
+   and add a lifecycle rule that expires non-current versions after a few days: the retention
+   purge deletes objects, and "deleted" has to mean gone for the privacy promise to hold.
+2. **Add the settings to BOTH `.env` and `docker-compose.yml`** (compose passes variables
+   explicitly, so one missing from the compose file is silently ignored — this release's
+   `docker-compose.yml` already lists them):
+   ```bash
+   MEDIA_DRIVER=local            # leave it on local until step 4
+   S3_ENDPOINT=http://your-store:8333
+   S3_REGION=us-east-1
+   S3_BUCKET=snapdini
+   S3_ACCESS_KEY=…
+   S3_SECRET_KEY=…
+   S3_FORCE_PATH_STYLE=1         # self-hosted stores; 0 for virtual-host addressing
+   ```
+3. **Copy, while live.** The tool never deletes, skips what is already there, and can be re-run:
+   ```bash
+   docker compose exec app npx tsx src/server/tools/media-copy.ts --from local --to s3
+   ```
+4. **Cut over.** Stop the app, copy the delta with a full byte-for-byte check, flip the driver,
+   start, and audit that every object the database points at is in the bucket:
+   ```bash
+   docker compose stop app
+   docker compose exec app npx tsx src/server/tools/media-copy.ts --from local --to s3 --verify full
+   sed -i 's/^MEDIA_DRIVER=.*/MEDIA_DRIVER=s3/' .env
+   docker compose up -d
+   docker compose exec app npx tsx src/server/tools/media-audit.ts --derived
+   ```
+   (`stop app` then `exec app` needs the container running — run the copy from a one-off
+   `docker compose run --rm app npx tsx …` if you prefer the app fully down.)
+5. **Keep the folder** untouched for a few weeks. Rolling back is `MEDIA_DRIVER=local` and a
+   restart. After that the volume can go: on `s3` it only ever holds in-flight uploads and the
+   working copies tools need, both of which the app deletes itself.
+
+Two things move with the photos: whatever backs the folder up should now back the bucket up (or
+the store's data directory), and the `UPLOADS_HOST` volume no longer needs to be large — a few
+gigabytes of local disk for staging is plenty.
+
