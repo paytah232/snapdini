@@ -67,6 +67,9 @@ services:
       - S3_FORCE_PATH_STYLE=${S3_FORCE_PATH_STYLE:-1}
       - S3_PREFIX=${S3_PREFIX:-}
       - S3_CA_FILE=${S3_CA_FILE:-}
+      # On s3, in-flight uploads and tools' working copies go here (local disk, inside /data) —
+      # never on the uploads volume. Leave empty for the default.
+      - MEDIA_SCRATCH_DIR=${MEDIA_SCRATCH_DIR:-}
       - DATABASE_URL=${DATABASE_URL:-postgres://snapdini:snapdini@db:5432/snapdini}
       - RETENTION_DAYS=${RETENTION_DAYS:-7}
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-64}

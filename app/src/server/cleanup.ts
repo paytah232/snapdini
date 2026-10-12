@@ -4,7 +4,7 @@ import { and, eq, isNotNull, lt, count } from 'drizzle-orm';
 import { db } from './db';
 import { RESCHEDULE_WINDOW_MS, RESCHEDULE_RETENTION_GRACE_MS } from './lib';
 import { events, photos, participants, clientErrors, slideshows, shares, emailTokens, sessions, adminActions } from './schema';
-import { UPLOADS_DIR, INCOMING_DIR } from './paths';
+import { UPLOADS_DIR, INCOMING_DIR, SCRATCH_DIR } from './paths';
 import { media, assertKey, keyFromWebPath, joinKey, invalidateListing } from './media';
 import { playName, thumbName } from './images';
 import { purgeOldSlideshows } from './slideshow';
@@ -174,7 +174,7 @@ export async function sweep(): Promise<number> {
   // completed (client gave up mid-upload) — once they're older than 6h. The same for working
   // directories a checkout never released (a process that died mid-derivation): on s3 those are
   // the only files on the local disk, and they are transient by contract.
-  for (const dir of [INCOMING_DIR, path.join(UPLOADS_DIR, '.work')]) {
+  for (const dir of [INCOMING_DIR, path.join(SCRATCH_DIR, '.work'), path.join(SCRATCH_DIR, '.ss-tmp')]) {
     try {
       const cutoff = Date.now() - 6 * 60 * 60 * 1000;
       for (const name of fs.readdirSync(dir)) {

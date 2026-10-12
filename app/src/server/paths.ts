@@ -50,9 +50,22 @@ export function eventRelPath(eventId: string, name: string): string {
   return `${seg(eventId)}/${name}`;
 }
 
+// Where TRANSIENT files go: upload staging, checkouts' working copies, slideshow render temp.
+//
+// On the local driver that is UPLOADS_DIR itself, so the move from staging into the event folder
+// is a same-filesystem atomic rename, exactly as it always was. On the s3 driver nothing permanent
+// is written to disk at all, so the scratch space lives on LOCAL disk under DATA_DIR by default —
+// never on the uploads volume, which may be a network share (NFS keeps a deleted file alive as a
+// `.nfs…` entry while anything holds it open, which stops working directories being removed) and
+// which other jobs may still be mirroring (a backup or a standby rsyncing UPLOADS_HOST would
+// faithfully mirror a scratch folder). UPLOADS_HOST can therefore stay pointed at the old tree
+// after a cut-over, untouched, for as long as a rollback might want it.
+const DRIVER = (process.env.MEDIA_DRIVER || 'local').trim().toLowerCase();
+export const SCRATCH_DIR = DRIVER === 's3'
+  ? (process.env.MEDIA_SCRATCH_DIR || path.join(DATA_DIR, 'media-scratch'))
+  : UPLOADS_DIR;
+
 // Staging dir for in-flight uploads (multer runs before we know the event, so files land here then
 // get adopted into the event's checkout). A dotfile dir so express.static (dotfiles:'ignore') never
-// serves it, and under UPLOADS_DIR so the move into the event folder on the local driver is a
-// same-filesystem atomic rename. On the s3 driver this and `.work/` are the only things ever
-// written to the local disk, and both are transient.
-export const INCOMING_DIR = path.join(UPLOADS_DIR, '.incoming');
+// serves it.
+export const INCOMING_DIR = path.join(SCRATCH_DIR, '.incoming');

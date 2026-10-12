@@ -5,11 +5,11 @@
 //   MEDIA_DRIVER=s3               S3_ENDPOINT / S3_REGION / S3_BUCKET / S3_ACCESS_KEY /
 //                                 S3_SECRET_KEY / S3_FORCE_PATH_STYLE / S3_PREFIX / S3_CA_FILE
 //
-// UPLOADS_DIR keeps a job on either driver: it is where uploads are staged and where checkouts
-// put their working copies. On s3 that is all it holds, and everything in it is transient.
+// Staging and working copies live under SCRATCH_DIR (paths.ts): the uploads folder itself on
+// local, a local-disk directory under DATA_DIR on s3, where everything written is transient.
 import path from 'path';
 import { Readable } from 'stream';
-import { UPLOADS_DIR } from '../paths';
+import { UPLOADS_DIR, SCRATCH_DIR } from '../paths';
 import { LocalStore } from './local';
 import { S3Store, s3ConfigFromEnv } from './s3';
 import { assertPrefix, keyDir, keyName } from './keys';
@@ -20,7 +20,7 @@ export { assertKey, assertPrefix, keyFromWebPath, webPath, keyDir, keyName, join
 
 function build(): MediaStore {
   const driver = (process.env.MEDIA_DRIVER || 'local').trim().toLowerCase();
-  if (driver === 's3') return new S3Store(s3ConfigFromEnv(process.env, path.join(UPLOADS_DIR, '.work')));
+  if (driver === 's3') return new S3Store(s3ConfigFromEnv(process.env, path.join(SCRATCH_DIR, '.work')));
   if (driver !== 'local') throw new Error(`MEDIA_DRIVER must be local or s3, not "${driver}"`);
   return new LocalStore(UPLOADS_DIR);
 }

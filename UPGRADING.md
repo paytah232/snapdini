@@ -781,10 +781,12 @@ way back is the same change reversed while the old copy still exists.
    ```
    (`stop app` then `exec app` needs the container running — run the copy from a one-off
    `docker compose run --rm app npx tsx …` if you prefer the app fully down.)
-5. **Point `UPLOADS_HOST` at local disk** (or leave it unset: the compose default `./data/uploads`
-   is local). On `s3` that volume holds only in-flight uploads and the working copies tools need,
-   and it must not be a network share: NFS keeps a deleted file alive as a `.nfs…` entry while
-   anything still holds it open, which stops the working directories being removed cleanly.
+5. **Leave `UPLOADS_HOST` exactly as it is.** On `s3` the app never writes to that volume again:
+   in-flight uploads and the working copies tools need go to local disk under `/data`
+   (`MEDIA_SCRATCH_DIR` to put them elsewhere — keep it on local disk, never a network share). So
+   the old folder stays untouched for rollback, and anything that mirrors it — a backup job, a
+   standby rsync — keeps mirroring a frozen tree rather than a scratch folder. Point those jobs at
+   the bucket (or the store's data directory) instead; that is now where the photos are.
 6. **Keep the old folder** untouched for a few weeks. Rolling back is `MEDIA_DRIVER=local` and a
    restart. After that the volume can go: on `s3` it only ever holds in-flight uploads and the
    working copies tools need, both of which the app deletes itself.

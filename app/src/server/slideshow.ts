@@ -13,7 +13,7 @@ import { and, asc, desc, eq, lt } from 'drizzle-orm';
 import { all, db } from './db';
 import { slideshows } from './schema';
 import { makePlaybackProxy, playName, makeSlot } from './images';
-import { UPLOADS_DIR, eventRelPath } from './paths';
+import { SCRATCH_DIR, eventRelPath } from './paths';
 import { media, listing, withLocalFile, invalidateListing, keyDir, keyName, keyFromWebPath, type Checkout } from './media';
 import { brandingRemovable as billingBrandingRemovable, BRANDING_REMOVAL_CENTS, billingEnabled as BILLING_ON } from './billing';
 
@@ -807,7 +807,7 @@ async function renderFilmIn(eventId: string, opts: Opts, outId: string, co: Chec
   // private temp dir on the uploads volume — a dotfile dir so express.static never serves it, and on
   // the same big volume so 4K frames don't fill a small container /tmp. Only the final mp4 lands in
   // the event folder. The whole workDir is removed in the finally below.
-  const workDir = path.join(UPLOADS_DIR, '.ss-tmp', outId);
+  const workDir = path.join(SCRATCH_DIR, '.ss-tmp', outId);
   fs.mkdirSync(workDir, { recursive: true });
   const cardFiles: string[] = [];
   if (opts.branding !== false) try {
