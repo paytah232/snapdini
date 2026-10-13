@@ -6,6 +6,8 @@
 // work, because every one of them is the kind that looks like a detail and is not.
 import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { applyReplicaState, isReadOnly, readOnlyKnown, blockedByReadOnly, READ_ONLY_BODY } from '../readonly';
 
 describe('deciding whether this database is a replica', () => {
@@ -96,5 +98,19 @@ describe('what a refused write tells the guest', () => {
     assert.match(READ_ONLY_BODY.error, /paused/i);
     assert.match(READ_ONLY_BODY.error, /no need to re-upload/i);
     assert.equal(READ_ONLY_BODY.readOnly, true);
+  });
+});
+
+describe('the boot-time media backfills stay off a replica', () => {
+  // The standby serves from its own copy of the store. Thumbnails and proxies built there would be
+  // writes nothing replicates back, and the layout migration writes rows — so the whole chain is
+  // gated on the read-only state, which startReadOnlyWatch establishes before the server listens.
+  test('index.ts gates migrate + backfill on skipWriteSweep, after the watch has started', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'index.ts'), 'utf8');
+    const watch = src.indexOf('await startReadOnlyWatch()');
+    const gate = src.indexOf("if (!skipWriteSweep('boot backfill')) migrateUploadsToPerEvent()");
+    assert.ok(watch > -1, 'startReadOnlyWatch is awaited at boot');
+    assert.ok(gate > -1, 'the backfill chain is gated on skipWriteSweep');
+    assert.ok(watch < gate, 'the read-only state is established before the backfills decide');
   });
 });

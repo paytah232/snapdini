@@ -59,6 +59,12 @@ export async function deleteEventFiles(eventId: string): Promise<void> {
       try { await safeDelete(keyFromWebPath(m[1])); } catch { /* not a key of ours — not ours to delete */ }
     }
   }
+  // Legacy pre-per-event backing track(s) in the shared slideshow-audio/ folder, named
+  // "<eventId>-*". Here rather than only in the retention sweep, so the organizer's delete clears
+  // them too — found as the one object an event delete left behind.
+  try {
+    for (const f of await media().list('slideshow-audio')) if (f.startsWith(`${eventId}-`)) await safeDelete(joinKey('slideshow-audio', f));
+  } catch { /* none */ }
   // And then the whole prefix: both callers — the retention purge and the organizer's delete — are
   // about to remove the event row, so nothing under its folder can be referenced again. This is
   // what sweeps a backing track, a render, a poster image that no row names, and any derived copy
@@ -98,16 +104,9 @@ export async function sweep(): Promise<number> {
       for (const s of ss) { await safeDelete(s.filename); await safeDelete(playName(s.filename)); }
       await db.delete(slideshows).where(eq(slideshows.eventId, e.id));
     } catch { /* best-effort */ }
-    // Legacy pre-per-event backing track(s) in the shared slideshow-audio/ dir (named "<eventId>-*").
-    try {
-      for (const f of await media().list('slideshow-audio')) if (f.startsWith(`${e.id}-`)) await safeDelete(joinKey('slideshow-audio', f));
-    } catch { /* none */ }
-    // Finally, remove the event's whole per-event folder — sweeps everything now stored there
-    // (audio, theme image, any leftover render temp), so nothing is orphaned. (Legacy flat files,
-    // if any, were already handled by the per-file deletes above.) Purge means GONE: on a bucket
-    // with versioning this is what the noncurrent-version expiry rule has to finish.
-    try { await media().deletePrefix(e.id); } catch { /* none */ }
-    invalidateListing(e.id);
+    // The legacy backing tracks and the whole per-event prefix went with deleteEventFiles above —
+    // purge means GONE, and on a bucket with versioning the noncurrent-version expiry rule is what
+    // finishes the job.
 
     // No `photos_taken` reconciliation here, and that is not an oversight. The counter lives on the
     // participant row, and the very next statement deletes those rows for the same event — so no

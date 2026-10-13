@@ -29,7 +29,7 @@ import { MUSIC_DIR, probeHasAudioStream } from './slideshow';
 import authRoutes from './routes/auth';
 import eventsRoutes, { requireOrganizer } from './routes/events';
 import guestsRoutes, { mailgunWebhookHandler } from './routes/guests';
-import { startReadOnlyWatch, isReadOnly, blockedByReadOnly, READ_ONLY_BODY } from './readonly';
+import { startReadOnlyWatch, isReadOnly, blockedByReadOnly, READ_ONLY_BODY, skipWriteSweep } from './readonly';
 import participantsRoutes from './routes/participants';
 import photosRoutes, { DELETE_WINDOW_SECONDS } from './routes/photos';
 import facesRoutes from './routes/faces';
@@ -724,7 +724,10 @@ initWithRetry()
     server.headersTimeout = 2 * 60 * 1000; // but headers must still arrive promptly (slow-loris guard)
     // One-off idempotent move of any pre-per-event assets into /uploads/<eventId>/, THEN backfill
     // thumbnails (which now scans the event subfolders too). Both best-effort, off the request path.
-    migrateUploadsToPerEvent()
+    // NOT on a replica. The standby serves reads from its own copy of the store; thumbnails and
+    // proxies it built there would be writes nothing replicates back, and the layout migration
+    // writes rows. The read-only state is established above (startReadOnlyWatch) before this runs.
+    if (!skipWriteSweep('boot backfill')) migrateUploadsToPerEvent()
       .catch((e) => console.error('[migrate] failed:', (e as Error).message))
       .finally(() => {
         backfillThumbnails(media())

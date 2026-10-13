@@ -748,12 +748,22 @@ async function renderFilmIn(eventId: string, opts: Opts, outId: string, co: Chec
        ORDER BY taken_at ASC, id ASC`, [eventId]);
   if (opts.favouritesOnly) rows = rows.filter((r) => r.is_highlighted);
 
-  // Fetched in one pass (a listing plus, on s3, the downloads); a row whose object is gone — or
-  // which somehow lives outside this event's folder — is left out, as a missing file always was.
-  const present = await co.fetch(rows.filter((r) => keyDir(r.filename) === eventId).map((r) => keyName(r.filename)));
+  // Fetched in one pass per folder (a listing plus, on s3, the downloads). Nearly every row lives
+  // under this event's prefix, which `co` already is; a row from before the per-event layout holds
+  // a bare name at the root, and that gets its own checkout, released with the render. A row whose
+  // object is gone is left out, as a missing file always was.
+  const localPathFor = new Map<string, string>();
+  const byDir = new Map<string, string[]>();
+  for (const r of rows) { const d = keyDir(r.filename); byDir.set(d, [...(byDir.get(d) ?? []), keyName(r.filename)]); }
+  for (const [dir, names] of byDir) {
+    const c = dir === eventId ? co : await media().checkout(dir);
+    if (c !== co) extra.push(c);
+    const present = await c.fetch(names);
+    for (const n of names) if (present.has(n)) localPathFor.set(dir ? `${dir}/${n}` : n, c.path(n));
+  }
   const allItems: Item[] = rows
-    .filter((r) => keyDir(r.filename) === eventId && present.has(keyName(r.filename)))
-    .map((r) => ({ path: co.path(keyName(r.filename)), isVideo: r.media_type === 'video', width: r.width, height: r.height }));
+    .filter((r) => localPathFor.has(r.filename))
+    .map((r) => ({ path: localPathFor.get(r.filename)!, isVideo: r.media_type === 'video', width: r.width, height: r.height }));
   // Every visible item the host asked for goes in — the render id doubles as the shuffle seed, so a
   // shuffled film is fixed for the life of that render and only a NEW render deals a new order.
   const items = orderForRender(allItems, orderOf(opts.order), outId);

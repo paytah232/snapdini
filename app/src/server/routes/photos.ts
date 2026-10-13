@@ -2642,8 +2642,12 @@ export function onZipStreamError(res: { destroy(): unknown }, archive: { abort()
  *  form keeps only printable ASCII (quotes and backslashes dropped); the starred form carries the
  *  rest, percent-encoded, which is the one place a browser accepts it. Exported for the test. */
 export function contentDisposition(name: string): string {
-  const ascii = name.replace(/[^\x20-\x7e]/g, '').replace(/["\\]/g, '').trim() || 'download.zip';
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+  const ext = /\.[A-Za-z0-9]+$/.exec(name)?.[0] ?? '';
+  const stem = name.slice(0, name.length - ext.length);
+  // An event called "🎉🎉🎉" or "日本語の結婚式" has NO ASCII in it at all. The starred form carries
+  // the real name; the plain one falls back to the product's, never to a bare ".zip".
+  const asciiStem = stem.replace(/[^\x20-\x7e]/g, '').replace(/["\\]/g, '').replace(/\s+/g, ' ').trim() || 'Snapdini';
+  return `attachment; filename="${asciiStem}${ext}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
 /** The note that goes INSIDE the zip when something could not be included.
@@ -2730,7 +2734,11 @@ export async function zipPhotosToResponse(
   rows: { id: string; filename: string; mediaType: string | null; captureShape: string | null;
           participantId: string; participantName: string | null }[],
 ): Promise<string[]> {
-  const fileSafe = (s: string) => s.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
+  // An entry name must not be a path and must not carry a control character: slashes, the
+  // Windows-reserved set and anything below 0x20 (a NUL in a name is a truncated name to some
+  // unzippers) all become one space. Everything else — apostrophes, emoji, other scripts — is kept,
+  // because it is the name the host and their guests know the event by.
+  const fileSafe = (s: string) => s.replace(/[\\/:*?"<>|\x00-\x1f\x7f]+/g, ' ').replace(/\s+/g, ' ').trim();
   const evName = fileSafe(eventName || 'Snapdini').slice(0, 40) || 'Snapdini';
   res.setHeader('Content-Type', 'application/zip');
   // RFC 6266: an ASCII-only `filename=` for every client, plus the real name in `filename*=` for
@@ -2898,6 +2906,22 @@ export async function zipPhotosToResponse(
   };
 
   const perPerson = new Map<string, number>();
+  // Two guests called Sam are two people, and each of their first photos used to be
+  // "Party - Sam - 1.jpg": the second entry overwrote the first in every unzipper that does not
+  // refuse the archive outright. The label is per PARTICIPANT, so the second Sam, in the order the
+  // rows arrive (which is participant order), is "Sam (2)". Numbering within a person is unchanged.
+  const labelFor = new Map<string, string>();
+  const labelsUsed = new Map<string, number>();
+  const whoLabel = (participantId: string, name: string | null): string => {
+    const have = labelFor.get(participantId);
+    if (have) return have;
+    const base = fileSafe(name || 'Guest').slice(0, 60) || 'Guest';
+    const seen = (labelsUsed.get(base) ?? 0) + 1;
+    labelsUsed.set(base, seen);
+    const label = seen === 1 ? base : `${base} (${seen})`;
+    labelFor.set(participantId, label);
+    return label;
+  };
   for (let start = 0; start < rows.length && !failed; start += ZIP_REFRESH_BATCH) {
     const slice = rows.slice(start, start + ZIP_REFRESH_BATCH);
     // RESOLVE LATE. The filenames in `slice` are as old as the snapshot; these are as old as this
@@ -2934,7 +2958,7 @@ export async function zipPhotosToResponse(
       // on a missing file renumbers everything after it, so one absent photo silently renames the
       // whole rest of the zip — and leaves the README below with no name to report it under.
       // A gap in the numbering is the honest artefact of a gap in the archive.
-      const who = fileSafe(r.participantName || 'Guest') || 'Guest';
+      const who = whoLabel(r.participantId, r.participantName);
       const n = (perPerson.get(r.participantId) || 0) + 1; perPerson.set(r.participantId, n);
       const cur = fresh?.get(r.id) ?? r;
       // The same file the gallery's own download button hands over — see downloadFile. Reading
