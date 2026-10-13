@@ -747,8 +747,10 @@ Migrations `0026` (event reschedule) and `0027` (indexes) apply automatically.
 From 1.5.8 the photos can live in any S3-compatible bucket instead of the `UPLOADS_HOST` folder.
 Nothing changes unless you ask: `MEDIA_DRIVER` defaults to `local`, and an upgrade with no new
 settings runs exactly as before. Rows in the database hold the same relative keys
-(`<eventId>/<uuid>.jpg`) on both drivers, so the move is a copy and an environment change, and the
-way back is the same change reversed while the old copy still exists.
+(`<eventId>/<uuid>.jpg`) on both drivers, so the move is a copy and an environment change. An
+immediate rollback can reverse that change only while no uploads, edits, or deletions have
+happened on S3. After that, restore a current local
+copy before switching back; the preserved pre-cutover folder is no longer current.
 
 1. **Create the bucket and a key for it** on your store — one bucket and one access key per
    environment, never a production key on a dev stack. Turn versioning ON if the store offers it,
@@ -774,24 +776,26 @@ way back is the same change reversed while the old copy still exists.
    start, and audit that every object the database points at is in the bucket:
    ```bash
    docker compose stop app
-   docker compose exec app npx tsx src/server/tools/media-copy.ts --from local --to s3 --verify full
+   docker compose run --rm --no-deps app npx tsx src/server/tools/media-copy.ts --from local --to s3 --verify full
    sed -i 's/^MEDIA_DRIVER=.*/MEDIA_DRIVER=s3/' .env
    docker compose up -d
    docker compose exec app npx tsx src/server/tools/media-audit.ts --derived
    ```
-   (`stop app` then `exec app` needs the container running — run the copy from a one-off
-   `docker compose run --rm app npx tsx …` if you prefer the app fully down.)
 5. **Leave `UPLOADS_HOST` exactly as it is.** On `s3` the app never writes to that volume again:
    in-flight uploads and the working copies tools need go to local disk under `/data`
    (`MEDIA_SCRATCH_DIR` to put them elsewhere — keep it on local disk, never a network share). So
    the old folder stays untouched for rollback, and anything that mirrors it — a backup job, a
    standby rsync — keeps mirroring a frozen tree rather than a scratch folder. Point those jobs at
    the bucket (or the store's data directory) instead; that is now where the photos are.
-6. **Keep the old folder** untouched for a few weeks. Rolling back is `MEDIA_DRIVER=local` and a
-   restart. After that the volume can go: on `s3` it only ever holds in-flight uploads and the
-   working copies tools need, both of which the app deletes itself.
+6. **Keep the old folder** untouched for a few weeks. Before any post-cutover changes, rollback
+   is `MEDIA_DRIVER=local` and a restart. After S3 has accepted changes, stop writes, copy current
+   media from S3 to a separate local folder with `--from s3 --to local --verify full`, audit it
+   against the current database, and reconcile deletions before switching drivers. The copy tool
+   never deletes destination objects, so copying onto the old folder alone can resurrect deleted
+   files. Set `UPLOADS_HOST` to the reconciled folder when switching back. Retire the old volume
+   only after the bucket backup and restore procedure has been verified.
 
 Two things move with the photos: whatever backs the folder up should now back the bucket up (or
-the store's data directory), and the `UPLOADS_HOST` volume no longer needs to be large — a few
-gigabytes of local disk for staging is plenty.
+the store's data directory), and local scratch space under `/data` needs room for concurrent
+uploads and rendering. The `UPLOADS_HOST` volume remains the preserved old media tree until it is retired.
 

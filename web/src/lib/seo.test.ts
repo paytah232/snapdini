@@ -14,7 +14,7 @@ describe('isIndexable', () => {
 
 describe('canonicalOrigin', () => {
   it('uses the configured origin, not the request host', () => {
-    expect(canonicalOrigin('https://snapdini.com', 'https://snapdini-dev.pugno-nas.synology.me'))
+    expect(canonicalOrigin('https://snapdini.com', 'https://preview.example.com'))
       .toBe('https://snapdini.com');
   });
   it('strips a trailing slash and any stray path someone left on BASE_URL', () => {
@@ -38,7 +38,7 @@ describe('canonicalSetting', () => {
   // copy: noindex is not a canonicalization signal, rel=canonical is. A suppressed host has to
   // point at the real site, and this is the knob that lets it.
   it('prefers CANONICAL_ORIGIN, so a preview host can name the real site as the original', () => {
-    expect(canonicalSetting('https://snapdini.com', 'https://snapdini-dev.pugno-nas.synology.me'))
+    expect(canonicalSetting('https://snapdini.com', 'https://preview.example.com'))
       .toBe('https://snapdini.com');
     expect(canonicalOrigin(canonicalSetting('https://snapdini.com', 'https://dev.example'), 'https://dev.example'))
       .toBe('https://snapdini.com');

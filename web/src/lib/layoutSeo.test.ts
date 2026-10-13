@@ -6,7 +6,7 @@
 // original. CANONICAL_ORIGIN must win when set, and nothing must ever come from the request host.
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
-async function identity(envVars: Record<string, string>, href = 'https://snapdini-dev.pugno-nas.synology.me/pricing') {
+async function identity(envVars: Record<string, string>, href = 'https://preview.example.com/pricing') {
   vi.resetModules();
   vi.doMock('$env/dynamic/private', () => ({ env: envVars }));
   const { load } = await import('../routes/+layout.server');
@@ -21,7 +21,7 @@ afterEach(() => { vi.doUnmock('$env/dynamic/private'); vi.resetModules(); });
 
 describe('root layout SEO identity', () => {
   it('a suppressed host names the real site as canonical when CANONICAL_ORIGIN is set', async () => {
-    const d = await identity({ SEO_INDEXABLE: '', ORIGIN: 'https://snapdini-dev.pugno-nas.synology.me', CANONICAL_ORIGIN: 'https://snapdini.com' });
+    const d = await identity({ SEO_INDEXABLE: '', ORIGIN: 'https://preview.example.com', CANONICAL_ORIGIN: 'https://snapdini.com' });
     expect(d.seoIndexable).toBe(false);
     expect(d.robotsMeta).toBe('noindex, nofollow');
     expect(d.canonicalOrigin).toBe('https://snapdini.com');
@@ -33,7 +33,7 @@ describe('root layout SEO identity', () => {
     expect(d.canonicalOrigin).toBe('https://snapdini.com');
   });
   it('never builds the canonical from the request host when either is configured', async () => {
-    const d = await identity({ SEO_INDEXABLE: '', ORIGIN: 'https://snapdini-dev.pugno-nas.synology.me', CANONICAL_ORIGIN: 'https://snapdini.com' }, 'https://evil.example/');
+    const d = await identity({ SEO_INDEXABLE: '', ORIGIN: 'https://preview.example.com', CANONICAL_ORIGIN: 'https://snapdini.com' }, 'https://evil.example/');
     expect(d.canonicalOrigin).toBe('https://snapdini.com');
   });
 });

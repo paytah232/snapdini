@@ -38,8 +38,8 @@ services:
       # ── Where the media lives ──
       # local (default): the UPLOADS_DIR volume above, exactly as always — nothing to set up.
       # s3: any S3-compatible bucket (SeaweedFS, Garage, MinIO, AWS, Backblaze B2, Wasabi…) holds
-      #     the photos and the volume above is only transient staging. Switching is a copy and this
-      #     one variable — see docs/UPGRADING.md "Moving media to S3".
+      #     the photos; staging uses local scratch under /data. Switching is a copy and this
+      #     one variable — see UPGRADING.md "Moving media to S3".
       - MEDIA_DRIVER=${MEDIA_DRIVER:-local}
       - S3_ENDPOINT=${S3_ENDPOINT:-}
       - S3_REGION=${S3_REGION:-}
