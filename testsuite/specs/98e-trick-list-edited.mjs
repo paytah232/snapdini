@@ -17,7 +17,7 @@ const shoot = async (token, challengeId) => {
 };
 const setList = (ev, items) => api('PUT', `/api/events/${ev.joinCode}/challenges`,
   { body: { challenges: { sets: [{ key: 'a', label: 'Card A', items }] } }, headers: org(ev.organizerCode) });
-const me = async (token) => (await api('GET', `/api/participants/me?sessionToken=${token}`)).json;
+const me = async (token) => (await api('GET', '/api/participants/me', { headers: { 'x-session-token': token } })).json;
 
 const A = [{ id: 'general-laugh', text: 'Someone laughing' },
            { id: 'general-shoes', text: 'Everyone’s shoes' },

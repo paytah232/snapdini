@@ -151,7 +151,11 @@ export async function upload(token, video = false) {
   fd.append('photo', new Blob([img], { type: video ? 'video/mp4' : 'image/jpeg' }), video ? 'v.mp4' : 'p.jpg');
   return api('POST', '/api/photos', { body: fd });
 }
-export const gallery = (code, q = '') => api('GET', `/api/photos/${code}?gallery=true${q}`);
+// `_cb` busts the nginx API cache (keyed on the request URI): the public gallery is served
+// `public, max-age=30` by design, so a guest may see a host's change up to 30 s late — but these
+// specs assert what the ORIGIN answers the instant after a change, which is a different question.
+let cb = 0;
+export const gallery = (code, q = '') => api('GET', `/api/photos/${code}?gallery=true${q}&_cb=${process.pid}.${++cb}`);
 
 // ════════════════════════════════════════════════════════════════════════════
 // Every spec needs a verified, logged-in owner account. This is the original

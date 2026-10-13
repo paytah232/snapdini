@@ -33,14 +33,14 @@ await spec('98d-tricks-are-photos', async () => {
     // A PHOTO tagged with a trick ticks it — the behaviour we are protecting, not removing.
     const shot = await send(token, 'general-laugh', false);
     ok('a photo tagged with a trick is accepted', shot.status === 200, `status ${shot.status}`);
-    let me = await api('GET', `/api/participants/me?sessionToken=${token}`);
+    let me = await api('GET', '/api/participants/me', { headers: { 'x-session-token': token } });
     ok('and ticks it off', (me.json?.challengesDone || []).includes('general-laugh'),
       JSON.stringify(me.json?.challengesDone));
 
     // A VIDEO tagged with a trick is kept, but ticks nothing.
     const clip = await send(token, 'general-shoes', true);
     ok('a clip tagged with a trick is still accepted', clip.status === 200, `status ${clip.status}`);
-    me = await api('GET', `/api/participants/me?sessionToken=${token}`);
+    me = await api('GET', '/api/participants/me', { headers: { 'x-session-token': token } });
     ok('but it does NOT tick the trick', !(me.json?.challengesDone || []).includes('general-shoes'),
       JSON.stringify(me.json?.challengesDone));
     ok('and the photo before it is untouched', (me.json?.challengesDone || []).includes('general-laugh'));

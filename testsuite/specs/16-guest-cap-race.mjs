@@ -52,7 +52,7 @@ const tally = (rs) => ({
 const sessionsWork = async (rs) => {
   const tokens = rs.filter((r) => r.status === 200).map((r) => r.json?.sessionToken);
   if (!tokens.length || tokens.some((t) => !t)) return false;
-  const me = await Promise.all(tokens.map((t) => api('GET', `/api/participants/me?sessionToken=${t}`)));
+  const me = await Promise.all(tokens.map((t) => api('GET', '/api/participants/me', { headers: { 'x-session-token': t } })));
   return me.every((r) => r.status === 200);
 };
 

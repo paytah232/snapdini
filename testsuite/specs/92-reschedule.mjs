@@ -29,12 +29,12 @@ await spec('92-reschedule', async () => {
     // B) Beyond ~6 months from the ORIGINAL start is refused.
     const tooFar = anchorStart + 200 * DAY;
     const rB = await api('PUT', `/api/events/${past.joinCode}/settings`, { headers: org(past.organizerCode), body: { startsAt: tooFar } });
-    ok('beyond the 6-month ceiling is refused', rB.status === 400, `status ${rB.status}`);
+    ok('beyond the 6-month ceiling is refused (200 + startRefused: the rest of the save is kept)', rB.status === 200 && /6 months/.test(rB.json?.startRefused || ''), `status ${rB.status} ${JSON.stringify(rB.json?.startRefused)}`);
     ok('refused move did not persist', Math.abs(Number(dbq(`SELECT starts_at FROM events WHERE id='${past.id}'`)) - future) < 2000);
 
     // C) A start in the past is refused.
     const rC = await api('PUT', `/api/events/${past.joinCode}/settings`, { headers: org(past.organizerCode), body: { startsAt: Date.now() - DAY } });
-    ok('a past start is refused', rC.status === 400, `status ${rC.status}`);
+    ok('a past start is refused (200 + startRefused)', rC.status === 200 && /future/.test(rC.json?.startRefused || ''), `status ${rC.status} ${JSON.stringify(rC.json?.startRefused)}`);
 
     // D) Once a guest has joined, the start LOCKS — a live event must never shift under its guests.
     const used = await createEvent({ startsAt: Date.now() - 2 * HOUR, durationHours: 6 });
@@ -42,7 +42,7 @@ await spec('92-reschedule', async () => {
     ok('guest joined the used event', j.status === 200, `status ${j.status}`);
     const beforeLock = Number(dbq(`SELECT starts_at FROM events WHERE id='${used.id}'`));
     const rD = await api('PUT', `/api/events/${used.joinCode}/settings`, { headers: org(used.organizerCode), body: { startsAt: Date.now() + 5 * DAY } });
-    ok('started + used CANNOT be rescheduled', rD.status === 409, `status ${rD.status}`);
+    ok('started + used CANNOT be rescheduled (200 + startRefused)', rD.status === 200 && /locked/.test(rD.json?.startRefused || ''), `status ${rD.status} ${JSON.stringify(rD.json?.startRefused)}`);
     ok('locked event start unchanged', Number(dbq(`SELECT starts_at FROM events WHERE id='${used.id}'`)) === beforeLock);
 
     // E) A used but NOT-yet-started event can still be moved (guests joined early; nothing has run).

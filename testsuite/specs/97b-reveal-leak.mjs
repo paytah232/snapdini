@@ -57,9 +57,9 @@ await spec('97b-reveal-leak', async () => {
     // A SECOND guest, legitimately in the event, must not see the first one's shots.
     const b = await join(ev.joinCode, 'Guest B');
     const tokenB = b.json?.sessionToken;
-    const asB = await api('GET', `/api/photos/${ev.joinCode}?sessionToken=${tokenB}`);
+    const asB = await api('GET', `/api/photos/${ev.joinCode}`, { headers: { 'x-session-token': tokenB } });
     leaks(JSON.stringify(asB.json ?? asB.text), 'another guest’s own-roll view');
-    const meB = await api('GET', `/api/participants/me?sessionToken=${tokenB}`);
+    const meB = await api('GET', '/api/participants/me', { headers: { 'x-session-token': tokenB } });
     leaks(JSON.stringify(meB.json ?? meB.text), 'another guest’s /me');
 
     // A share link made BEFORE the reveal must not become a back door.
@@ -74,7 +74,7 @@ await spec('97b-reveal-leak', async () => {
     }
 
     // The guest who TOOK it may always see their own — that is the product, not a leak.
-    const asA = await api('GET', `/api/photos/${ev.joinCode}?sessionToken=${tokenA}`);
+    const asA = await api('GET', `/api/photos/${ev.joinCode}`, { headers: { 'x-session-token': tokenA } });
     ok('the shooter still sees their own roll before the reveal',
       JSON.stringify(asA.json ?? '').includes(filename.split('/').pop() ?? 'x'),
       `status ${asA.status}`);
@@ -189,7 +189,7 @@ await spec('97b-reveal-leak', async () => {
     await shoot(tokenA);
     await shoot(tokenB);
 
-    const own = async (token) => (await api('GET', `/api/photos/${ev.joinCode}?sessionToken=${token}`)).json?.photos ?? [];
+    const own = async (token) => (await api('GET', `/api/photos/${ev.joinCode}`, { headers: { 'x-session-token': token } })).json?.photos ?? [];
     const aPhoto = (await own(tokenA))[0]?.id;
     const bPhoto = (await own(tokenB))[0]?.id;
     ok('both guests have a shot to heart', !!aPhoto && !!bPhoto);
@@ -206,7 +206,7 @@ await spec('97b-reveal-leak', async () => {
       Object.keys(sj.hearts ?? {}).length === 0, JSON.stringify(sj).slice(0, 120));
 
     // And a guest sees their own, never the other guest's.
-    const asA = (await api('GET', `/api/photos/${ev.joinCode}/hearts?sessionToken=${tokenA}`)).json ?? {};
+    const asA = (await api('GET', `/api/photos/${ev.joinCode}/hearts`, { headers: { 'x-session-token': tokenA } })).json ?? {};
     ok('a guest sees the count on their own shot', (asA.hearts ?? {})[aPhoto] === 1, JSON.stringify(asA).slice(0, 120));
     ok('\u2026and not the other guest\u2019s', !(bPhoto in (asA.hearts ?? {})));
 
@@ -263,7 +263,7 @@ await spec('97b-reveal-leak', async () => {
       { body: { sessionToken: tokenB, body: 'peeking' } });
     ok('another guest cannot comment on a photo hidden from them before the reveal',
       cross.status === 404, `status ${cross.status}`);
-    const bobReads = await api('GET', `/api/photos/${ev.joinCode}/comments?ids=${aPhoto}&sessionToken=${tokenB}`);
+    const bobReads = await api('GET', `/api/photos/${ev.joinCode}/comments?ids=${aPhoto}`, { headers: { 'x-session-token': tokenB } });
     ok('\u2026nor read its thread', Object.keys(bobReads.json?.comments ?? {}).length === 0,
       JSON.stringify(bobReads.json).slice(0, 110));
     const strangerReads = await api('GET', `/api/photos/${ev.joinCode}/comments?ids=${aPhoto}`);

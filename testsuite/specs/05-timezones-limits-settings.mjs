@@ -79,7 +79,7 @@ await spec('05-timezones-limits-settings', async () => {
   ok('guest joined, so the event is now in use', !!startedTok);
   const origStart = dbq(`SELECT starts_at FROM events WHERE id='${startedEv.id}'`);
   const rLocked = await api('PUT', `/api/events/${startedEv.joinCode}/settings`, { headers: org(startedEv.organizerCode), body: { startsAt: Date.now() + 5 * HOUR } });
-  ok('started event WITH GUESTS cannot be rescheduled', rLocked.status === 409, `status ${rLocked.status}`);
+  ok('started event WITH GUESTS cannot be rescheduled (200 + startRefused: the rest of the save is kept)', rLocked.status === 200 && /locked/.test(rLocked.json?.startRefused || ''), `status ${rLocked.status} ${JSON.stringify(rLocked.json?.startRefused)}`);
   ok('locked event start unchanged', dbq(`SELECT starts_at FROM events WHERE id='${startedEv.id}'`) === origStart);
   const upcomingEv = await createEvent({ startsAt: Date.now() + 24 * HOUR, durationHours: 2 });
   const newStart = Date.now() + 48 * HOUR;
