@@ -1,0 +1,11 @@
+resource: devel/deployment-production
+owner:
+  vm: snapdini
+  user: ai
+  provider: null
+  profile: null
+  task: null
+  pid: 1976897
+acquired_at: '2026-10-13T01:40:43Z'
+expires_at: '2026-10-13T03:40:43Z'
+ttl_minutes: 120
