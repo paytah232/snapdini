@@ -2782,6 +2782,7 @@ export async function zipPhotosToResponse(
    *  reason: a name is not an identity here. */
   let missing: { id: string | null; entry: string; done?: boolean }[] = [];
   let queued = 0, settled = 0, failed = false;
+  const objectStreams = new Set<import('stream').Readable>();
   let wake: (() => void) | null = null;
   let onSettle: (() => void) | null = null;
   const settle = () => {
@@ -2797,6 +2798,8 @@ export async function zipPhotosToResponse(
   const abandoned = new Promise<void>((resolve) => { stopWaiting = resolve; });
   const giveUp = () => {
     failed = true;
+    for (const stream of objectStreams) stream.destroy();
+    objectStreams.clear();
     stopWaiting?.();
     if (wake) { const w = wake; wake = null; w(); }
   };
@@ -2895,14 +2898,27 @@ export async function zipPhotosToResponse(
     });
   }
 
-  /** Queue one object. On the local driver archiver is handed the file itself and lstats it in its
-   *  own time (its 'warning' then carries that path); on s3 it is handed a stream that opens the
-   *  object only when its turn comes, so a 400-photo zip is not 400 open requests. */
-  const queue = (key: string, entry: string, id: string) => {
+  /** Archiver pipes appended streams into its own buffers immediately, before their queue
+   *  turn. Queue bucket bodies one at a time so a large ZIP opens only one object request.
+   *  Its pipe also does not forward source errors: handle them here to fail this download
+   *  without turning a disconnected store into an unhandled process error. */
+  const queue = async (key: string, entry: string, id: string): Promise<void> => {
+    if (failed) return;
     const src = archiveSource(key);
-    if ('path' in src) { entryFor.set(src.path, { entry, id }); archive.file(src.path, { name: entry }); }
-    else { entryFor.set(key, { entry, id }); archive.append(src.stream, { name: entry }); }
     queued++;
+    if ('path' in src) {
+      entryFor.set(src.path, { entry, id });
+      archive.file(src.path, { name: entry });
+    } else {
+      entryFor.set(key, { entry, id });
+      objectStreams.add(src.stream);
+      src.stream.once('close', () => objectStreams.delete(src.stream));
+      src.stream.on('error', (err: Error) => {
+        if (!failed) { onZipStreamError(res, archive, err); giveUp(); }
+      });
+      archive.append(src.stream, { name: entry });
+      await waitForSettle();
+    }
   };
 
   const perPerson = new Map<string, number>();
@@ -2980,7 +2996,8 @@ export async function zipPhotosToResponse(
       // event, which is exactly when the origin can least afford to stop answering.
       if (!have.has(rel) && !(await exists(rel))) { missing.push({ id: r.id, entry }); continue; }
 
-      queue(rel, entry, r.id);
+      await queue(rel, entry, r.id);
+      if (failed) break;
     }
   }
 
@@ -3048,7 +3065,8 @@ export async function zipPhotosToResponse(
           // that two downloads of one event agree, and a photo recovered here must not be renamed
           // just because it arrived late — it goes in at the end of the archive under its original
           // name, which is the only part of it anybody sees.
-          queue(key, m.entry, m.id);
+          await queue(key, m.entry, m.id);
+          if (failed) break;
           m.done = true;
           recovered++;
         }

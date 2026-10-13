@@ -107,8 +107,9 @@ export async function checkoutFor(prefix: string, fetch?: string[]): Promise<Che
 // ── Feeding an archive ────────────────────────────────────────────────────────
 
 /** What to hand archiver for one object: the file itself on the local driver (archiver lstats and
- *  opens it in its own time, and its 'warning' carries that path), or on s3 a stream that opens
- *  the object only when archiver reaches it — so a 400-photo zip is not 400 open requests. */
+ *  opens it in its own time, and its 'warning' carries that path), or a bucket stream that opens
+ *  on first read. The ZIP caller must serialize appends: archiver pipes appended streams
+ *  immediately, so laziness alone does not bound the number of open object requests. */
 export function archiveSource(key: string): { path: string } | { stream: Readable } {
   const store = media();
   if (store instanceof LocalStore) return { path: store.diskPath(key) };
@@ -132,9 +133,12 @@ export function lazyStream(key: string): Readable {
           return;
         }
         src = body.stream;
+        src.on('error', (e) => out.destroy(e));
+        // A cancelled ZIP can close before the asynchronous GetObject resolves. Release the
+        // late body too; piping it into an already destroyed wrapper would leak the request.
+        if (out.destroyed) { src.destroy(); return; }
         src.on('data', (chunk: Buffer) => { if (!out.push(chunk)) src!.pause(); });
         src.on('end', () => out.push(null));
-        src.on('error', (e) => out.destroy(e));
       }).catch((e) => out.destroy(e));
     },
     destroy(err, cb) { src?.destroy(); cb(err); },
