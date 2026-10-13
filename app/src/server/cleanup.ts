@@ -6,7 +6,7 @@ import { RESCHEDULE_WINDOW_MS, RESCHEDULE_RETENTION_GRACE_MS } from './lib';
 import { events, photos, participants, clientErrors, slideshows, shares, emailTokens, sessions, adminActions } from './schema';
 import { UPLOADS_DIR, INCOMING_DIR, SCRATCH_DIR } from './paths';
 import { media, assertKey, keyFromWebPath, joinKey, invalidateListing } from './media';
-import { playName, thumbName } from './images';
+import { derivedNames, playName } from './images';
 import { purgeOldSlideshows } from './slideshow';
 import { pruneAnalytics } from './analytics';
 import { skipWriteSweep } from './readonly';
@@ -25,12 +25,15 @@ function safeDelete(key: string): Promise<void> {
   return media().delete(k).catch(() => {}); // best-effort; ignore missing
 }
 
-// Remove a photo's uploaded file (and its grid thumbnail) given its stored filename.
+// Remove a photo's uploaded file and EVERY copy derived from it, given its stored filename.
+//
+// derivedNames is the one list (images.ts): this used to name the thumbnail and the playback proxy
+// by hand and leave the crop, the crop's poster and the download re-encode behind — found as five
+// orphans in the bucket after an event delete, and as the same litter in old event folders on the
+// disk. Most of the names will not exist for most rows; deleting what is not there is a no-op.
 export async function unlinkUpload(filename?: string | null): Promise<void> {
   if (!filename) return;
-  await safeDelete(filename);
-  await safeDelete(thumbName(filename)); // <name>_thumb.webp (no-op for videos)
-  await safeDelete(playName(filename));  // <name>_play.mp4 (no-op for photos)
+  for (const key of [filename, ...derivedNames(filename)]) await safeDelete(key);
 }
 
 // Delete every file owned by an event (photos + theme header image) from disk.
@@ -56,6 +59,11 @@ export async function deleteEventFiles(eventId: string): Promise<void> {
       try { await safeDelete(keyFromWebPath(m[1])); } catch { /* not a key of ours — not ours to delete */ }
     }
   }
+  // And then the whole prefix: both callers — the retention purge and the organizer's delete — are
+  // about to remove the event row, so nothing under its folder can be referenced again. This is
+  // what sweeps a backing track, a render, a poster image that no row names, and any derived copy
+  // a chain finished after the rows were read. Legacy flat files were handled above by name.
+  try { await media().deletePrefix(eventId); } catch { /* best-effort: an orphan, not a failure */ }
   invalidateListing(eventId);
 }
 

@@ -2638,6 +2638,14 @@ export function onZipStreamError(res: { destroy(): unknown }, archive: { abort()
   res.destroy();
 }
 
+/** `attachment; filename="…"; filename*=UTF-8''…` for a name that may hold anything. The plain
+ *  form keeps only printable ASCII (quotes and backslashes dropped); the starred form carries the
+ *  rest, percent-encoded, which is the one place a browser accepts it. Exported for the test. */
+export function contentDisposition(name: string): string {
+  const ascii = name.replace(/[^\x20-\x7e]/g, '').replace(/["\\]/g, '').trim() || 'download.zip';
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+}
+
 /** The note that goes INSIDE the zip when something could not be included.
  *
  *  Inside the archive, rather than a header or a status or a different filename, because there is
@@ -2725,7 +2733,11 @@ export async function zipPhotosToResponse(
   const fileSafe = (s: string) => s.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
   const evName = fileSafe(eventName || 'Snapdini').slice(0, 40) || 'Snapdini';
   res.setHeader('Content-Type', 'application/zip');
-  res.setHeader('Content-Disposition', `attachment; filename="${evName}.zip"`);
+  // RFC 6266: an ASCII-only `filename=` for every client, plus the real name in `filename*=` for
+  // the ones that read it. An event name is whatever the host typed — the demo roll's carries an
+  // emoji — and a non-ASCII byte in a header value is a TypeError from setHeader, which answered
+  // every zip of such an event with a 500 and a JSON body under a zip content type.
+  res.setHeader('Content-Disposition', contentDisposition(`${evName}.zip`));
 
   // STORE, not DEFLATE. Everything in here is JPEG, MP4 or WebP — already compressed — so deflate
   // has nothing to find. Measured on 60 real photos (50.28 MB): level 9 saved 0.10% and took
