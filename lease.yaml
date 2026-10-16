@@ -5,9 +5,7 @@ owner:
   provider: null
   profile: null
   task: null
-  pid: 1001535
-acquired_at: '2026-10-15T01:11:34Z'
-expires_at: '2026-10-15T03:11:34Z'
+  pid: 3775046
+acquired_at: '2026-10-16T22:03:52Z'
+expires_at: '2026-10-17T00:03:52Z'
 ttl_minutes: 120
-state: released
-released_at: '2026-10-15T01:11:37Z'
