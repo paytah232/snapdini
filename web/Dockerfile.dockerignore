@@ -15,3 +15,5 @@ web/e2e
 web/.camtest
 **/.env
 **/.env.*
+
+web/guest-dist

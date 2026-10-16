@@ -9,3 +9,6 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 test-results
 playwright-report
+
+# Standalone guest build output is generated for each deployment.
+/guest-dist/

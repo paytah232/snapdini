@@ -34,6 +34,7 @@ export interface StoredCapture {
    *
    *  All optional: rows written before this existed simply have no answer, which is different from
    *  an answer of zero. */
+  challengeId?: string;
   capturedAt?: number;
   captureTurn?: number;
   captureRotation?: number;
@@ -64,14 +65,16 @@ function open(): Promise<IDBDatabase> {
 const available = () => typeof indexedDB !== 'undefined';
 
 export async function putCapture(c: StoredCapture): Promise<void> {
-  if (!available()) return;
+  if (!available()) throw new Error('This browser cannot save captures on this device');
   const db = await open();
-  await new Promise<void>((res, rej) => {
-    const t = db.transaction(STORE, 'readwrite');
-    t.objectStore(STORE).put(c);
-    t.oncomplete = () => res(); t.onerror = () => rej(t.error);
-  });
-  db.close();
+  try {
+    await new Promise<void>((res, rej) => {
+      const t = db.transaction(STORE, 'readwrite');
+      t.objectStore(STORE).put(c);
+      t.oncomplete = () => res(); t.onerror = () => rej(t.error);
+      t.onabort = () => rej(t.error || new Error('Capture storage was interrupted'));
+    });
+  } finally { db.close(); }
 }
 
 export async function delCapture(id: string): Promise<void> {
@@ -81,7 +84,7 @@ export async function delCapture(id: string): Promise<void> {
     const t = db.transaction([STORE, PROGRESS], 'readwrite');
     t.objectStore(STORE).delete(id);
     t.objectStore(PROGRESS).delete(id);   // uploaded/dropped → clear any resume state too
-    t.oncomplete = () => res(); t.onerror = () => rej(t.error);
+    t.oncomplete = () => res(); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new Error('Capture storage was interrupted'));
   });
   db.close();
 }
@@ -94,7 +97,7 @@ export async function saveProgress(p: UploadProgress): Promise<void> {
   await new Promise<void>((res, rej) => {
     const t = db.transaction(PROGRESS, 'readwrite');
     t.objectStore(PROGRESS).put(p);
-    t.oncomplete = () => res(); t.onerror = () => rej(t.error);
+    t.oncomplete = () => res(); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new Error('Capture storage was interrupted'));
   });
   db.close();
 }

@@ -40,7 +40,8 @@
       } catch { /* private mode — the camera still works, the host link just is not offered */ }
       // replace(), not href: the demo is spent once it is created. A back-button press must return
       // to wherever they came from, not re-run this page and mint a second event.
-      location.replace('/join/' + joinCode);
+      const guestPreview = new URLSearchParams(location.search).get('camera') === 'guest';
+      location.replace((guestPreview ? '/guest/join/' : '/join/') + joinCode);
     } catch {
       failed = true;
     } finally {

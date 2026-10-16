@@ -17,7 +17,7 @@
   // Aliased: this component already has a `track` for the MediaStreamTrack.
   import { track as trackEvent } from '$lib/analytics';
   import { fade } from 'svelte/transition';
-  import { getEvent, getMe, joinEvent, chooseCard, getPhotosBySession, savePhotoCaption, CAPTION_MAX, clampCaption, captionLength, captionRemaining,
+  import { getEvent as liveEvent, getMe as liveMe, joinEvent, chooseCard, getPhotosBySession, savePhotoCaption, CAPTION_MAX, clampCaption, captionLength, captionRemaining,
            type PublicEvent, type Photo, setHeart, getHearts,
   } from '$lib/events';
   import { getSession, saveSession, clearSession, rememberEvent, forgetEventAt } from '$lib/session';
@@ -43,6 +43,14 @@
   import Confetti from './Confetti.svelte';
   import FeedbackModal from '$lib/components/FeedbackModal.svelte';
 
+  import { recoveryEvent, recoveryMe, recoveryState, temporaryFailure, rememberGuest, rememberRemaining,
+    createProvisional, provisionalGuest, admitProvisional, finishProvisional, rememberRecoveryContact, syncRecoveryContact } from '$lib/guestRecovery';
+  export let recoveryEnabled = false;
+  const getEvent = (id: string) => recoveryEnabled ? recoveryEvent(id) : liveEvent(id);
+  const getMe = (token: string) => recoveryEnabled && ev ? recoveryMe(token, ev.joinCode) : liveMe(token);
+  let storageFailure = false;
+  const persisting = new Map<string, Promise<void>>();
+
   export let identifier: string; // joinCode or slug
 
   type Screen = 'loading' | 'join' | 'upcoming' | 'camera' | 'gallery';
@@ -56,7 +64,8 @@
   // (server - in flight) is what stops a burst of captures being forgotten the moment anything
   // re-reads /me — which is how a 12-shot roll could be spammed past 12.
   $: pendingUploads = queue.filter((q) => q.status === 'pending' || q.status === 'uploading').length;
-  $: photosRemaining = Math.max(0, serverRemaining - pendingUploads);
+  $: reservedCaptures = queue.filter((q) => q.status !== 'done').length;
+  $: photosRemaining = Math.max(0, serverRemaining - reservedCaptures);
 
   // Demo showcase: link into the host + gallery views. Shared with the gallery's own nav through
   // demoLinks(), so the two surfaces cannot drift on where the links point or on how the organizer
@@ -413,7 +422,7 @@
   let aspect = '1:1';
 
   // upload queue
-  interface QueueItem { id: string; blob: Blob; mediaType: 'photo' | 'video'; source: 'capture' | 'upload'; ext: string; status: 'pending' | 'uploading' | 'done' | 'error'; error?: string; progress?: number; size: number; durationSecs?: number; w?: number; h?: number; retries?: number; uploadId?: string; challengeId?: string; doneChunks?: number[]; captureOrientation?: 'portrait' | 'landscape'; captureShape?: string; captureRotation?: number; captureTurn?: number; capturedAt?: number; }
+  interface QueueItem { id: string; blob: Blob; mediaType: 'photo' | 'video'; source: 'capture' | 'upload'; ext: string; status: 'pending' | 'uploading' | 'done' | 'error'; error?: string; progress?: number; size: number; durationSecs?: number; w?: number; h?: number; retries?: number; uploadId?: string; challengeId?: string; doneChunks?: number[]; captureOrientation?: 'portrait' | 'landscape'; captureShape?: string; captureRotation?: number; captureTurn?: number; capturedAt?: number; sessionToken?: string; blocked?: boolean; volatile?: boolean; }
   const MAX_UPLOAD_RETRIES = 5;   // auto-retry a failing upload this many times (with backoff) before asking the user
   // ── Photo missions ─────────────────────────────────────────────────────────
   //
@@ -724,7 +733,7 @@
       // this same dead page, and the app would look permanently broken with no way to type a new
       // code. Drop the pointer so the next launch offers the way in instead.
       if (typeof location !== 'undefined') forgetEventAt(location.pathname);
-      fatal = 'Event not found';
+      fatal = 'Could not open this event. Please try again when Snapdini is available.';
       return;
     }
     // Video length is now a per-event entitlement (falls back to the global setting when
@@ -770,7 +779,8 @@
     const token = getSession(ev.joinCode);
     if (token) {
       try {
-        const me = await getMe(token);
+        const me = token.startsWith('offline_') && recoveryEnabled
+          ? provisionalMe() : await getMe(token);
         // Returning from Stripe, the guest lands on /join/<code>?topup=1. /me already reflects the
         // purchase because the webhook credited the participant, so there is nothing to poll — confirm
         // it and strip the flag so a refresh does not re-announce it.
@@ -802,8 +812,20 @@
         if (me.challengeTick) missionTick = me.challengeTick;
         await enterCamera();
         return;
-      } catch {
-        clearSession(ev.joinCode);
+      } catch (error) {
+        // A failed origin is not an invalid session. Keep credentials and saved captures intact.
+        if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+          let saved;
+          try { saved = await listCaptures(ev.joinCode); }
+          catch { fatal = 'This device could not read your saved captures. Your guest session has been kept; please try again.'; return; }
+          if (saved.some(capture => capture.sessionToken === token)) {
+            sessionToken = token; serverRemaining = 0;
+            await enterCamera();
+            showToast('Your guest access has changed. Your saved captures are still in the upload queue to save a copy.', true);
+            return;
+          }
+          clearSession(ev.joinCode);
+        } else { fatal = 'Your guest session could not be loaded. Please try again shortly.'; return; }
       }
     }
     screen = 'join';
@@ -1185,6 +1207,17 @@
     stopCamera();
   });
 
+  function provisionalMe(): Awaited<ReturnType<typeof liveMe>> {
+    if (!ev) throw new Error('Event settings are unavailable');
+    const guest = provisionalGuest(ev.joinCode);
+    if (!guest) throw new Error('Your saved guest could not be found');
+    return { participant: { id: '', name: guest.name, photosTaken: 0, email: null },
+      photosRemaining: ev.maxPhotos, eventName: ev.name, joinCode: ev.joinCode, slug: ev.slug,
+      startsAt: ev.startsAt, expiresAt: ev.expiresAt, isLocked: ev.isLocked, maxPhotos: ev.maxPhotos,
+      allowDownloads: ev.allowDownloads, noFlash: ev.noFlash, challenges: [], challengesDone: [],
+      challengeSet: null, challengeTick: null };
+  }
+
   async function doJoin() {
     if (!joinName.trim()) { showToast('Enter your name', true); return; }
     // Asking to be emailed the photos and leaving no address is a promise we cannot keep: the
@@ -1229,7 +1262,31 @@
         try { return new URLSearchParams(window.location.search).get('set') || undefined; }
         catch { return undefined; }
       })();
-      const r = await joinEvent(identifier, joinName.trim(), joinEmail.trim() || undefined, printedSet);
+      let r;
+      if (recoveryEnabled && ev) {
+        rememberRecoveryContact(ev.joinCode, joinEmail.trim(), joinWantsPhotos);
+        const guest = createProvisional(ev.joinCode, joinName, printedSet);
+        try {
+          r = await admitProvisional(ev.joinCode);
+        } catch (error) {
+          if (!temporaryFailure(error)) throw error;
+          if (ev.isLocked || ev.isExpired || ev.isUpcoming) throw new Error('This event is not open for photos.');
+          sessionToken = `offline_${guest.nonce}`;
+          saveSession(ev.joinCode, sessionToken);
+          serverRemaining = ev.maxPhotos;
+          rememberGuest(sessionToken, provisionalMe());
+          recoveryState.set(true);
+          showToast('Uploads are paused. Keep your saved photos here until Snapdini returns.');
+          await enterCamera();
+          return;
+        }
+      } else r = await joinEvent(identifier, joinName.trim(), joinEmail.trim() || undefined, printedSet);
+      if (recoveryEnabled && ev) {
+        finishProvisional(ev.joinCode);
+        rememberGuest(r.sessionToken, { ...r, participant: { ...r.participant, photosTaken: 0, email: null },
+          slug: ev.slug, startsAt: ev.startsAt, expiresAt: ev.expiresAt, isLocked: ev.isLocked,
+          maxPhotos: ev.maxPhotos, allowDownloads: ev.allowDownloads, noFlash: ev.noFlash });
+      }
       sessionToken = r.sessionToken;
       serverRemaining = r.photosRemaining;
       canBuyShots = !!r.canBuyShots;
@@ -1242,6 +1299,7 @@
       applyCardStatus(r);
       if (r.challengeTick) missionTick = r.challengeTick;
       saveSession(r.joinCode, r.sessionToken);
+      if (recoveryEnabled && joinEmail.trim()) void setParticipantEmail(r.sessionToken, joinEmail.trim()).catch(() => {});
       trackEvent('joined', undefined, r.joinCode);
       // Not awaited: the camera must open at the speed it always has, and a failed opt-in is
       // recoverable from the roll. Ticking the box with no address is not thrown away either
@@ -1276,6 +1334,7 @@
 
   async function enterCamera() {
     screen = 'camera';
+    if (recoveryEnabled && ev && sessionToken) void syncRecoveryContact(ev.joinCode, sessionToken);
     applyEventTheme(ev?.theme);
     if (ev?.isExpired || ev?.isLocked) { showToast(ev.isLocked ? 'Event is locked' : 'Event has ended'); }
     // …and never restore it on iOS: the control is not shown there, so a value left over from
@@ -1283,8 +1342,8 @@
     if (ev && !iosDevice) { try { saveToDevice = localStorage.getItem('savedev_' + ev.joinCode) === '1'; } catch { /* ignore */ } }
     try { const q = localStorage.getItem('snap_vidq'); if (q === 'high' || q === 'standard' || q === 'smooth' || q === 'phone') videoQuality = q; } catch { /* ignore */ }
     try { gridOn = localStorage.getItem('snap_grid') === '1'; } catch { /* ignore */ }
+    await restoreQueue();
     await startCamera();
-    restoreQueue();
     if (typeof window !== 'undefined') {
       window.addEventListener('online', autoRetry);
       retryTimer = setInterval(autoRetry, 15000);
@@ -2839,17 +2898,22 @@
     // refused at one hen do, eighteen minutes past the end, by a single phone draining its queue.
     //
     // Advisory, not evidence — a client clock can be wrong or lied to — so the server clamps it.
-    queue = [...queue, { id, blob, mediaType, source, ext, status: 'pending', size: blob.size, challengeId,
+    queue = [...queue, { id, blob, mediaType, source, ext, sessionToken: sessionToken ?? undefined, status: 'pending', size: blob.size, challengeId,
                          captureOrientation: shotAs === 'unknown' ? undefined : shotAs,
                          captureShape: shotShape, ...extra, capturedAt }];
     trackEvent('photo_captured', { kind: mediaType, source }, ev?.joinCode);
     // Persist to IndexedDB immediately so the capture survives an outage / reload / closed tab.
-    if (sessionToken && ev) putCapture({ id, joinCode: ev.joinCode, sessionToken, blob, mediaType, source, ext,
+    if (sessionToken && ev) persisting.set(id, putCapture({ id, joinCode: ev.joinCode, sessionToken, blob, mediaType, source, ext,
         createdAt: Date.now(),
         // Everything the shutter measured goes to disk with the blob. Left out, a reload silently
         // undoes both the late-upload grace and the rotation correction — see StoredCapture.
         capturedAt, captureTurn: extra?.captureTurn, captureRotation: extra?.captureRotation,
-        captureOrientation: shotAs === 'unknown' ? undefined : shotAs, captureShape: shotShape }).catch(() => {});
+        captureOrientation: shotAs === 'unknown' ? undefined : shotAs, captureShape: shotShape, challengeId }).catch(() => {
+          storageFailure = true;
+          const item = queue.find(q => q.id === id); if (item) item.volatile = true;
+          queue = queue;
+          showToast('This device could not save your capture. Keep this page open and save a copy from the queue.', true);
+        }));
     if (saveToDevice) saveToDeviceCopy(blob, ext);
     // Celebrate NOW, not when the upload lands. By this line the shot is in the queue and on its way
     // into IndexedDB, so the trick really is pulled off — the guest is holding a finished thing.
@@ -2990,14 +3054,15 @@
     try {
       const stored = await listCaptures(ev.joinCode);
       const have = new Set(queue.map((q) => q.id));
-      const fresh = stored.filter((s) => !have.has(s.id));
+      const fresh = stored.filter((s) => !have.has(s.id) &&
+        (s.sessionToken === sessionToken || (recoveryEnabled && s.sessionToken === `offline_${provisionalGuest(ev!.joinCode)?.nonce}`)));
       // Pull each capture's chunk-resume state so a big upload continues where it left off.
       const restored = await Promise.all(fresh.map(async (s) => {
         const p = await getProgress(s.id).catch(() => null);
         // Carried back out, or the restore is the thing that breaks the feature. `createdAt` is the
         // fallback for rows stored before capturedAt existed: it is written at the same instant, so
         // it is the same number, and an older row is better served by it than by nothing.
-        return { id: s.id, blob: s.blob, mediaType: s.mediaType, source: s.source ?? 'capture', ext: s.ext, status: 'pending' as const, size: s.blob?.size ?? 0,
+        return { id: s.id, sessionToken: s.sessionToken, challengeId: s.challengeId, blob: s.blob, mediaType: s.mediaType, source: s.source ?? 'capture', ext: s.ext, status: 'pending' as const, size: s.blob?.size ?? 0,
           uploadId: p?.uploadId, doneChunks: p?.doneChunks,
           capturedAt: s.capturedAt ?? s.createdAt, captureTurn: s.captureTurn,
           captureRotation: s.captureRotation, captureOrientation: s.captureOrientation,
@@ -3008,14 +3073,20 @@
         showToast(`${restored.length} saved photo${restored.length > 1 ? 's' : ''} still uploading…`);
         processQueue();
       }
-    } catch { /* ignore */ }
+    } catch {
+      storageFailure = true; serverRemaining = 0;
+      showToast('This device could not read your saved captures. Keep this page open and try again shortly.', true);
+    }
   }
 
   // Auto-retry failed items when the connection / server come back.
   function autoRetry() {
     let changed = false;
-    for (const it of queue) if (it.status === 'error') { it.status = 'pending'; it.error = undefined; changed = true; }
-    if (changed) { queue = queue; processQueue(); }
+    for (const it of queue) if (it.status === 'error' && !it.blocked) { it.status = 'pending'; it.error = undefined; changed = true; }
+    if (changed) queue = queue;
+    // Paused outage uploads are already pending. An online/foreground retry must resume them
+    // immediately too, rather than waiting for their old outage timer to expire.
+    if (queue.some(item => item.status === 'pending')) processQueue();
   }
 
   // Anything larger than one chunk is uploaded in small ~5MB parts. Small parts mean a flaky
@@ -3032,7 +3103,8 @@
     return new Promise((resolve, reject) => {
       const form = new FormData();
       form.append('photo', item.blob, `media.${item.ext}`);
-      form.append('sessionToken', sessionToken!);
+      form.append('sessionToken', item.sessionToken ?? sessionToken!);
+      form.append('captureId', item.id);
       form.append('source', item.source);
       if (item.challengeId) form.append('challengeId', item.challengeId);
       if (item.captureOrientation) form.append('captureOrientation', item.captureOrientation);
@@ -3104,7 +3176,8 @@
       const start = index * CHUNK_SIZE;
       const form = new FormData();
       form.append('chunk', blob.slice(start, Math.min(blob.size, start + CHUNK_SIZE)), 'part');
-      form.append('sessionToken', sessionToken!);
+      form.append('sessionToken', item.sessionToken ?? sessionToken!);
+      form.append('captureId', item.id);
       form.append('uploadId', uploadId!);
       form.append('index', String(index));
       form.append('total', String(total));
@@ -3131,7 +3204,7 @@
     }
     const complete = () => fetch('/api/photos/complete', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
-      body: JSON.stringify({ sessionToken, uploadId, total, ext: item.ext, mediaType: item.mediaType, source: item.source, challengeId: item.challengeId, captureOrientation: item.captureOrientation, captureShape: item.captureShape, captureRotation: item.captureRotation, captureTurn: item.captureTurn, capturedAt: item.capturedAt, durationSecs: item.durationSecs }),
+      body: JSON.stringify({ sessionToken: item.sessionToken ?? sessionToken, captureId: item.id, uploadId, total, ext: item.ext, mediaType: item.mediaType, source: item.source, challengeId: item.challengeId, captureOrientation: item.captureOrientation, captureShape: item.captureShape, captureRotation: item.captureRotation, captureTurn: item.captureTurn, capturedAt: item.capturedAt, durationSecs: item.durationSecs }),
     });
     let res = await complete();
     if (res.status === 409) {   // server missing some parts → resend them, then retry complete
@@ -3240,6 +3313,30 @@
     if (!item) return;
     uploading = true; item.status = 'uploading'; item.progress = 0; queue = queue;
     try {
+      await persisting.get(item.id); // Never delete a receipt before its IndexedDB write settles.
+      if (recoveryEnabled && ev && (item.sessionToken ?? sessionToken)?.startsWith('offline_')) {
+        const admitted = await admitProvisional(ev.joinCode);
+        const oldToken = item.sessionToken ?? sessionToken;
+        const recoveredMe = { ...provisionalMe(), ...admitted,
+          participant: { ...admitted.participant, photosTaken: Math.max(0, ev.maxPhotos - admitted.photosRemaining), email: null } };
+        // Cache the admitted identity before persisting its token. An interruption at any later
+        // await can then reopen the camera even while the origin is still intermittent.
+        rememberGuest(admitted.sessionToken, recoveredMe, true);
+        sessionToken = admitted.sessionToken;
+        saveSession(ev.joinCode, sessionToken);
+        serverRemaining = admitted.photosRemaining;
+        for (const queued of queue) if ((queued.sessionToken ?? oldToken) === oldToken) queued.sessionToken = sessionToken;
+        // Rewrite durable queue ownership before upload. The nonce remains so an interrupted
+        // remap can repeat admission safely without creating another participant.
+        await Promise.all(persisting.values());
+        const stored = await listCaptures(ev.joinCode);
+        for (const capture of stored) if (capture.sessionToken === oldToken)
+          await putCapture({ ...capture, sessionToken });
+        finishProvisional(ev.joinCode);
+        const me = await liveMe(sessionToken); rememberGuest(sessionToken, me);
+        void syncRecoveryContact(ev.joinCode, sessionToken);
+        recoveryState.set(false);
+      }
       const data = (item.blob.size > CHUNK_SIZE || item.uploadId) ? await uploadChunked(item) : await uploadSingle(item);
       item.status = 'done'; item.progress = 100;
       nowTick = Date.now();   // a fresh shot is deletable, so wake the window ticker
@@ -3248,6 +3345,7 @@
       // optimistic count during a burst, so only ever take the lower of the two.
       // Authoritative: this already accounts for every uploaded photo including this one.
       serverRemaining = data.photosRemaining;
+      if (sessionToken && recoveryEnabled) rememberRemaining(sessionToken, data.photosRemaining);
       // A mission just landed. Tick it locally rather than refetching — the server derives progress
       // from the photos table, so a reload agrees with this; doing it here just avoids a round trip
       // before the guest sees their own list update.
@@ -3259,6 +3357,7 @@
         missionsDoneLocal = [...missionsDoneLocal, item.challengeId];
       }
       if (item.challengeId && armed === item.challengeId) armed = null;
+      persisting.delete(item.id);
       delCapture(item.id).catch(() => {});   // uploaded → drop from the offline queue
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : 'Upload failed';
@@ -3268,9 +3367,8 @@
       // has actually allowed.
       if (/no shots remaining/i.test(errMsg)) {
         serverRemaining = 0;
-        queue = queue.filter((q) => q.id !== item.id);   // it can never succeed
+        item.status = 'error'; item.error = 'Roll full — saved here; save a copy or ask the host'; item.blocked = true; queue = queue;
         untickMission(item.challengeId);                 // …so its tick would be a lie
-        delCapture(item.id).catch(() => {});
         uploading = false;
         showToast(canBuyShots || canAskHost
           ? "That's your roll — ask the host or top up below"
@@ -3287,11 +3385,16 @@
          So: no toast, no error state, and NOT counted against MAX_UPLOAD_RETRIES — giving up is
          exactly wrong for a condition that ends on its own. The shot sits in the queue and goes up
          when the database can take it, which is what the guest was promised. */
-      if (e instanceof ApiError && e.status === 503) {
+      if (temporaryFailure(e)) {
+        if (recoveryEnabled) recoveryState.set(true);
         item.status = 'pending'; item.error = undefined;
         queue = queue; uploading = false;
         setTimeout(() => processQueue(), 20_000);
         return;
+      }
+      if (e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429) {
+        item.status = 'error'; item.error = `${errMsg} — kept here; save a copy or contact the host`;
+        item.blocked = true; queue = queue; uploading = false; processQueue(); return;
       }
       item.retries = (item.retries || 0) + 1;
       // The error OBJECT, not a sentence made out of it, and what happened next.
@@ -3337,7 +3440,7 @@
   // Re-queue a failed upload (manual retry from the queue drawer).
   function retryItem(item: QueueItem) {
     if (item.status !== 'error') return;
-    item.status = 'pending'; item.error = undefined; item.retries = 0;   // fresh round of auto-retries
+    item.status = 'pending'; item.error = undefined; item.retries = 0; item.blocked = false;   // fresh round of auto-retries
     queue = queue;
     processQueue();
   }
@@ -3493,7 +3596,7 @@
 
     } catch {
 
-      clearSession(ev.joinCode);   // stale token — let them join properly
+      // Never discard a guest identity merely because the origin is unavailable.
 
       return false;
 
@@ -3534,7 +3637,7 @@
 <svelte:window on:click={() => (confirmingDeleteId = null)} on:pointerdown={ensureTilt} />
 
 {#if fatal}
-  <div class="center"><div class="msg"><span class="big">😕</span><h2>{fatal}</h2><a class="btn ghost" href="/">← Home</a></div></div>
+  <div class="center"><div class="msg"><span class="big">😕</span><h2>{fatal}</h2>{#if recoveryEnabled}<p><a class="btn ghost" href={`/guest/saved/${encodeURIComponent(identifier)}`}>Saved captures on this device</a></p>{/if}<a class="btn ghost" href="/">← Home</a></div></div>
 {:else if screen === 'loading'}
   <div class="center"><div class="spinner"></div></div>
 {:else if screen === 'upcoming'}
@@ -4562,6 +4665,12 @@
 
 {#if showFeedback}<FeedbackModal context="Camera ({ev?.joinCode ?? ''})" eventCode={ev?.joinCode ?? ''} on:close={() => (showFeedback = false)} />{/if}
 
+{#if storageFailure}
+  <div class="guest-recovery-note" role="alert">This device could not save a capture. Keep this page open and save a copy from the upload queue.</div>
+{:else if recoveryEnabled && $recoveryState}
+  <div class="guest-recovery-note" role="status">Uploads are paused. Keep your photos on this device and reopen this camera to send them when Snapdini returns.</div>
+{/if}
+
 <!-- Upload queue — shared across the camera and gallery screens; opened on demand. -->
 {#if drawerOpen}
   <div class="drawer">
@@ -4574,6 +4683,7 @@
           {#if qmeta(item)}<span class="qmeta">{qmeta(item)}</span>{/if}
         </span>
         <span class="qstatus {item.status}">{item.status === 'error' ? item.error : item.status === 'uploading' ? `${item.progress ?? 0}%` : item.status}</span>
+        {#if item.status !== 'done'}<button class="btn ghost sm" on:click={() => saveToDeviceCopy(item.blob, item.ext)}>Save a copy</button>{/if}
         {#if item.status === 'error'}<button class="btn ghost sm" on:click={() => retryItem(item)}>Retry</button>{/if}
       </div>
     {/each}
@@ -4582,6 +4692,7 @@
 {/if}
 
 <style>
+  .guest-recovery-note { position: fixed; top: 0; left: 0; right: 0; z-index: 500; padding: 10px 14px; background: #4a3a10; color: #fff4d6; font-size: .85rem; text-align: center; }
   .center { position: fixed; inset: 0; display: flex; align-items: safe center; justify-content: center; padding: 24px; background: var(--bg); overflow-y: auto; }
   .msg { text-align: center; } .big { font-size: 56px; display: block; margin-bottom: 12px; }
   .muted { color: var(--text-muted); }

@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "build:guest": "vite build --config vite.guest.config.ts",
+    "preview:guest": "vite preview --config vite.guest.config.ts",
     "preview": "vite preview",
     "sync": "svelte-kit sync",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --tsgo",

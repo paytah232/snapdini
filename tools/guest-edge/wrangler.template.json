@@ -1,0 +1,16 @@
+{
+  "name": "snapdini-guest-dev",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-16",
+  "workers_dev": true,
+  "preview_urls": false,
+  "routes": [],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "html_handling": "none",
+    "not_found_handling": "none",
+    "run_worker_first": ["/api/*", "/uploads/*"]
+  },
+  "vars": { "DEPLOYMENT_LANE": "dev", "APP_ORIGIN": "https://development.example.invalid" }
+}

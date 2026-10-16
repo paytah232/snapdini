@@ -25,6 +25,7 @@ sw.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== sw.location.origin) return;
+  if (url.pathname.startsWith('/guest/')) return;
   // Dynamic — must hit the network (and is what queues offline): API + media.
   if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/uploads/')) return;
   event.respondWith(handle(req, url));

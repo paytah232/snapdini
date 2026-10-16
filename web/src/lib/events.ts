@@ -714,9 +714,9 @@ export type GuestCardStatus = {
  *  card in their hand disagreeing with the app is the one thing printing several cards is meant to
  *  avoid, so this argument is the fix, and the server keeps the last word on whether the key is
  *  real. */
-export const joinEvent = (joinCode: string, name: string, email?: string, set?: string) =>
+export const joinEvent = (joinCode: string, name: string, email?: string, set?: string, joinAttempt?: string) =>
   postJson<{ participant: { id: string; name: string }; sessionToken: string; joinCode: string; photosRemaining: number; eventName: string; noFlash?: boolean; recovered?: boolean; canBuyShots?: boolean; canAskHost?: boolean; faceMatching?: boolean; faceEnrolled?: boolean; feedbackGiven?: boolean; emailFromPayment?: boolean; wantsPhotos?: boolean } & GuestMissions>(
-    '/api/participants', { joinCode, name, email: email || undefined, set: set || undefined });
+    '/api/participants', { joinCode, name, email: email || undefined, set: set || undefined, joinAttempt });
 
 /** The guest saying which card they are holding — or, with `null`, that they have not got one, in
  *  which case the round-robin's answer stands. Answerable once: the server refuses a second attempt

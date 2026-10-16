@@ -209,6 +209,8 @@ services:
       context: ..
       dockerfile: web/Dockerfile
     container_name: snapdini-dev-web
+    volumes:
+      - ./data/guest-recovery:/guest-events:ro
     restart: unless-stopped
     logging: *default-logging
     environment:
@@ -248,6 +250,24 @@ services:
       - ANALYTICS_EXCLUDE_EMAILS=${ANALYTICS_EXCLUDE_EMAILS:-}
     depends_on:
       - app
+
+  recovery-publisher:
+    image: snapdini-dev-app
+    container_name: snapdini-dev-recovery-publisher
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["node", "/tools/guest-recovery/publish.mjs"]
+    volumes:
+      - ../tools/guest-recovery:/tools/guest-recovery:ro
+      - ./data/guest-recovery:/recovery
+    environment:
+      - GUEST_RECOVERY_ENV=dev
+      - DATABASE_URL=${DATABASE_URL:-postgres://snapdini:snapdini@db:5432/snapdini}
+      - INTERNAL_API_BASE=http://app:3000
+      - OUTPUT_DIR=/recovery
+    depends_on:
+      app:
+        condition: service_healthy
 
   db:
     image: postgres:16-alpine

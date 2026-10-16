@@ -13,7 +13,9 @@ COPY web/ ./
 # Sibling of the web root, mirroring the repo, so `../../../shared/caption` means the same thing in
 # here as it does in the checkout. Bundled into build/ by Vite, so it is not needed at runtime.
 COPY shared/ /shared/
-RUN npm run build && npm prune --omit=dev
+RUN npm run build && npm run build:guest \
+    && mkdir -p build/client/guest && cp -a guest-dist/. build/client/guest/ \
+    && npm prune --omit=dev
 
 # Same image as the build stage above; see the note there before changing either.
 FROM node:22-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85

@@ -27,9 +27,9 @@ describe('an upload refused because the database is read-only', () => {
 
   it('pauses rather than failing: no toast, no error state, no retry limit', () => {
     const c = CAMERA.slice(CAMERA.indexOf('async function processQueue'));
-    expect(c).toMatch(/e instanceof ApiError && e\.status === 503/);
-    const branch = c.slice(c.indexOf('e instanceof ApiError && e.status === 503'));
-    const body = branch.slice(0, branch.indexOf('item.retries ='));
+    expect(c).toMatch(/if \(temporaryFailure\(e\)\)/);
+    const branch = c.slice(c.indexOf('if (temporaryFailure(e))'));
+    const body = branch.slice(0, branch.indexOf('if (e instanceof ApiError'));
     // The three things that make it a pause. A toast here would argue with the banner; an error
     // state would show the guest a failure; counting retries would make it eventually give up on a
     // condition that ends by itself.
