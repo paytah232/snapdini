@@ -5,7 +5,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { ZipArchive } from 'archiver';
-import { v4 as uuidv4 } from 'uuid';
+import { v4 as uuidv4, v5 as uuidv5 } from 'uuid';
 import { and, asc, count, desc, eq, gt, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { readSets, isOfferedChallenge } from '../challenges';
@@ -417,6 +417,40 @@ async function participantForUpload(sessionToken: string): Promise<UploadPartici
   return p ?? null;
 }
 
+// A retry carries the same browser queue id. Namespace it by the authenticated roll so a
+// guessed/reused id cannot acknowledge another guest's photograph. The photo primary key is
+// the durable receipt; older clients that omit captureId retain random ids.
+export function capturePhotoId(raw: unknown, p: { eventId: string; id: string }): string | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(raw)) {
+    const error = new Error('Invalid captureId') as Error & { status: number };
+    error.status = 400;
+    throw error;
+  }
+  return uuidv5(JSON.stringify([p.eventId, p.id, raw]), '16e1aee4-177e-4f3e-a313-9cb15ecda68a');
+}
+
+async function uploadedCapture(p: UploadParticipant, photoId: string | undefined, conn: Pick<typeof db, 'select'> = db) {
+  if (!photoId) return null;
+  // The participant snapshot used to authenticate can predate a winning concurrent upload.
+  // Read its counter and current entitlement WITH the receipt, in one database snapshot.
+  const [photo] = await conn.select({ id: photos.id, status: photos.status,
+    photosTaken: participants.photosTaken, extraPhotos: participants.extraPhotos,
+    maxPhotos: events.maxPhotos, moderationEnabled: events.moderationEnabled,
+  }).from(photos).innerJoin(participants, eq(participants.id, photos.participantId))
+    .innerJoin(events, eq(events.id, photos.eventId))
+    .where(and(eq(photos.id, photoId), eq(photos.participantId, p.id), eq(photos.eventId, p.eventId)));
+  return photo ?? null;
+}
+
+function captureReceipt(photo: NonNullable<Awaited<ReturnType<typeof uploadedCapture>>>) {
+  return {
+    success: true, photoId: photo.id, status: photo.status,
+    pendingModeration: !!photo.moderationEnabled && photo.status === 'pending',
+    photosRemaining: remainingFor(photo),
+  };
+}
+
 /* THE NETWORK GRACE PERIOD IS GONE, DELIBERATELY.
  *
  *  A 24-hour ceiling used to live here, described as "a grace period for the NETWORK" — right about
@@ -812,7 +846,7 @@ export function readShape(raw: unknown, allowed: string[]): string | null {
 async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo: boolean,
                               source: 'capture' | 'upload' = 'capture', challengeRaw?: unknown,
                               orientationRaw?: unknown, shapeRaw?: unknown, rotationRaw?: unknown,
-                              turnRaw?: unknown, capturedAtRaw?: unknown) {
+                              turnRaw?: unknown, capturedAtRaw?: unknown, captureId?: string) {
   const baseName = path.basename(stagedPath);                       // <uuid>.ext
   // The event's folder, checked out of the store with the staged file adopted into it. On the local
   // driver that IS the folder the file is served from, so this is the same atomic rename it always
@@ -935,7 +969,7 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     ? String(challengeRaw).trim() : null;
 
   const status = 'pending';
-  const photoId = uuidv4();
+  const photoId = captureId ?? uuidv4();
   // Resolved ONCE. It was read twice — once for the column, once for the crop below — which is two
   // chances for the stored shape and the shape that was actually cut to disagree.
   const shape = readShape(shapeRaw, allowedShapes(p.aspectRatios));
@@ -962,6 +996,14 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
   // negative column can never shrink the roll below what the event sold.
   const eventMaxPhotos = sql<number>`(select ${events.maxPhotos} from ${events} where ${events.id} = ${participants.eventId})`;
   const claim = await db.transaction(async (tx) => {
+    if (captureId) {
+      // Recheck after taking the same lock as the allowance UPDATE: two requests can both have
+      // passed their early lookup before either one committed.
+      await tx.select({ id: participants.id }).from(participants)
+        .where(eq(participants.id, p.id)).for('update');
+      const duplicate = await uploadedCapture(p, captureId, tx);
+      if (duplicate) return { duplicate };
+    }
     const [row] = await tx.update(participants)
       .set({ photosTaken: sql`${participants.photosTaken} + 1` })
       .where(and(
@@ -1030,6 +1072,14 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     invalidateListing(p.eventId);
     const e = new Error('No shots remaining') as Error & { status?: number };
     e.status = 403; throw e;
+  }
+  if ('duplicate' in claim) {
+    cancelled = true;
+    await drain(derivations);
+    await co.remove([baseName, ...derivedNames(baseName)]);
+    invalidateListing(p.eventId);
+    await co.release();
+    return captureReceipt(claim.duplicate);
   }
   // Face matching, if the host enabled it and anyone has enrolled. Deliberately not awaited:
   // it runs against the thumbnail after this response, and a slow or dead ML container must
@@ -2300,11 +2350,16 @@ router.post('/', upload.single('photo'), async (req: Request, res: Response) => 
 
   const participant = await participantForUpload(sessionToken);
   if (!participant) { fs.unlinkSync(req.file.path); return res.status(403).json({ error: 'Invalid session' }); }
+  let captureId: string | undefined;
+  try { captureId = capturePhotoId(req.body?.captureId, participant); }
+  catch { fs.unlinkSync(req.file.path); return res.status(400).json({ error: 'Invalid captureId' }); }
+  const duplicate = await uploadedCapture(participant, captureId);
+  if (duplicate) { fs.unlinkSync(req.file.path); return res.json(captureReceipt(duplicate)); }
   const gate = gateUpload(participant, isVideo, capturedAtFor(req.body?.capturedAt, participant, Date.now()), req.body);
   if (gate) { fs.unlinkSync(req.file.path); return res.status(gate.status).json({ error: gate.error }); }
 
   try {
-    return res.json(await finalizeUpload(participant, req.file.path, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId, req.body?.captureOrientation, req.body?.captureShape, req.body?.captureRotation, req.body?.captureTurn, req.body?.capturedAt));
+    return res.json(await finalizeUpload(participant, req.file.path, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId, req.body?.captureOrientation, req.body?.captureShape, req.body?.captureRotation, req.body?.captureTurn, req.body?.capturedAt, captureId));
   } catch (e) {
     // A `status` on the error means finalizeUpload raised it FOR the guest ("Video is too long —
     // this server accepts clips up to 30s"), so its message is the message and must survive. An
@@ -2418,6 +2473,11 @@ router.post('/complete', async (req: Request, res: Response) => {
 
   const participant = await participantForUpload(sessionToken);
   if (!participant) return res.status(403).json({ error: 'Invalid session' });
+  let captureId: string | undefined;
+  try { captureId = capturePhotoId(req.body?.captureId, participant); }
+  catch { return res.status(400).json({ error: 'Invalid captureId' }); }
+  const duplicate = await uploadedCapture(participant, captureId);
+  if (duplicate) return res.json(captureReceipt(duplicate));
 
   // Two questions, two answers, and only one of them may be taken on trust.
   //
@@ -2459,7 +2519,7 @@ router.post('/complete', async (req: Request, res: Response) => {
   wipe();   // parts no longer needed
 
   try {
-    return res.json(await finalizeUpload(participant, staged, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId, req.body?.captureOrientation, req.body?.captureShape, req.body?.captureRotation, req.body?.captureTurn, req.body?.capturedAt));
+    return res.json(await finalizeUpload(participant, staged, isVideo, req.body?.source === 'upload' ? 'upload' : 'capture', req.body?.challengeId, req.body?.captureOrientation, req.body?.captureShape, req.body?.captureRotation, req.body?.captureTurn, req.body?.capturedAt, captureId));
   } catch (e) {
     // A `status` on the error means finalizeUpload raised it FOR the guest ("Video is too long —
     // this server accepts clips up to 30s"), so its message is the message and must survive. An

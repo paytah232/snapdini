@@ -97,6 +97,7 @@ function chain<T>(produce: (c: any) => T): any {
     returning() { return o; },
     limit() { return o; },
     orderBy() { return o; },
+    for() { return o; },
     innerJoin() { return o; },
     leftJoin() { return o; },
     onConflictDoNothing() { return o; },
@@ -516,7 +517,10 @@ const ADVISORY = new Set(['durationSecs']);
 /** Inside the fixture event and a few minutes old — the case the grace window exists to admit. */
 const PLAUSIBLE_SHUTTER = Date.now() - 5 * 60_000;
 
-const SENT: Record<string, { sent: unknown; stored: unknown }> = {
+const SENT: Record<string, { sent: unknown; stored: unknown; column?: string }> = {
+  // The browser nonce is not a public photo id. The server derives a stable, roll-scoped UUID
+  // from it and stores that as id; keep a fixed expected UUID to pin this wire-to-row boundary.
+  captureId: { sent: 'boundary-capture-123', stored: '4cec4d79-1035-5c79-8d37-4cd2022fbe38', column: 'id' },
   source:             { sent: 'upload',    stored: 'upload' },
   mediaType:          { sent: 'photo',     stored: 'photo' },
   challengeId:        { sent: 'wear-a-hat', stored: 'wear-a-hat' },
@@ -580,7 +584,7 @@ describe('the upload insert carries every field the camera sends', () => {
         const want = SENT[field];
         assert.ok(want, `the camera now sends "${field}" and this test does not know what it should `
           + 'store. Add it to SENT — and check the server reads it, which is the bug this file exists for.');
-        assert.equal(values[field], want.stored,
+        assert.equal(values[want.column ?? field], want.stored,
           `the camera sends ${field} on ${pathName} and the inserted row does not carry it`);
       }
     });

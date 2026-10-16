@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { v4 as uuidv4 } from 'uuid';
+import { createHash } from 'node:crypto';
 import { eq, or, and, count, sql, isNotNull } from 'drizzle-orm';
 import { db } from '../db';
 import { effectiveMaxPhotos, photosRemaining as remainingFor } from '../allowance';
@@ -192,12 +193,18 @@ export function recoveryAllowed(req: Request, res: Response, key: string): Promi
 // ── POST /api/participants — join an event ─────────────────────────────────────
 
 router.post('/', async (req: Request, res: Response) => {
-  const body = (req.body ?? {}) as { joinCode?: unknown; name?: unknown; email?: unknown };
+  const body = (req.body ?? {}) as { joinCode?: unknown; name?: unknown; email?: unknown; joinAttempt?: unknown };
   const joinCode = asText(body.joinCode);
   const name = asText(body.name);
   const participantEmail = asText(body.email);
   if (!joinCode || !name) return res.status(400).json({ error: 'joinCode and name are required' });
 
+  const joinAttempt = body.joinAttempt;
+  if (joinAttempt !== undefined && (typeof joinAttempt !== 'string' || !/^[a-f0-9]{64}$/.test(joinAttempt)))
+    return res.status(400).json({ error: 'Invalid join attempt' });
+  // Recovery attempts use a 256-bit browser secret. It is never a URL parameter or trusted
+  // admission: the first request still passes normal event/cap gates. The derived token is
+  // registered only after admission, and later email recovery rotates/revokes it as usual.
   const cleanEmail = participantEmail ? participantEmail.trim().slice(0, 200) : null;
   if (cleanEmail && !isEmail(cleanEmail))
     return res.status(400).json({ error: 'Enter a valid email address (or leave it blank)' });
@@ -212,6 +219,23 @@ router.post('/', async (req: Request, res: Response) => {
   const event = evRows.length < 2 ? evRows[0]
     : (evRows.find((e) => e.joinCode === joinCode.toUpperCase().trim()) ?? evRows[0]);
   if (!event) return res.status(404).json({ error: 'Event not found' });
+
+  const attemptedToken = typeof joinAttempt === 'string'
+    ? createHash('sha256').update(JSON.stringify(['guest-join-v1', event.id, joinAttempt])).digest('hex') : null;
+  const replyReplay = async (p: typeof participants.$inferSelect) => res.json({
+    participant: { id: p.id, name: p.name, photosTaken: p.photosTaken },
+    sessionToken: p.sessionToken, joinCode: event.joinCode, eventName: event.name,
+    photosRemaining: remainingFor({ maxPhotos: event.maxPhotos, extraPhotos: p.extraPhotos, photosTaken: p.photosTaken }),
+    faceMatching: faceMatchingAvailable() && !!event.faceMatchingEnabled, faceEnrolled: !!p.faceConsentAt,
+    noFlash: !!event.noFlash, canBuyShots: !!event.guestMayBuyShots, canAskHost: !!event.guestMayRequest,
+    ...(await missionsFor(event.challenges, p.challengeSet, p.id)),
+    ...setStatusFor({ challenges: event.challenges, posterConfig: event.posterConfig,
+      challengeSet: p.challengeSet, challengeSetSource: p.challengeSetSource }),
+  });
+  if (attemptedToken) {
+    const [prior] = await db.select().from(participants).where(and(eq(participants.sessionToken, attemptedToken), eq(participants.eventId, event.id)));
+    if (prior) return replyReplay(prior);
+  }
 
   const now = Date.now();
   if (event.startsAt && now < event.startsAt)
@@ -250,7 +274,7 @@ router.post('/', async (req: Request, res: Response) => {
       // event means no new session token, so the roll is not handed over. See recoveryLimiter.
       if (!await recoveryAllowed(req, res, recoveryKey(event.id, cleanEmail)))
         return res.status(429).json({ error: 'Too many attempts to rejoin with that email — please wait a few minutes and try again.' });
-      const sessionToken = newToken();
+      const sessionToken = attemptedToken ?? newToken();
       const newName = name.trim().slice(0, 40) || existing.name;
       await db.update(participants).set({ sessionToken, name: newName }).where(eq(participants.id, existing.id));
       // A rename of a roll that already has photos on it is the takeover shape — alert ops.
@@ -290,7 +314,7 @@ router.post('/', async (req: Request, res: Response) => {
   if (billingEnabled && !event.paid)
     return res.status(402).json({ error: "This event isn't active yet — the organizer needs to finish setting it up." });
 
-  const sessionToken = newToken();
+  const sessionToken = attemptedToken ?? newToken();
 
   // The mission cards this event hands out, and the one this guest's printed card asked for
   // (?set=b on the QR). Parsed out here; USED inside the transaction, where the join count the
@@ -349,13 +373,17 @@ router.post('/', async (req: Request, res: Response) => {
   // the lock existed: a host who buys a bigger tier mid-rush should be believed immediately.
   const seat = await db.transaction(async (tx) => {
     let cap: number | null = null;
-    if (billingEnabled) {
+    if (billingEnabled || attemptedToken) {
       const [locked] = await tx.select({ guestCap: events.guestCap })
         .from(events).where(eq(events.id, event.id)).for('no key update');
       // Deleted while this join waited for the lock. The foreign key below would refuse the insert
       // anyway; answering the same 404 the lookup above would have is the honest version of that.
       if (!locked) return { gone: true } as const;
-      cap = locked.guestCap;
+      if (billingEnabled) cap = locked.guestCap;
+      if (attemptedToken) {
+        const [prior] = await tx.select().from(participants).where(eq(participants.sessionToken, attemptedToken));
+        if (prior) return { replay: prior } as const;
+      }
     }
 
     // ONE count, shared by the cap and the round-robin. They were two identical queries; inside
@@ -394,6 +422,7 @@ router.post('/', async (req: Request, res: Response) => {
 
   // Answered out here, after the commit — a response written inside the transaction would hold the
   // lock for as long as it took to build.
+  if ('replay' in seat && seat.replay) return replyReplay(seat.replay);
   if ('gone' in seat) return res.status(404).json({ error: 'Event not found' });
   if ('full' in seat) return res.status(403).json({ error: `This event is full (max ${seat.full} guests).` });
 
