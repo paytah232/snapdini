@@ -75,3 +75,6 @@ Run isolated checks with no account credentials or network calls:
 ```sh
 node --test tools/guest-edge/edge.test.mjs
 ```
+
+The extensionless `/guest/shell` is an identical HTML alias with an explicit HTML content type.
+It avoids Cloudflare rejecting index.html rewrites as loops despite html_handling:none.

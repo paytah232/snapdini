@@ -42,6 +42,9 @@ export async function prepare({ accountId, origin, lane, guestDir = path.join(ro
     await mkdir(guest, { recursive: true });
     await copyGuest(guestDir, guest);
     await readFile(path.join(guest, 'index.html')); // A partial build cannot be deployed.
+    // Cloudflare's redirect validator can reject rewrites to index.html as loops
+    // even with html_handling:none. An extensionless HTML alias avoids that check.
+    await copyFile(path.join(guest, 'index.html'), path.join(guest, 'shell'));
     await mkdir(path.join(guest, 'events'));
     let snapshots = 0;
     const { publicCameraEvent } = await import('../guest-recovery/publish.mjs');
@@ -60,7 +63,7 @@ export async function prepare({ accountId, origin, lane, guestDir = path.join(ro
       snapshots++;
     }
     await writeFile(path.join(publicDir, '_redirects'),
-      '/guest/join/* /guest/index.html 200\n/guest/e/* /guest/index.html 200\n/guest/saved/* /guest/index.html 200\n');
+      '/guest/join/* /guest/shell 200\n/guest/e/* /guest/shell 200\n/guest/saved/* /guest/shell 200\n');
     await writeFile(path.join(publicDir, '_headers'), [
       '/guest/*',
       '  X-Content-Type-Options: nosniff',
@@ -69,15 +72,21 @@ export async function prepare({ accountId, origin, lane, guestDir = path.join(ro
       '  X-Robots-Tag: noindex, nofollow',
       '  Permissions-Policy: camera=(self), microphone=(self), geolocation=()',
       "  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      '/guest/shell',
+      '  Content-Type: text/html; charset=utf-8',
+      '  Cache-Control: no-cache',
       '/guest/index.html',
       '  Cache-Control: no-cache',
       '/guest/sw.js',
       '  Cache-Control: no-cache',
       '/guest/join/*',
+      '  Content-Type: text/html; charset=utf-8',
       '  Cache-Control: no-cache',
       '/guest/e/*',
+      '  Content-Type: text/html; charset=utf-8',
       '  Cache-Control: no-cache',
       '/guest/saved/*',
+      '  Content-Type: text/html; charset=utf-8',
       '  Cache-Control: no-cache',
       '/guest/assets/*',
       '  Cache-Control: public, max-age=31536000, immutable',

@@ -84,14 +84,36 @@ test('returning guest keeps session and saved capture when origin fails and retu
   await expect(shutter).toBeEnabled();
   await expect.poll(() => page.locator('.viewfinder video').evaluate((v: HTMLVideoElement) => v.videoWidth)).toBeGreaterThan(0);
   const token = await page.evaluate(code => localStorage.getItem(`session_${code}`), code);
-  await page.route('**/api/**', route => route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }));
+  let uploadAttempts = 0;
+  await page.route('**/api/**', route => {
+    const upload = new URL(route.request().url()).pathname === '/api/photos';
+    if (upload) uploadAttempts++;
+    return route.fulfill({ status: upload ? 429 : 503, contentType: 'application/json', body: '{}' });
+  });
   // A newly created event may not have reached the independent publisher yet.
   await page.route(`**/guest/events/${code}.json`, route => route.fulfill({ status: 404, body: 'Not published yet' }));
   await shutter.click(); await expect.poll(async () => (await queued(page)).length).toBe(1);
+  await expect.poll(() => uploadAttempts).toBeGreaterThanOrEqual(2);
+  await expect(page.getByRole('status').filter({ hasText: 'Photos are waiting in the queue' })).toHaveCount(1);
+  await expect(page.getByText(/trying again in \d+s/)).toHaveCount(0);
   await page.reload(); await expect(shutter).toBeEnabled();
   await expect.poll(() => page.locator('.viewfinder video').evaluate((v: HTMLVideoElement) => v.videoWidth)).toBeGreaterThan(0);
   expect(await page.evaluate(code => localStorage.getItem(`session_${code}`), code)).toBe(token);
   await page.unroute('**/api/**'); await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect.poll(async () => (await queued(page)).length, { timeout: 40_000 }).toBe(0);
+  // Exercise a genuinely offline navigation: mocked API failures alone cannot
+  // detect an installed worker that forgot to cache its HTML shell.
+  await page.evaluate(() => navigator.serviceWorker.ready.then(() => undefined));
+  await page.reload();
+  await page.context().setOffline(true);
+  try {
+    await page.reload();
+    await expect(shutter).toBeEnabled();
+    await expect.poll(() => page.locator('.viewfinder video').evaluate((v: HTMLVideoElement) => v.videoWidth)).toBeGreaterThan(0);
+    await shutter.click();
+    await expect.poll(async () => (await queued(page)).length).toBe(1);
+  } finally { await page.context().setOffline(false); }
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
   await expect.poll(async () => (await queued(page)).length, { timeout: 40_000 }).toBe(0);
 });
 

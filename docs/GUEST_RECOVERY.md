@@ -47,8 +47,11 @@ A first-time visit still needs internet to obtain the independent shell. Device
 queues are not a backup; browser eviction, clearing site data and device failure
 can remove them. Physical iPhone/Android acceptance remains necessary.
 
-Cloudflare hosting is a separate deployment step. Until configured, the dev
-artifact and snapshots still share the dev server's availability. The existing
+The isolated Cloudflare dev Worker hosts an independent copy of the guest
+artifact and public snapshots on its workers.dev hostname. Event snapshots
+currently require regenerating and redeploying the package after settings change;
+new dev events will work online before their outage snapshots are published.
+See `tools/guest-edge/README.md` for the deployment steps. The existing
 failover Worker, its KV budget and checks are unchanged. Production rollout must
 include trusted snapshot publication, same-release asset promotion after origin
 health checks, and outage tests from an independent origin. Production must not

@@ -2,7 +2,7 @@
 export function guestServiceWorker(version: string, assets: string[]): string {
   return `
 const CACHE = ${JSON.stringify(`snapdini-guest-${version}`)};
-const ASSETS = ${JSON.stringify(assets)};
+const ASSETS = ${JSON.stringify([...new Set(['/guest/index.html', ...assets])])};
 const SHELL = '/guest/index.html';
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));

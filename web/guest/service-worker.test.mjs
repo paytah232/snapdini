@@ -7,14 +7,18 @@ const worker = readFileSync(new URL('../guest-dist/sw.js', import.meta.url), 'ut
 function harness() {
   const listeners = {};
   const cachedShell = new Response('<html>cached camera</html>');
-  const cache = { match: async key => key === '/guest/index.html' ? cachedShell : undefined, addAll: async () => {} };
+  const cached = new Map();
+  const cache = {
+    match: async key => cached.get(key),
+    addAll: async keys => { for (const key of keys) cached.set(key, key === '/guest/index.html' ? cachedShell : new Response('asset')); },
+  };
   vm.runInNewContext(worker, {
     self: { location: { origin: 'https://example.test' }, addEventListener: (type, handler) => { listeners[type] = handler; } },
     caches: { open: async () => cache },
     URL,
     fetch: async () => { throw new Error('offline'); },
   });
-  return { listeners, cachedShell };
+  return { listeners, cachedShell, cached };
 }
 function request(listeners, pathname, mode = 'cors') {
   let response;
@@ -22,7 +26,11 @@ function request(listeners, pathname, mode = 'cors') {
   return response;
 }
 test('offline guest deep links recover the camera shell', async () => {
-  const { listeners, cachedShell } = harness();
+  const { listeners, cachedShell, cached } = harness();
+  let installed;
+  listeners.install({ waitUntil: promise => { installed = promise; } });
+  await installed;
+  assert.ok(cached.has('/guest/index.html'), 'install must cache the shell, not assume it already exists');
   for (const path of ['/guest/', '/guest/join/ABCDEFGH', '/guest/e/wedding', '/guest/saved/ABCDEFGH']) {
     assert.equal(await request(listeners, path, 'navigate'), cachedShell);
   }

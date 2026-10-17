@@ -534,6 +534,7 @@
   }
 
   let queue: QueueItem[] = [];
+  let uploadWaiting = false;
   let uploading = false;
   let capturing = false;          // one capture at a time (guards rapid double-taps)
   const iosDevice = isIOS();      // decided once: the control it hides must not flicker
@@ -665,6 +666,7 @@
   let allowDownloads = true;
 
   $: pendingCount = queue.filter((q) => q.status !== 'done').length;
+  $: if (!pendingCount) uploadWaiting = false;
   /** Still going, versus stopped and waiting for a person. pendingCount lumps them together, which
    *  is right for a badge — "there is something in the queue" — and wrong for a sentence: telling a
    *  guest a capture is "still uploading" when it has actually given up is the one message that
@@ -3070,7 +3072,7 @@
       }));
       if (restored.length) {
         queue = [...restored, ...queue];
-        showToast(`${restored.length} saved photo${restored.length > 1 ? 's' : ''} still uploading…`);
+        uploadWaiting = true;
         processQueue();
       }
     } catch {
@@ -3386,6 +3388,7 @@
          exactly wrong for a condition that ends on its own. The shot sits in the queue and goes up
          when the database can take it, which is what the guest was promised. */
       if (temporaryFailure(e)) {
+        uploadWaiting = true;
         if (recoveryEnabled) recoveryState.set(true);
         item.status = 'pending'; item.error = undefined;
         queue = queue; uploading = false;
@@ -3396,6 +3399,7 @@
         item.status = 'error'; item.error = `${errMsg} — kept here; save a copy or contact the host`;
         item.blocked = true; queue = queue; uploading = false; processQueue(); return;
       }
+      uploadWaiting = true;
       item.retries = (item.retries || 0) + 1;
       // The error OBJECT, not a sentence made out of it, and what happened next.
       //
@@ -3417,7 +3421,6 @@
         item.status = 'pending'; item.error = undefined;
         queue = queue; uploading = false;
         const secs = Math.min(15, Math.ceil(1.5 * item.retries));
-        showToast(`Upload didn't go through — trying again in ${secs}s…`);
         setTimeout(() => processQueue(), secs * 1000);
         return;
       }
@@ -3431,7 +3434,6 @@
       // is a reactive declaration over pendingUploads, so `queue = queue` below recomputed straight
       // over it — and it would have been wrong if it had landed: moving this item to 'error' already
       // drops it out of pendingUploads, so the shot comes back on its own and the bump double-counted.
-      showToast('Still can’t upload — your photo is saved; open the queue to retry when you’re back online', true);
     }
     queue = queue; uploading = false;
     processQueue();
@@ -4667,8 +4669,10 @@
 
 {#if storageFailure}
   <div class="guest-recovery-note" role="alert">This device could not save a capture. Keep this page open and save a copy from the upload queue.</div>
+{:else if pendingCount && (uploadWaiting || (recoveryEnabled && $recoveryState))}
+  <div class="guest-recovery-note" role="status">Photos are waiting in the queue, saved on this device. Uploads will continue automatically when the connection returns. Keep this page open, or return to this camera on this device to finish uploading. You can also save a copy from the queue.</div>
 {:else if recoveryEnabled && $recoveryState}
-  <div class="guest-recovery-note" role="status">Uploads are paused. Keep your photos on this device and reopen this camera to send them when Snapdini returns.</div>
+  <div class="guest-recovery-note" role="status">Snapdini is temporarily unavailable. New photos will be saved on this device until it returns.</div>
 {/if}
 
 <!-- Upload queue — shared across the camera and gallery screens; opened on demand. -->

@@ -99,7 +99,11 @@ test('package has isolated dev configuration, direct asset navigation rewrites, 
   assert.equal(Object.hasOwn(config, 'kv_namespaces'), false);
   assert.equal(Object.hasOwn(config, 'triggers'), false);
   const redirects = await readFile(path.join(artifact, 'public/_redirects'), 'utf8');
-  for (const route of ['join', 'e', 'saved']) assert.ok(redirects.includes(`/guest/${route}/* /guest/index.html 200`));
+  for (const route of ['join', 'e', 'saved']) assert.ok(redirects.includes(`/guest/${route}/* /guest/shell 200`));
+  assert.equal(await readFile(path.join(artifact, 'public/guest/shell'), 'utf8'), '<html>guest</html>');
+  const headers = await readFile(path.join(artifact, 'public/_headers'), 'utf8');
+  for (const route of ['shell', 'join/*', 'e/*', 'saved/*'])
+    assert.ok(headers.includes(`/guest/${route}\n  Content-Type: text/html; charset=utf-8`));
   const json = await readFile(path.join(artifact, 'public/guest/events/EVENT123.json'), 'utf8');
   assert.equal(json.includes('must-not-deploy'), false);
   assert.equal(json.includes('ownerEmail'), false);
