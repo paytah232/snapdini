@@ -10,7 +10,7 @@ export function appOrigin(raw, lane) {
 
 const REQUEST_HEADERS = ['accept', 'accept-language', 'content-type', 'range', 'if-range',
   'if-none-match', 'if-modified-since', 'if-match', 'if-unmodified-since',
-  'x-session-token', 'x-visitor-token'];
+  'x-session-token', 'x-visitor-token', 'x-capture-id', 'x-upload-id', 'x-upload-index', 'x-upload-total'];
 
 export async function handle(request, env, fetchOrigin = fetch) {
   let origin;

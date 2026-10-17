@@ -30,7 +30,8 @@
   import { showToast, hideToast, toast } from '$lib/toast';
   import Toast from '$lib/components/Toast.svelte';
   import { reportClientError } from '$lib/report';
-  import { putCapture, delCapture, listCaptures, saveProgress, getProgress } from '$lib/captureStore';
+  import { appendCaptureEvidence, remapCaptureEvidence, flushCaptureEvidence, type CaptureMetadata } from '$lib/captureEvidence';
+  import { putCapture, delCapture, listCaptures, saveProgress, getProgress, acknowledgeCapture } from '$lib/captureStore';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import PhotoCard from '$lib/components/PhotoCard.svelte';
   import DownloadIcon from '$lib/components/DownloadIcon.svelte';
@@ -720,6 +721,7 @@
   };
 
   onMount(async () => {
+    void flushCaptureEvidence();
     // Before anything else: Chrome fires beforeinstallprompt once, early, and a listener attached
     // after it has fired never hears it — the offer would then be impossible for that visit.
     initInstall();
@@ -1176,6 +1178,7 @@
       if (screen === 'camera') stopCamera();
       stopEndWatch();
     } else {
+      autoRetry();
       resumeIfDead();   // and the watch comes back with it — see startEndWatch
       if (screen === 'camera') startEndWatch();   // liveness, not merely "is there a stream object"
 
@@ -3066,6 +3069,7 @@
         (s.sessionToken === sessionToken || (recoveryEnabled && s.sessionToken === `offline_${provisionalGuest(ev!.joinCode)?.nonce}`)));
       // Pull each capture's chunk-resume state so a big upload continues where it left off.
       const restored = await Promise.all(fresh.map(async (s) => {
+        await appendCaptureEvidence(s, 'local_saved'); // Reconstruct an interrupted blob-to-journal handoff.
         const p = await getProgress(s.id).catch(() => null);
         // Carried back out, or the restore is the thing that breaks the feature. `createdAt` is the
         // fallback for rows stored before capturedAt existed: it is written at the same instant, so
@@ -3089,6 +3093,7 @@
 
   // Auto-retry failed items when the connection / server come back.
   function autoRetry() {
+    void flushCaptureEvidence(); // Receipts must drain even after the photo queue is empty.
     let changed = false;
     for (const it of queue) if (it.status === 'error' && !it.blocked) { it.status = 'pending'; it.error = undefined; changed = true; }
     if (changed) queue = queue;
@@ -3105,6 +3110,18 @@
   const CHUNK_SIZE = 5 * 1024 * 1024;
   const CHUNK_RETRIES = 4;   // per-part retries (with backoff) before the item's overall retry kicks in
   const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  function captureMetadata(item: QueueItem): CaptureMetadata {
+    return { id: item.id, joinCode: ev?.joinCode ?? identifier,
+      sessionToken: item.sessionToken ?? sessionToken ?? '', blob: item.blob };
+  }
+  function evidenceFailure(error: unknown) {
+    const status = error instanceof ApiError ? error.status : 0;
+    return { httpStatus: status, reason: status > 0 ? 'http_error'
+      : error instanceof Error && /evidence|storage|indexeddb|quota/i.test(`${error.name} ${error.message}`) ? 'storage_error'
+      : error instanceof Error && /timed?\s*out/i.test(error.message) ? 'timeout'
+      : error instanceof Error && /network/i.test(error.message) ? 'network' : 'unknown' };
+  }
 
   // Single-shot upload (XHR so we get a live progress %). Resolves the server's { photosRemaining }.
   function uploadSingle(item: QueueItem): Promise<{ photosRemaining: number; photoId?: string }> {
@@ -3143,6 +3160,8 @@
       if (item.durationSecs != null) form.append('durationSecs', String(item.durationSecs));
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/photos');
+      xhr.setRequestHeader('X-Session-Token', item.sessionToken ?? sessionToken!);
+      xhr.setRequestHeader('X-Capture-Id', item.id);
       xhr.upload.onprogress = (e) => { if (e.lengthComputable) { item.progress = Math.round((e.loaded / e.total) * 100); queue = queue; } };
       xhr.onload = () => {
         let d: { photosRemaining: number; error?: string } | null = null;
@@ -3191,6 +3210,11 @@
       form.append('total', String(total));
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/photos/chunk');
+      xhr.setRequestHeader('X-Session-Token', item.sessionToken ?? sessionToken!);
+      xhr.setRequestHeader('X-Capture-Id', item.id);
+      xhr.setRequestHeader('X-Upload-Id', uploadId!);
+      xhr.setRequestHeader('X-Upload-Index', String(index));
+      xhr.setRequestHeader('X-Upload-Total', String(total));
       xhr.upload.onprogress = (e) => { if (e.lengthComputable) setProgress(e.loaded / e.total); };
       xhr.onload = () => { (xhr.status >= 200 && xhr.status < 300) ? resolve()
         : reject(new ApiError(`Chunk ${index} failed (${xhr.status})`, xhr.status)); };
@@ -3199,8 +3223,15 @@
     });
     const sendWithRetry = async (index: number) => {
       for (let attempt = 0; ; attempt++) {
+        await appendCaptureEvidence(captureMetadata(item), 'upload_started', {
+          uploadId, chunkIndex: index, chunkTotal: total, bytes: Math.min(CHUNK_SIZE, blob.size - index * CHUNK_SIZE) });
         try { await sendChunk(index); return; }
-        catch (e) { if (attempt >= CHUNK_RETRIES) throw e; await sleep(Math.min(8000, 500 * 2 ** attempt)); }
+        catch (e) {
+          await appendCaptureEvidence(captureMetadata(item), 'upload_failed', {
+            uploadId, chunkIndex: index, chunkTotal: total, ...evidenceFailure(e) });
+          if (attempt >= CHUNK_RETRIES) throw e;
+          await sleep(Math.min(8000, 500 * 2 ** attempt));
+        }
       }
     };
     for (let i = 0; i < total; i++) {
@@ -3211,7 +3242,9 @@
       setProgress(0);
     }
     const complete = () => fetch('/api/photos/complete', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+      method: 'POST', headers: { 'Content-Type': 'application/json',
+        'X-Session-Token': item.sessionToken ?? sessionToken!, 'X-Capture-Id': item.id,
+        'X-Upload-Id': uploadId!, 'X-Upload-Total': String(total) }, credentials: 'same-origin',
       body: JSON.stringify({ sessionToken: item.sessionToken ?? sessionToken, captureId: item.id, uploadId, total, ext: item.ext, mediaType: item.mediaType, source: item.source, challengeId: item.challengeId, captureOrientation: item.captureOrientation, captureShape: item.captureShape, captureRotation: item.captureRotation, captureTurn: item.captureTurn, capturedAt: item.capturedAt, durationSecs: item.durationSecs }),
     });
     let res = await complete();
@@ -3340,12 +3373,17 @@
         const stored = await listCaptures(ev.joinCode);
         for (const capture of stored) if (capture.sessionToken === oldToken)
           await putCapture({ ...capture, sessionToken });
+        await remapCaptureEvidence(ev.joinCode, oldToken!, sessionToken).catch(() => {});
         finishProvisional(ev.joinCode);
         const me = await liveMe(sessionToken); rememberGuest(sessionToken, me);
         void syncRecoveryContact(ev.joinCode, sessionToken);
         recoveryState.set(false);
       }
+      await appendCaptureEvidence(captureMetadata(item), 'upload_started', { uploadId: item.uploadId });
       const data = (item.blob.size > CHUNK_SIZE || item.uploadId) ? await uploadChunked(item) : await uploadSingle(item);
+      // Journal the received server receipt durably before removing the local original.
+      await acknowledgeCapture(captureMetadata(item), data.photoId);
+      void flushCaptureEvidence();
       item.status = 'done'; item.progress = 100;
       nowTick = Date.now();   // a fresh shot is deletable, so wake the window ticker
       void refreshGalleryIfOpen();   // show it straight away if they are watching the gallery
@@ -3366,9 +3404,10 @@
       }
       if (item.challengeId && armed === item.challengeId) armed = null;
       persisting.delete(item.id);
-      delCapture(item.id).catch(() => {});   // uploaded → drop from the offline queue
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : 'Upload failed';
+      await appendCaptureEvidence(captureMetadata(item), 'upload_failed', { uploadId: item.uploadId, ...evidenceFailure(e) });
+      void flushCaptureEvidence();
       // "No shots remaining" is a settled answer, not a transient failure. Retrying it five times
       // with backoff spams the server and makes the guest watch the same refusal repeatedly before
       // being told anything useful. Stop at once, correct the count, and point at whatever the host

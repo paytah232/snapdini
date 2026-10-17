@@ -3,7 +3,7 @@ import path from 'path';
 import { and, eq, isNotNull, lt, count } from 'drizzle-orm';
 import { db } from './db';
 import { RESCHEDULE_WINDOW_MS, RESCHEDULE_RETENTION_GRACE_MS } from './lib';
-import { events, photos, participants, clientErrors, slideshows, shares, emailTokens, sessions, adminActions } from './schema';
+import { events, photos, participants, clientErrors, captureEvidence, slideshows, shares, emailTokens, sessions, adminActions } from './schema';
 import { UPLOADS_DIR, INCOMING_DIR, SCRATCH_DIR } from './paths';
 import { media, assertKey, keyFromWebPath, joinKey, invalidateListing } from './media';
 import { derivedNames, playName } from './images';
@@ -194,6 +194,9 @@ export async function sweep(): Promise<number> {
   // Keep the diagnostics table bounded — drop client error reports older than the TTL.
   try { await db.delete(clientErrors).where(lt(clientErrors.createdAt, Date.now() - CLIENT_ERROR_TTL_MS)); }
   catch (e) { console.error('[sweeper] client_errors prune failed:', (e as Error).message); }
+
+  try { await db.delete(captureEvidence).where(lt(captureEvidence.receivedAt, Date.now() - CLIENT_ERROR_TTL_MS)); }
+  catch { console.warn('[sweeper] upload evidence prune failed'); }
 
   // Auto-purge non-favourite slideshow renders older than a day (favourites kept until event purge).
   try { await purgeOldSlideshows(); } catch (e) { console.error('[sweeper] slideshow purge failed:', (e as Error).message); }

@@ -33,7 +33,7 @@ but that does not make a first-time visitor independent of the server.
 The development Compose web service also sets `GUEST_RECOVERY_ENV=dev` to
 opt normal `/join/CODE` and `/e/slug` pages into the same recovery logic. This
 allows a guest to join online, keep the same session through a backend outage,
-reload, and upload to the original roll after recovery. The flag is absent from
+reload, and upload to the original roll after recovery. The flag is empty or unset in
 normal self-hosted and production configurations. This test still relies on the
 dev web server to serve the normal page; it does not prove independent hosting
 through that domain during a complete site outage.
@@ -128,3 +128,8 @@ Snapdini backend is stopped. Do not stop a production service for this test.
 Repeat on physical iPhone Safari and Android Chrome. Export a saved copy if the
 browser reports storage failure. R2 is not part of this preview: captures wait on
 the device, and no Cloudflare photo-storage subscription is required.
+
+The optional [capture/upload evidence trail](UPLOAD_EVIDENCE.md) links saved
+captures and retries to server storage and phone acknowledgements. It uses the
+same capture IDs and retries its metadata after reconnection; it does not grant
+admission or upload permission.

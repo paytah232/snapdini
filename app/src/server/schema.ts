@@ -789,3 +789,15 @@ export const adminActions = pgTable('admin_actions', {
 }));
 
 export type AdminAction = typeof adminActions.$inferSelect;
+
+// Metadata only; client claims and server observations occupy separate namespaces.
+export const captureEvidence = pgTable('capture_evidence', {
+ id:text('id').primaryKey(), evidenceId:text('evidence_id').notNull(),
+ eventId:text('event_id').notNull().references(() => events.id, {onDelete:'cascade'}),
+ participantId:text('participant_id').notNull().references(() => participants.id, {onDelete:'cascade'}),
+ captureId:text('capture_id').notNull(), source:text('source').notNull(), stage:text('stage').notNull(),
+ at:ms('at').notNull(), receivedAt:ms('received_at').notNull(), uploadId:text('upload_id'),
+ chunkIndex:integer('chunk_index'), chunkTotal:integer('chunk_total'), bytes:ms('bytes'),
+ httpStatus:integer('http_status'), reason:text('reason'), photoId:text('photo_id'),
+}, t => [uniqueIndex('capture_evidence_dedup_idx').on(t.participantId,t.source,t.evidenceId),
+ index('capture_evidence_event_idx').on(t.eventId,t.receivedAt),index('capture_evidence_retention_idx').on(t.receivedAt)]);

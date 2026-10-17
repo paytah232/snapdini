@@ -22,7 +22,8 @@ test('guest API bodies and guest identity survive, account/organizer credentials
   const request = new Request('https://edge.example.test/api/participants/join?x=1', {
     method: 'POST', body: '{"name":"Guest"}', headers: {
       'Content-Type': 'application/json', 'X-Session-Token': 'guest-token',
-      'X-Visitor-Token': 'visitor-token', Cookie: 'account=secret', Authorization: 'Bearer account',
+      'X-Visitor-Token': 'visitor-token', 'X-Capture-Id': 'capture-test', 'X-Upload-Id': 'upload-test',
+      'X-Upload-Index': '0', 'X-Upload-Total': '2', Cookie: 'account=secret', Authorization: 'Bearer account',
       'X-Organizer-Code': 'secret-key', 'X-Admin-Key': 'private', 'X-Forwarded-For': 'forged',
     },
   });
@@ -36,6 +37,8 @@ test('guest API bodies and guest identity survive, account/organizer credentials
   assert.equal(upstream.redirect, 'manual');
   assert.equal(upstream.headers.get('x-session-token'), 'guest-token');
   assert.equal(upstream.headers.get('x-visitor-token'), 'visitor-token');
+  for (const [name, value] of [['x-capture-id', 'capture-test'], ['x-upload-id', 'upload-test'], ['x-upload-index', '0'], ['x-upload-total', '2']])
+    assert.equal(upstream.headers.get(name), value);
   for (const name of ['cookie', 'authorization', 'x-organizer-code', 'x-admin-key', 'x-forwarded-for'])
     assert.equal(upstream.headers.has(name), false);
   assert.equal(response.headers.has('set-cookie'), false);

@@ -512,6 +512,13 @@
       "when": 1789919022742,
       "tag": "0072_contact_event_code",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1792277676451,
+      "tag": "0073_capture_evidence",
+      "breakpoints": true
     }
   ]
 }

@@ -1,3 +1,4 @@
+import { evidenceForEvent } from '../upload-evidence';
 import { Router, type Request, type Response } from 'express';
 import { requireAdmin } from '../auth';
 import { get, all, run } from '../db';
@@ -12,6 +13,14 @@ import { DEMO_NAME } from '../lib';
 // self-host default is no admin at all. Promo-code management is mounted here too.
 const router = Router();
 router.use(requireAdmin);
+router.get('/upload-evidence', async (req: Request,res: Response) => {
+ res.set('Cache-Control','no-store');
+ const code = typeof req.query.eventCode === 'string' ? req.query.eventCode : '';
+ if (!/^[A-Za-z0-9_-]{4,64}$/.test(code)) return res.status(400).json({error:'eventCode required'});
+ const event = await get<{id:string}>('SELECT id FROM events WHERE join_code = ?', [code]);
+ if (!event) return res.status(404).json({error:'Event not found'});
+ return res.json(await evidenceForEvent(event.id,Math.min(5000,Math.max(1,Math.trunc(Number(req.query.limit)||2000)))));
+});
 
 
 // ── Listing helpers ───────────────────────────────────────────────────────────

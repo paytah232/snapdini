@@ -1,3 +1,5 @@
+import { appendCaptureEvidence, persistCaptureEvidence, type CaptureMetadata } from './captureEvidence';
+
 // Offline-durable capture queue. Photos/videos are stored in IndexedDB the moment they're
 // taken, so they survive a flaky connection, a server outage, OR a page reload/close — they
 // upload (or retry) when the connection + server come back. Nothing relies on the network at
@@ -75,18 +77,42 @@ export async function putCapture(c: StoredCapture): Promise<void> {
       t.onabort = () => rej(t.error || new Error('Capture storage was interrupted'));
     });
   } finally { db.close(); }
+  await appendCaptureEvidence(c, 'local_saved');
+}
+
+// A receipt is durable before deleting the blob. If either step fails, an idempotent retry is safe.
+export async function acknowledgeCapture(c: CaptureMetadata, photoId?: string): Promise<void> {
+  await persistCaptureEvidence(c, 'server_acknowledged', { photoId });
+  await deleteCaptureRows(c.id);
 }
 
 export async function delCapture(id: string): Promise<void> {
   if (!available()) return;
   const db = await open();
-  await new Promise<void>((res, rej) => {
-    const t = db.transaction([STORE, PROGRESS], 'readwrite');
-    t.objectStore(STORE).delete(id);
-    t.objectStore(PROGRESS).delete(id);   // uploaded/dropped → clear any resume state too
-    t.oncomplete = () => res(); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new Error('Capture storage was interrupted'));
-  });
-  db.close();
+  let capture: StoredCapture | undefined;
+  try {
+    capture = await new Promise((resolve, reject) => {
+      const r = db.transaction(STORE, 'readonly').objectStore(STORE).get(id);
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => reject(r.error);
+    });
+  } finally { db.close(); }
+  // Explicit removal remains possible even if ancillary evidence storage is unavailable.
+  if (capture) await appendCaptureEvidence(capture, 'local_removed');
+  await deleteCaptureRows(id);
+}
+async function deleteCaptureRows(id: string): Promise<void> {
+  if (!available()) return;
+  const db = await open();
+  try {
+    await new Promise<void>((res, rej) => {
+      const t = db.transaction([STORE, PROGRESS], 'readwrite');
+      t.objectStore(STORE).delete(id);
+      t.objectStore(PROGRESS).delete(id);
+      t.oncomplete = () => res(); t.onerror = () => rej(t.error);
+      t.onabort = () => rej(t.error || new Error('Capture storage was interrupted'));
+    });
+  } finally { db.close(); }
 }
 
 // Persist chunked-upload progress so a suspended/reloaded tab RESUMES from the last landed chunk

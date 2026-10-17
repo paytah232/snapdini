@@ -167,6 +167,7 @@ all in Docker. Building from source, developing, or publishing your own images? 
 | **[docs/GUIDE.md](docs/GUIDE.md)** | Every page and every control, grouped by who uses it. Start here to learn the app. |
 | **[UPGRADING.md](UPGRADING.md)** | The traps `pull && up -d` does not close, plus per-release notes. |
 | **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** | Architecture, the dev stack, the gotchas worth knowing before you change something, and how releases are cut. |
+| **[docs/UPLOAD_EVIDENCE.md](docs/UPLOAD_EVIDENCE.md)** | Correlated capture, chunk, upload and acknowledgement diagnostics for operators. |
 | **[docs/GUEST_RECOVERY.md](docs/GUEST_RECOVERY.md)** | Optional independent guest-camera hosting, development setup, recovery limitations and phone outage testing. |
 | **[docs/DELIVERY-TRACKING.md](docs/DELIVERY-TRACKING.md)** | Turning on Mailgun delivery tracking: the webhook signing key, which events to subscribe, and how to tell it is working. |
 | **[TESTING.md](TESTING.md)** | The manual QA checklist, and what the automated suites already cover. |

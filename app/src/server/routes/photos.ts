@@ -1,3 +1,4 @@
+import { canonicalCapturePhotoId } from '../capture-photo-id';
 import { clampCaption, CAPTION_MAX, CAPTION_MAX_RAW } from '../../../../shared/caption';
 import { clampComment, COMMENT_MAX_RAW } from '../../../../shared/comment';
 import { Router, type Request, type Response } from 'express';
@@ -5,7 +6,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { ZipArchive } from 'archiver';
-import { v4 as uuidv4, v5 as uuidv5 } from 'uuid';
+import { v4 as uuidv4 } from 'uuid';
 import { and, asc, count, desc, eq, gt, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { readSets, isOfferedChallenge } from '../challenges';
@@ -23,7 +24,13 @@ import { eventByIdentifier } from './events';
 import { recordAdminAction } from '../admin-actions';
 import { billingEnabled } from '../billing';
 
+import { acceptClientEvidence, requireEvidenceParticipant, evidenceLimiter, observeUpload, observeUploadParserError, replayedReceipt, uploadRejection } from '../upload-evidence';
 const router = Router();
+router.post('/evidence', requireEvidenceParticipant, evidenceLimiter, acceptClientEvidence);
+router.use((req,res,next) => {
+  if (req.method === 'POST' && ['/', '/chunk', '/complete'].includes(req.path)) return observeUpload(req,res,next);
+  next();
+});
 
 import { INCOMING_DIR, eventRelPath } from '../paths';
 import { media, listingFor, invalidateListing, archiveSource, keyDir, keyName, __resetListingCache as resetListings, type Listing, type Checkout } from '../media';
@@ -427,7 +434,7 @@ export function capturePhotoId(raw: unknown, p: { eventId: string; id: string })
     error.status = 400;
     throw error;
   }
-  return uuidv5(JSON.stringify([p.eventId, p.id, raw]), '16e1aee4-177e-4f3e-a313-9cb15ecda68a');
+  return canonicalCapturePhotoId(raw, p);
 }
 
 async function uploadedCapture(p: UploadParticipant, photoId: string | undefined, conn: Pick<typeof db, 'select'> = db) {
@@ -1079,7 +1086,7 @@ async function finalizeUpload(p: UploadParticipant, stagedPath: string, isVideo:
     await co.remove([baseName, ...derivedNames(baseName)]);
     invalidateListing(p.eventId);
     await co.release();
-    return captureReceipt(claim.duplicate);
+    return replayedReceipt(captureReceipt(claim.duplicate));
   }
   // Face matching, if the host enabled it and anyone has enrolled. Deliberately not awaited:
   // it runs against the thumbnail after this response, and a slow or dead ML container must
@@ -2354,7 +2361,7 @@ router.post('/', upload.single('photo'), async (req: Request, res: Response) => 
   try { captureId = capturePhotoId(req.body?.captureId, participant); }
   catch { fs.unlinkSync(req.file.path); return res.status(400).json({ error: 'Invalid captureId' }); }
   const duplicate = await uploadedCapture(participant, captureId);
-  if (duplicate) { fs.unlinkSync(req.file.path); return res.json(captureReceipt(duplicate)); }
+  if (duplicate) { fs.unlinkSync(req.file.path); return res.json(replayedReceipt(captureReceipt(duplicate))); }
   const gate = gateUpload(participant, isVideo, capturedAtFor(req.body?.capturedAt, participant, Date.now()), req.body);
   if (gate) { fs.unlinkSync(req.file.path); return res.status(gate.status).json({ error: gate.error }); }
 
@@ -2454,7 +2461,12 @@ router.post('/chunk', chunkUpload.single('chunk'), async (req: Request, res: Res
   const total = parseInt(req.body?.total, 10);
   if (!req.file) return res.status(400).json({ error: 'No chunk uploaded' });
   if (!sessionToken || !SAFE_UPLOAD_ID.test(String(uploadId || '')) || !Number.isInteger(index) || index < 0
-      || !Number.isInteger(total) || total < 1 || total > MAX_CHUNKS || index >= total) { drop(); return res.status(400).json({ error: 'Bad chunk request' }); }
+      || !Number.isInteger(total) || total < 1 || total > MAX_CHUNKS || index >= total) {
+    uploadRejection(req, !sessionToken ? 'missing_session' : !SAFE_UPLOAD_ID.test(String(uploadId || '')) ? 'invalid_upload_id'
+      : !Number.isInteger(index) || index < 0 ? 'invalid_chunk_index' : !Number.isInteger(total) || total < 1 ? 'invalid_chunk_total'
+      : total > MAX_CHUNKS ? 'chunk_limit_exceeded' : 'chunk_index_out_of_range');
+    drop(); return res.status(400).json({ error: 'Bad chunk request' });
+  }
   if (!(await participantForUpload(sessionToken))) { drop(); return res.status(403).json({ error: 'Invalid session' }); }
 
   const dir = uploadPartsDir(uploadId);
@@ -2468,8 +2480,11 @@ router.post('/chunk', chunkUpload.single('chunk'), async (req: Request, res: Res
 router.post('/complete', async (req: Request, res: Response) => {
   const { sessionToken, uploadId, ext, mediaType } = req.body || {};
   const total = parseInt(req.body?.total, 10);
-  if (!sessionToken || !SAFE_UPLOAD_ID.test(String(uploadId || '')) || !Number.isInteger(total) || total < 1 || total > MAX_CHUNKS)
+  if (!sessionToken || !SAFE_UPLOAD_ID.test(String(uploadId || '')) || !Number.isInteger(total) || total < 1 || total > MAX_CHUNKS) {
+    uploadRejection(req, !sessionToken ? 'missing_session' : !SAFE_UPLOAD_ID.test(String(uploadId || '')) ? 'invalid_upload_id'
+      : !Number.isInteger(total) || total < 1 ? 'invalid_chunk_total' : 'chunk_limit_exceeded');
     return res.status(400).json({ error: 'Bad complete request' });
+  }
 
   const participant = await participantForUpload(sessionToken);
   if (!participant) return res.status(403).json({ error: 'Invalid session' });
@@ -2477,7 +2492,7 @@ router.post('/complete', async (req: Request, res: Response) => {
   try { captureId = capturePhotoId(req.body?.captureId, participant); }
   catch { return res.status(400).json({ error: 'Invalid captureId' }); }
   const duplicate = await uploadedCapture(participant, captureId);
-  if (duplicate) return res.json(captureReceipt(duplicate));
+  if (duplicate) return res.json(replayedReceipt(captureReceipt(duplicate)));
 
   // Two questions, two answers, and only one of them may be taken on trust.
   //
@@ -3656,5 +3671,7 @@ router.get('/:joinCode', async (req: Request, res: Response) => {
     photos: rows.map(p => photoRow(p, participant.id, captions, hearts, comments, names)),
   });
 });
+
+router.use(observeUploadParserError);
 
 export default router;
