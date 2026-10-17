@@ -96,6 +96,11 @@ test('returning guest keeps session and saved capture when origin fails and retu
   await expect.poll(() => uploadAttempts).toBeGreaterThanOrEqual(2);
   await expect(page.getByRole('status').filter({ hasText: 'Photos are waiting in the queue' })).toHaveCount(1);
   await expect(page.getByText(/trying again in \d+s/)).toHaveCount(0);
+  await page.getByRole('status').filter({ hasText: 'Photos are waiting in the queue' })
+    .getByRole('button', { name: 'Dismiss notification' }).click();
+  const attemptsAtDismissal = uploadAttempts;
+  await expect.poll(() => uploadAttempts).toBeGreaterThan(attemptsAtDismissal);
+  await expect(page.getByRole('status').filter({ hasText: 'Photos are waiting in the queue' })).toHaveCount(0);
   await page.reload(); await expect(shutter).toBeEnabled();
   await expect.poll(() => page.locator('.viewfinder video').evaluate((v: HTMLVideoElement) => v.videoWidth)).toBeGreaterThan(0);
   expect(await page.evaluate(code => localStorage.getItem(`session_${code}`), code)).toBe(token);

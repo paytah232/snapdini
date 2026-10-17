@@ -27,7 +27,8 @@
            askedAlready, markAsked } from '$lib/pwa';
   import { ApiError, getConfig } from '$lib/api';
   import { applyEventTheme } from '$lib/theme';
-  import { showToast, hideToast } from '$lib/toast';
+  import { showToast, hideToast, toast } from '$lib/toast';
+  import Toast from '$lib/components/Toast.svelte';
   import { reportClientError } from '$lib/report';
   import { putCapture, delCapture, listCaptures, saveProgress, getProgress } from '$lib/captureStore';
   import Lightbox from '$lib/components/Lightbox.svelte';
@@ -535,6 +536,11 @@
 
   let queue: QueueItem[] = [];
   let uploadWaiting = false;
+  let dismissedRecoveryNotice = '';
+  $: recoveryNotice = storageFailure ? 'storage'
+    : pendingCount && (uploadWaiting || (recoveryEnabled && $recoveryState)) ? 'queue'
+    : recoveryEnabled && $recoveryState ? 'outage' : '';
+  $: if (!recoveryNotice) dismissedRecoveryNotice = '';
   let uploading = false;
   let capturing = false;          // one capture at a time (guards rapid double-taps)
   const iosDevice = isIOS();      // decided once: the control it hides must not flicker
@@ -4667,12 +4673,15 @@
 
 {#if showFeedback}<FeedbackModal context="Camera ({ev?.joinCode ?? ''})" eventCode={ev?.joinCode ?? ''} on:close={() => (showFeedback = false)} />{/if}
 
-{#if storageFailure}
-  <div class="guest-recovery-note" role="alert">This device could not save a capture. Keep this page open and save a copy from the upload queue.</div>
-{:else if pendingCount && (uploadWaiting || (recoveryEnabled && $recoveryState))}
-  <div class="guest-recovery-note" role="status">Photos are waiting in the queue, saved on this device. Uploads will continue automatically when the connection returns. Keep this page open, or return to this camera on this device to finish uploading. You can also save a copy from the queue.</div>
-{:else if recoveryEnabled && $recoveryState}
-  <div class="guest-recovery-note" role="status">Snapdini is temporarily unavailable. New photos will be saved on this device until it returns.</div>
+{#if recoveryNotice && dismissedRecoveryNotice !== recoveryNotice && !$toast}
+  <Toast
+    message={{ kind: recoveryNotice === 'storage' ? 'error' : 'info', msg: recoveryNotice === 'storage'
+      ? 'This device could not save a capture. Keep this page open and save a copy from the upload queue.'
+      : recoveryNotice === 'queue'
+        ? 'Photos are waiting in the queue, saved on this device. Uploads continue when the connection returns. Keep this page open or return here to finish uploading. You can save a copy from the queue.'
+        : 'Snapdini is temporarily unavailable. New photos will be saved on this device until it returns.' }}
+    role={recoveryNotice === 'storage' ? 'alert' : 'status'}
+    dismiss={() => { dismissedRecoveryNotice = recoveryNotice; }} />
 {/if}
 
 <!-- Upload queue — shared across the camera and gallery screens; opened on demand. -->
@@ -4696,7 +4705,6 @@
 {/if}
 
 <style>
-  .guest-recovery-note { position: fixed; top: 0; left: 0; right: 0; z-index: 500; padding: 10px 14px; background: #4a3a10; color: #fff4d6; font-size: .85rem; text-align: center; }
   .center { position: fixed; inset: 0; display: flex; align-items: safe center; justify-content: center; padding: 24px; background: var(--bg); overflow-y: auto; }
   .msg { text-align: center; } .big { font-size: 56px; display: block; margin-bottom: 12px; }
   .muted { color: var(--text-muted); }

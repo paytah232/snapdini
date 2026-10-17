@@ -59,6 +59,9 @@ captures against its local allowance, including failed uploads. Captures enter
 IndexedDB before upload, and remain there until the server acknowledges them or
 the guest explicitly removes their local copy. A failed storage write/read is
 shown visibly; the app cannot promise durability when the browser refuses it.
+Recovery notices use the normal message box with a dismiss button. Closing a
+notice does not stop retries or remove saved captures; the queue remains available
+for inspection and export. Retries do not reopen a dismissed notice.
 
 On recovery, provisional guests pass normal server admission, including current
 payment, lock, time and guest-cap rules. A persisted random join nonce makes

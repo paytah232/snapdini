@@ -1,9 +1,18 @@
 <script lang="ts">
-  import { toast } from '$lib/toast';
+  import { toast, type ToastKind } from '$lib/toast';
+
+  // A caller-owned notice uses the same message box without the transient toast timer.
+  export let message: { msg: string; kind: ToastKind } | undefined = undefined;
+  export let dismiss: (() => void) | undefined = undefined;
+  export let role: 'status' | 'alert' = 'status';
+  $: current = message ?? $toast;
 </script>
 
-{#if $toast}
-  <div class="toast {$toast.kind}" role="status">{$toast.msg}</div>
+{#if current}
+  <div class="toast {current.kind}" class:dismissible={!!dismiss} {role}>
+    <span>{current.msg}</span>
+    {#if dismiss}<button type="button" class="dismiss" on:click={dismiss} aria-label="Dismiss notification">✕</button>{/if}
+  </div>
 {/if}
 
 <style>
@@ -21,6 +30,9 @@
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35); z-index: 9999;
     width: max-content; max-width: min(92vw, 520px); text-align: center;
   }
+  .toast.dismissible { display: flex; align-items: flex-start; gap: 12px; text-align: left; }
+  .dismiss { flex: none; border: 0; background: transparent; color: inherit; cursor: pointer;
+    font: inherit; padding: 2px 4px; min-width: 28px; min-height: 28px; }
   .toast.error { border-color: var(--danger); color: var(--danger); }
   .toast.success { border-color: var(--success); color: var(--success); }
   /* Twice the border weight and a ring of the same colour around it. The other kinds only recolour
