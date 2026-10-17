@@ -30,6 +30,14 @@ Without independent hosting, the locally served preview still depends on the
 Snapdini web server for a first visit. An already cached camera can work offline,
 but that does not make a first-time visitor independent of the server.
 
+The development Compose web service also sets `GUEST_RECOVERY_ENV=dev` to
+opt normal `/join/CODE` and `/e/slug` pages into the same recovery logic. This
+allows a guest to join online, keep the same session through a backend outage,
+reload, and upload to the original roll after recovery. The flag is absent from
+normal self-hosted and production configurations. This test still relies on the
+dev web server to serve the normal page; it does not prove independent hosting
+through that domain during a complete site outage.
+
 Normal QR links are not automatically redirected by this preview. A production
 integration would serve the camera under the existing guest URLs at the edge,
 use the live Snapdini API whenever available, and fall back to published settings

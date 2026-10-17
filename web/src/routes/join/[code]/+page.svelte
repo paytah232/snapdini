@@ -14,5 +14,5 @@
 
 <OgHead og={data.og} />
 <main>
-  <Camera identifier={$page.params.code ?? ''} />
+  <Camera identifier={$page.params.code ?? ''} recoveryEnabled={data.guestRecovery} />
 </main>

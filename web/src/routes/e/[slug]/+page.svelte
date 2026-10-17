@@ -7,4 +7,4 @@
 </script>
 
 <OgHead og={data.og} />
-<Camera identifier={$page.params.slug ?? ''} />
+<Camera identifier={$page.params.slug ?? ''} recoveryEnabled={data.guestRecovery} />

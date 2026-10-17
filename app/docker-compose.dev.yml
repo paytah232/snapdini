@@ -215,6 +215,8 @@ services:
     logging: *default-logging
     environment:
       - NODE_ENV=production
+      # Same-origin guest recovery test on normal /join and /e URLs; dev only.
+      - GUEST_RECOVERY_ENV=dev
       - PORT=3000
       # adapter-node uses ORIGIN to build absolute URLs (og:image, og:url) behind the proxy.
       - ORIGIN=${BASE_URL:-http://localhost:3001}

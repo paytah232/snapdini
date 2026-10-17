@@ -77,13 +77,22 @@ test('fresh outage guest captures, reloads, reconciles once and drains durable q
   expect(await queued(page)).toEqual([]); expect(errors).toEqual([]);
 });
 
-test('returning guest keeps session and saved capture when origin fails and returns', async ({ page }) => {
-  await page.goto(`/guest/join/${code}`); await page.locator('#join-name').fill('Returning guest');
+for (const joinPath of ['/guest/join', '/join']) {
+test(`returning guest on ${joinPath} keeps session and saved capture when origin fails and returns`, async ({ page, request }) => {
+  await page.goto(`${joinPath}/${code}`); await page.locator('#join-name').fill('Returning guest');
   await page.getByRole('button', { name: 'Join & open camera' }).click();
   const shutter = page.getByRole('button', { name: 'Take photo', exact: true });
   await expect(shutter).toBeEnabled();
   await expect.poll(() => page.locator('.viewfinder video').evaluate((v: HTMLVideoElement) => v.videoWidth)).toBeGreaterThan(0);
   const token = await page.evaluate(code => localStorage.getItem(`session_${code}`), code);
+  const initialMe = await (await request.get('/api/participants/me', { headers: { 'x-session-token': token! } })).json();
+  // Start with a confirmed online capture, as a guest scanning an ordinary QR would.
+  await shutter.click();
+  await expect.poll(async () => {
+    const me = await (await request.get('/api/participants/me', { headers: { 'x-session-token': token! } })).json();
+    return me.participant.photosTaken;
+  }).toBe(1);
+  await expect.poll(async () => (await queued(page)).length).toBe(0);
   let uploadAttempts = 0;
   await page.route('**/api/**', route => {
     const upload = new URL(route.request().url()).pathname === '/api/photos';
@@ -120,7 +129,15 @@ test('returning guest keeps session and saved capture when origin fails and retu
   } finally { await page.context().setOffline(false); }
   await page.evaluate(() => window.dispatchEvent(new Event('online')));
   await expect.poll(async () => (await queued(page)).length, { timeout: 40_000 }).toBe(0);
+  const finalMe = await (await request.get('/api/participants/me', { headers: { 'x-session-token': token! } })).json();
+  expect(finalMe.participant.id).toBe(initialMe.participant.id);
+  expect(finalMe.participant.photosTaken).toBe(3);
+  expect(await page.evaluate(code => localStorage.getItem(`session_${code}`), code)).toBe(token);
+  const finalEvent = await (await request.get(`/api/events/${code}`)).json();
+  expect(finalEvent.participantCount).toBe(2); // Original demo guest + the same returning guest.
+  expect(finalEvent.photoCount).toBe(3);
 });
+}
 
 test('saved captures remain exportable after authoritative event removal', async ({ page }) => {
   await page.goto(`/guest/join/${code}`); await page.locator('#join-name').fill('Saved guest');
