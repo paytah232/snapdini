@@ -4,10 +4,8 @@ owner:
   user: ai
   provider: null
   profile: null
-  task: correct-phone-test-path
-  pid: 2966265
-acquired_at: '2026-10-19T00:48:56Z'
-expires_at: '2026-10-19T02:48:56Z'
+  task: staged-production-1.5.10
+  pid: 2968745
+acquired_at: '2026-10-19T00:51:05Z'
+expires_at: '2026-10-19T02:51:05Z'
 ttl_minutes: 120
-state: released
-released_at: '2026-10-19T00:48:59Z'
