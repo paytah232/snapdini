@@ -4,8 +4,8 @@ owner:
   user: ai
   provider: null
   profile: null
-  task: release-1.5.10-readiness
-  pid: 1332883
-acquired_at: '2026-10-17T23:25:59Z'
-expires_at: '2026-10-18T01:25:59Z'
+  task: release-1.5.10-final-checks
+  pid: 2920496
+acquired_at: '2026-10-19T00:07:28Z'
+expires_at: '2026-10-19T02:07:28Z'
 ttl_minutes: 120
