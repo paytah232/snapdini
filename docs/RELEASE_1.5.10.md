@@ -1,4 +1,4 @@
-# 1.5.10 release candidate
+# 1.5.10 release and rollout
 
 ## Changes
 
@@ -21,19 +21,23 @@ Independent hosting is optional for self-hosters. Normal installations need no C
 6. Review the three narrow routes (`/join/*`, `/e/*`, `/guest/*`). Account pages, APIs and uploads retain their existing routing and authentication. Ensure these paths do not overlap an existing Worker route; compose routing rather than replacing the failover Worker. Deploy only after this account-specific review.
 7. Verify normal QR links, settings freshness, session continuity, first visits during an outage, queued reload/recovery and exact photo counts. Observe diagnostics and errors before declaring completion.
 
-The normal-domain production routes are prepared in code, not enabled by development tests. A Workers Scripts Edit credential alone may not authorize zone-route changes; use a separately scoped deployment credential when activating routes. Keep credentials outside browser assets and Git.
+Development tests do not activate normal-domain production routes; independent hosting requires explicit operator deployment. A Workers Scripts Edit credential alone may not authorize zone-route changes; use a separately scoped deployment credential when activating routes. Keep credentials outside browser assets and Git.
 
 ## Development validation
 
 - 1,338 backend unit tests; 1,616 web unit tests; 1,037 real PostgreSQL/S3 integration checks.
-- 39 isolated service-worker, edge and publication checks; clean typechecks (27 existing Svelte warnings).
+- 40 isolated service-worker, edge and publication checks; clean typechecks (27 existing Svelte warnings).
 - Browser coverage includes chunk rejection/retry, lost acknowledgement, fresh/returning outage guests,
   same-origin ordinary links, fully offline reload, queued originals across a waiting update and natural activation.
 - Disposable database rehearsal upgrades the pre-1.5.10 schema through both new migrations and repeats boot safely.
-- Local app/web candidate images built; the running-image camera promotion hook was exercised on dev.
+- App/web candidate images built and exercised; running-image camera promotion verified on development and production.
 
-Physical iPhone Safari and Android Chrome acceptance, zone-route overlap review and actual production
-activation remain release gates. These development checks do not activate production recovery.
+Mobile-data outage acceptance on the normal production event link confirmed a newly joined guest,
+two exactly-once stored captures and matching browser acknowledgements after recovery. Follow-up
+join/gallery message fixes passed the browser recovery suite. Normal event-code, custom-slug and
+guest-alias links were then checked with the API unavailable, and published settings verified.
+The operator must still assess physical Safari/Chrome camera, storage and download behavior for
+the devices they support; the completed phone exercise does not establish every device/browser pair.
 
 ## Acceptance
 
