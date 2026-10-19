@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-/** Read-only development publisher. Never copies an API response wholesale. */
+/** Read-only event metadata publisher. Never copies an API response wholesale. */
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, unlink, writeFile, lstat } from 'node:fs/promises';
 
 const STRING_FIELDS = ['id', 'name', 'revealMode'];
@@ -62,7 +62,35 @@ async function previousSnapshot(filename) {
   }
 }
 
+export const SOURCE_RECEIPT = '.publication-complete.json';
+export function snapshotRevision(entries) {
+  return createHash('sha256').update(JSON.stringify(entries.sort((a, b) => a[0].localeCompare(b[0])))).digest('hex');
+}
+export async function recordSourceReceipt(outputDir, complete) {
+  const entries = [];
+  for (const filename of (await readdir(outputDir)).sort()) {
+    if (!/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*\.json$/.test(filename)) continue;
+    const filepath = path.join(outputDir, filename);
+    if (!(await lstat(filepath)).isFile()) throw new Error('Invalid public source file');
+    const raw = await readFile(filepath);
+    entries.push([filename, createHash('sha256').update(raw).digest('hex')]);
+  }
+  const receipt = { schema: 1, complete, revision: snapshotRevision(entries), files: entries.length };
+  const filename = path.join(outputDir, SOURCE_RECEIPT);
+  const previous = await previousSnapshot(filename);
+  if (JSON.stringify(previous) === JSON.stringify(receipt)) return;
+  const temporary = `${filename}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, JSON.stringify(receipt) + '\n', { mode: 0o644, flag: 'wx' });
+    await rename(temporary, filename);
+  } finally { await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
+}
+
 export async function publishOnce({ source, fetchEvent, outputDir, now = Date.now, onError = () => {} }) {
+  // Invalidate the prior generation before any source reads or file writes. A separate host
+  // scheduler must never publish a partially successful source pass. The receipt contains no index.
+  await mkdir(outputDir, { recursive: true, mode: 0o755 });
+  await recordSourceReceipt(outputDir, false);
   // A failed database read must never be mistaken for an empty event list.
   const rows = await source(now());
   const expected = new Set();
@@ -118,18 +146,27 @@ export async function publishOnce({ source, fetchEvent, outputDir, now = Date.no
       stats.removed++;
     }
   }
+  await recordSourceReceipt(outputDir, stats.failed === 0);
   return stats;
 }
 
-export async function main(env = process.env) {
-  if (env.GUEST_RECOVERY_ENV !== 'dev') throw new Error('GUEST_RECOVERY_ENV must be dev');
+export function sourceConfiguration(env) {
+  if (!['dev', 'production'].includes(env.GUEST_RECOVERY_ENV))
+    throw new Error('GUEST_RECOVERY_ENV must be dev or production explicitly');
   for (const key of ['DATABASE_URL', 'INTERNAL_API_BASE', 'OUTPUT_DIR'])
     if (!env[key]) throw new Error(`${key} is required; no production defaults are provided`);
   const api = new URL(env.INTERNAL_API_BASE);
   if (!['http:', 'https:'].includes(api.protocol) || api.username || api.password || api.search || api.hash)
     throw new Error('Invalid INTERNAL_API_BASE');
-  if (api.hostname === 'snapdini.com' || api.hostname.endsWith('.snapdini.com'))
+  if (env.GUEST_RECOVERY_ENV === 'dev' && (api.hostname === 'snapdini.com' || api.hostname.endsWith('.snapdini.com')))
     throw new Error('Production API is forbidden by the dev publisher');
+  return api;
+}
+
+export async function main(env = process.env) {
+  const api = sourceConfiguration(env);
+  const publishEdge = env.GUEST_EDGE_PUBLISH === '1'
+    ? (await import('./edge-publish.mjs')).createEdgePublisher(env) : null;
   const require = createRequire(new URL('../../app/package.json', import.meta.url));
   const { Pool } = require('pg');
   const pool = new Pool({ connectionString: env.DATABASE_URL, options: '-c default_transaction_read_only=on' });
@@ -154,6 +191,10 @@ export async function main(env = process.env) {
         const stats = await publishOnce({ source, fetchEvent, outputDir: path.resolve(env.OUTPUT_DIR),
           onError: error => console.error(`Recovery event publication failed: ${error.message}`) });
         console.log(JSON.stringify({ at: Date.now(), ...stats }));
+        if (publishEdge && stats.failed === 0) {
+          const edge = await publishEdge();
+          console.log(JSON.stringify({ at: Date.now(), edge }));
+        }
         if (process.argv.includes('--once') && stats.failed) process.exitCode = 1;
       } catch (error) {
         // Avoid logging connection strings, headers, event payloads or SQL parameters.

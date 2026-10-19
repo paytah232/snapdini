@@ -8,7 +8,7 @@
 
   // This entry owns only guest camera links. Gallery/host/navigation links still go to the
   // authoritative application; no SvelteKit router or server routes enter this build.
-  const route = /^\/guest\/(join|e|saved)\/([^/]+)\/?$/.exec(window.location.pathname);
+  const route = /^\/(?:guest\/)?(join|e|saved)\/([^/]+)\/?$/.exec(window.location.pathname);
   let identifier = '';
   try { identifier = route ? decodeURIComponent(route[2]) : ''; } catch { /* malformed link */ }
 

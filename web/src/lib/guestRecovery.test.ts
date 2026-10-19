@@ -184,9 +184,9 @@ describe('normalized event recovery links', () => {
     expect(fetchMock).toHaveBeenCalledWith(`/guest/events/${code}.json`, expect.anything());
   });
 
-  it('requests the lowercase slug manifest and finds its local cache from a mixed-case slug route', async () => {
+  it.each(['/guest/e/a-PaRtY', '/e/a-PaRtY'])('requests the lowercase manifest for %s', async (route) => {
     await cacheLiveEvent();
-    history.replaceState({}, '', '/guest/e/A-PaRtY');
+    history.replaceState({}, '', route);
     vi.mocked(getEvent).mockRejectedValueOnce(transient());
     await expect(recoveryEvent('A-PaRtY')).resolves.toMatchObject({ joinCode: code });
     expect(fetchMock).toHaveBeenCalledWith('/guest/events/a-party.json', expect.anything());

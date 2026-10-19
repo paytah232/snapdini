@@ -5,13 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { appOrigin, handle } from './worker.mjs';
 import { prepare } from './prepare.mjs';
+import { verifyOrigin } from './promote.mjs';
 
 const env = { APP_ORIGIN: 'https://development.example.test', DEPLOYMENT_LANE: 'dev' };
 const accountId = 'a'.repeat(32);
 
 test('development origin validation rejects production and ambiguous origins', () => {
   assert.equal(appOrigin(env.APP_ORIGIN, 'dev'), env.APP_ORIGIN);
-  assert.throws(() => appOrigin(env.APP_ORIGIN, 'production'));
+  assert.equal(appOrigin('https://camera.example.test', 'production'), 'https://camera.example.test');
+  assert.throws(() => appOrigin(env.APP_ORIGIN, 'unknown'));
   for (const origin of ['https://snapdini.com', 'https://www.snapdini.com', 'http://dev.example.test',
     'https://dev.example.test/path', 'https://dev.example.test?secret=x',
     'https://user:secret@dev.example.test', 'https://dev.example.test#fragment'])
@@ -122,4 +124,52 @@ test('package refuses secrets, source maps and symlinks in the supposedly guest-
   await symlink('/etc/passwd', path.join(opts.guestDir, 'leak.js'));
   await assert.rejects(prepare(opts), /Unexpected guest artifact/);
   await assert.rejects(prepare({ ...opts, accountId: '' }), /explicit Cloudflare account ID/);
+});
+
+
+test('normal guest links are static aliases with scoped offline worker permission', async t => {
+  const { artifact } = await prepare(await fixture(t));
+  const redirects = await readFile(path.join(artifact, 'public/_redirects'), 'utf8');
+  assert.ok(redirects.includes('/join/* /guest/shell 200'));
+  assert.ok(redirects.includes('/e/* /guest/shell 200'));
+  const headers = await readFile(path.join(artifact, 'public/_headers'), 'utf8');
+  assert.ok(headers.includes('Service-Worker-Allowed: /'));
+  for (const route of ['/join/*', '/e/*']) {
+    assert.ok(headers.includes(route + '\n  X-Robots-Tag: noindex, nofollow\n  X-Frame-Options: DENY\n  Content-Type: text/html'));
+  }
+});
+
+test('production configuration intercepts guest paths only and requires independent publication', async t => {
+  const opts = { ...await fixture(t), lane: 'production', origin: 'https://camera.example.test' };
+  await assert.rejects(prepare(opts), /requires an independent/);
+  await assert.rejects(prepare({ ...opts, eventsWorker: 'snapdini-guest-events-dev' }), /does not match/);
+  const { artifact } = await prepare({ ...opts, eventsWorker: 'snapdini-guest-events' });
+  const config = JSON.parse(await readFile(path.join(artifact, 'wrangler.json'), 'utf8'));
+  assert.equal(config.workers_dev, false);
+  assert.deepEqual(config.routes.map(x => x.pattern), ['camera.example.test/join/*', 'camera.example.test/e/*', 'camera.example.test/guest/*']);
+  assert.deepEqual(config.assets.run_worker_first, ['/guest/events/*', '/guest/publication.json']);
+  assert.deepEqual(config.services, [{ binding: 'EVENTS_ASSETS', service: 'snapdini-guest-events' }]);
+  assert.equal((await handle(new Request('https://camera.example.test/api/config'), config.vars,
+    () => assert.fail('production APIs must remain on original path'))).status, 404);
+});
+
+test('independent settings binding receives only an identifier and no caller credentials', async () => {
+  let forwarded;
+  const response = await handle(new Request('https://edge.example.test/guest/events/ABC123.json?ignored=1', {
+    headers: { cookie: 'secret', authorization: 'Bearer secret', 'x-session-token': 'secret' },
+  }), { ...env, EVENTS_ASSETS: { fetch: async request => { forwarded = request; return new Response('withdrawn', { status: 410 }); } } });
+  assert.equal(response.status, 410);
+  assert.equal(forwarded.url, 'https://edge.example.test/guest/events/ABC123.json');
+  assert.equal([...forwarded.headers].length, 0);
+  const failed = await handle(new Request('https://edge.example.test/guest/events/ABC123.json'),
+    { ...env, EVENTS_ASSETS: { fetch: () => { throw Error('offline'); } } });
+  assert.equal(failed.status, 503);
+});
+
+
+test('guest promotion requires matching healthy writable origin', async () => {
+  await verifyOrigin(env.APP_ORIGIN, '1.5.10', async () => Response.json({ version: '1.5.10', readOnly: false }));
+  for (const config of [{ version: '1.5.9', readOnly: false }, { version: '1.5.10', readOnly: true }, { version: '1.5.10' }])
+    await assert.rejects(verifyOrigin(env.APP_ORIGIN, '1.5.10', async () => Response.json(config)), /matching release/);
+  await assert.rejects(verifyOrigin(env.APP_ORIGIN, '1.5.10', async () => new Response('', { status: 503 })), /HTTP 503/);
 });

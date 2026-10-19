@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { identifier, publicCameraEvent, publishOnce, main } from './publish.mjs';
+import { identifier, publicCameraEvent, publishOnce, main, sourceConfiguration, SOURCE_RECEIPT } from './publish.mjs';
 
 const fixture = () => ({ id: 'event-public-id', name: 'Test event', joinCode: 'ABCD1234', slug: 'test-event',
   maxPhotos: 12, revealMode: 'instant', revealDelayHours: 0, videoSeconds: 0,
@@ -55,7 +55,7 @@ test('count changes do not republish; settings and locks do, atomically for both
   assert.equal(updated.event.isLocked, true);
   assert.equal(updated.publishedAt, 2);
   assert.equal(updated.schema, 1);
-  assert.deepEqual(await readdir(outputDir), ['ABCD1234.json', 'test-event.json']);
+  assert.deepEqual((await readdir(outputDir)).filter(name => !name.startsWith('.')), ['ABCD1234.json', 'test-event.json']);
 });
 
 test('renamed slug and removed/purged events remove obsolete files', async t => {
@@ -65,9 +65,9 @@ test('renamed slug and removed/purged events remove obsolete files', async t => 
   await publishOnce(opts);
   event = { ...event, slug: 'new-slug' };
   assert.equal((await publishOnce(opts)).removed, 1);
-  assert.deepEqual(await readdir(outputDir), ['ABCD1234.json', 'new-slug.json']);
+  assert.deepEqual((await readdir(outputDir)).filter(name => !name.startsWith('.')), ['ABCD1234.json', 'new-slug.json']);
   assert.equal((await publishOnce({ ...opts, source: async () => [] })).removed, 2);
-  assert.deepEqual(await readdir(outputDir), []);
+  assert.deepEqual((await readdir(outputDir)).filter(name => !name.startsWith('.')), []);
 });
 
 test('database failure and temporary API failure preserve previously published settings', async t => {
@@ -77,7 +77,7 @@ test('database failure and temporary API failure preserve previously published s
   await publishOnce(opts);
   await assert.rejects(publishOnce({ ...opts, source: async () => { throw new Error('db down'); } }));
   assert.equal((await publishOnce({ ...opts, fetchEvent: async () => { throw new Error('timeout'); } })).failed, 1);
-  assert.equal((await readdir(outputDir)).length, 2);
+  assert.equal(((await readdir(outputDir)).filter(name => !name.startsWith('.'))).length, 2);
   assert.equal((await publishOnce({ ...opts, fetchEvent: async () => ({ ok: false, status: 404 }) })).removed, 2);
 });
 
@@ -85,7 +85,7 @@ test('invalid database identifiers cannot address files outside the output direc
   const outputDir = await sandbox(t);
   await assert.rejects(publishOnce({ outputDir, source: async () => [{ joinCode: '../secret' }],
     fetchEvent: async () => assert.fail('must not request invalid identifiers') }), /Invalid recovery identifier/);
-  assert.deepEqual(await readdir(outputDir), []);
+  assert.deepEqual((await readdir(outputDir)).filter(name => !name.startsWith('.')), []);
 });
 
 test('dev publisher requires explicit environment and refuses known production API before connecting', async () => {
@@ -93,4 +93,28 @@ test('dev publisher requires explicit environment and refuses known production A
   await assert.rejects(main({ GUEST_RECOVERY_ENV: 'dev' }), /DATABASE_URL is required/);
   await assert.rejects(main({ GUEST_RECOVERY_ENV: 'dev', DATABASE_URL: 'not-used', OUTPUT_DIR: '/not-used',
     INTERNAL_API_BASE: 'https://snapdini.com' }), /Production API is forbidden/);
+});
+
+test('production source mode must be explicit, while dev still refuses production hosts', () => {
+  const env = { GUEST_RECOVERY_ENV: 'production', DATABASE_URL: 'not-used', OUTPUT_DIR: '/not-used', INTERNAL_API_BASE: 'https://snapdini.com' };
+  assert.equal(sourceConfiguration(env).origin, 'https://snapdini.com');
+  assert.throws(() => sourceConfiguration({ ...env, GUEST_RECOVERY_ENV: 'dev' }), /Production API/);
+  assert.throws(() => sourceConfiguration({ ...env, GUEST_RECOVERY_ENV: undefined }), /explicitly/);
+});
+
+test('source receipt is invalidated before database reads and completed only after all fetches succeed', async t => {
+  const outputDir = await sandbox(t);
+  const event = fixture();
+  const opts = { outputDir, source: async () => [event], fetchEvent: async () => response(event) };
+  await publishOnce(opts);
+  assert.equal(JSON.parse(await readFile(path.join(outputDir, SOURCE_RECEIPT))).complete, true);
+  await assert.rejects(publishOnce({ ...opts, source: async () => {
+    assert.equal(JSON.parse(await readFile(path.join(outputDir, SOURCE_RECEIPT))).complete, false);
+    throw Error('database unavailable');
+  } }));
+  assert.equal(JSON.parse(await readFile(path.join(outputDir, SOURCE_RECEIPT))).complete, false);
+  await publishOnce({ ...opts, fetchEvent: async () => ({ ok: false, status: 503 }) });
+  assert.equal(JSON.parse(await readFile(path.join(outputDir, SOURCE_RECEIPT))).complete, false);
+  await publishOnce(opts);
+  assert.equal(JSON.parse(await readFile(path.join(outputDir, SOURCE_RECEIPT))).complete, true);
 });

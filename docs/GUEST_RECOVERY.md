@@ -1,4 +1,4 @@
-# Guest camera recovery (development preview)
+# Guest camera recovery (1.5.10 release candidate)
 
 ## Optional for self-hosters
 
@@ -22,9 +22,11 @@ currently targets Cloudflare Workers and the development environment only.
    artifact using [the Cloudflare dev instructions](../tools/guest-edge/README.md).
    Supply your own account and a scoped deployment token through the environment.
    This creates a separate development Worker with no production domain routes.
-4. Regenerate and redeploy after camera changes or relevant event-setting changes.
-   New events need their snapshots published to the independent host before a
-   first-time guest can open them during a backend outage.
+4. Configure the optional [automatic settings publisher](../tools/guest-recovery/README.md)
+   and bind its dedicated event Worker as `EVENTS_ASSETS`. Settings changes and withdrawals
+   publish independently of camera releases, with complete-source checks, coalescing and retries.
+   Camera promotion uses `tools/guest-edge/promote.mjs` after matching origin health checks.
+   New events need a successful settings publication before first visits can recover from an outage.
 
 Without independent hosting, the locally served preview still depends on the
 Snapdini web server for a first visit. An already cached camera can work offline,
@@ -38,11 +40,12 @@ normal self-hosted and production configurations. This test still relies on the
 dev web server to serve the normal page; it does not prove independent hosting
 through that domain during a complete site outage.
 
-Normal QR links are not automatically redirected by this preview. A production
-integration would serve the camera under the existing guest URLs at the edge,
-use the live Snapdini API whenever available, and fall back to published settings
-when it is unavailable. Keep browser storage on the same origin so queues remain
-accessible. This production integration is not enabled by these dev instructions.
+The independent artifact supports ordinary `/join/CODE` and `/e/slug` links without
+redirecting to another origin. Its scoped service workers preserve those navigation shells.
+Explicit production artifact preparation includes only `/join/*`, `/e/*`, and `/guest/*`
+routes, leaving APIs, uploads and account pages on their existing paths. Browser storage
+stays on the normal origin. Production routing is not activated by development setup;
+see the [release runbook](RELEASE_1.5.10.md).
 
 ## Capture preservation and authority
 
@@ -77,10 +80,11 @@ concurrent or lost-response admission retries reuse one participant. It is
 removed after confirmed admission and durable queue ownership transfer. Uploads
 carry stable capture IDs scoped to the authenticated event and participant;
 concurrent or lost-response retries count once and return the existing photo.
-No schema migration is required; legacy clients remain supported. Replay receipts
-currently use the photo row: deleting that row removes its receipt. Before production,
-add a deletion receipt or equivalent coordination so an in-flight retry cannot
-recreate a deliberately deleted photo.
+Legacy clients remain supported. Migration 0074 adds deletion receipts so late retries
+acknowledge a deliberately deleted capture without recreating it or consuming another frame.
+Upload finalization and guest deletion share the same participant lock. Receipts retain no
+photo contents and remain until the participant/event is deleted. Migration 0073 adds the
+optional diagnostic evidence journal; neither migration changes existing photo rows.
 
 If admission or upload is refused, captures remain on the device. The queue
 provides export, and `/guest/saved/CODE` reads only local IndexedDB for export
@@ -97,14 +101,17 @@ queues are not a backup; browser eviction, clearing site data and device failure
 can remove them. Physical iPhone/Android acceptance remains necessary.
 
 The isolated Cloudflare dev Worker hosts an independent copy of the guest
-artifact and public snapshots on its workers.dev hostname. Event snapshots
-currently require regenerating and redeploying the package after settings change;
-new dev events will work online before their outage snapshots are published.
+artifact and public snapshots on its workers.dev hostname. The optional automatic
+publisher deploys allowlisted settings to a separate event Worker, keeping camera releases
+independent. It validates a complete source generation before deployment, sends explicit
+HTTP 410 withdrawals, and preserves the last good publication on failures. Publication
+is asynchronous; new events can work online before their outage settings are published.
 See `tools/guest-edge/README.md` for the deployment steps. The existing
 failover Worker, its KV budget and checks are unchanged. Production rollout must
-include trusted snapshot publication, same-release asset promotion after origin
-health checks, and outage tests from an independent origin. Production must not
-activate an unverified or unsigned recovery publication policy by accident.
+configure the trusted publication pipeline and same-release promotion hook, review actual
+zone-route overlap, and complete physical acceptance. Publication uses the authenticated
+Cloudflare deployment API and the same trusted HTTPS application origin; public write endpoints
+and browser deployment credentials are never enabled.
 
 ## Physical phone outage test
 

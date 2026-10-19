@@ -13,7 +13,7 @@ import { readSets, isOfferedChallenge } from '../challenges';
 import { hasShotsLeft, photosRemaining as remainingFor } from '../allowance';
 import { matchNewPhoto } from './faces';
 import { missionsFor } from './participants';
-import { events, participants, photos, photoHearts, photoComments, commentHearts, shareVisitors } from '../schema';
+import { events, participants, photos, captureUploadTombstones, photoHearts, photoComments, commentHearts, shareVisitors } from '../schema';
 import { stripImageMetadata, makeThumbnail, makeVideoPoster, makePlaybackProxy, fixAudioLead, thumbName, playName,
          cropClipToShape, cropName, dlName, shapeRatio, derivedNames, normalizeTurn, rotateImageTo,
          rotateClipTo, whileDeriving, isDeriving } from '../images';
@@ -426,7 +426,8 @@ async function participantForUpload(sessionToken: string): Promise<UploadPartici
 
 // A retry carries the same browser queue id. Namespace it by the authenticated roll so a
 // guessed/reused id cannot acknowledge another guest's photograph. The photo primary key is
-// the durable receipt; older clients that omit captureId retain random ids.
+// the durable receipt while it exists; a deletion tombstone preserves that decision afterwards.
+// Older clients that omit captureId retain random ids.
 export function capturePhotoId(raw: unknown, p: { eventId: string; id: string }): string | undefined {
   if (raw === undefined || raw === null || raw === '') return undefined;
   if (typeof raw !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(raw)) {
@@ -447,12 +448,21 @@ async function uploadedCapture(p: UploadParticipant, photoId: string | undefined
   }).from(photos).innerJoin(participants, eq(participants.id, photos.participantId))
     .innerJoin(events, eq(events.id, photos.eventId))
     .where(and(eq(photos.id, photoId), eq(photos.participantId, p.id), eq(photos.eventId, p.eventId)));
-  return photo ?? null;
+  if (photo) return { ...photo, deleted: false };
+  const [deleted] = await conn.select({ id: captureUploadTombstones.photoId,
+    photosTaken: participants.photosTaken, extraPhotos: participants.extraPhotos,
+    maxPhotos: events.maxPhotos, moderationEnabled: events.moderationEnabled,
+  }).from(captureUploadTombstones).innerJoin(participants, eq(participants.id, captureUploadTombstones.participantId))
+    .innerJoin(events, eq(events.id, captureUploadTombstones.eventId))
+    .where(and(eq(captureUploadTombstones.photoId, photoId), eq(captureUploadTombstones.participantId, p.id),
+      eq(captureUploadTombstones.eventId, p.eventId)));
+  return deleted ? { ...deleted, status: 'deleted', deleted: true } : null;
 }
 
 function captureReceipt(photo: NonNullable<Awaited<ReturnType<typeof uploadedCapture>>>) {
   return {
     success: true, photoId: photo.id, status: photo.status,
+    ...(photo.deleted ? { deleted: true } : {}),
     pendingModeration: !!photo.moderationEnabled && photo.status === 'pending',
     photosRemaining: remainingFor(photo),
   };
@@ -1341,6 +1351,11 @@ router.delete('/:id', async (req: Request, res: Response) => {
   // The DELETE returns rows, and the decrement only happens when it actually removed one: a
   // double-tapped delete (two requests, one photo) must not give the frame back twice.
   const gaveBack = await db.transaction(async (tx) => {
+    // Same order as finalizeUpload: participant, then receipt/photo. A retry that passed its
+    // early lookup must see this deletion before it can claim a frame; racing deletes must not
+    // deadlock against upload transactions that already hold the participant lock.
+    await tx.select({ id: participants.id }).from(participants)
+      .where(eq(participants.id, me.id)).for('update');
     // RETURNING the filename, not just the id, and the rest of this route uses THAT name rather
     // than the one read a few lines above. The two can differ: POST /:id/rotate writes the
     // corrected photo under a fresh uuid and moves the row onto it, so a rotation committing
@@ -1350,6 +1365,9 @@ router.delete('/:id', async (req: Request, res: Response) => {
     // authority on what is on the disk.
     const [gone] = await tx.delete(photos).where(eq(photos.id, photo.id)).returning({ id: photos.id, filename: photos.filename });
     if (!gone) return null;
+    await tx.insert(captureUploadTombstones).values({
+      photoId: gone.id, eventId: me.eventId, participantId: me.id, deletedAt: Date.now(),
+    }).onConflictDoNothing();
     const [row] = await tx.update(participants)
       .set({ photosTaken: sql`greatest(${participants.photosTaken} - 1, 0)` })
       .where(eq(participants.id, me.id))

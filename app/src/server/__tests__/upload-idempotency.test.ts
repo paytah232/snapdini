@@ -25,6 +25,8 @@ let afterParticipantRead: (() => void) | undefined;
 let locked = false;
 let ended = false;
 let rows: any[] = [];
+let tombstones: any[] = [];
+let beforeAcquire: (() => void) | undefined;
 let lockTail: Promise<void> = Promise.resolve();
 const roll = (id = 'guest-a') => ({
   id, eventId: 'event-a', photosTaken: shots, maxPhotos: 1, extraPhotos: 0,
@@ -48,7 +50,7 @@ function chain(produce: (o: any) => any) {
 function connection(acquire?: () => Promise<void>): any {
   return {
     select() { return { from(table: any) { return chain(async (o) => {
-      if (o.lock) { assert.ok(acquire, 'row lock outside transaction'); await acquire!(); }
+      if (o.lock) { assert.ok(acquire, 'row lock outside transaction'); beforeAcquire?.(); beforeAcquire = undefined; await acquire!(); }
       if (nameOf(table) === 'participants') {
         const args = o.args ?? [];
         if (args.includes('invalid-session')) return [];
@@ -57,6 +59,9 @@ function connection(acquire?: () => Promise<void>): any {
         hook?.();
         return [snapshot];
       }
+      if (nameOf(table) === 'capture_upload_tombstones') return tombstones.filter((r) =>
+        [r.id, r.participantId, r.eventId].every((v) => o.args.includes(v)))
+        .map((r) => ({ ...r, photosTaken: shots, maxPhotos: 1, extraPhotos: 0, moderationEnabled: false }));
       if (nameOf(table) === 'photos') return rows.filter((r) =>
         [r.id, r.participantId, r.eventId].every((v) => o.args.includes(v)))
         .map((r) => ({ ...r, photosTaken: shots, maxPhotos: 1, extraPhotos: 0, moderationEnabled: false }));
@@ -112,7 +117,7 @@ async function single(captureId?: unknown, sessionToken = 'session-a') {
   return result;
 }
 beforeEach(() => {
-  shots = 0; locked = false; ended = false; rows = []; lockTail = Promise.resolve(); afterParticipantRead = undefined;
+  shots = 0; locked = false; ended = false; rows = []; tombstones = []; beforeAcquire = undefined; lockTail = Promise.resolve(); afterParticipantRead = undefined;
   fs.rmSync(path.join(tmp, 'event-a'), { force: true, recursive: true });
   routes.__resetListingCache();
 });
@@ -211,3 +216,50 @@ for (const route of ['single', 'complete']) {
     assert.equal(rows.length, 1);
   });
 }
+
+function deleteStoredCapture() {
+  assert.equal(rows.length, 1);
+  const photo = rows.pop();
+  tombstones.push({ id: photo.id, participantId: photo.participantId, eventId: photo.eventId });
+  shots--;
+}
+for (const route of ['single', 'complete']) {
+  test(`${route} retries acknowledge deliberately deleted captures without recreating or recharging`, async () => {
+    const first = await single(capture);
+    deleteStoredCapture();
+    locked = true; ended = true;
+    const reply = route === 'single' ? await single(capture) : await call('/complete', {
+      sessionToken: 'session-a', captureId: capture, uploadId: 'deleted-parts-123', total: 1,
+      ext: 'jpg', mediaType: 'photo',
+    });
+    assert.equal(reply.code, 200);
+    assert.equal(reply.body.photoId, first.body.photoId);
+    assert.equal(reply.body.deleted, true);
+    assert.equal(reply.body.status, 'deleted');
+    assert.equal(reply.body.pendingModeration, false);
+    assert.equal(reply.body.photosRemaining, 1);
+    assert.equal(rows.length, 0);
+    assert.equal(shots, 0);
+  });
+}
+test('a tombstone committed after early lookup is rechecked under the allowance lock', async () => {
+  const id = routes.capturePhotoId(capture, { eventId: 'event-a', id: 'guest-a' });
+  beforeAcquire = () => { tombstones.push({ id, participantId: 'guest-a', eventId: 'event-a' }); };
+  const result = await single(capture);
+  assert.equal(result.code, 200);
+  assert.equal(result.body.deleted, true);
+  assert.equal(rows.length, 0);
+  assert.equal(shots, 0);
+  const files = fs.readdirSync(path.join(tmp, 'event-a'));
+  assert.equal(files.length, 0, 'late upload published media after deletion tombstone');
+});
+test('deletion tombstones cannot acknowledge another authenticated participant', async () => {
+  const first = await single(capture);
+  deleteStoredCapture();
+  const second = await single(capture, 'other-session');
+  assert.equal(second.code, 200);
+  assert.notEqual(second.body.photoId, first.body.photoId);
+  assert.equal(second.body.deleted, undefined);
+  assert.equal(rows.length, 1);
+  assert.equal(shots, 1);
+});

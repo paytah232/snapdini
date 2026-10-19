@@ -97,6 +97,9 @@ await spec('98k-upload-evidence', async () => {
     session.cookie = ownerCookie;
     const deleted = await api('DELETE', `/api/photos/${first.json.photoId}`, { body: { sessionToken: token } });
     assert.equal(deleted.status, 200, deleted.text);
+    const deletedReplay = await single(token, singleCapture);
+    ok('deleted capture retry acknowledges deletion without restoring media', deletedReplay.status === 200 && deletedReplay.json.deleted === true && deletedReplay.json.photoId === first.json.photoId);
+    ok('deleted acknowledgement records a response rather than storage proof', await waitFor(() => journalCount(event, `capture_id='${singleCapture}' AND source='server' AND stage='response_sent' AND photo_id IS NULL`) === 1, 'deleted acknowledgement evidence'));
     session.cookie = adminCookie;
     const afterDelete = await api('GET', path);
     ok('deleted photo retains evidence but is no longer reported stored', find(afterDelete, singleCapture)?.stages.some(s => s.stage === 'server_stored') && find(afterDelete, singleCapture)?.storedPhotoIds.length === 0);

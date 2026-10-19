@@ -52,7 +52,7 @@ export async function recoveryEvent(identifier: string): Promise<PublicEvent> {
     if (!temporaryFailure(error)) throw error; // Never override an authoritative refusal/deletion.
     recoveryState.set(true);
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(identifier)) throw error;
-    const snapshotKey = typeof location !== 'undefined' && location.pathname.startsWith('/guest/e/')
+    const snapshotKey = typeof location !== 'undefined' && /^\/(?:guest\/)?e\//.test(location.pathname)
       ? identifier.toLowerCase() : identifier.toUpperCase();
     try {
       const response = await fetch(`/guest/events/${encodeURIComponent(snapshotKey)}.json`,

@@ -41,6 +41,7 @@ function guestOnly(): Plugin {
       hash.update(readFileSync(resolve(web, 'static/icon.svg')));
       const fingerprint = hash.digest('hex').slice(0, 16);
       const assets = [...files.map(name => `/guest/${name}`), ...fonts.map(name => `/guest/fonts/${name}.woff2`), '/guest/icon.svg'];
+      this.emitFile({ type: 'asset', fileName: 'release.json', source: JSON.stringify({ version, fingerprint }) });
       this.emitFile({ type: 'asset', fileName: 'sw.js', source: guestServiceWorker(fingerprint, assets) });
       console.info(`Guest artifact audited: ${modules} browser modules; no routes/server/env modules.`);
     },

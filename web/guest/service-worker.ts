@@ -12,7 +12,8 @@ self.addEventListener('fetch', event => {
   const request = event.request;
   const url = new URL(request.url);
   if (request.method !== 'GET' || url.origin !== self.location.origin) return;
-  const navigation = request.mode === 'navigate' && /^\\/guest\\/(?:$|(?:join|e|saved)\\/[^/]+\\/?$)/.test(url.pathname);
+  const navigation = request.mode === 'navigate' && /^\\/guest\\/(?:$|(?:join|e|saved)\\/[^/]+\\/?$)/.test(url.pathname)
+    || request.mode === 'navigate' && /^\\/(?:join|e)\\/[^/]+\\/?$/.test(url.pathname);
   if (navigation) {
     event.respondWith(fetch(request).then(response => {
       if (!response.ok) throw new Error('Guest shell unavailable');

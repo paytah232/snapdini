@@ -31,7 +31,7 @@ No Wrangler dependency is installed by these scripts. Tokens belong in the proce
 as `CLOUDFLARE_API_TOKEN`, never in shell history, checked-in files or browser assets. Use the
 account that owns the production domain, while targeting only this isolated development Worker.
 The origin must be an explicit HTTPS development origin without credentials, path, query or
-fragment. Production `snapdini.com` and `www.snapdini.com` origins and non-dev lanes are rejected.
+fragment. These development settings reject production `snapdini.com` and `www.snapdini.com` origins; production preparation requires the explicit configuration below.
 
 The needed API token permission is **Account → Workers Scripts → Edit** (the API documents
 this as `Workers Scripts Write`), scoped to that selected account. No DNS edit, zone routes,
@@ -65,8 +65,7 @@ The expected free-tier advantage follows Cloudflare's [static asset billing](htt
 
 This is a deployment snapshot: later origin event edits are not automatically sent to Cloudflare.
 Regenerate and deploy after relevant event-setting changes during development, and redeploy a
-new guest artifact after app changes. This manual pipeline must become a tested publication
-process before production rollout. Do not promise current lock/revocation knowledge during an outage.
+new guest artifact after app changes. For automatic operation, use the verified separate event publisher described below. Do not promise current lock/revocation knowledge during an outage.
 Browser queues on this separate hostname also belong to that hostname; they are not migrated
 from the primary site's IndexedDB or localStorage.
 
@@ -78,3 +77,35 @@ node --test tools/guest-edge/edge.test.mjs
 
 The extensionless `/guest/shell` is an identical HTML alias with an explicit HTML content type.
 It avoids Cloudflare rejecting index.html rewrites as loops despite html_handling:none.
+
+
+## Release promotion and ordinary guest links
+
+The camera artifact also serves `/join/*` and `/e/*` as static aliases. There is no browser
+redirect, so normal-domain sessions, IndexedDB queues and camera permissions keep their origin.
+`/guest/sw.js` has `Service-Worker-Allowed: /`; guest pages register only their own `/join/`,
+`/e/`, or `/guest/` scope. Updates wait for existing camera clients to close.
+
+Set `GUEST_EVENTS_WORKER=snapdini-guest-events-dev` in dev or `snapdini-guest-events` in an
+explicit production lane. This binds the independently deployed settings Worker. Camera
+artifacts then omit event snapshots; settings changes never require a camera deployment.
+Production preparation requires this binding, disables workers.dev and prepares only the three
+guest path routes. It never reroutes account pages, `/api/*`, `/uploads/*` or existing failover.
+Review existing zone routes before deploying; no production route is installed by dev commands.
+
+`EXPECTED_VERSION=<release> node tools/guest-edge/promote.mjs` prepares a private artifact after
+checking app/web versions, the built guest manifest and a matching writable live origin.
+Supply explicit lane, account, origin and event Worker as above. `--deploy` additionally requires
+a private process deployment token and rechecks health immediately before uploading. The checked-in
+Wrangler template remains isolated to dev; generated production configuration is opt-in only.
+
+For normal upgrades, set `SNAPDINI_GUEST_RELEASE_HOOK` to an operator-owned executable when
+running `app/scripts/upgrade.sh`. The hook receives the running version after origin startup.
+Configure it to load private deployment settings/token and invoke
+`node tools/guest-edge/update-from-container.mjs "$1"` with `GUEST_WEB_CONTAINER` explicitly set.
+That helper extracts the guest artifact from the **running web image**, verifies its release,
+and uses the same health-gated promotion. No hook is needed for ordinary self-hosting.
+A failed promotion fails the upgrade's final step and leaves the prior edge deployment available;
+it does not report an edge update as successful. Preserve the previous deployment ID for rollback.
+
+See [the 1.5.10 runbook](../../docs/RELEASE_1.5.10.md) for acceptance and rollback limits.

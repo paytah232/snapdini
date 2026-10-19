@@ -1,10 +1,10 @@
 /** Isolated development guest API/media proxy. Static assets normally bypass this code. */
 export function appOrigin(raw, lane) {
-  if (lane !== 'dev') throw new Error('Only the development lane is supported');
+  if (!['dev', 'production'].includes(lane)) throw new Error('Invalid deployment lane');
   const origin = new URL(raw);
   if (origin.protocol !== 'https:' || origin.username || origin.password || origin.pathname !== '/'
-      || origin.search || origin.hash || origin.hostname === 'snapdini.com'
-      || origin.hostname === 'www.snapdini.com') throw new Error('Invalid development APP_ORIGIN');
+      || origin.search || origin.hash || (lane === 'dev' && (origin.hostname === 'snapdini.com'
+      || origin.hostname === 'www.snapdini.com'))) throw new Error('Invalid development APP_ORIGIN');
   return origin.origin;
 }
 
@@ -17,6 +17,18 @@ export async function handle(request, env, fetchOrigin = fetch) {
   try { origin = appOrigin(env.APP_ORIGIN, env.DEPLOYMENT_LANE); }
   catch { return new Response('Development proxy is not configured', { status: 503 }); }
   const incoming = new URL(request.url);
+  if ((/^\/guest\/events\/[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*\.json$/.test(incoming.pathname)
+      || incoming.pathname === '/guest/publication.json') && env.EVENTS_ASSETS) {
+    if (!['GET', 'HEAD'].includes(request.method)) return new Response('Method not allowed', { status: 405 });
+    try {
+      return await env.EVENTS_ASSETS.fetch(new Request(incoming.origin + incoming.pathname, { method: request.method }));
+    } catch {
+      return new Response('Recovery settings temporarily unavailable', { status: 503, headers: { 'cache-control': 'no-store' } });
+    }
+  }
+  // Production routes cover only guest navigation/assets/settings. API and media remain
+  // on the existing same-origin application path with its normal authentication/failover.
+  if (env.DEPLOYMENT_LANE !== 'dev') return new Response('Not found', { status: 404 });
   if (!incoming.pathname.startsWith('/api/') && !incoming.pathname.startsWith('/uploads/'))
     return new Response('Not found', { status: 404 });
   // Setting pathname/search independently prevents //host paths becoming a different origin.

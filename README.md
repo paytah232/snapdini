@@ -188,3 +188,5 @@ Sacramento and Jost — each under the [SIL Open Font License 1.1](web/static/fo
 covers redistributing them with the application. Per-family copyright notices are in
 [`web/static/fonts/README.md`](web/static/fonts/README.md). The OFL is separate from the AGPL and
 applies only to those files.
+
+Release preparation: [1.5.10 recovery rollout and acceptance](docs/RELEASE_1.5.10.md).

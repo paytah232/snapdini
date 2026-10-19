@@ -372,6 +372,18 @@ export const photos = pgTable('photos', {
   participantIdx: index('idx_photos_participant').on(t.participantId),
 }));
 
+// A deleted upload receipt outlives the photo, so a queued retry cannot undo an intentional
+// delete. No media or raw capture identifier is retained; purge with the event/participant.
+export const captureUploadTombstones = pgTable('capture_upload_tombstones', {
+  photoId: text('photo_id').primaryKey(),
+  eventId: text('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
+  participantId: text('participant_id').notNull().references(() => participants.id, { onDelete: 'cascade' }),
+  deletedAt: ms('deleted_at').notNull(),
+}, (t) => ({
+  byEvent: index('capture_upload_tombstones_event_idx').on(t.eventId),
+  byParticipant: index('capture_upload_tombstones_participant_idx').on(t.participantId),
+}));
+
 // Shareable links to a gallery: 'all' = the whole (visible) library, 'selected' = a hand-picked
 // subset (photoIds). Each has its own opaque token so an organizer can share a curated set.
 /** Somebody who opened a SHARE LINK and gave a name, so they can heart and comment.

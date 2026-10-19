@@ -15,7 +15,7 @@ const dbPath = require.resolve('../db');
 require(dbPath);
 require.cache[dbPath]!.exports = { db: { select: () => ({ from: (t: any) => chain(() => t[Symbol.for('drizzle:Name')] === 'participants' ? actorRows : t[Symbol.for('drizzle:Name')] === 'photos' ? photoRows : journalRows) }), insert: () => { let c: any; c = chain(() => { if (failInsert)
       throw Error('db unavailable'); inserted.push(...c.v); return []; }); return c; } } };
-const { parseClientEvidence, acceptClientEvidence, observeUpload, rejectionReason, evidenceForEvent, observeUploadParserError } = require('../upload-evidence') as typeof import('../upload-evidence');
+const { parseClientEvidence, acceptClientEvidence, observeUpload, rejectionReason, evidenceForEvent, observeUploadParserError, replayedReceipt } = require('../upload-evidence') as typeof import('../upload-evidence');
 const valid = {
   id: 'capture001:local_saved', captureId: 'capture001', stage: 'local_saved', at: 123
 };
@@ -179,4 +179,29 @@ test('participant rate-limit keys separate guests behind one IP and require auth
   assert.equal(next, false);
   assert.equal(res.statusCode, 403);
   assert.throws(() => evidenceParticipantKey(unauth));
+});
+
+test('deleted upload acknowledgement cannot create replayed or current storage proof', async () => {
+  photoRows = [];
+  const req = request({ sessionToken: 'session123', captureId: 'capture001' }, {}, '/');
+  const res = response();
+  observeUpload(req, res, () => { });
+  const receipt = replayedReceipt({ success: true, deleted: true, status: 'deleted',
+    photoId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', photosRemaining: 12 });
+  res.json(receipt);
+  assert.equal(res.body, receipt, 'telemetry must preserve successful tombstone acknowledgement');
+  await tick();
+  assert.deepEqual(inserted.map(row => row.stage), ['received', 'response_sent']);
+  assert.equal(inserted[1].photoId, null);
+  journalRows = [...inserted, {
+    id: 'old-storage', source: 'server', stage: 'server_stored', participantId: 'guest1', captureId: 'capture001',
+    photoId: receipt.photoId,
+  }, {
+    id: 'old-replay', source: 'server', stage: 'server_replayed', participantId: 'guest1', captureId: 'capture001',
+    photoId: receipt.photoId,
+  }];
+  const summary = await evidenceForEvent('event1', 50);
+  assert.deepEqual(summary.captures[0].storedPhotoIds, []);
+  assert.ok(summary.captures[0].stages.some(row => row.stage === 'server_replayed'),
+    'historical replay is retained as historical evidence only');
 });

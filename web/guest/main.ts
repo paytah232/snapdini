@@ -7,7 +7,9 @@ mount(App, { target: document.getElementById('app')! });
 // Only this browser-only guest shell gets an offline cache; the site's SSR worker is not bundled.
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/guest/sw.js', { scope: '/guest/', updateViaCache: 'none' })
+    const scope = window.location.pathname.startsWith('/join/') ? '/join/'
+      : window.location.pathname.startsWith('/e/') ? '/e/' : '/guest/';
+    navigator.serviceWorker.register('/guest/sw.js', { scope, updateViaCache: 'none' })
       .catch((error) => console.warn('Guest offline cache unavailable', error));
   });
 }

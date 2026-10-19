@@ -150,4 +150,12 @@ if [ -z "${got:-}" ]; then
 fi
 [ -n "${got:-}" ] || die "app did not come up — check: $COMPOSE logs app"
 ok "running version ${got}"
+# Optional independent guest hosting: an operator-owned executable promotes the camera assets
+# from the running web image after its own writable/version health checks. Default installs
+# need no hook or Cloudflare credentials. Failure leaves the previous edge camera deployed.
+if [ -n "${SNAPDINI_GUEST_RELEASE_HOOK:-}" ]; then
+  [ -x "$SNAPDINI_GUEST_RELEASE_HOOK" ] || die "guest release hook is not executable"
+  "$SNAPDINI_GUEST_RELEASE_HOOK" "$got" || die "app is running, but independent guest promotion failed; check the hook and retry"
+  ok "independent guest camera promoted"
+fi
 echo "▸ done. Roll back with: sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=<previous>/' .env && $COMPOSE up -d"
