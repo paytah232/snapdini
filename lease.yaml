@@ -4,10 +4,8 @@ owner:
   user: ai
   provider: null
   profile: null
-  task: phone-fresh-guest-outage
-  pid: 2964162
-acquired_at: '2026-10-19T00:47:26Z'
-expires_at: '2026-10-19T02:47:26Z'
+  task: correct-phone-test-path
+  pid: 2966265
+acquired_at: '2026-10-19T00:48:56Z'
+expires_at: '2026-10-19T02:48:56Z'
 ttl_minutes: 120
-state: released
-released_at: '2026-10-19T00:47:29Z'
