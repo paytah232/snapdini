@@ -173,3 +173,20 @@ test('guest promotion requires matching healthy writable origin', async () => {
     await assert.rejects(verifyOrigin(env.APP_ORIGIN, '1.5.10', async () => Response.json(config)), /matching release/);
   await assert.rejects(verifyOrigin(env.APP_ORIGIN, '1.5.10', async () => new Response('', { status: 503 })), /HTTP 503/);
 });
+
+
+test('production canary routes cover only the chosen event and independent assets', async t => {
+  const opts = { ...await fixture(t), lane: 'production', origin: 'https://camera.example.test',
+    eventsWorker: 'snapdini-guest-events', canaryCode: 'ABCD1234' };
+  const { artifact } = await prepare(opts);
+  const config = JSON.parse(await readFile(path.join(artifact, 'wrangler.json'), 'utf8'));
+  const patterns = config.routes.map(route => route.pattern);
+  assert.ok(patterns.includes('camera.example.test/join/ABCD1234*'));
+  assert.ok(patterns.includes('camera.example.test/guest/events/ABCD1234.json*'));
+  assert.ok(patterns.includes('camera.example.test/guest/assets/*'));
+  for (const path of ['join/*', 'e/*', 'guest/*', 'api/*', 'uploads/*'])
+    assert.equal(patterns.includes('camera.example.test/' + path), false);
+  assert.equal(patterns.some(p => p.includes('guest/join/')), false);
+  await assert.rejects(prepare({ ...opts, canaryCode: '../wrong' }), /valid production event/);
+  await assert.rejects(prepare({ ...opts, lane: 'dev' }), /valid production event/);
+});

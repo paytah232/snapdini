@@ -109,3 +109,9 @@ A failed promotion fails the upgrade's final step and leaves the prior edge depl
 it does not report an edge update as successful. Preserve the previous deployment ID for rollback.
 
 See [the 1.5.10 runbook](../../docs/RELEASE_1.5.10.md) for acceptance and rollback limits.
+
+For staged acceptance, set `GUEST_CANARY_CODE` to one eight-character event code in the production
+lane. This routes only its normal join link, its recovery settings/export link and independent
+camera assets. Other `/join/*` and `/e/*` links retain origin handling. Trailing route wildcards
+allow query strings while the shell still validates its event identifier. Remove the explicit
+canary setting only after acceptance to promote the normal guest path routes.

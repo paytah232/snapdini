@@ -23,7 +23,7 @@ export async function promote(env = process.env, deploy = false) {
   if (web.version !== app.version) throw new Error('Application and camera versions do not match');
   if (env.EXPECTED_VERSION !== web.version) throw new Error('Explicit EXPECTED_VERSION must match source');
   const options = { accountId: env.CLOUDFLARE_ACCOUNT_ID, origin: env.APP_ORIGIN,
-    lane: env.DEPLOYMENT_LANE, eventsWorker: env.GUEST_EVENTS_WORKER,
+    lane: env.DEPLOYMENT_LANE, eventsWorker: env.GUEST_EVENTS_WORKER, canaryCode: env.GUEST_CANARY_CODE,
     guestDir: env.GUEST_ASSET_DIR, snapshotDir: env.GUEST_SNAPSHOT_DIR };
   // Verify the built camera version too: a forgotten build must never promote stale assets.
   const guest = options.guestDir ?? path.join(root, 'web/guest-dist');

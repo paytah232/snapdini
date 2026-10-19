@@ -35,8 +35,10 @@ async function copyGuest(source, destination) {
 }
 
 export async function prepare({ accountId, origin, lane, guestDir = path.join(root, 'web/guest-dist'),
-  eventsWorker, snapshotDir = path.join(root, 'app/data/guest-recovery'), tempRoot = os.tmpdir() }) {
+  eventsWorker, canaryCode, snapshotDir = path.join(root, 'app/data/guest-recovery'), tempRoot = os.tmpdir() }) {
   const validatedOrigin = appOrigin(origin, lane);
+  if (canaryCode && (lane !== 'production' || !/^[A-Z0-9]{8}$/.test(canaryCode)))
+    throw new Error('Canary requires a valid production event code');
   if (!/^[a-f0-9]{32}$/i.test(accountId ?? '')) throw new Error('An explicit Cloudflare account ID is required');
   // Validate required inputs before creating a destination. No origin fallback or snapshot fetch.
   if (!(await lstat(guestDir)).isDirectory() || (!eventsWorker && !(await lstat(snapshotDir)).isDirectory()))
@@ -127,7 +129,12 @@ export async function prepare({ accountId, origin, lane, guestDir = path.join(ro
       const host = new URL(validatedOrigin).hostname;
       config.name = 'snapdini-guest';
       config.workers_dev = false;
-      config.routes = ['join/*', 'e/*', 'guest/*'].map(route => ({ pattern: `${host}/${route}`, zone_name: host }));
+      const paths = canaryCode
+        ? [`join/${canaryCode}*`, 'guest/assets/*', 'guest/fonts/*', 'guest/sw.js*',
+          'guest/icon.svg*', 'guest/index.html*', 'guest/shell*', 'guest/release.json*',
+          'guest/publication.json*', `guest/events/${canaryCode}.json*`, `guest/saved/${canaryCode}*`]
+        : ['join/*', 'e/*', 'guest/*'];
+      config.routes = paths.map(route => ({ pattern: `${host}/${route}`, zone_name: host }));
       config.assets.run_worker_first = ['/guest/events/*', '/guest/publication.json'];
     }
     if (eventsWorker) {
@@ -149,6 +156,6 @@ export async function prepare({ accountId, origin, lane, guestDir = path.join(ro
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   prepare({ accountId: process.env.CLOUDFLARE_ACCOUNT_ID, origin: process.env.APP_ORIGIN,
     lane: process.env.DEPLOYMENT_LANE, guestDir: process.env.GUEST_ASSET_DIR,
-    eventsWorker: process.env.GUEST_EVENTS_WORKER, snapshotDir: process.env.GUEST_SNAPSHOT_DIR }).then(result => console.log(JSON.stringify(result)))
+    eventsWorker: process.env.GUEST_EVENTS_WORKER, canaryCode: process.env.GUEST_CANARY_CODE, snapshotDir: process.env.GUEST_SNAPSHOT_DIR }).then(result => console.log(JSON.stringify(result)))
     .catch(error => { console.error(error.message); process.exitCode = 1; });
 }
