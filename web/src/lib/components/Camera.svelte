@@ -1287,7 +1287,6 @@
           serverRemaining = ev.maxPhotos;
           rememberGuest(sessionToken, provisionalMe());
           recoveryState.set(true);
-          showToast('Uploads are paused. Keep your saved photos here until Snapdini returns.');
           await enterCamera();
           return;
         }
@@ -3673,7 +3672,11 @@
           : r.revealMode === 'at_end' ? 'Everyone’s photos unlock when the event ends.'
           : 'Photos are hidden right now.';
       }
-    } catch (e) { showToast(e instanceof Error ? e.message : 'Could not load gallery', true); }
+    } catch (e) {
+      // An outage still leaves the saved local roll available. Keep browsing quiet; successful
+      // uploads refresh this gallery when the connection returns. Settled refusals still matter.
+      if (!temporaryFailure(e)) showToast(e instanceof Error ? e.message : 'Could not load gallery', true);
+    }
   }
 
   function backToCamera() { screen = 'camera'; startCamera(); }
@@ -4712,7 +4715,7 @@
 
 {#if showFeedback}<FeedbackModal context="Camera ({ev?.joinCode ?? ''})" eventCode={ev?.joinCode ?? ''} on:close={() => (showFeedback = false)} />{/if}
 
-{#if recoveryNotice && dismissedRecoveryNotice !== recoveryNotice && !$toast}
+{#if (screen === 'camera' || screen === 'gallery') && recoveryNotice && dismissedRecoveryNotice !== recoveryNotice && !$toast}
   <Toast
     message={{ kind: recoveryNotice === 'storage' ? 'error' : 'info', msg: recoveryNotice === 'storage'
       ? 'This device could not save a capture. Keep this page open and save a copy from the upload queue.'

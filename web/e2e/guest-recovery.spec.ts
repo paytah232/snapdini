@@ -39,6 +39,8 @@ test('fresh outage guest captures, reloads, reconciles once and drains durable q
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
   await page.route('**/api/**', route => route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"Temporarily unavailable"}' }));
   await page.goto(`/guest/join/${code}`);
+  await expect(page.locator('#join-name')).toBeVisible();
+  await expect(page.locator('.toast')).toHaveCount(0); // Joining needs no outage notice.
   await page.locator('#join-name').fill('Outage guest');
   await page.getByRole('button', { name: 'Join & open camera' }).click();
   const shutter = page.getByRole('button', { name: 'Take photo', exact: true });
@@ -46,6 +48,15 @@ test('fresh outage guest captures, reloads, reconciles once and drains durable q
   await expect.poll(() => page.locator('.viewfinder video').evaluate((v: HTMLVideoElement) => v.videoWidth)).toBeGreaterThan(0); await shutter.click();
   await expect.poll(async () => (await queued(page)).length).toBe(1);
   const [original] = await queued(page); expect(original.sessionToken).toMatch(/^offline_/);
+  const galleryFetch = page.waitForResponse(r => new URL(r.url()).pathname === `/api/photos/${code}` && r.request().method() === 'GET');
+  await page.getByRole('button', { name: /^Gallery/ }).click();
+  expect((await galleryFetch).status()).toBe(503);
+  await expect(page.locator('.gallery')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Upload queue (1 uploading)', exact: true })).toBeVisible();
+  expect((await queued(page)).map(row => row.id)).toEqual([original.id]);
+  await expect(page.locator('.toast.error')).toHaveCount(0); // Local photos need no failed-fetch alert.
+  await expect(page.getByRole('status').filter({ hasText: 'Photos are waiting in the queue' })).toBeVisible();
+  await page.getByRole('button', { name: '📷 Camera', exact: true }).click();
   await page.reload();
   await expect(shutter).toBeEnabled();
   await expect.poll(() => page.locator('.viewfinder video').evaluate((v: HTMLVideoElement) => v.videoWidth)).toBeGreaterThan(0);
