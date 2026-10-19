@@ -4,10 +4,8 @@ owner:
   user: ai
   provider: null
   profile: null
-  task: witness-quota-hardening
-  pid: 3385752
-acquired_at: '2026-10-19T06:53:50Z'
-expires_at: '2026-10-19T07:38:50Z'
-ttl_minutes: 45
-state: released
-released_at: '2026-10-19T06:58:03Z'
+  task: official-release-1.5.10
+  pid: 3833454
+acquired_at: '2026-10-19T13:38:43Z'
+expires_at: '2026-10-19T15:08:43Z'
+ttl_minutes: 90
