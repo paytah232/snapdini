@@ -100,7 +100,7 @@ a private process deployment token and rechecks health immediately before upload
 Wrangler template remains isolated to dev; generated production configuration is opt-in only.
 
 For normal upgrades, set `SNAPDINI_GUEST_RELEASE_HOOK` to an operator-owned executable when
-running `app/scripts/upgrade.sh`. The hook receives the running version after origin startup.
+running `app/scripts/upgrade.sh`, or install it as executable `./guest-release-hook` in the deployment directory. The hook receives the running version after origin startup.
 Configure it to load private deployment settings/token and invoke
 `node tools/guest-edge/update-from-container.mjs "$1"` with `GUEST_WEB_CONTAINER` explicitly set.
 That helper extracts the guest artifact from the **running web image**, verifies its release,
