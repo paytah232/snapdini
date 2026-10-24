@@ -9,3 +9,5 @@ owner:
 acquired_at: '2026-10-24T07:04:08Z'
 expires_at: '2026-10-24T08:04:08Z'
 ttl_minutes: 60
+state: released
+released_at: '2026-10-24T07:13:46Z'
