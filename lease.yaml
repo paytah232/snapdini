@@ -1,0 +1,11 @@
+resource: devel/guest-diagnostics-fix
+owner:
+  vm: snapdini
+  user: ai
+  provider: null
+  profile: null
+  task: null
+  pid: 4165713
+acquired_at: '2026-10-24T21:19:55Z'
+expires_at: '2026-10-24T23:19:55Z'
+ttl_minutes: 120
