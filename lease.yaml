@@ -1,13 +1,11 @@
-resource: next/deployment-next
+resource: devel/deployment-next
 owner:
   vm: snapdini
   user: ai
   provider: null
   profile: null
-  task: security-merge
-  pid: 3093005
-acquired_at: '2026-10-24T07:04:08Z'
-expires_at: '2026-10-24T08:04:08Z'
-ttl_minutes: 60
-state: released
-released_at: '2026-10-24T07:13:46Z'
+  task: next-readiness
+  pid: 3168833
+acquired_at: '2026-10-24T07:32:34Z'
+expires_at: '2026-10-24T09:32:34Z'
+ttl_minutes: 120
