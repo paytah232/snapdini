@@ -46,30 +46,20 @@ router.post('/register', async (req: Request, res: Response) => {
   if (!validEmail(emailAddr)) return res.status(400).json({ error: 'Enter a valid email address' });
   if (password.length < 8)    return res.status(400).json({ error: 'Password must be at least 8 characters' });
 
-  const [existing] = await db.select({ id: users.id, passwordHash: users.passwordHash })
-    .from(users).where(eq(users.email, emailAddr));
-  if (existing && existing.passwordHash)
-    return res.status(409).json({ error: 'An account with that email already exists' });
+  const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.email, emailAddr));
+  // Registration never changes credentials on an existing account, including passwordless
+  // accounts. Existing users must prove ownership through the normal sign-in flow.
+  if (existing) return res.status(409).json({ error: 'An account with that email already exists' });
 
-  const now  = Date.now();
+  const now = Date.now();
   const hash = await auth.hashPassword(password);
-  let userId: string;
-  if (existing) {
-    // Email pre-existed via magic-link/social; attach a password to it.
-    userId = existing.id;
-    await db.update(users)
-      .set({ passwordHash: hash, displayName: sql`COALESCE(${users.displayName}, ${displayName})` })
-      .where(eq(users.id, userId));
-  } else {
-    userId = uuidv4();
-    // Guest-referral attribution: which event's gallery sent them here. Captured at signup as well
-    // as at event creation, because a guest often signs up well before running anything.
-    const referredByEventId = await referrerFromCookie(req);
-    await db.insert(users).values({
-      id: userId, email: emailAddr, passwordHash: hash, displayName, plan: 'free', createdAt: now,
-      referredByEventId,
-    });
-  }
+  const userId = uuidv4();
+  // Guest-referral attribution is retained for genuinely new accounts only.
+  const referredByEventId = await referrerFromCookie(req);
+  await db.insert(users).values({
+    id: userId, email: emailAddr, passwordHash: hash, displayName, plan: 'free', createdAt: now,
+    referredByEventId,
+  });
 
   const token  = await auth.createEmailToken(userId, 'verify');
   const link   = `${baseUrl(req)}/api/auth/verify?token=${token}`;
