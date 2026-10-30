@@ -10,7 +10,7 @@ export type UseCase = {
   slug: string;
   /** <title> — keep ≤ ~60 chars before the brand suffix. */
   title: string;
-  /** meta description — ~150–160 chars. */
+  /** meta description — at most 155 chars: Bing flags anything over 160 as an error and Google truncates it. */
   desc: string;
   eyebrow: string;
   /** H1; may contain a single <em> for the accent word. */
@@ -52,7 +52,7 @@ export const usecases: Record<string, UseCase> = {
   'wedding-disposable-camera': {
     slug: 'wedding-disposable-camera',
     title: 'Wedding Disposable Camera App — QR Photo Sharing',
-    desc: 'Snapdini is a digital disposable camera for weddings. Guests scan a QR code on the table to snap a limited roll — no app — and every photo lands in one shared gallery revealed after your big day. Free for up to 10 guests.',
+    desc: 'A digital disposable camera for weddings. Guests scan a QR to snap a limited roll, no app, into one gallery revealed after the day. Free for 10 guests.',
     eyebrow: 'For weddings',
     h1: 'The disposable camera for your <em>wedding</em>.',
     lede: 'Put a QR code on every table. Guests scan, shoot their roll, and capture the candid moments you’ll never see from the photographer — all collected in one gallery you unwrap together after the day.',
@@ -81,7 +81,7 @@ export const usecases: Record<string, UseCase> = {
   'birthday-party-camera': {
     slug: 'birthday-party-camera',
     title: 'Birthday Party Camera App — Shared QR Photos',
-    desc: 'A digital disposable camera for birthday parties. Guests scan a QR to snap a limited roll — no app — and every photo lands in one shared gallery to reveal and download together. Free for up to 10 guests.',
+    desc: 'A digital disposable camera for birthday parties. Guests scan a QR to snap a limited roll, no app, into one gallery revealed together. Free for 10 guests.',
     eyebrow: 'For birthdays & parties',
     h1: 'A disposable camera for the whole <em>party</em>.',
     lede: 'Hand the party a QR code and let everyone shoot. The candid, silly, off-guard shots all land in one gallery — then reappear together when the night’s over.',
@@ -110,7 +110,7 @@ export const usecases: Record<string, UseCase> = {
   'corporate-event-photo-sharing': {
     slug: 'corporate-event-photo-sharing',
     title: 'Corporate Event Photo Sharing — QR Camera',
-    desc: 'A QR-code camera for corporate events, conferences and team parties. Attendees scan to snap photos — no app, no logins — into one shared, downloadable gallery. Free to trial; one-off pass for larger events.',
+    desc: 'A QR camera for corporate events and conferences. Attendees scan to snap photos, no app or logins, into one gallery. Free trial, one-off event pass.',
     eyebrow: 'For corporate & teams',
     h1: 'Crowd-sourced photos for your <em>company event</em>.',
     lede: 'Conferences, launches, off-sites and team parties — put a QR on the screen or lanyard and let attendees capture it from every angle. One shared gallery, ready to download for the recap.',
@@ -138,7 +138,7 @@ export const usecases: Record<string, UseCase> = {
   'baby-shower-photo-app': {
     slug: 'baby-shower-photo-app',
     title: 'Baby Shower Photo App — Shared QR Camera',
-    desc: 'A digital disposable camera for baby showers. Guests scan a QR to snap a limited roll — no app — into one shared gallery to reveal and keep. Free for up to 10 guests.',
+    desc: 'A digital disposable camera for baby showers. Guests scan a QR to snap a limited roll, no app, into one gallery to reveal and keep. Free for 10 guests.',
     eyebrow: 'For baby showers',
     h1: 'A shared camera for the <em>baby shower</em>.',
     lede: 'Let every guest capture the games, the gifts and the happy tears. One QR code, one gallery — a keepsake of the day to reveal together and treasure.',
@@ -166,7 +166,7 @@ export const usecases: Record<string, UseCase> = {
   'bachelorette-hens-party-camera': {
     slug: 'bachelorette-hens-party-camera',
     title: 'Bachelorette & Hen Party Camera App',
-    desc: 'A shared QR camera for bachelorette and hen parties. Everyone scans to snap a limited roll — no app — and the (sometimes incriminating) photos land in one gallery revealed at the end. Free for up to 10 guests.',
+    desc: 'A shared QR camera for bachelorette and hen parties. Everyone snaps a limited roll, no app, into one gallery revealed at the end. Free for 10 guests.',
     eyebrow: 'For hen & bachelorette parties',
     h1: 'The shared camera for the <em>hen do</em>.',
     lede: 'Whatever happens on the night, it lands in one gallery. Everyone scans the same QR, shoots their roll, and the whole story reappears together when it’s over — nothing lost in a dozen camera rolls.',
@@ -193,7 +193,7 @@ export const usecases: Record<string, UseCase> = {
   'engagement-party-camera': {
     slug: 'engagement-party-camera',
     title: 'Engagement Party Camera — Shared QR Photos',
-    desc: 'A digital disposable camera for engagement parties. Guests scan a QR to snap a limited roll — no app — into one shared gallery revealed at the end. Free for up to 10 guests; a head start before the wedding.',
+    desc: 'A digital disposable camera for engagement parties. Guests scan a QR to snap a limited roll, no app, into one gallery revealed later. Free for 10 guests.',
     eyebrow: 'For engagement parties',
     h1: 'A shared camera for the <em>engagement</em>.',
     lede: 'Celebrate the “yes” with photos from everyone who came. One QR code, one gallery — the candid moments to keep, and a perfect warm-up for the wedding camera later.',
@@ -220,7 +220,7 @@ export const usecases: Record<string, UseCase> = {
   'graduation-party-photo-app': {
     slug: 'graduation-party-photo-app',
     title: 'Graduation Party Photo App — Shared QR Camera',
-    desc: 'A shared QR camera for graduation parties. Friends and family scan to snap a limited roll — no app — into one gallery to reveal and keep. Free for up to 10 guests.',
+    desc: 'A shared QR camera for graduation parties. Friends and family scan to snap a limited roll, no app, into one gallery to keep. Free for 10 guests.',
     eyebrow: 'For graduations',
     h1: 'A shared camera for the <em>graduation</em>.',
     lede: 'Cap toss, family photos and the after-party — captured by everyone there and gathered into one gallery to celebrate the milestone and keep forever.',
@@ -247,7 +247,7 @@ export const usecases: Record<string, UseCase> = {
   'holiday-christmas-party-camera': {
     slug: 'holiday-christmas-party-camera',
     title: 'Holiday & Christmas Party Camera App',
-    desc: 'A shared QR camera for holiday and Christmas parties — office or family. Everyone scans to snap a limited roll, no app, into one gallery to reveal and download. Free for up to 10 guests.',
+    desc: 'A shared QR camera for holiday & Christmas parties. Everyone scans to snap a limited roll, no app, into one gallery to keep. Free for 10 guests.',
     eyebrow: 'For holiday & Christmas parties',
     h1: 'A shared camera for the <em>Christmas party</em>.',
     lede: 'Office do or family gathering — let everyone capture it. One QR on the table or the invite, one gallery of the whole night, revealed and ready to download when it’s over.',
@@ -278,7 +278,7 @@ export const usecases: Record<string, UseCase> = {
   'group-travel-photo-app': {
     slug: 'group-travel-photo-app',
     title: 'Group Travel Photo App — Shared Trip Photo Album',
-    desc: 'A group travel photo app that collects everyone\u2019s holiday photos in one shared album. Each traveller gets a limited roll, no app to install, and the whole trip is revealed together at the end. Free for groups up to 10.',
+    desc: 'A group travel photo app: everyone\u2019s trip photos in one shared album. A limited roll each, no app to install, revealed together at the end. Free for 10.',
     eyebrow: 'For trips & holidays',
     h1: 'One shared album for the <em>whole trip</em>.',
     lede: 'Everyone shoots. Nobody shares. Six months later the photos are still sitting on four different phones. Snapdini is a group travel photo app that gives the whole trip one camera and one shared album \u2014 and hands it back at the end, in one place.',

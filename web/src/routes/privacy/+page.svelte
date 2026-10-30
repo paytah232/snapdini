@@ -18,7 +18,7 @@
 
 <svelte:head>
   <title>Privacy Policy — Snapdini</title>
-  <meta name="description" content="Snapdini privacy policy: what we collect, how we use it, how long we keep your photos and emails, the services we use, and our promise never to sell your data or send unsolicited marketing." />
+  <meta name="description" content="Snapdini privacy policy: what we collect, how long we keep your photos and emails, the services we use, and our promise never to sell your data." />
   <link rel="canonical" href={origin + '/privacy'} />
   <meta name="robots" content={$page.data.robotsMeta ?? 'noindex, nofollow'} />
 </svelte:head>

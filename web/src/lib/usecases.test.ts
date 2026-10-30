@@ -32,4 +32,14 @@ describe('use-case pages', () => {
       expect(packFor(u.packKey).challenges.length).toBeGreaterThanOrEqual(6);
     }
   });
+
+  it('titles and descriptions fit in a search result', () => {
+    // Bing Webmaster reports a description over 160 chars as an error, and both engines cut a
+    // long one off mid-sentence. The brand suffix is added to the title elsewhere.
+    for (const u of Object.values(usecases)) {
+      expect(u.desc.length, u.slug).toBeLessThanOrEqual(155);
+      expect(u.desc.length, u.slug).toBeGreaterThanOrEqual(70);
+      expect(u.title.length, u.slug).toBeLessThanOrEqual(60);
+    }
+  });
 });

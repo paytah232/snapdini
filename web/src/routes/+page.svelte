@@ -279,8 +279,8 @@
   });
 
   // ── SEO ──
-  const TITLE = 'Snapdini — Disposable Camera App for Events & Weddings | QR Photo Sharing';
-  const DESC = 'Snapdini is a digital disposable camera for events. Guests scan a QR code to snap a limited roll — no app to install — and the whole gallery reappears when your event ends, as a gallery and as a slideshow film. Design printable posters and table cards in the app. Free for up to 10 guests.';
+  const TITLE = 'Snapdini — Disposable Camera App for Events & Weddings';
+  const DESC = 'Snapdini is a digital disposable camera for events. Guests scan a QR to snap a limited roll, no app, and every photo reappears after. Free for 10 guests.';
   // `more` is navigation, not part of the answer — which is why it is a separate field and not
   // markup inside `a`. That string is also fed verbatim to the FAQ JSON-LD below, where an anchor
   // tag would be a literal "<a href..." in the structured data Google reads.
