@@ -59,6 +59,36 @@ export function canonicalOrigin(configured: string | null | undefined, requestOr
   }
 }
 
+/**
+ * Where a request on the `www.` twin of the canonical host should be sent, or null to serve it.
+ *
+ * www.snapdini.com used to answer every page itself with a canonical pointing at the apex. That
+ * works, but a rel=canonical is a hint and a 301 is an instruction, and the two hosts showed up in
+ * Search Console as separate properties of the same pages. Only the indexable deployment does
+ * this, and only for exactly `www.` + its own canonical host, so a preview, a self-hosted install
+ * on some other name, or the apex itself is never redirected.
+ *
+ * `host` is the raw Host header, not `event.url`: with ORIGIN set, adapter-node builds event.url
+ * from ORIGIN and every request looks like it arrived on the apex.
+ */
+export function wwwRedirectTarget(opts: {
+  indexable: boolean;
+  host: string | null | undefined;
+  canonical: string;
+  pathAndQuery: string;
+}): string | null {
+  if (!opts.indexable || !opts.host) return null;
+  let canonicalHost: string;
+  try {
+    canonicalHost = new URL(opts.canonical).host.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (canonicalHost.startsWith('www.')) return null;
+  if (opts.host.trim().toLowerCase() !== `www.${canonicalHost}`) return null;
+  return new URL(opts.canonical).origin + opts.pathAndQuery;
+}
+
 /** The `<meta name="robots">` value. */
 export const robotsMeta = (indexable: boolean): string =>
   indexable ? 'index, follow' : 'noindex, nofollow';

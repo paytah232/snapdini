@@ -5,6 +5,7 @@
   import Turnstile from '$lib/components/Turnstile.svelte';
   import Logo from '$lib/components/Logo.svelte';
   import SiteFooter from '$lib/components/SiteFooter.svelte';
+  import { page } from '$app/stores';
 
   let name = '';
   let email = '';
@@ -16,6 +17,8 @@
   let sending = false;
   let sent = false;
   let supportEmail: string | null = null;
+  // Configuration, NOT the request host. See the note on /privacy.
+  $: origin = $page.data.canonicalOrigin ?? $page.url.origin;
 
   onMount(async () => {
     try { supportEmail = (await getConfig()).supportEmail; } catch { /* offline */ }
@@ -39,7 +42,12 @@
   }
 </script>
 
-<svelte:head><title>Contact — Snapdini</title></svelte:head>
+<svelte:head>
+  <title>Contact — Snapdini</title>
+  <meta name="description" content="Questions, ideas or trouble with your Snapdini event camera? Send us a note and we’ll get back to you." />
+  <link rel="canonical" href={origin + '/contact'} />
+  <meta name="robots" content={$page.data.robotsMeta ?? 'noindex, nofollow'} />
+</svelte:head>
 
 <main>
   <div class="card">

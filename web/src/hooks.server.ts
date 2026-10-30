@@ -2,7 +2,7 @@ import type { Handle } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import { analyticsHead, isConsentRegion, isValidGtagId } from '$lib/consent';
 import { isValidUetId, uetHead } from '$lib/msads';
-import { isIndexable, robotsHeader } from '$lib/seo';
+import { isIndexable, robotsHeader, wwwRedirectTarget, canonicalOrigin, canonicalSetting } from '$lib/seo';
 import { isTokenRoute, redactPath } from '../../shared/token-paths';
 
 // Injects the ad/analytics tags into the %snapdini.analytics% placeholder in app.html at SSR —
@@ -54,6 +54,18 @@ export function isPrivatePage(pathname: string): boolean {
 }
 
 export const handle: Handle = async ({ event, resolve }) => {
+  const wwwTarget = wwwRedirectTarget({
+    indexable: isIndexable(env.SEO_INDEXABLE),
+    host: event.request.headers.get('host'),
+    canonical: canonicalOrigin(canonicalSetting(env.CANONICAL_ORIGIN, env.ORIGIN), event.url.origin),
+    pathAndQuery: event.url.pathname + event.url.search,
+  });
+  if (wwwTarget) {
+    // 308 keeps the method and body for anything that is not a plain page load.
+    const safe = event.request.method === 'GET' || event.request.method === 'HEAD';
+    return new Response(null, { status: safe ? 301 : 308, headers: { location: wwwTarget } });
+  }
+
   const id = (env.GTAG_ID || '').trim();
   const uetId = (env.MSUET_ID || '').trim();
   // Microsoft's tag has no page_location equivalent to redact (bat.js reads document.location
