@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isIndexable, canonicalOrigin, canonicalSetting, robotsMeta, robotsHeader, robotsTxt, sitemapXml, SITEMAP_LASTMOD } from './seo';
+import { isIndexable, canonicalOrigin, canonicalSetting, robotsMeta, robotsHeader, robotsTxt, sitemapXml, SITEMAP_LASTMOD, wwwRedirectTarget } from './seo';
 
 describe('isIndexable', () => {
   it('opts in on 1 / true, case- and space-insensitively', () => {
@@ -154,5 +154,26 @@ describe('sitemapXml', () => {
   it('never leaks a request host into it', () => {
     expect(sitemapXml('https://snapdini.com', [{ path: '/', priority: '1.0' }]))
       .not.toContain('synology');
+  });
+});
+
+describe('wwwRedirectTarget', () => {
+  const base = { indexable: true, canonical: 'https://snapdini.com', pathAndQuery: '/pricing?ref=ad' };
+  it('sends the www twin of the canonical host to the apex, keeping path and query', () => {
+    expect(wwwRedirectTarget({ ...base, host: 'www.snapdini.com' })).toBe('https://snapdini.com/pricing?ref=ad');
+    expect(wwwRedirectTarget({ ...base, host: 'WWW.Snapdini.com' })).toBe('https://snapdini.com/pricing?ref=ad');
+  });
+  it('leaves the apex and every other host alone', () => {
+    for (const host of ['snapdini.com', 'snapdini-dev.example.com', 'www.other.com', 'www.snapdini.com.evil.com']) {
+      expect(wwwRedirectTarget({ ...base, host })).toBeNull();
+    }
+  });
+  it('never redirects on a non-indexable deployment', () => {
+    expect(wwwRedirectTarget({ ...base, indexable: false, host: 'www.snapdini.com' })).toBeNull();
+  });
+  it('does nothing when the canonical host is itself www, or there is no Host header', () => {
+    expect(wwwRedirectTarget({ ...base, canonical: 'https://www.snapdini.com', host: 'www.snapdini.com' })).toBeNull();
+    expect(wwwRedirectTarget({ ...base, host: null })).toBeNull();
+    expect(wwwRedirectTarget({ ...base, canonical: 'not a url', host: 'www.snapdini.com' })).toBeNull();
   });
 });
