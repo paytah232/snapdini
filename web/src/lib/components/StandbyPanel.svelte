@@ -109,7 +109,7 @@
     <div class="req {req.state}">
       <div class="req-head">
         <strong>Last rebuild: {req.state}</strong>
-        <span class="muted">asked by {req.requestedBy} at {clock(req.requestedAt)}{#if req.finishedAt} · finished {clock(req.finishedAt)}{/if}</span>
+        <span class="muted">asked by {req.requestedBy} at {clock(req.requestedAt)}{#if req.finishedAt}&nbsp;· finished {clock(req.finishedAt)}{/if}</span>
       </div>
       {#if req.error}<p class="err">{req.error}</p>{/if}
       {#if req.steps.length}
@@ -129,7 +129,7 @@
         <p>This <strong>discards the standby's database</strong> and re-clones it from production, then
           re-arms replication, media mirroring and the failover watcher. Production keeps serving
           throughout; the standby cannot take over until it finishes (a few minutes).</p>
-        <label>Type <code>{view.confirmWord}</code> to confirm
+        <label><span>Type <code>{view.confirmWord}</code> to confirm</span>
           <input bind:value={typed} autocomplete="off" autocapitalize="characters" spellcheck="false" />
         </label>
         <div class="row">
