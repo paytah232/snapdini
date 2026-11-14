@@ -1166,6 +1166,13 @@
   .stack { margin: 10px 0 0; padding: 10px 12px; background: var(--surface-2, #fafafa); border: 1px solid var(--border, #e5e5e5); border-radius: 8px;
     font-size: 0.72rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
   tbody tr.done { opacity: 0.5; }
+  @media (max-width: 560px) {
+    /* Four across on a phone: eight tiles were three rows, pushing the tabs below the fold. */
+    .stat-grid { grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 14px 0; }
+    .stat-grid .stat { padding: 8px 2px; border-radius: 10px; }
+    .stat-grid .stat .n { font-size: 1.1rem; }
+    .stat-grid .stat .l { font-size: .62rem; letter-spacing: 0; overflow-wrap: anywhere; }
+  }
   .rev-totals { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
   .rev-totals .stat { min-width: 130px; }
   table.inner { width: 100%; margin: 2px 0; font-size: 0.82rem; }
