@@ -931,66 +931,6 @@
       </section>
     {:else if tab === 'sales'}
       <section class="panel">
-        <!-- Guest top-ups. Participant-level payments were invisible here, so a refund meant the Stripe
-             dashboard. Change-of-mind is declined as policy, but a path has to exist for genuine
-             failures — Australian Consumer Law does not allow contracting out of that. -->
-        {#if guestPayments.length}
-          <h2>Guest top-ups</h2>
-          <div class="table-scroll">
-            <table>
-              <thead><tr><th>Guest</th><th>Event</th><th>Shots</th><th>Paid</th><th></th></tr></thead>
-              <tbody>
-                {#each guestPayments as g}
-                  <tr>
-                    <td>{g.name}<br /><small class="muted">{g.email || 'no email'}</small></td>
-                    <td>{g.event_name}<br /><small class="muted">{g.join_code}</small></td>
-                    <td>+{g.extra_photos}</td>
-                    <td>{money(g.amount_paid_cents)}</td>
-                    <td>
-                      <button class="btn ghost sm" disabled={refunding === g.id}
-                              on:click={() => refundGuest(g.id, g.name)}>
-                        {refunding === g.id ? 'Refunding…' : 'Refund'}
-                      </button>
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {/if}
-
-        <!-- Referral funnel. The step that matters is signups → events created: that is exactly
-             where paid traffic dies, so it is the comparison worth watching. -->
-        {#if funnel}
-          <h2>Referral funnel</h2>
-          <div class="stats">
-            <div class="stat"><b>{funnel.totals?.gallery_views ?? 0}</b><span>Gallery views</span></div>
-            <div class="stat"><b>{funnel.totals?.referral_clicks ?? 0}</b><span>Referral clicks</span></div>
-            <div class="stat"><b>{funnel.totals?.referred_signups ?? 0}</b><span>Referred signups</span></div>
-            <div class="stat"><b>{funnel.totals?.referred_events ?? 0}</b><span>Events created</span></div>
-            <div class="stat"><b>{funnel.totals?.referred_paid ?? 0}</b><span>Paid</span></div>
-            <div class="stat"><b>{((funnel.totals?.referred_cents ?? 0) / 100).toFixed(2)}</b><span>Revenue</span></div>
-            <div class="stat"><b>{funnel.engagement?.photo_views ?? 0}</b><span>Photo views</span></div>
-            <div class="stat"><b>{funnel.engagement?.photo_downloads ?? 0}</b><span>Downloads</span></div>
-          </div>
-          {#if funnel.sources?.length}
-            <table>
-              <thead><tr><th>Source gallery</th><th>Views</th><th>Clicks</th><th>Signups</th><th>Events</th></tr></thead>
-              <tbody>
-                {#each funnel.sources as srcRow}
-                  <tr>
-                    <td>{srcRow.name} <span class="muted">({srcRow.join_code})</span></td>
-                    <td>{srcRow.gallery_views}</td><td>{srcRow.referral_clicks}</td>
-                    <td>{srcRow.signups}</td><td>{srcRow.events_created}</td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          {:else}
-            <p class="muted">No gallery activity yet — this fills in once guests view a gallery.</p>
-          {/if}
-        {/if}
-
         <h2>Promo codes <span class="count">{promoState === 'all' ? promoTotal : `${promos.length} / ${promoTotal}`}</span></h2>
         <div class="filterbar">
           <select bind:value={promoState} on:change={loadPromos} aria-label="Filter promo codes">
@@ -1036,6 +976,71 @@
             </table>
           </div>
         {/if}
+        <!-- Guest top-ups. Participant-level payments were invisible here, so a refund meant the Stripe
+             dashboard. Change-of-mind is declined as policy, but a path has to exist for genuine
+             failures — Australian Consumer Law does not allow contracting out of that. -->
+        {#if guestPayments.length}
+          <h2>Guest top-ups</h2>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Guest</th><th>Event</th><th>Shots</th><th>Paid</th><th></th></tr></thead>
+              <tbody>
+                {#each guestPayments as g}
+                  <tr>
+                    <td>{g.name}<br /><small class="muted">{g.email || 'no email'}</small></td>
+                    <td>{g.event_name}<br /><small class="muted">{g.join_code}</small></td>
+                    <td>+{g.extra_photos}</td>
+                    <td>{money(g.amount_paid_cents)}</td>
+                    <td>
+                      <button class="btn ghost sm" disabled={refunding === g.id}
+                              on:click={() => refundGuest(g.id, g.name)}>
+                        {refunding === g.id ? 'Refunding…' : 'Refund'}
+                      </button>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+
+        <!-- Referral funnel. The step that matters is signups → events created: that is exactly
+             where paid traffic dies, so it is the comparison worth watching. -->
+        {#if funnel}
+          <h2>Referral funnel</h2>
+          <div class="stats">
+            <div class="stat"><b>{funnel.totals?.gallery_views ?? 0}</b><span>Gallery views</span></div>
+            <div class="stat"><b>{funnel.totals?.referral_clicks ?? 0}</b><span>Referral clicks</span></div>
+            <div class="stat"><b>{funnel.totals?.referred_signups ?? 0}</b><span>Referred signups</span></div>
+            <div class="stat"><b>{funnel.totals?.referred_events ?? 0}</b><span>Events created</span></div>
+            <div class="stat"><b>{funnel.totals?.referred_paid ?? 0}</b><span>Paid</span></div>
+            <div class="stat"><b>{money(funnel.totals?.referred_cents ?? 0)}</b><span>Revenue</span></div>
+            <div class="stat"><b>{funnel.engagement?.photo_views ?? 0}</b><span>Photo views</span></div>
+            <div class="stat"><b>{funnel.engagement?.photo_downloads ?? 0}</b><span>Downloads</span></div>
+          </div>
+          {#if funnel.sources?.length}
+            <!-- Every gallery ever viewed is a row, and most are demo rolls with one view. The top
+                 ten by views are the ones that can say anything about referrals. -->
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Source gallery</th><th class="num">Views</th><th class="num">Clicks</th><th class="num">Signups</th><th class="num">Events</th></tr></thead>
+                <tbody>
+                  {#each [...funnel.sources].sort((a, b) => b.gallery_views - a.gallery_views).slice(0, 10) as srcRow}
+                    <tr>
+                      <td>{srcRow.name} <span class="muted">({srcRow.join_code})</span></td>
+                      <td class="num">{srcRow.gallery_views}</td><td class="num">{srcRow.referral_clicks}</td>
+                      <td class="num">{srcRow.signups}</td><td class="num">{srcRow.events_created}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+            {#if funnel.sources.length > 10}<p class="field-hint">Top 10 of {funnel.sources.length} galleries by views.</p>{/if}
+          {:else}
+            <p class="muted">No gallery activity yet — this fills in once guests view a gallery.</p>
+          {/if}
+        {/if}
+
       </section>
     {:else if tab === 'activity'}
       <!-- Every change a site admin has made to an event they do not own, newest first.
@@ -1079,6 +1084,13 @@
   .stat .n { font-size: 1.45rem; font-weight: 800; }
   .stat .l { font-size: 0.78rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .03em; }
   .panel { margin-bottom: 30px; }
+  /* Tabs hold several sections each; give each heading after the first room to start a new one. */
+  .panel > h2:not(:first-child) { margin-top: 30px; }
+  /* The referral funnel's figures — never styled, because loadFunnel was never called. */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; margin: 0 0 12px; }
+  .stats .stat { display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; }
+  .stats .stat b { font-size: 1.25rem; font-weight: 800; }
+  .stats .stat span { font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .03em; }
   .panel h2 { font-size: 1.05rem; display: flex; align-items: center; gap: 8px; }
   .count { background: var(--border, #eee); color: var(--text-muted); border-radius: 999px; padding: 1px 9px; font-size: 0.78rem; font-weight: 700; }
   .table-scroll { overflow-x: auto; border: 1px solid var(--border, #e5e5e5); border-radius: 12px; }
