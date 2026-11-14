@@ -143,7 +143,7 @@
 </section>
 
 <style>
-  .standby { margin-bottom: 30px; scroll-margin-top: 16px; }
+  .standby { margin-bottom: 30px; scroll-margin-top: calc(var(--nav-h, 62px) + 16px); }  /* clears the sticky site nav */
   h2 { font-size: 1.05rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .pill { border-radius: 999px; padding: 1px 10px; font-size: 0.76rem; font-weight: 700; background: var(--border, #eee); color: var(--text-muted); }
   .pill.ok { background: #1e8449; color: #fff; }
