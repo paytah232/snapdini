@@ -5,7 +5,7 @@
    *  what the button will do, and the button is a typed confirmation, not a tap. A REBUILD discards
    *  the standby's database and re-clones it from production; the runner re-checks every gate
    *  before it starts and may still refuse (see app/src/server/standby.ts). */
-  import { onDestroy, onMount, tick } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { api, postJson, ApiError } from '$lib/api';
   import { showToast } from '$lib/toast';
 
@@ -22,7 +22,6 @@
   let sending = false;
   let now = Date.now();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let section: HTMLElement;
 
   $: status = view?.status ?? null;
   $: req = view?.request ?? null;
@@ -69,22 +68,18 @@
     }
   }
 
-  onMount(async () => {
-    await load();
-    // Alerts link straight here (…/siteadmin#standby). The page renders its panels after its own
-    // data arrives, so the browser's own jump to the anchor has usually already missed.
-    if (location.hash === '#standby') { await tick(); section?.scrollIntoView({ block: 'start' }); }
-  });
+  onMount(load);
   onDestroy(() => clearTimeout(timer));
 </script>
 
-<section class="standby" id="standby" bind:this={section}>
-  <h2>
+<!-- The page is /siteadmin/standby and this is all of it, so the heading is its h1. -->
+<section class="standby">
+  <h1>
     Failover standby
     <span class="pill {panelState}">
       {panelState === 'ok' ? 'Healthy' : panelState === 'bad' ? 'Needs attention' : panelState === 'stale' ? 'Runner silent' : 'Not reporting'}
     </span>
-  </h2>
+  </h1>
 
   {#if loadError}
     <p class="err">{loadError}</p>
@@ -143,8 +138,8 @@
 </section>
 
 <style>
-  .standby { margin-bottom: 30px; scroll-margin-top: calc(var(--nav-h, 62px) + 16px); }  /* clears the sticky site nav */
-  h2 { font-size: 1.05rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .standby { margin-bottom: 30px; }
+  h1 { margin: 6px 0 8px; font-size: 1.6rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .pill { border-radius: 999px; padding: 1px 10px; font-size: 0.76rem; font-weight: 700; background: var(--border, #eee); color: var(--text-muted); }
   .pill.ok { background: #1e8449; color: #fff; }
   .pill.bad, .pill.stale { background: #c0392b; color: #fff; }
