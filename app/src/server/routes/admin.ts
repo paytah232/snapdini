@@ -6,6 +6,7 @@ import { billingEnabled, stripe, CURRENCY } from '../billing';
 import { sweep } from '../cleanup';
 import { media } from '../media';
 import { DEMO_NAME } from '../lib';
+import { standbyView, requestRebuild, CONFIRM_WORD } from '../standby';
 
 // ── Site-admin API ────────────────────────────────────────────────────────────
 // Every route is gated by requireAdmin (signed-in user with the is_admin flag).
@@ -571,6 +572,24 @@ router.get('/guest-feedback', async (_req: Request, res: Response) => {
 router.post('/run-sweep', async (_req: Request, res: Response) => {
   const purged = await sweep();
   res.json({ ok: true, purged });
+});
+
+// ── Failover standby ──────────────────────────────────────────────────────────
+// Status reported by the host-side runner, and a REQUEST to rebuild the standby. The runner does the
+// work and re-checks every gate itself; see standby.ts for why the app never touches the standby.
+router.get('/standby', async (_req: Request, res: Response) => {
+  res.set('Cache-Control', 'no-store');
+  res.json(await standbyView());
+});
+
+router.post('/standby/rebuild', async (req: Request, res: Response) => {
+  if (req.body?.confirm !== CONFIRM_WORD) {
+    return res.status(400).json({ error: `Type ${CONFIRM_WORD} to confirm.` });
+  }
+  const r = await requestRebuild(req.user?.email || 'site admin');
+  if (!r.ok) return res.status(r.status).json({ error: r.error });
+  console.log(`[standby] rebuild requested by ${req.user?.email} (${r.request?.id})`);
+  return res.status(202).json({ ok: true, request: r.request });
 });
 
 // ── Product analytics ─────────────────────────────────────────────────────────
