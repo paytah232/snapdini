@@ -7,6 +7,7 @@
   import { dep } from '$lib/reactive';
   import AdminBanner from '$lib/components/AdminBanner.svelte';
   import AdminActionLog from '$lib/components/AdminActionLog.svelte';
+  import StandbyPanel from '$lib/components/StandbyPanel.svelte';
   import type { User } from '$lib/types';
 
   let loading = true;
@@ -433,6 +434,10 @@
         {/each}
       </section>
     {/if}
+
+    <!-- Near the top on purpose: alerts link here (#standby) from a phone, mid-incident. It loads
+         its own data, so the rest of the console does not wait on it, nor it on them. -->
+    <StandbyPanel />
 
     {#if revenue?.billingEnabled}
       <section class="panel">
