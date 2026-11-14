@@ -1,16 +1,43 @@
 <script lang="ts">
   import SiteNav from '$lib/components/SiteNav.svelte';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import { replaceState } from '$app/navigation';
   import { api, postJson, getMe } from '$lib/api';
   import Loading from '$lib/components/Loading.svelte';
   import { showToast } from '$lib/toast';
   import { dep } from '$lib/reactive';
   import AdminBanner from '$lib/components/AdminBanner.svelte';
   import AdminActionLog from '$lib/components/AdminActionLog.svelte';
-  import StandbyPanel from '$lib/components/StandbyPanel.svelte';
   import type { User } from '$lib/types';
 
   let loading = true;
+
+  // ── Tabs ──
+  type Tab = 'overview' | 'events' | 'users' | 'support' | 'sales' | 'activity';
+  const TABS: { id: Tab; label: string }[] = [
+    { id: 'overview', label: 'Overview' }, { id: 'events', label: 'Events' }, { id: 'users', label: 'Users' },
+    { id: 'support', label: 'Support' }, { id: 'sales', label: 'Sales' }, { id: 'activity', label: 'Admin log' },
+  ];
+  let tab: Tab = 'overview';
+  const isTab = (h: string): h is Tab => TABS.some((t) => t.id === h);
+  /** Overview is the bare address; every other tab is a hash, so a link can open it directly. */
+  function pick(t: Tab) {
+    tab = t;
+    const url = location.pathname + location.search + (t === 'overview' ? '' : `#${t}`);
+    // SvelteKit's replaceState, not history's — see dashboard/+page.svelte. Cosmetic if it fails.
+    try { replaceState(url, {}); } catch { /* ignore */ }
+  }
+  $: supportOpen = contactUnhandled + errOpenGroups;
+
+  // ── Standby, as a dot on its button. The page itself is /siteadmin/standby. ──
+  let standbyState: 'ok' | 'bad' | 'stale' | 'none' = 'none';
+  $: standbyTitle = { ok: 'Standby healthy', bad: 'Standby needs attention', stale: 'Standby runner silent', none: 'No standby runner reporting' }[standbyState];
+  async function loadStandby() {
+    try {
+      const v = await api<{ status: { checkedAt: number; healthy: boolean } | null; staleAfterMs: number }>('/api/admin/standby');
+      standbyState = !v.status ? 'none' : Date.now() - v.status.checkedAt > v.staleAfterMs ? 'stale' : v.status.healthy ? 'ok' : 'bad';
+    } catch { /* the button still works; it just has no dot */ }
+  }
   let user: User | null = null;
   let stats: Record<string, number> | null = null;
   let events: any[] = [];
@@ -360,6 +387,10 @@
   };
 
   onMount(async () => {
+    // Alerts sent before the standby got its own page link to /siteadmin#standby.
+    if (location.hash === '#standby') { location.replace('/siteadmin/standby'); return; }
+    const h = location.hash.slice(1);
+    if (isTab(h)) tab = h;
     try {
       const me = await getMe();
       user = me.user;
@@ -374,17 +405,18 @@
       evCounts = ev.counts ?? { real: events.length, demo: 0 };
       users = us.users;
       usrTotal = us.total ?? us.users.length;
-      await loadPromos();
-      await loadContact();
-      await loadClientErrors();
-      await loadRevenue();
-      await loadSurvey();
-      await loadAnalytics();
     } catch (e) {
       error = (e as Error).message;
-    } finally {
       loading = false;
+      return;
     }
+    loading = false;
+    await tick();
+    // The rest load side by side and fill their tabs as they arrive; each one keeps its own
+    // failure to itself. loadFunnel was never called here before, so guest feedback, guest
+    // top-ups and the referral funnel only ever appeared after creating a promo code.
+    await Promise.all([loadStandby(), loadPromos(), loadContact(), loadClientErrors(),
+                       loadRevenue(), loadSurvey(), loadAnalytics(), loadFunnel()]);
   });
 
   const STAT_LABELS: [string, string][] = [
@@ -409,21 +441,24 @@
     <p class="muted">This area is for site administrators only.</p>
     <a class="btn" href="/dashboard">← Back to my events</a>
   {:else}
-    <!-- Distinct top bar so it's unmistakable you're in platform/site-admin mode.
-         The bar itself now lives in AdminBanner: the event manager needed the same one, and the red
-         declared here could never have reached it — Svelte scopes CSS to the file that declares it,
-         so the second copy would have been forty lines of colour to keep in step by hand. Same
-         reason SiteAdminLink exists. -->
-    <AdminBanner>
-      🎩 SITE ADMIN MODE — platform-wide controls
-      <a slot="actions" class="exit" href="/dashboard">← Back to my events</a>
-    </AdminBanner>
+    <!-- Distinct top bar so it's unmistakable you're in platform/site-admin mode. The bar lives in
+         AdminBanner so the event manager shows the identical one (Svelte scopes CSS per file). It
+         carries no links of its own here: the header below has them, once. -->
+    <AdminBanner>🎩 SITE ADMIN MODE — platform-wide controls</AdminBanner>
     <header class="head">
-      <h1>🎩 Site admin</h1>
-      <div class="head-right">
+      <div>
+        <h1>🎩 Site admin</h1>
         <span class="who">{user.email}</span>
-        <a class="btn" href="/dashboard">← My events</a>
       </div>
+      <nav class="head-right" aria-label="Site admin pages">
+        <!-- Its own page, not a panel here: alerts open it from a phone mid-incident, and it is the
+             one screen in the console that can change infrastructure. The dot is the runner's
+             verdict, so trouble is visible from here without opening it. -->
+        <a class="btn ghost" href="/siteadmin/standby" title={standbyTitle}>
+          <span class="dot {standbyState}" aria-hidden="true"></span>Failover standby
+        </a>
+        <a class="btn" href="/dashboard">← My events</a>
+      </nav>
     </header>
     {#if error}<p class="err">{error}</p>{/if}
 
@@ -435,571 +470,586 @@
       </section>
     {/if}
 
-    <!-- Near the top on purpose: alerts link here (#standby) from a phone, mid-incident. It loads
-         its own data, so the rest of the console does not wait on it, nor it on them. -->
-    <StandbyPanel />
+    <!-- One section at a time. The console used to be every panel in one 4,700px column, so the
+         thing you came for was always a long scroll away. Each tab has its own address
+         (/siteadmin#support) so a link can open the right one; the badges say where work is waiting. -->
+    <div class="tabs" role="tablist" aria-label="Site admin sections">
+      {#each TABS as t}
+        <button class="tab" role="tab" aria-selected={tab === t.id} class:on={tab === t.id} on:click={() => pick(t.id)}>
+          {t.label}
+          {#if t.id === 'support' && supportOpen}<span class="badge">{supportOpen}</span>{/if}
+          {#if t.id === 'events' && activeEventCount}<span class="count">{activeEventCount}</span>{/if}
+        </button>
+      {/each}
+    </div>
 
-    {#if revenue?.billingEnabled}
+    {#if tab === 'overview'}
+      {#if revenue?.billingEnabled}
+        <section class="panel">
+          <h2>Revenue</h2>
+          <div class="rev-totals">
+            <div class="stat"><div class="n">{money(revenue.totals.all)}</div><div class="l">All time</div></div>
+            <div class="stat"><div class="n">{money(revenue.totals.d30)}</div><div class="l">Last 30 days</div></div>
+            <div class="stat"><div class="n">{money(revenue.totals.d7)}</div><div class="l">Last 7 days</div></div>
+          </div>
+          {#if revenue.users.length}
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Customer</th><th>Events</th><th>Total spent</th><th></th></tr></thead>
+                <tbody>
+                  {#each revenue.users as u (rowKey(u))}
+                    <tr>
+                      <td>{u.email}{#if u.displayName}{' '}<span class="muted">({u.displayName})</span>{/if}</td>
+                      <td>{u.events.length}</td>
+                      <td>{money(u.totalCents)}</td>
+                      <td><button class="linklike" on:click={() => (openUser = openUser === rowKey(u) ? null : rowKey(u))}>{openUser === rowKey(u) ? 'Hide' : 'Details'}</button></td>
+                    </tr>
+                    {#if openUser === rowKey(u)}
+                      <tr class="drill"><td colspan="4">
+                        <table class="inner">
+                          <thead><tr><th>Event</th><th>Created</th><th>Paid</th></tr></thead>
+                          <tbody>
+                            {#each u.events as ev}
+                              <tr><td>{ev.name}{#if ev.branding}{' '}<span class="muted">· no-frames add-on</span>{/if}</td><td>{fmtDate(ev.createdAt)}</td><td>{money(ev.cents)}</td></tr>
+                            {/each}
+                          </tbody>
+                        </table>
+                      </td></tr>
+                    {/if}
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {:else}
+            <p class="muted">No paid events yet.</p>
+          {/if}
+        </section>
+      {/if}
+      <!-- Product analytics. Funnels first, because the operator's question is "where do people give
+           up", and a wall of event counts does not answer it. -->
+      {#if an}
+        <section class="panel">
+          <h2>How people use the site
+            <span class="count">{an.totals.visits} visits · {an.totals.events} events</span>
+          </h2>
+          <div class="filterbar">
+            <select bind:value={anDays} on:change={loadAnalytics} aria-label="Window">
+              <option value={7}>Last 7 days</option>
+              <option value={30}>Last 30 days</option>
+              <option value={90}>Last 90 days</option>
+            </select>
+            {#if an.cameraGrantRate !== null}
+              <span class="an-note">
+                Camera allowed <b>{an.cameraGrantRate}%</b>
+                <span class="muted">({an.cameraGranted} allowed / {an.cameraDenied} denied)</span>
+              </span>
+            {/if}
+          </div>
+
+          <div class="an-cols">
+            {#each [{ t: 'Host journey', f: an.hostFunnel }, { t: 'Guest journey', f: an.guestFunnel }] as fn}
+              <div class="an-funnel">
+                <h3>{fn.t}</h3>
+                {#each fn.f as s}
+                  <div class="an-step">
+                    <span class="an-label">{s.step}</span>
+                    <span class="an-bar">
+                      <!-- Width is relative to the FIRST step, so the shape of the drop is visible
+                           at a glance rather than needing the numbers read. -->
+                      <span class="an-fill" style="width:{fn.f[0].visits ? Math.max(2, (s.visits / fn.f[0].visits) * 100) : 0}%"></span>
+                    </span>
+                    <span class="an-n">{s.visits}</span>
+                    <span class="an-drop">{s.dropFromPrev === null ? '' : `−${s.dropFromPrev}%`}</span>
+                  </div>
+                {/each}
+              </div>
+            {/each}
+          </div>
+
+          <div class="an-cols">
+            {#if an.topPages?.length}
+              <div>
+                <h3>Most visited</h3>
+                <table><tbody>
+                  {#each an.topPages.slice(0, 10) as p}<tr><td>{p.path}</td><td class="num">{p.visits}</td></tr>{/each}
+                </tbody></table>
+              </div>
+            {/if}
+            {#if an.tierClicks?.length}
+              <div>
+                <h3>Pricing tier clicked</h3>
+                <table><tbody>
+                  {#each an.tierClicks as t}<tr><td>{t.tier === 'free' || !t.tier ? 'Free' : t.tier + ' guests'}</td><td class="num">{t.clicks}</td></tr>{/each}
+                </tbody></table>
+              </div>
+            {/if}
+            {#if an.faqOpens?.length}
+              <div>
+                <h3>Questions opened</h3>
+                <table><tbody>
+                  {#each an.faqOpens as f}<tr><td>{f.q}</td><td class="num">{f.opens}</td></tr>{/each}
+                </tbody></table>
+              </div>
+            {/if}
+          </div>
+          <p class="hint" style="margin:10px 0 0">
+            First-party and cookieless — nothing is stored on a visitor's device and no third party sees
+            it. Visits are grouped by a hash that rotates daily, so it cannot follow anyone between days.
+            Raw rows are kept {an.days >= 90 ? '90' : an.days} days.
+          </p>
+        </section>
+      {/if}
+      {#if !revenue?.billingEnabled && !an}<p class="muted">Nothing to show yet.</p>{/if}
+    {:else if tab === 'events'}
       <section class="panel">
-        <h2>Revenue</h2>
-        <div class="rev-totals">
-          <div class="stat"><div class="n">{money(revenue.totals.all)}</div><div class="l">All time</div></div>
-          <div class="stat"><div class="n">{money(revenue.totals.d30)}</div><div class="l">Last 30 days</div></div>
-          <div class="stat"><div class="n">{money(revenue.totals.d7)}</div><div class="l">Last 7 days</div></div>
+        <h2>Events <span class="count">{evFiltered.length}</span></h2>
+        <div class="toolbar">
+          <input class="search" placeholder="Search events — name, code, owner…" bind:value={evQuery} />
+          <div class="seg">
+            <button class="seg-btn" class:on={evKind === 'real' && !evShowInactive}
+                    on:click={() => { evShowInactive = false; if (evKind !== 'real') loadEvents('real'); }}>Active <small>({activeEventCount})</small></button>
+            <button class="seg-btn" class:on={evKind === 'real' && evShowInactive}
+                    on:click={() => { evShowInactive = true; if (evKind !== 'real') loadEvents('real'); }}>All <small>({evCounts.real})</small></button>
+            <!-- Demo rolls are nobody's event, so they get their own tab rather than padding "All". -->
+            <button class="seg-btn" class:on={evKind === 'demo'}
+                    on:click={() => loadEvents('demo')}>Demos <small>({evCounts.demo})</small></button>
+          </div>
         </div>
-        {#if revenue.users.length}
-          <div class="table-scroll">
-            <table>
-              <thead><tr><th>Customer</th><th>Events</th><th>Total spent</th><th></th></tr></thead>
-              <tbody>
-                {#each revenue.users as u (rowKey(u))}
-                  <tr>
-                    <td>{u.email}{#if u.displayName}{' '}<span class="muted">({u.displayName})</span>{/if}</td>
-                    <td>{u.events.length}</td>
-                    <td>{money(u.totalCents)}</td>
-                    <td><button class="linklike" on:click={() => (openUser = openUser === rowKey(u) ? null : rowKey(u))}>{openUser === rowKey(u) ? 'Hide' : 'Details'}</button></td>
-                  </tr>
-                  {#if openUser === rowKey(u)}
-                    <tr class="drill"><td colspan="4">
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Event</th><th>Details</th><th>Paid</th><th>Status</th><th>Created</th><th></th></tr></thead>
+            <tbody>
+              {#each evPaged as e}
+                <tr>
+                  <td>
+                    <div class="ev-name">{e.name}</div>
+                    <code class="ev-code">{e.slug || e.join_code}</code>
+                  </td>
+                  <td class="stacked muted">
+                    <div>👤 {e.owner || 'anon'}</div>
+                    <div>👥 {e.participants}/{e.guest_cap} guests</div>
+                    <div>🖼️ {e.photos} photos</div>
+                  </td>
+                  <!-- `paid` is true for demos too (they bypass billing), so a tick here read as a
+                       sale. Show the amount actually taken, and label demos as what they are. -->
+                  <td>{!e.owner ? 'Demo' : e.amount_paid_cents > 0 ? `$${(e.amount_paid_cents / 100).toFixed(2)}${e.refunded_at ? ' (refunded)' : ''}` : '—'}</td>
+                  <td class="stacked">
+                    <div class="ev-status {evState(e)}">{evStatus(e)}</div>
+                    <div class="purge-line">{purgeInfo(e)}</div>
+                  </td>
+                  <td class="muted nowrap">{fmtDate(e.created_at)}</td>
+                  <td class="nowrap">
+                    <button class="linklike" aria-expanded={openEvent === e.id}
+                            on:click={() => (openEvent = openEvent === e.id ? null : e.id)}
+                            title="What this event was set up to be">{openEvent === e.id ? 'Hide' : 'Setup'}</button>
+                    {#if e.organizer_code}<a class="manage" href={`/admin/${e.join_code}#${encodeURIComponent(e.organizer_code)}`} title="Open the full manager for this event (support override)">Manage →</a>{/if}
+                    <!-- `paid` is true for demos and free-tier events (both amount 0), so gating on it
+                         offered a Refund button beside 25 events with nothing to refund. Gate on money
+                         actually taken, and render nothing at all when there is none. -->
+                    {#if e.amount_paid_cents > 0 && !e.refunded_at}<button class="mini-refund" on:click={() => doRefund(e)} disabled={refundingId === e.id} title="Full Stripe refund + lock">{refundingId === e.id ? '…' : 'Refund'}</button>
+                    {:else if e.refunded_at}<span class="refunded-tag" title="Refunded">↩ refunded</span>{/if}
+                  </td>
+                </tr>
+                {#if openEvent === e.id}
+                  <!-- Same `.drill` row the revenue table uses for its own expansion, so the page has
+                       one way of opening something rather than two that look slightly different. -->
+                  <tr class="drill"><td colspan="6">
+                    <div class="setup">
+                      {#each evSetup(e) as group}
+                        <div class="setup-g">
+                          <div class="setup-h">{group.title}</div>
+                          {#each group.items as [k, v]}
+                            <div class="setup-r"><span>{k}</span><b>{v}</b></div>
+                          {/each}
+                        </div>
+                      {/each}
+                    </div>
+                  </td></tr>
+                {/if}
+              {/each}
+              {#if !evFiltered.length}<tr><td colspan="6" class="muted">{events.length ? (evKind === 'demo' || evShowInactive ? 'No matches.' : 'No active events — switch to “All”.') : (evKind === 'demo' ? 'No demo rolls.' : 'No events yet.')}</td></tr>{/if}
+            </tbody>
+          </table>
+        </div>
+        {#if pageCount(evFiltered.length) > 1}
+          <div class="pager">
+            <button class="pg" on:click={() => (evPage = Math.max(1, evPage - 1))} disabled={evPage <= 1}>‹ Prev</button>
+            <span>Page {Math.min(evPage, pageCount(evFiltered.length))} / {pageCount(evFiltered.length)}</span>
+            <button class="pg" on:click={() => (evPage = Math.min(pageCount(evFiltered.length), evPage + 1))} disabled={evPage >= pageCount(evFiltered.length)}>Next ›</button>
+          </div>
+        {/if}
+      </section>
+    {:else if tab === 'users'}
+      <section class="panel">
+        <h2>Users <span class="count">{usrTotal}</span></h2>
+        <div class="filterbar">
+          <input class="search" placeholder="Search users — email or name…"
+                 bind:value={usrQuery} on:input={onUsrQuery} />
+          <select bind:value={usrStatus} on:change={setUsrFilter} aria-label="Filter by account status">
+            <option value="all">Any status</option>
+            <option value="verified">Verified</option>
+            <option value="unverified">Never verified</option>
+            <option value="admin">Admins</option>
+          </select>
+          <select bind:value={usrHas} on:change={setUsrFilter} aria-label="Filter by events created">
+            <option value="all">Any activity</option>
+            <option value="events">Has created an event</option>
+            <option value="none">Never created one</option>
+          </select>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Email</th><th>Name</th><th>Events</th><th>Verified</th><th>Admin</th><th>Joined</th></tr></thead>
+            <tbody>
+              {#each users as u}
+                <tr>
+                  <td>{u.email}</td>
+                  <td class="muted">{u.display_name || '—'}</td>
+                  <td>{u.events}</td>
+                  <td>{u.email_verified_at ? '✅' : '—'}</td>
+                  <td>{u.is_admin ? '🎩' : '—'}</td>
+                  <td class="muted">{fmtDate(u.created_at)}</td>
+                </tr>
+              {/each}
+              {#if !users.length}<tr><td colspan="6" class="muted">{usrLoading ? 'Loading…' : (usrQuery || usrStatus !== 'all' || usrHas !== 'all' ? 'No matches.' : 'No users yet.')}</td></tr>{/if}
+            </tbody>
+          </table>
+        </div>
+        {#if usrTotal > PAGE}
+          <div class="pager">
+            <button class="pg" on:click={() => usrGo(-1)} disabled={usrPage <= 1 || usrLoading}>‹ Prev</button>
+            <!-- Says what is on screen against the real total, so a growing table can never quietly
+                 stop showing rows the way a fixed LIMIT did. -->
+            <span>{(usrPage - 1) * PAGE + 1}–{Math.min(usrPage * PAGE, usrTotal)} of {usrTotal}</span>
+            <button class="pg" on:click={() => usrGo(1)} disabled={usrPage * PAGE >= usrTotal || usrLoading}>Next ›</button>
+          </div>
+        {/if}
+      </section>
+    {:else if tab === 'support'}
+      <section class="panel">
+        <h2>Contact messages <span class="count">{msgFiltered.length}</span>{#if contactUnhandled}<span class="badge">{contactUnhandled} new</span>{/if}</h2>
+        <p class="field-hint">Submissions from the contact form. Every message is stored here even if email forwarding is off or fails — “Emailed” shows whether it also reached the support inbox.</p>
+        <div class="toolbar">
+          <input class="search" placeholder="Search messages — name, email, text…" bind:value={msgQuery} />
+          <div class="seg">
+            <button class="seg-btn" class:on={!msgShowDone} on:click={() => (msgShowDone = false)}>Open <small>({contactUnhandled})</small></button>
+            <button class="seg-btn" class:on={msgShowDone} on:click={() => (msgShowDone = true)}>All <small>({contactMsgs.length})</small></button>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>From</th><th>Type</th><th>Message</th><th>Emailed</th><th>Received</th><th></th></tr></thead>
+            <tbody>
+              {#each msgPaged as m}
+                <tr class={m.handled ? 'done' : ''}>
+                  <td>
+                    <div>{m.name || 'Anonymous'}</div>
+                    {#if m.email}<a class="muted" href={`mailto:${m.email}`}>{m.email}</a>{/if}
+                  </td>
+                  <td>{m.kind && m.kind !== 'contact' ? m.kind : 'contact'}</td>
+                  <td class="msg">{m.message}{#if m.imageFilename}<br><a href={`/api/admin/feedback-image/${m.imageFilename.split('/').pop()}`} target="_blank" rel="noopener">📎 screenshot</a>{/if}</td>
+                  <td>{m.emailed ? '✅' : '—'}</td>
+                  <td class="muted">{fmtDate(m.created_at)}</td>
+                  <td><button class="link-btn" on:click={() => toggleHandled(m.id)}>{m.handled ? 'reopen' : 'mark done'}</button></td>
+                </tr>
+              {/each}
+              {#if !msgFiltered.length}<tr><td colspan="6" class="muted">{contactMsgs.length ? (msgShowDone ? 'No matches.' : 'No open messages — switch to “All”.') : 'No messages yet.'}</td></tr>{/if}
+            </tbody>
+          </table>
+        </div>
+        {#if pageCount(msgFiltered.length) > 1}
+          <div class="pager">
+            <button class="pg" on:click={() => (msgPage = Math.max(1, msgPage - 1))} disabled={msgPage <= 1}>‹ Prev</button>
+            <span>Page {Math.min(msgPage, pageCount(msgFiltered.length))} / {pageCount(msgFiltered.length)}</span>
+            <button class="pg" on:click={() => (msgPage = Math.min(pageCount(msgFiltered.length), msgPage + 1))} disabled={msgPage >= pageCount(msgFiltered.length)}>Next ›</button>
+          </div>
+        {/if}
+      </section>
+      <section class="panel">
+        <h2>Client errors <span class="count">{errFiltered.length}</span>{#if errOpenGroups}<span class="badge">{errOpenGroups} open</span>{/if}</h2>
+        <p class="field-hint">Diagnostic reports from guests' devices (e.g. failed uploads, camera errors) — technical only, no photos or personal content. One row per problem; open it for the stack, the device and who hit it.</p>
+        <div class="toolbar">
+          <input class="search" placeholder="Search errors — message, context, code…" bind:value={errQuery} />
+          <div class="seg">
+            <button class="seg-btn" class:on={!errShowDone} on:click={() => (errShowDone = false)}>Open <small>({errOpenGroups})</small></button>
+            <button class="seg-btn" class:on={errShowDone} on:click={() => (errShowDone = true)}>All <small>({errGroups.length})</small></button>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Problem</th><th>Seen</th><th>Guests</th><th>Event</th><th>Last</th><th></th></tr></thead>
+            <tbody>
+              {#each errPaged as g}
+                <tr class={g.handled ? 'done' : ''}>
+                  <td class="msg">
+                    <div>{g.message}</div>
+                    {#if g.context}<span class="chip">{g.context}</span>{/if}
+                  </td>
+                  <!-- The count IS the feature. Twelve reports of one thing and one report of
+                       another used to occupy twelve rows and one; now they occupy one row each and
+                       the twelve says so. The open tally appears only when a group is part-handled,
+                       which is what a group that RECURRED after being resolved looks like. -->
+                  <td class="num"><b>{g.count}×</b>{#if g.open && g.open !== g.count}<div class="purge-line">{g.open} since resolved</div>{/if}</td>
+                  <td class="num">{g.guests || '—'}</td>
+                  <td class="muted">{(g.eventCodes ?? []).slice(0, 2).join(', ') || '—'}{#if (g.eventCodes ?? []).length > 2}<span class="muted"> +{g.eventCodes.length - 2}</span>{/if}</td>
+                  <td class="muted nowrap">{fmtDate(g.lastSeen)}</td>
+                  <td class="nowrap">
+                    <button class="linklike" aria-expanded={openErr === g.key}
+                            on:click={() => (openErr = openErr === g.key ? null : g.key)}
+                            title="Stack, device, connection and who hit it">{openErr === g.key ? 'Hide' : 'Detail'}</button>
+                    <button class="link-btn" on:click={() => toggleErrHandled(g)}>{g.handled ? 'reopen' : 'resolve'}</button>
+                  </td>
+                </tr>
+                {#if openErr === g.key}
+                  <!-- The same `.drill` row the events and revenue tables open, so the page has one
+                       way of opening something rather than three that look slightly different.
+                       Costs no request: the group already arrived with its occurrences. -->
+                  <tr class="drill"><td colspan="6">
+                    <div class="setup">
+                      <div class="setup-g">
+                        <div class="setup-h">Where</div>
+                        <div class="setup-r"><span>Context</span><b>{g.context || '—'}</b></div>
+                        <div class="setup-r"><span>Page</span><b>{g.latest?.url || '—'}</b></div>
+                        <div class="setup-r"><span>First seen</span><b>{fmtDate(g.firstSeen)}</b></div>
+                        <div class="setup-r"><span>Last seen</span><b>{fmtDate(g.lastSeen)}</b></div>
+                      </div>
+                      <div class="setup-g">
+                        <div class="setup-h">Latest device</div>
+                        <div class="setup-r"><span>Mode</span><b>{g.latest?.displayMode || '—'}</b></div>
+                        <div class="setup-r"><span>Viewport</span><b>{g.latest?.viewport || '—'}</b></div>
+                        <div class="setup-r"><span>Connection</span><b>{g.latest?.connection || '—'}</b></div>
+                        <div class="setup-r"><span>Outcome</span><b>{g.latest?.outcome || 'not reported'}</b></div>
+                      </div>
+                      <div class="setup-g">
+                        <div class="setup-h">Build</div>
+                        <!-- Two versions on purpose: a disagreement means the guest was running a
+                             bundle we had already replaced, which is the difference between "the fix
+                             did not work" and "the fix never reached them". -->
+                        <div class="setup-r"><span>Deployed</span><b>{(g.versions ?? []).join(', ') || '—'}</b></div>
+                        <div class="setup-r"><span>Their build</span><b>{g.latest?.clientBuild || '—'}</b></div>
+                        <div class="setup-r"><span>Guests hit</span><b>{g.guests || '—'}</b></div>
+                        <div class="setup-r"><span>Reports</span><b>{g.count}</b></div>
+                      </div>
+                    </div>
+                    <!-- The one field whose absence made a report unactionable: production holds a
+                         row reading `camera: TypeError Type error` and nothing else. Say so out loud
+                         when it is missing, rather than rendering an empty box. -->
+                    {#if g.latest?.stack}
+                      <pre class="stack">{g.latest.stack}</pre>
+                    {:else}
+                      <p class="field-hint">No stack — reported by a client build older than this field, or from a call site that had no error object to pass.</p>
+                    {/if}
+                    {#if g.occurrences?.length > 1}
                       <table class="inner">
-                        <thead><tr><th>Event</th><th>Created</th><th>Paid</th></tr></thead>
+                        <thead><tr><th>When</th><th>Guest</th><th>Event</th><th>Device</th><th>Outcome</th></tr></thead>
                         <tbody>
-                          {#each u.events as ev}
-                            <tr><td>{ev.name}{#if ev.branding}{' '}<span class="muted">· no-frames add-on</span>{/if}</td><td>{fmtDate(ev.createdAt)}</td><td>{money(ev.cents)}</td></tr>
+                          {#each g.occurrences as o}
+                            <tr>
+                              <td class="muted nowrap">{fmtDate(o.at)}</td>
+                              <td>{errGuest(o)}</td>
+                              <td class="muted">{o.eventCode || '—'}</td>
+                              <td class="muted">{errDevice(o)}</td>
+                              <td class="muted">{o.outcome || '—'}</td>
+                            </tr>
                           {/each}
                         </tbody>
                       </table>
-                    </td></tr>
-                  {/if}
+                      {#if g.count > g.occurrences.length}
+                        <p class="field-hint">Showing the {g.occurrences.length} most recent of {g.count}.</p>
+                      {/if}
+                    {/if}
+                  </td></tr>
+                {/if}
+              {/each}
+              {#if !errFiltered.length}<tr><td colspan="6" class="muted">{errGroups.length ? (errShowDone ? 'No matches.' : 'No open errors — switch to “All”.') : 'No client errors reported. 🎉'}</td></tr>{/if}
+            </tbody>
+          </table>
+        </div>
+        {#if pageCount(errFiltered.length) > 1}
+          <div class="pager">
+            <button class="pg" on:click={() => (errPage = Math.max(1, errPage - 1))} disabled={errPage <= 1}>‹ Prev</button>
+            <span>Page {Math.min(errPage, pageCount(errFiltered.length))} / {pageCount(errFiltered.length)}</span>
+            <button class="pg" on:click={() => (errPage = Math.min(pageCount(errFiltered.length), errPage + 1))} disabled={errPage >= pageCount(errFiltered.length)}>Next ›</button>
+          </div>
+        {/if}
+      </section>
+      <section class="panel">
+        <h2>Survey responses <span class="count">{surveyFilter === 'all' ? surveyTotal : `${surveys.length} / ${surveyTotal}`}</span></h2>
+        <div class="filterbar">
+          <select bind:value={surveyFilter} on:change={loadSurvey} aria-label="Filter survey responses">
+            <option value="all">All responses</option>
+            <option value="testimonial">Cleared to quote</option>
+            <option value="promoter">Promoters (NPS 9+)</option>
+            <option value="detractor">Detractors (NPS ≤6)</option>
+          </select>
+        </div>
+        {#if !surveys.length}
+          <p class="muted">No responses yet.</p>
+        {:else}
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Event</th><th>Overall</th><th>Setup</th><th>Guests</th><th>Value</th><th>NPS</th><th>Comments</th><th>Contact?</th><th>When</th></tr></thead>
+              <tbody>
+                {#each surveys as s}
+                  <tr>
+                    <td><div class="ev-name">{s.eventName}</div><code class="ev-code">{s.joinCode}</code></td>
+                    <td class="score">{s.overall ?? '—'}</td>
+                    <td class="score">{s.setup ?? '—'}</td>
+                    <td class="score">{s.guestExperience ?? '—'}</td>
+                    <td class="score">{s.value ?? '—'}</td>
+                    <td class="score">{s.nps ?? '—'}</td>
+                    <td class="muted">{#each parseComments(s.comments) as [k, v]}<div class="cmt-line"><b>{k}:</b> {v}</div>{/each}</td>
+                    <td>{s.contactOptIn ? '✅' : '—'}</td>
+                    <td class="muted nowrap">{fmtDate(s.created_at)}</td>
+                  </tr>
                 {/each}
               </tbody>
             </table>
           </div>
-        {:else}
-          <p class="muted">No paid events yet.</p>
         {/if}
       </section>
-    {/if}
-
-    <section class="panel">
-      <h2>Events <span class="count">{evFiltered.length}</span></h2>
-      <div class="toolbar">
-        <input class="search" placeholder="Search events — name, code, owner…" bind:value={evQuery} />
-        <div class="seg">
-          <button class="seg-btn" class:on={evKind === 'real' && !evShowInactive}
-                  on:click={() => { evShowInactive = false; if (evKind !== 'real') loadEvents('real'); }}>Active <small>({activeEventCount})</small></button>
-          <button class="seg-btn" class:on={evKind === 'real' && evShowInactive}
-                  on:click={() => { evShowInactive = true; if (evKind !== 'real') loadEvents('real'); }}>All <small>({evCounts.real})</small></button>
-          <!-- Demo rolls are nobody's event, so they get their own tab rather than padding "All". -->
-          <button class="seg-btn" class:on={evKind === 'demo'}
-                  on:click={() => loadEvents('demo')}>Demos <small>({evCounts.demo})</small></button>
-        </div>
-      </div>
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th>Event</th><th>Details</th><th>Paid</th><th>Status</th><th>Created</th><th></th></tr></thead>
-          <tbody>
-            {#each evPaged as e}
-              <tr>
-                <td>
-                  <div class="ev-name">{e.name}</div>
-                  <code class="ev-code">{e.slug || e.join_code}</code>
-                </td>
-                <td class="stacked muted">
-                  <div>👤 {e.owner || 'anon'}</div>
-                  <div>👥 {e.participants}/{e.guest_cap} guests</div>
-                  <div>🖼️ {e.photos} photos</div>
-                </td>
-                <!-- `paid` is true for demos too (they bypass billing), so a tick here read as a
-                     sale. Show the amount actually taken, and label demos as what they are. -->
-                <td>{!e.owner ? 'Demo' : e.amount_paid_cents > 0 ? `$${(e.amount_paid_cents / 100).toFixed(2)}${e.refunded_at ? ' (refunded)' : ''}` : '—'}</td>
-                <td class="stacked">
-                  <div class="ev-status {evState(e)}">{evStatus(e)}</div>
-                  <div class="purge-line">{purgeInfo(e)}</div>
-                </td>
-                <td class="muted nowrap">{fmtDate(e.created_at)}</td>
-                <td class="nowrap">
-                  <button class="linklike" aria-expanded={openEvent === e.id}
-                          on:click={() => (openEvent = openEvent === e.id ? null : e.id)}
-                          title="What this event was set up to be">{openEvent === e.id ? 'Hide' : 'Setup'}</button>
-                  {#if e.organizer_code}<a class="manage" href={`/admin/${e.join_code}#${encodeURIComponent(e.organizer_code)}`} title="Open the full manager for this event (support override)">Manage →</a>{/if}
-                  <!-- `paid` is true for demos and free-tier events (both amount 0), so gating on it
-                       offered a Refund button beside 25 events with nothing to refund. Gate on money
-                       actually taken, and render nothing at all when there is none. -->
-                  {#if e.amount_paid_cents > 0 && !e.refunded_at}<button class="mini-refund" on:click={() => doRefund(e)} disabled={refundingId === e.id} title="Full Stripe refund + lock">{refundingId === e.id ? '…' : 'Refund'}</button>
-                  {:else if e.refunded_at}<span class="refunded-tag" title="Refunded">↩ refunded</span>{/if}
-                </td>
-              </tr>
-              {#if openEvent === e.id}
-                <!-- Same `.drill` row the revenue table uses for its own expansion, so the page has
-                     one way of opening something rather than two that look slightly different. -->
-                <tr class="drill"><td colspan="6">
-                  <div class="setup">
-                    {#each evSetup(e) as group}
-                      <div class="setup-g">
-                        <div class="setup-h">{group.title}</div>
-                        {#each group.items as [k, v]}
-                          <div class="setup-r"><span>{k}</span><b>{v}</b></div>
-                        {/each}
-                      </div>
-                    {/each}
-                  </div>
-                </td></tr>
-              {/if}
-            {/each}
-            {#if !evFiltered.length}<tr><td colspan="6" class="muted">{events.length ? (evKind === 'demo' || evShowInactive ? 'No matches.' : 'No active events — switch to “All”.') : (evKind === 'demo' ? 'No demo rolls.' : 'No events yet.')}</td></tr>{/if}
-          </tbody>
-        </table>
-      </div>
-      {#if pageCount(evFiltered.length) > 1}
-        <div class="pager">
-          <button class="pg" on:click={() => (evPage = Math.max(1, evPage - 1))} disabled={evPage <= 1}>‹ Prev</button>
-          <span>Page {Math.min(evPage, pageCount(evFiltered.length))} / {pageCount(evFiltered.length)}</span>
-          <button class="pg" on:click={() => (evPage = Math.min(pageCount(evFiltered.length), evPage + 1))} disabled={evPage >= pageCount(evFiltered.length)}>Next ›</button>
-        </div>
-      {/if}
-    </section>
-
-    <section class="panel">
-      <!-- Referral funnel. The step that matters is signups → events created: that is exactly
-           where paid traffic dies, so it is the comparison worth watching. -->
-      <!-- What guests said about USING it — a different respondent from the host survey. -->
-      {#if guestFeedbackRows.length}
-        <h2>Guest feedback{guestFeedbackAvg ? ` · ${guestFeedbackAvg.toFixed(1)}★ avg` : ''}</h2>
-        <div class="table-scroll">
-          <table>
-            <thead><tr><th>Rating</th><th>Guest</th><th>Event</th><th>Comment</th></tr></thead>
-            <tbody>
-              {#each guestFeedbackRows as g}
-                <tr>
-                  <td>{g.rating ? '★'.repeat(g.rating) : '—'}</td>
-                  <td>{g.guest_name || 'anonymised'}</td>
-                  <td>{g.event_name}<br /><small class="muted">{g.join_code}</small></td>
-                  <td>{g.comment || ''}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {/if}
-
-      <!-- Guest top-ups. Participant-level payments were invisible here, so a refund meant the Stripe
-           dashboard. Change-of-mind is declined as policy, but a path has to exist for genuine
-           failures — Australian Consumer Law does not allow contracting out of that. -->
-      {#if guestPayments.length}
-        <h2>Guest top-ups</h2>
-        <div class="table-scroll">
-          <table>
-            <thead><tr><th>Guest</th><th>Event</th><th>Shots</th><th>Paid</th><th></th></tr></thead>
-            <tbody>
-              {#each guestPayments as g}
-                <tr>
-                  <td>{g.name}<br /><small class="muted">{g.email || 'no email'}</small></td>
-                  <td>{g.event_name}<br /><small class="muted">{g.join_code}</small></td>
-                  <td>+{g.extra_photos}</td>
-                  <td>{money(g.amount_paid_cents)}</td>
-                  <td>
-                    <button class="btn ghost sm" disabled={refunding === g.id}
-                            on:click={() => refundGuest(g.id, g.name)}>
-                      {refunding === g.id ? 'Refunding…' : 'Refund'}
-                    </button>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {/if}
-
-      {#if funnel}
-        <h2>Referral funnel</h2>
-        <div class="stats">
-          <div class="stat"><b>{funnel.totals?.gallery_views ?? 0}</b><span>Gallery views</span></div>
-          <div class="stat"><b>{funnel.totals?.referral_clicks ?? 0}</b><span>Referral clicks</span></div>
-          <div class="stat"><b>{funnel.totals?.referred_signups ?? 0}</b><span>Referred signups</span></div>
-          <div class="stat"><b>{funnel.totals?.referred_events ?? 0}</b><span>Events created</span></div>
-          <div class="stat"><b>{funnel.totals?.referred_paid ?? 0}</b><span>Paid</span></div>
-          <div class="stat"><b>{((funnel.totals?.referred_cents ?? 0) / 100).toFixed(2)}</b><span>Revenue</span></div>
-          <div class="stat"><b>{funnel.engagement?.photo_views ?? 0}</b><span>Photo views</span></div>
-          <div class="stat"><b>{funnel.engagement?.photo_downloads ?? 0}</b><span>Downloads</span></div>
-        </div>
-        {#if funnel.sources?.length}
-          <table>
-            <thead><tr><th>Source gallery</th><th>Views</th><th>Clicks</th><th>Signups</th><th>Events</th></tr></thead>
-            <tbody>
-              {#each funnel.sources as srcRow}
-                <tr>
-                  <td>{srcRow.name} <span class="muted">({srcRow.join_code})</span></td>
-                  <td>{srcRow.gallery_views}</td><td>{srcRow.referral_clicks}</td>
-                  <td>{srcRow.signups}</td><td>{srcRow.events_created}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {:else}
-          <p class="muted">No gallery activity yet — this fills in once guests view a gallery.</p>
-        {/if}
-      {/if}
-
-      <h2>Promo codes <span class="count">{promoState === 'all' ? promoTotal : `${promos.length} / ${promoTotal}`}</span></h2>
-      <div class="filterbar">
-        <select bind:value={promoState} on:change={loadPromos} aria-label="Filter promo codes">
-          <option value="all">All codes</option>
-          <option value="active">Usable now</option>
-          <option value="used">Fully redeemed</option>
-          <option value="expired">Expired</option>
-          <option value="off">Switched off</option>
-        </select>
-      </div>
-      {#if !promoBilling}
-        <p class="muted">Billing isn't enabled on this instance, so promo codes are off.</p>
-      {:else}
-        <div class="promo-form">
-          <input class="in" placeholder="CODE (e.g. LAUNCH20)" bind:value={pCode} maxlength="40" />
-          <select class="in" bind:value={pType}>
-            <option value="percent">% off</option>
-            <option value="amount">$ off</option>
-          </select>
-          <input class="in sm" type="number" min="1" placeholder={pType === 'percent' ? '20' : '5'} bind:value={pValue} />
-          <input class="in sm" type="number" min="1" placeholder="Max uses" bind:value={pMax} />
-          <input class="in" type="date" bind:value={pExpiry} title="Expires (optional)" />
-          <button class="btn" on:click={createPromo} disabled={pBusy}>{pBusy ? 'Creating…' : 'Create'}</button>
-        </div>
-        <p class="field-hint">Leave max uses / expiry blank for unlimited. Stripe enforces limits at checkout.</p>
-        <div class="table-scroll">
-          <table>
-            <thead><tr><th>Code</th><th>Discount</th><th>Used</th><th>Max</th><th>Expires</th><th>Active</th><th></th></tr></thead>
-            <tbody>
-              {#each promos as p}
-                <tr>
-                  <td><code>{p.code}</code></td>
-                  <td>{discountLabel(p)}</td>
-                  <td>{p.timesRedeemed}</td>
-                  <td>{p.maxRedemptions ?? '∞'}</td>
-                  <td class="muted">{p.expiresAt ? fmtDate(p.expiresAt) : '—'}</td>
-                  <td>{p.active ? '✅' : '⛔'}</td>
-                  <td>{#if p.active}<button class="link-btn" on:click={() => deactivatePromo(p.id)}>deactivate</button>{/if}</td>
-                </tr>
-              {/each}
-              {#if !promos.length}<tr><td colspan="7" class="muted">{promoState === 'all' ? 'No promo codes yet.' : 'None in this state.'}</td></tr>{/if}
-            </tbody>
-          </table>
-        </div>
-      {/if}
-    </section>
-
-    <section class="panel">
-      <h2>Contact messages <span class="count">{msgFiltered.length}</span>{#if contactUnhandled}<span class="badge">{contactUnhandled} new</span>{/if}</h2>
-      <p class="field-hint">Submissions from the contact form. Every message is stored here even if email forwarding is off or fails — “Emailed” shows whether it also reached the support inbox.</p>
-      <div class="toolbar">
-        <input class="search" placeholder="Search messages — name, email, text…" bind:value={msgQuery} />
-        <div class="seg">
-          <button class="seg-btn" class:on={!msgShowDone} on:click={() => (msgShowDone = false)}>Open <small>({contactUnhandled})</small></button>
-          <button class="seg-btn" class:on={msgShowDone} on:click={() => (msgShowDone = true)}>All <small>({contactMsgs.length})</small></button>
-        </div>
-      </div>
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th>From</th><th>Type</th><th>Message</th><th>Emailed</th><th>Received</th><th></th></tr></thead>
-          <tbody>
-            {#each msgPaged as m}
-              <tr class={m.handled ? 'done' : ''}>
-                <td>
-                  <div>{m.name || 'Anonymous'}</div>
-                  {#if m.email}<a class="muted" href={`mailto:${m.email}`}>{m.email}</a>{/if}
-                </td>
-                <td>{m.kind && m.kind !== 'contact' ? m.kind : 'contact'}</td>
-                <td class="msg">{m.message}{#if m.imageFilename}<br><a href={`/api/admin/feedback-image/${m.imageFilename.split('/').pop()}`} target="_blank" rel="noopener">📎 screenshot</a>{/if}</td>
-                <td>{m.emailed ? '✅' : '—'}</td>
-                <td class="muted">{fmtDate(m.created_at)}</td>
-                <td><button class="link-btn" on:click={() => toggleHandled(m.id)}>{m.handled ? 'reopen' : 'mark done'}</button></td>
-              </tr>
-            {/each}
-            {#if !msgFiltered.length}<tr><td colspan="6" class="muted">{contactMsgs.length ? (msgShowDone ? 'No matches.' : 'No open messages — switch to “All”.') : 'No messages yet.'}</td></tr>{/if}
-          </tbody>
-        </table>
-      </div>
-      {#if pageCount(msgFiltered.length) > 1}
-        <div class="pager">
-          <button class="pg" on:click={() => (msgPage = Math.max(1, msgPage - 1))} disabled={msgPage <= 1}>‹ Prev</button>
-          <span>Page {Math.min(msgPage, pageCount(msgFiltered.length))} / {pageCount(msgFiltered.length)}</span>
-          <button class="pg" on:click={() => (msgPage = Math.min(pageCount(msgFiltered.length), msgPage + 1))} disabled={msgPage >= pageCount(msgFiltered.length)}>Next ›</button>
-        </div>
-      {/if}
-    </section>
-
-    <section class="panel">
-      <h2>Client errors <span class="count">{errFiltered.length}</span>{#if errOpenGroups}<span class="badge">{errOpenGroups} open</span>{/if}</h2>
-      <p class="field-hint">Diagnostic reports from guests' devices (e.g. failed uploads, camera errors) — technical only, no photos or personal content. One row per problem; open it for the stack, the device and who hit it.</p>
-      <div class="toolbar">
-        <input class="search" placeholder="Search errors — message, context, code…" bind:value={errQuery} />
-        <div class="seg">
-          <button class="seg-btn" class:on={!errShowDone} on:click={() => (errShowDone = false)}>Open <small>({errOpenGroups})</small></button>
-          <button class="seg-btn" class:on={errShowDone} on:click={() => (errShowDone = true)}>All <small>({errGroups.length})</small></button>
-        </div>
-      </div>
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th>Problem</th><th>Seen</th><th>Guests</th><th>Event</th><th>Last</th><th></th></tr></thead>
-          <tbody>
-            {#each errPaged as g}
-              <tr class={g.handled ? 'done' : ''}>
-                <td class="msg">
-                  <div>{g.message}</div>
-                  {#if g.context}<span class="chip">{g.context}</span>{/if}
-                </td>
-                <!-- The count IS the feature. Twelve reports of one thing and one report of
-                     another used to occupy twelve rows and one; now they occupy one row each and
-                     the twelve says so. The open tally appears only when a group is part-handled,
-                     which is what a group that RECURRED after being resolved looks like. -->
-                <td class="num"><b>{g.count}×</b>{#if g.open && g.open !== g.count}<div class="purge-line">{g.open} since resolved</div>{/if}</td>
-                <td class="num">{g.guests || '—'}</td>
-                <td class="muted">{(g.eventCodes ?? []).slice(0, 2).join(', ') || '—'}{#if (g.eventCodes ?? []).length > 2}<span class="muted"> +{g.eventCodes.length - 2}</span>{/if}</td>
-                <td class="muted nowrap">{fmtDate(g.lastSeen)}</td>
-                <td class="nowrap">
-                  <button class="linklike" aria-expanded={openErr === g.key}
-                          on:click={() => (openErr = openErr === g.key ? null : g.key)}
-                          title="Stack, device, connection and who hit it">{openErr === g.key ? 'Hide' : 'Detail'}</button>
-                  <button class="link-btn" on:click={() => toggleErrHandled(g)}>{g.handled ? 'reopen' : 'resolve'}</button>
-                </td>
-              </tr>
-              {#if openErr === g.key}
-                <!-- The same `.drill` row the events and revenue tables open, so the page has one
-                     way of opening something rather than three that look slightly different.
-                     Costs no request: the group already arrived with its occurrences. -->
-                <tr class="drill"><td colspan="6">
-                  <div class="setup">
-                    <div class="setup-g">
-                      <div class="setup-h">Where</div>
-                      <div class="setup-r"><span>Context</span><b>{g.context || '—'}</b></div>
-                      <div class="setup-r"><span>Page</span><b>{g.latest?.url || '—'}</b></div>
-                      <div class="setup-r"><span>First seen</span><b>{fmtDate(g.firstSeen)}</b></div>
-                      <div class="setup-r"><span>Last seen</span><b>{fmtDate(g.lastSeen)}</b></div>
-                    </div>
-                    <div class="setup-g">
-                      <div class="setup-h">Latest device</div>
-                      <div class="setup-r"><span>Mode</span><b>{g.latest?.displayMode || '—'}</b></div>
-                      <div class="setup-r"><span>Viewport</span><b>{g.latest?.viewport || '—'}</b></div>
-                      <div class="setup-r"><span>Connection</span><b>{g.latest?.connection || '—'}</b></div>
-                      <div class="setup-r"><span>Outcome</span><b>{g.latest?.outcome || 'not reported'}</b></div>
-                    </div>
-                    <div class="setup-g">
-                      <div class="setup-h">Build</div>
-                      <!-- Two versions on purpose: a disagreement means the guest was running a
-                           bundle we had already replaced, which is the difference between "the fix
-                           did not work" and "the fix never reached them". -->
-                      <div class="setup-r"><span>Deployed</span><b>{(g.versions ?? []).join(', ') || '—'}</b></div>
-                      <div class="setup-r"><span>Their build</span><b>{g.latest?.clientBuild || '—'}</b></div>
-                      <div class="setup-r"><span>Guests hit</span><b>{g.guests || '—'}</b></div>
-                      <div class="setup-r"><span>Reports</span><b>{g.count}</b></div>
-                    </div>
-                  </div>
-                  <!-- The one field whose absence made a report unactionable: production holds a
-                       row reading `camera: TypeError Type error` and nothing else. Say so out loud
-                       when it is missing, rather than rendering an empty box. -->
-                  {#if g.latest?.stack}
-                    <pre class="stack">{g.latest.stack}</pre>
-                  {:else}
-                    <p class="field-hint">No stack — reported by a client build older than this field, or from a call site that had no error object to pass.</p>
-                  {/if}
-                  {#if g.occurrences?.length > 1}
-                    <table class="inner">
-                      <thead><tr><th>When</th><th>Guest</th><th>Event</th><th>Device</th><th>Outcome</th></tr></thead>
-                      <tbody>
-                        {#each g.occurrences as o}
-                          <tr>
-                            <td class="muted nowrap">{fmtDate(o.at)}</td>
-                            <td>{errGuest(o)}</td>
-                            <td class="muted">{o.eventCode || '—'}</td>
-                            <td class="muted">{errDevice(o)}</td>
-                            <td class="muted">{o.outcome || '—'}</td>
-                          </tr>
-                        {/each}
-                      </tbody>
-                    </table>
-                    {#if g.count > g.occurrences.length}
-                      <p class="field-hint">Showing the {g.occurrences.length} most recent of {g.count}.</p>
-                    {/if}
-                  {/if}
-                </td></tr>
-              {/if}
-            {/each}
-            {#if !errFiltered.length}<tr><td colspan="6" class="muted">{errGroups.length ? (errShowDone ? 'No matches.' : 'No open errors — switch to “All”.') : 'No client errors reported. 🎉'}</td></tr>{/if}
-          </tbody>
-        </table>
-      </div>
-      {#if pageCount(errFiltered.length) > 1}
-        <div class="pager">
-          <button class="pg" on:click={() => (errPage = Math.max(1, errPage - 1))} disabled={errPage <= 1}>‹ Prev</button>
-          <span>Page {Math.min(errPage, pageCount(errFiltered.length))} / {pageCount(errFiltered.length)}</span>
-          <button class="pg" on:click={() => (errPage = Math.min(pageCount(errFiltered.length), errPage + 1))} disabled={errPage >= pageCount(errFiltered.length)}>Next ›</button>
-        </div>
-      {/if}
-    </section>
-
-    <section class="panel">
-      <h2>Survey responses <span class="count">{surveyFilter === 'all' ? surveyTotal : `${surveys.length} / ${surveyTotal}`}</span></h2>
-      <div class="filterbar">
-        <select bind:value={surveyFilter} on:change={loadSurvey} aria-label="Filter survey responses">
-          <option value="all">All responses</option>
-          <option value="testimonial">Cleared to quote</option>
-          <option value="promoter">Promoters (NPS 9+)</option>
-          <option value="detractor">Detractors (NPS ≤6)</option>
-        </select>
-      </div>
-      {#if !surveys.length}
-        <p class="muted">No responses yet.</p>
-      {:else}
-        <div class="table-scroll">
-          <table>
-            <thead><tr><th>Event</th><th>Overall</th><th>Setup</th><th>Guests</th><th>Value</th><th>NPS</th><th>Comments</th><th>Contact?</th><th>When</th></tr></thead>
-            <tbody>
-              {#each surveys as s}
-                <tr>
-                  <td><div class="ev-name">{s.eventName}</div><code class="ev-code">{s.joinCode}</code></td>
-                  <td class="score">{s.overall ?? '—'}</td>
-                  <td class="score">{s.setup ?? '—'}</td>
-                  <td class="score">{s.guestExperience ?? '—'}</td>
-                  <td class="score">{s.value ?? '—'}</td>
-                  <td class="score">{s.nps ?? '—'}</td>
-                  <td class="muted">{#each parseComments(s.comments) as [k, v]}<div class="cmt-line"><b>{k}:</b> {v}</div>{/each}</td>
-                  <td>{s.contactOptIn ? '✅' : '—'}</td>
-                  <td class="muted nowrap">{fmtDate(s.created_at)}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {/if}
-    </section>
-
-    <!-- Product analytics. Funnels first, because the operator's question is "where do people give
-         up", and a wall of event counts does not answer it. -->
-    {#if an}
       <section class="panel">
-        <h2>How people use the site
-          <span class="count">{an.totals.visits} visits · {an.totals.events} events</span>
-        </h2>
+        <!-- What guests said about USING it — a different respondent from the host survey. -->
+        {#if guestFeedbackRows.length}
+          <h2>Guest feedback{guestFeedbackAvg ? ` · ${guestFeedbackAvg.toFixed(1)}★ avg` : ''}</h2>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Rating</th><th>Guest</th><th>Event</th><th>Comment</th></tr></thead>
+              <tbody>
+                {#each guestFeedbackRows as g}
+                  <tr>
+                    <td>{g.rating ? '★'.repeat(g.rating) : '—'}</td>
+                    <td>{g.guest_name || 'anonymised'}</td>
+                    <td>{g.event_name}<br /><small class="muted">{g.join_code}</small></td>
+                    <td>{g.comment || ''}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      </section>
+    {:else if tab === 'sales'}
+      <section class="panel">
+        <h2>Promo codes <span class="count">{promoState === 'all' ? promoTotal : `${promos.length} / ${promoTotal}`}</span></h2>
         <div class="filterbar">
-          <select bind:value={anDays} on:change={loadAnalytics} aria-label="Window">
-            <option value={7}>Last 7 days</option>
-            <option value={30}>Last 30 days</option>
-            <option value={90}>Last 90 days</option>
+          <select bind:value={promoState} on:change={loadPromos} aria-label="Filter promo codes">
+            <option value="all">All codes</option>
+            <option value="active">Usable now</option>
+            <option value="used">Fully redeemed</option>
+            <option value="expired">Expired</option>
+            <option value="off">Switched off</option>
           </select>
-          {#if an.cameraGrantRate !== null}
-            <span class="an-note">
-              Camera allowed <b>{an.cameraGrantRate}%</b>
-              <span class="muted">({an.cameraGranted} allowed / {an.cameraDenied} denied)</span>
-            </span>
-          {/if}
         </div>
+        {#if !promoBilling}
+          <p class="muted">Billing isn't enabled on this instance, so promo codes are off.</p>
+        {:else}
+          <div class="promo-form">
+            <input class="in" placeholder="CODE (e.g. LAUNCH20)" bind:value={pCode} maxlength="40" />
+            <select class="in" bind:value={pType}>
+              <option value="percent">% off</option>
+              <option value="amount">$ off</option>
+            </select>
+            <input class="in sm" type="number" min="1" placeholder={pType === 'percent' ? '20' : '5'} bind:value={pValue} />
+            <input class="in sm" type="number" min="1" placeholder="Max uses" bind:value={pMax} />
+            <input class="in" type="date" bind:value={pExpiry} title="Expires (optional)" />
+            <button class="btn" on:click={createPromo} disabled={pBusy}>{pBusy ? 'Creating…' : 'Create'}</button>
+          </div>
+          <p class="field-hint">Leave max uses / expiry blank for unlimited. Stripe enforces limits at checkout.</p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Code</th><th>Discount</th><th>Used</th><th>Max</th><th>Expires</th><th>Active</th><th></th></tr></thead>
+              <tbody>
+                {#each promos as p}
+                  <tr>
+                    <td><code>{p.code}</code></td>
+                    <td>{discountLabel(p)}</td>
+                    <td>{p.timesRedeemed}</td>
+                    <td>{p.maxRedemptions ?? '∞'}</td>
+                    <td class="muted">{p.expiresAt ? fmtDate(p.expiresAt) : '—'}</td>
+                    <td>{p.active ? '✅' : '⛔'}</td>
+                    <td>{#if p.active}<button class="link-btn" on:click={() => deactivatePromo(p.id)}>deactivate</button>{/if}</td>
+                  </tr>
+                {/each}
+                {#if !promos.length}<tr><td colspan="7" class="muted">{promoState === 'all' ? 'No promo codes yet.' : 'None in this state.'}</td></tr>{/if}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+        <!-- Guest top-ups. Participant-level payments were invisible here, so a refund meant the Stripe
+             dashboard. Change-of-mind is declined as policy, but a path has to exist for genuine
+             failures — Australian Consumer Law does not allow contracting out of that. -->
+        {#if guestPayments.length}
+          <h2>Guest top-ups</h2>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Guest</th><th>Event</th><th>Shots</th><th>Paid</th><th></th></tr></thead>
+              <tbody>
+                {#each guestPayments as g}
+                  <tr>
+                    <td>{g.name}<br /><small class="muted">{g.email || 'no email'}</small></td>
+                    <td>{g.event_name}<br /><small class="muted">{g.join_code}</small></td>
+                    <td>+{g.extra_photos}</td>
+                    <td>{money(g.amount_paid_cents)}</td>
+                    <td>
+                      <button class="btn ghost sm" disabled={refunding === g.id}
+                              on:click={() => refundGuest(g.id, g.name)}>
+                        {refunding === g.id ? 'Refunding…' : 'Refund'}
+                      </button>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
 
-        <div class="an-cols">
-          {#each [{ t: 'Host journey', f: an.hostFunnel }, { t: 'Guest journey', f: an.guestFunnel }] as fn}
-            <div class="an-funnel">
-              <h3>{fn.t}</h3>
-              {#each fn.f as s}
-                <div class="an-step">
-                  <span class="an-label">{s.step}</span>
-                  <span class="an-bar">
-                    <!-- Width is relative to the FIRST step, so the shape of the drop is visible
-                         at a glance rather than needing the numbers read. -->
-                    <span class="an-fill" style="width:{fn.f[0].visits ? Math.max(2, (s.visits / fn.f[0].visits) * 100) : 0}%"></span>
-                  </span>
-                  <span class="an-n">{s.visits}</span>
-                  <span class="an-drop">{s.dropFromPrev === null ? '' : `−${s.dropFromPrev}%`}</span>
-                </div>
-              {/each}
+        <!-- Referral funnel. The step that matters is signups → events created: that is exactly
+             where paid traffic dies, so it is the comparison worth watching. -->
+        {#if funnel}
+          <h2>Referral funnel</h2>
+          <div class="stats">
+            <div class="stat"><b>{funnel.totals?.gallery_views ?? 0}</b><span>Gallery views</span></div>
+            <div class="stat"><b>{funnel.totals?.referral_clicks ?? 0}</b><span>Referral clicks</span></div>
+            <div class="stat"><b>{funnel.totals?.referred_signups ?? 0}</b><span>Referred signups</span></div>
+            <div class="stat"><b>{funnel.totals?.referred_events ?? 0}</b><span>Events created</span></div>
+            <div class="stat"><b>{funnel.totals?.referred_paid ?? 0}</b><span>Paid</span></div>
+            <div class="stat"><b>{money(funnel.totals?.referred_cents ?? 0)}</b><span>Revenue</span></div>
+            <div class="stat"><b>{funnel.engagement?.photo_views ?? 0}</b><span>Photo views</span></div>
+            <div class="stat"><b>{funnel.engagement?.photo_downloads ?? 0}</b><span>Downloads</span></div>
+          </div>
+          {#if funnel.sources?.length}
+            <!-- Every gallery ever viewed is a row, and most are demo rolls with one view. The top
+                 ten by views are the ones that can say anything about referrals. -->
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Source gallery</th><th class="num">Views</th><th class="num">Clicks</th><th class="num">Signups</th><th class="num">Events</th></tr></thead>
+                <tbody>
+                  {#each [...funnel.sources].sort((a, b) => b.gallery_views - a.gallery_views).slice(0, 10) as srcRow}
+                    <tr>
+                      <td>{srcRow.name} <span class="muted">({srcRow.join_code})</span></td>
+                      <td class="num">{srcRow.gallery_views}</td><td class="num">{srcRow.referral_clicks}</td>
+                      <td class="num">{srcRow.signups}</td><td class="num">{srcRow.events_created}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
             </div>
-          {/each}
-        </div>
+            {#if funnel.sources.length > 10}<p class="field-hint">Top 10 of {funnel.sources.length} galleries by views.</p>{/if}
+          {:else}
+            <p class="muted">No gallery activity yet — this fills in once guests view a gallery.</p>
+          {/if}
+        {/if}
 
-        <div class="an-cols">
-          {#if an.topPages?.length}
-            <div>
-              <h3>Most visited</h3>
-              <table><tbody>
-                {#each an.topPages as p}<tr><td>{p.path}</td><td class="num">{p.visits}</td></tr>{/each}
-              </tbody></table>
-            </div>
-          {/if}
-          {#if an.tierClicks?.length}
-            <div>
-              <h3>Pricing tier clicked</h3>
-              <table><tbody>
-                {#each an.tierClicks as t}<tr><td>{t.tier === 'free' || !t.tier ? 'Free' : t.tier + ' guests'}</td><td class="num">{t.clicks}</td></tr>{/each}
-              </tbody></table>
-            </div>
-          {/if}
-          {#if an.faqOpens?.length}
-            <div>
-              <h3>Questions opened</h3>
-              <table><tbody>
-                {#each an.faqOpens as f}<tr><td>{f.q}</td><td class="num">{f.opens}</td></tr>{/each}
-              </tbody></table>
-            </div>
-          {/if}
-        </div>
-        <p class="hint" style="margin:10px 0 0">
-          First-party and cookieless — nothing is stored on a visitor's device and no third party sees
-          it. Visits are grouped by a hash that rotates daily, so it cannot follow anyone between days.
-          Raw rows are kept {an.days >= 90 ? '90' : an.days} days.
-        </p>
+      </section>
+    {:else if tab === 'activity'}
+      <!-- Every change a site admin has made to an event they do not own, newest first.
+           Read-only by design: there is no revert here and there is not going to be one — see
+           AdminActionLog for why the before-value plus the ordinary control beats an undo button. -->
+      <section class="panel">
+        <AdminActionLog heading="Admin actions on customers' events" />
       </section>
     {/if}
-
-    <!-- Every change a site admin has made to an event they do not own, newest first.
-         Read-only by design: there is no revert here and there is not going to be one — see
-         AdminActionLog for why the before-value plus the ordinary control beats an undo button. -->
-    <section class="panel">
-      <AdminActionLog heading="Admin actions on customers' events" />
-    </section>
-
-    <section class="panel">
-      <h2>Users <span class="count">{usrTotal}</span></h2>
-      <div class="filterbar">
-        <input class="search" placeholder="Search users — email or name…"
-               bind:value={usrQuery} on:input={onUsrQuery} />
-        <select bind:value={usrStatus} on:change={setUsrFilter} aria-label="Filter by account status">
-          <option value="all">Any status</option>
-          <option value="verified">Verified</option>
-          <option value="unverified">Never verified</option>
-          <option value="admin">Admins</option>
-        </select>
-        <select bind:value={usrHas} on:change={setUsrFilter} aria-label="Filter by events created">
-          <option value="all">Any activity</option>
-          <option value="events">Has created an event</option>
-          <option value="none">Never created one</option>
-        </select>
-      </div>
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th>Email</th><th>Name</th><th>Events</th><th>Verified</th><th>Admin</th><th>Joined</th></tr></thead>
-          <tbody>
-            {#each users as u}
-              <tr>
-                <td>{u.email}</td>
-                <td class="muted">{u.display_name || '—'}</td>
-                <td>{u.events}</td>
-                <td>{u.email_verified_at ? '✅' : '—'}</td>
-                <td>{u.is_admin ? '🎩' : '—'}</td>
-                <td class="muted">{fmtDate(u.created_at)}</td>
-              </tr>
-            {/each}
-            {#if !users.length}<tr><td colspan="6" class="muted">{usrLoading ? 'Loading…' : (usrQuery || usrStatus !== 'all' || usrHas !== 'all' ? 'No matches.' : 'No users yet.')}</td></tr>{/if}
-          </tbody>
-        </table>
-      </div>
-      {#if usrTotal > PAGE}
-        <div class="pager">
-          <button class="pg" on:click={() => usrGo(-1)} disabled={usrPage <= 1 || usrLoading}>‹ Prev</button>
-          <!-- Says what is on screen against the real total, so a growing table can never quietly
-               stop showing rows the way a fixed LIMIT did. -->
-          <span>{(usrPage - 1) * PAGE + 1}–{Math.min(usrPage * PAGE, usrTotal)} of {usrTotal}</span>
-          <button class="pg" on:click={() => usrGo(1)} disabled={usrPage * PAGE >= usrTotal || usrLoading}>Next ›</button>
-        </div>
-      {/if}
-    </section>
   {/if}
 </main>
 
@@ -1008,17 +1058,39 @@
   /* The "site-admin mode" bar's own styles moved into AdminBanner — including `.exit`, which the
      slotted link still carries: slotted markup keeps the CALLER's scope, so the component styles it
      through a :global() under its own wrapper. Nothing to declare here. */
-  .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding-top: 6px; }
-  .head-right { display: flex; align-items: center; gap: 12px; }
-  h1 { margin: 0 0 4px; }
-  .who { color: var(--text-muted); font-size: 0.9rem; }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding-top: 6px; }
+  .head-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .head-right .btn { margin-top: 0; display: inline-flex; align-items: center; gap: 7px; }
+  .btn.ghost { border: 1px solid var(--border); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-muted); opacity: .6; flex: none; }
+  .dot.ok { background: var(--success, #2e9e5b); opacity: 1; }
+  .dot.bad { background: var(--danger, #c0392b); opacity: 1; }
+  .dot.stale { background: var(--accent, #b08b08); opacity: 1; }
+  /* Pinned under the site nav, so switching section never needs a scroll back up. Scrolls
+     sideways on a phone rather than wrapping into two rows of tabs. */
+  .tabs { position: sticky; top: var(--nav-h, 62px); z-index: 5; display: flex; gap: 2px; overflow-x: auto;
+    margin: 0 -16px 22px; padding: 0 16px; background: var(--bg); border-bottom: 1px solid var(--border, #e5e5e5); scrollbar-width: none; }
+  .tab { background: none; border: none; border-bottom: 2px solid transparent; padding: 12px 14px 10px; font: inherit;
+    font-size: .9rem; font-weight: 700; color: var(--text-muted); cursor: pointer; white-space: nowrap;
+    display: inline-flex; align-items: center; gap: 7px; }
+  .tab:hover { color: var(--text); }
+  .tab.on { color: var(--text); border-bottom-color: var(--accent, #b08b08); }
+  h1 { margin: 0 0 2px; }
+  .who { color: var(--text-muted); font-size: 0.86rem; }
   .muted { color: var(--text-muted); }
   .err { color: #c0392b; }
-  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; margin: 18px 0 26px; }
-  .stat { background: var(--surface, #fff); border: 1px solid var(--border, #e5e5e5); border-radius: 12px; padding: 14px; text-align: center; }
-  .stat .n { font-size: 1.7rem; font-weight: 800; }
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 10px; margin: 18px 0 18px; }
+  .stat { background: var(--surface, #fff); border: 1px solid var(--border, #e5e5e5); border-radius: 12px; padding: 11px 8px; text-align: center; }
+  .stat .n { font-size: 1.45rem; font-weight: 800; }
   .stat .l { font-size: 0.78rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .03em; }
   .panel { margin-bottom: 30px; }
+  /* Tabs hold several sections each; give each heading after the first room to start a new one. */
+  .panel > h2:not(:first-child) { margin-top: 30px; }
+  /* The referral funnel's figures — never styled, because loadFunnel was never called. */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; margin: 0 0 12px; }
+  .stats .stat { display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; }
+  .stats .stat b { font-size: 1.25rem; font-weight: 800; }
+  .stats .stat span { font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .03em; }
   .panel h2 { font-size: 1.05rem; display: flex; align-items: center; gap: 8px; }
   .count { background: var(--border, #eee); color: var(--text-muted); border-radius: 999px; padding: 1px 9px; font-size: 0.78rem; font-weight: 700; }
   .table-scroll { overflow-x: auto; border: 1px solid var(--border, #e5e5e5); border-radius: 12px; }
@@ -1106,6 +1178,13 @@
   .stack { margin: 10px 0 0; padding: 10px 12px; background: var(--surface-2, #fafafa); border: 1px solid var(--border, #e5e5e5); border-radius: 8px;
     font-size: 0.72rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
   tbody tr.done { opacity: 0.5; }
+  @media (max-width: 560px) {
+    /* Four across on a phone: eight tiles were three rows, pushing the tabs below the fold. */
+    .stat-grid { grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 14px 0; }
+    .stat-grid .stat { padding: 8px 2px; border-radius: 10px; }
+    .stat-grid .stat .n { font-size: 1.1rem; }
+    .stat-grid .stat .l { font-size: .62rem; letter-spacing: 0; overflow-wrap: anywhere; }
+  }
   .rev-totals { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
   .rev-totals .stat { min-width: 130px; }
   table.inner { width: 100%; margin: 2px 0; font-size: 0.82rem; }
