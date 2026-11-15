@@ -14,6 +14,27 @@ const INFORMATIONAL = new Set(['camera-denied']);
 // POST /api/client-error — lightweight client-side diagnostic capture (e.g. a failed upload).
 // Public (guests aren't authenticated) and best-effort: we never want error reporting to itself
 // throw. Stores TECHNICAL data only — message + where it happened — never photos or content.
+/** A crawler, judged from its user agent. Its reports are not ours to fix: AdsBot rendering a
+ *  demo roll has no camera, so "camera: NotFoundError" from it is a fact about Google's renderer,
+ *  and it sat in the open queue beside the reports from real guests.
+ *
+ *  Named crawlers, plus the `+http…` contact URL that well-behaved bots put in their agent string
+ *  and no browser does. NOT a bare /bot/i: real phones carry it (CUBOT handsets: "CUBOT X30"), and
+ *  dropping a real guest's report is the one mistake this filter must not make — a crawler that
+ *  slips through costs a click on "resolve". */
+const CRAWLER = new RegExp([
+  'googlebot', 'adsbot', 'mediapartners-google', 'google-inspectiontool', 'googleother', 'storebot-google',
+  'bingbot', 'bingpreview', 'adidxbot', 'applebot', 'duckduckbot', 'yandex(?:bot|images|mobilebot)',
+  'baiduspider', 'slurp', 'facebookexternalhit', 'facebookbot', 'meta-externalagent', 'twitterbot',
+  'linkedinbot', 'slackbot', 'discordbot', 'telegrambot', 'petalbot', 'ahrefsbot', 'semrushbot',
+  'mj12bot', 'dotbot', 'bytespider', 'gptbot', 'oai-searchbot', 'chatgpt-user', 'claudebot',
+  'perplexitybot', 'amazonbot', 'ccbot', 'seznambot', 'dataforseobot', 'chrome-lighthouse',
+  '\\+https?://',
+].join('|'), 'i');
+export function isCrawler(userAgent: string | undefined | null): boolean {
+  return !!userAgent && CRAWLER.test(userAgent);
+}
+
 /** Everything before the first `?` or `#` — see the note at its use. */
 function stripQuery(u: string): string {
   const cut = u.search(/[?#]/);
@@ -102,6 +123,8 @@ router.post('/', async (req: Request, res: Response) => {
     };
     const message = String(b?.message || '').trim().slice(0, 500);
     if (!message) return res.status(400).json({ error: 'message required' });
+    // Accepted and dropped: the same answer a stored report gets, so nothing retries it.
+    if (isCrawler(req.get('user-agent'))) return res.json({ ok: true });
     const context = b?.context ? String(b.context).slice(0, 60) : null;
     await db.insert(clientErrors).values({
       id: uuidv4(),

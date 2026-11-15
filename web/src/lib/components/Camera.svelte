@@ -668,6 +668,8 @@
       : p));
   }
   let revealMsg = '';
+  $: eventOver = eventEnded || !!ev?.isExpired || !!ev?.isLocked;
+  $: rollSpent = photosRemaining <= 0;
   let lbOpen = false;
   let lbIndex = 0;
   let allowDownloads = true;
@@ -830,7 +832,7 @@
           catch { fatal = 'This device could not read your saved captures. Your guest session has been kept; please try again.'; return; }
           if (saved.some(capture => capture.sessionToken === token)) {
             sessionToken = token; serverRemaining = 0;
-            await enterCamera();
+            await enterCamera(false);
             showToast('Your guest access has changed. Your saved captures are still in the upload queue to save a copy.', true);
             return;
           }
@@ -1342,7 +1344,18 @@
     } catch { /* the roll carries the same button */ }
   }
 
-  async function enterCamera() {
+  /** Nothing left to shoot: the event is over (or locked), or every shot on the roll is used —
+   *  videos come out of the same roll. Computed from the raw numbers rather than the reactive
+   *  `photosRemaining`, because callers run before Svelte has re-derived it. */
+  function rollIsDone(): boolean {
+    if (ev?.isExpired || ev?.isLocked) return true;
+    const reserved = queue.filter((q) => q.status !== 'done').length;
+    return serverRemaining - reserved <= 0;
+  }
+
+  /** `rollCheck` false is for the revoked-session path, which enters only so the upload queue can
+   *  save copies of what is on the device; its gallery request would just be refused. */
+  async function enterCamera(rollCheck = true) {
     screen = 'camera';
     if (recoveryEnabled && ev && sessionToken) void syncRecoveryContact(ev.joinCode, sessionToken);
     applyEventTheme(ev?.theme);
@@ -1353,7 +1366,13 @@
     try { const q = localStorage.getItem('snap_vidq'); if (q === 'high' || q === 'standard' || q === 'smooth' || q === 'phone') videoQuality = q; } catch { /* ignore */ }
     try { gridOn = localStorage.getItem('snap_grid') === '1'; } catch { /* ignore */ }
     await restoreQueue();
-    await startCamera();
+    // A guest coming BACK to a finished roll used to get the camera anyway: a viewfinder with a
+    // dead shutter and, if the hardware would not start (seen on an iPhone hours after the roll
+    // was full: "camera: TypeError Type error"), an error about a camera they had no use for.
+    // Their own shots — and the shared gallery, once the host has opened it — are what they came
+    // back for, so open those and never ask for the camera at all.
+    if (rollCheck && rollIsDone()) await openGallery();
+    else await startCamera();
     if (typeof window !== 'undefined') {
       window.addEventListener('online', autoRetry);
       retryTimer = setInterval(autoRetry, 15000);
@@ -3636,7 +3655,9 @@
 
       faceMatching = !!me.faceMatching;
 
-      if (screen === 'join' || screen === 'loading') { screen = 'camera'; startCamera(); }
+      if (screen === 'join' || screen === 'loading') {
+        if (rollIsDone()) void openGallery(); else { screen = 'camera'; startCamera(); }
+      }
 
       return true;
 
@@ -4298,6 +4319,9 @@
            the guest who shuts the tab is the only one who actually loses anything. -->
       <div class="endcard" role="status" aria-live="polite">
         <div class="endcard-title">{endedNote}</div>
+        {#if !pendingUploads && !stuckUploads}
+          <button class="btn soft sm" on:click={openGallery}>See your photos</button>
+        {/if}
         {#if pendingUploads || stuckUploads}
           <p class="endcard-body">
             {lateStillCounts}
@@ -4467,13 +4491,16 @@
         <button class="btn primary sm" on:click={() => { void setVideoQuality('phone'); openNativeVideo(); }}>🎥 Use phone camera</button>
       </div>
     {/if}
-    {#if outOfShots && (canAskHost || canBuyShots)}
+    {#if outOfShots && !eventEnded}
       <!-- Bound so a press on the spent shutter can take the guest here — see announceNoShots().
            Focus goes to the first BUTTON inside rather than to the panel, because the panel is a
            div and the thing worth reaching is the way forward, not the heading above it. -->
       <div class="oos-panel" bind:this={oosPanelEl}>
         <div class="oos-title">That's your roll</div>
         <div class="oos-actions">
+          <!-- Always offered: with no top-ups and no asking, this card used to not appear at all,
+               leaving a dead shutter and no word about why. -->
+          <button class="btn soft sm" on:click={openGallery}>See your photos</button>
           {#if canAskHost}
             <button class="btn soft sm" on:click={askHostForMore} disabled={askedHost}>
               {askedHost ? '✓ Host asked' : 'Ask the host for more'}
@@ -4529,6 +4556,36 @@
         <button class="btn ghost sm" on:click={backToCamera}>📷 Camera</button>
       </div>
     </header>
+    <!-- The answer to "why am I not looking at a camera": said first, before the photos, with the
+         ways forward on it. A guest who comes back to a spent roll, or after the event, lands here
+         (see rollIsDone) — and a guest who taps the gallery mid-event with shots left sees nothing. -->
+    {#if eventOver || rollSpent}
+      <div class="done-card" role="status">
+        <div class="done-title">{eventOver ? endedNote : "That's your roll"}</div>
+        <p class="done-body">
+          {#if myShotCount}{eventOver ? 'Your' : `You've used every shot — your`} {myShotCount} shot{myShotCount === 1 ? ' is' : 's are'} below.
+          {:else}{eventOver ? 'Nothing from you on this roll.' : "You've used every shot on your roll."}{/if}
+        </p>
+        <div class="oos-actions">
+          <!-- Buying or asking is for a spent roll at a running event, and only where the host
+               allows it (the server's flags); checkout itself refuses near the close. -->
+          {#if !eventOver && rollSpent && canAskHost}
+            <button class="btn soft sm" on:click={askHostForMore} disabled={askedHost}>
+              {askedHost ? '✓ Host asked' : 'Ask the host for more'}
+            </button>
+          {/if}
+          {#if !eventOver && rollSpent && canBuyShots}
+            <button class="btn primary sm" on:click={buyMoreShots} disabled={buying}>
+              {buying ? 'Opening…' : 'Get 12 more'}
+            </button>
+          {/if}
+          <!-- Only when the host has opened the gallery. Before that, the notice below says when. -->
+          {#if ev?.joinCode && galleryRevealed && (othersCount > 0 || ev?.isDemo)}
+            <a class="btn primary sm" href={ev?.isDemo ? demoGalleryHref : `/gallery/${ev.joinCode}`}>🖼️ See everyone's photos</a>
+          {/if}
+        </div>
+      </div>
+    {/if}
     {#if !galleryRevealed}
       <div class="notice">
         <span aria-hidden="true">🔒</span>
@@ -4629,26 +4686,6 @@
         {/if}
       </div>
     {/if}
-    <!-- The same offer, in the gallery: this is where a guest lands after a failed upload, and
-         telling them they are out of shots without showing the way forward is a dead end. -->
-    {#if photosRemaining <= 0 && (canAskHost || canBuyShots)}
-      <div class="oos-panel oos-inline">
-        <div class="oos-title">That's your roll</div>
-        <div class="oos-actions">
-          {#if canAskHost}
-            <button class="btn soft sm" on:click={askHostForMore} disabled={askedHost}>
-              {askedHost ? '✓ Host asked' : 'Ask the host for more'}
-            </button>
-          {/if}
-          {#if canBuyShots}
-            <button class="btn primary sm" on:click={buyMoreShots} disabled={buying}>
-              {buying ? 'Opening…' : 'Get 12 more'}
-            </button>
-          {/if}
-        </div>
-      </div>
-    {/if}
-
     <!-- Referral surface 2: a guest lands here when their roll is spent, which is the moment they
          have just finished using the product. Emphasised only then, not on a casual gallery peek. -->
     {#if ev?.joinCode}
@@ -5316,7 +5353,7 @@
     background: rgba(0,0,0,.72); border: 1px solid rgba(255,255,255,.22); backdrop-filter: blur(6px);
     color: #fff; font-size: .86rem; line-height: 1.4;
   }
-  /* Ordinary page content in the roll, never an overlay — see .oos-panel.oos-inline for what
+  /* Ordinary page content in the roll, never an overlay — see .done-card for what
      happens when a card in here inherits the gallery's own min-height. */
   /* max-width alone does nothing below 720px, so on every phone these ran edge-to-edge while the
      photo cards beside them sat 10px in (.pgrid's padding) — the panels read as full-bleed bands
@@ -5395,19 +5432,17 @@
     background: rgba(0,0,0,.72); border: 1px solid rgba(255,255,255,.22); backdrop-filter: blur(6px);
     box-shadow: 0 8px 28px rgba(0,0,0,.4);
   }
-  /* In the gallery it is ordinary page content, not an overlay. Named oos-inline, NOT .gallery —
-     that class belongs to the gallery screen itself and carries min-height:100dvh, which made this
-     card expand to fill the viewport. */
-  .oos-panel.oos-inline {
-    position: static; transform: none; margin: 14px auto; background: var(--surface-2, #1e1b14);
-    border-color: var(--border, #3a3630); box-shadow: none; backdrop-filter: none;
-  }
-  .oos-panel.oos-inline .oos-title { color: var(--text, #f2ece0); }
-  /* Same split as the title above: over the viewfinder the card is dark whatever the theme, so
-     its label is white; in the gallery it is ordinary page content and follows the theme. */
-  .oos-panel .btn.soft { color: #fff; }
-  .oos-panel.oos-inline .btn.soft { color: var(--text, #f2ece0); }
+  /* Over the viewfinder these cards are dark whatever the theme, so their buttons read white. */
+  .oos-panel .btn.soft, .endcard .btn.soft { color: #fff; }
   .oos-title { color: #fff; font-size: .9rem; font-weight: 600; }
+  /* The gallery's opening card when there is nothing left to shoot. Page content, so it follows
+     the theme; it replaced the old in-gallery copy of .oos-panel. */
+  .done-card { margin: 14px auto 6px; max-width: 420px; padding: 16px 18px; border-radius: 16px; text-align: center;
+    background: var(--surface-2, #1e1b14); border: 1px solid var(--border, #3a3630);
+    display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .done-title { font-size: 1.05rem; font-weight: 700; color: var(--text, #f2ece0); }
+  .done-body { margin: 0; font-size: .88rem; color: var(--text-muted, #a39b8c); }
+  .done-card .btn.soft { color: var(--text, #f2ece0); }
   .oos-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
   .shutter { width: 76px; height: 76px; border-radius: 50%; border: 4px solid #fff; background: transparent;
     cursor: pointer; padding: 0; display: flex; align-items: center; justify-content: center; -webkit-tap-highlight-color: transparent; }
