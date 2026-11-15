@@ -494,3 +494,43 @@ describe('POST /api/client-error', () => {
     assert.deepEqual(inserted, []);
   });
 });
+
+// ── 6. Crawlers are not guests ───────────────────────────────────────────────
+
+describe('POST /api/client-error — crawlers', () => {
+  const post = (ua: string) =>
+    call(clientErrorRoutes.default, 'post', '/', fakeReq({ body: { message: 'camera: NotFoundError Requested device not found', context: 'camera' } }, { 'user-agent': ua }));
+
+  test('the production AdsBot report is accepted and not stored', async () => {
+    // Verbatim from production, 2026-11-07, on a demo roll.
+    const rec = await post('AdsBot-Google (+http://www.google.com/adsbot.html)');
+    assert.equal(rec.code ?? 200, 200);
+    assert.deepEqual(inserted, []);
+  });
+
+  test('other crawlers are dropped too', async () => {
+    for (const ua of [
+      'Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+      'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm) Chrome/116.0.1938.76 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.1.1 Safari/605.1.15 (Applebot/0.1; +http://www.apple.com/go/applebot)',
+      'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+    ]) {
+      reset();
+      await post(ua);
+      assert.deepEqual(inserted, [], ua);
+    }
+  });
+
+  test('real browsers are kept — including a phone whose model name contains "bot"', async () => {
+    for (const ua of [
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6.1 Mobile/15E148 Safari/604.1',
+      'Mozilla/5.0 (Linux; Android 13; CUBOT X30) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36',
+      'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36',
+      '',
+    ]) {
+      reset();
+      await post(ua);
+      assert.equal(inserted.length, 1, ua || '(no user agent)');
+    }
+  });
+});
