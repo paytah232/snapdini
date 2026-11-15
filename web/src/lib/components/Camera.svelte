@@ -4553,8 +4553,7 @@
             {:else}<DownloadIcon /> Download{/if}
           </button>
         {/if}
-        <!-- Nothing to go back to once the event is over: the shutter could not fire. -->
-        {#if !eventOver}<button class="btn ghost sm" on:click={backToCamera}>📷 Camera</button>{/if}
+        <button class="btn ghost sm" on:click={backToCamera}>📷 Camera</button>
       </div>
     </header>
     <!-- The answer to "why am I not looking at a camera": said first, before the photos, with the
@@ -4568,12 +4567,14 @@
           {:else}{eventOver ? 'Nothing from you on this roll.' : "You've used every shot on your roll."}{/if}
         </p>
         <div class="oos-actions">
-          {#if !eventOver && canAskHost}
+          <!-- Buying or asking is for a spent roll at a running event, and only where the host
+               allows it (the server's flags); checkout itself refuses near the close. -->
+          {#if !eventOver && rollSpent && canAskHost}
             <button class="btn soft sm" on:click={askHostForMore} disabled={askedHost}>
               {askedHost ? '✓ Host asked' : 'Ask the host for more'}
             </button>
           {/if}
-          {#if !eventOver && canBuyShots}
+          {#if !eventOver && rollSpent && canBuyShots}
             <button class="btn primary sm" on:click={buyMoreShots} disabled={buying}>
               {buying ? 'Opening…' : 'Get 12 more'}
             </button>
